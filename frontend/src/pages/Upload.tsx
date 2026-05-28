@@ -28,17 +28,35 @@ export default function Upload() {
 
   useEffect(() => {
     if (!job || job.status === "concluido" || job.status === "erro") return;
+    let consecutivos404 = 0;
     const t = setInterval(async () => {
       try {
         const s = await api.jobs.status(job.id);
+        consecutivos404 = 0;
         setJob(s);
         if (s.status === "concluido") {
           clearInterval(t);
           setTimeout(() => nav(`/processos/${id}/dashboard`), 800);
         }
         if (s.status === "erro") clearInterval(t);
-      } catch {
-        /* tentar de novo no próximo tick */
+      } catch (e: unknown) {
+        const msg = (e as Error).message || "";
+        if (msg.startsWith("404")) {
+          consecutivos404 += 1;
+          // Job sumiu (provavelmente o backend reiniciou no meio do
+          // processamento). Após ~15s sem encontrá-lo, paramos.
+          if (consecutivos404 >= 10) {
+            clearInterval(t);
+            setJob({
+              ...job,
+              status: "erro",
+              erro:
+                "O backend perdeu este job. Provavelmente o uvicorn reiniciou (--reload) ou foi encerrado durante o processamento. Rode o backend SEM --reload e envie o vídeo de novo.",
+              mensagem: "Job perdido",
+            });
+          }
+        }
+        /* outros erros: continua tentando no próximo tick */
       }
     }, 1500);
     return () => clearInterval(t);

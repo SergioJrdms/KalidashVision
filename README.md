@@ -78,8 +78,16 @@ cp .env.example .env
 python -c "from ultralytics import YOLO; YOLO('yolo11n-pose.pt')"
 
 # rode a API
-uvicorn backend.main:app --reload --port 8000
+uvicorn backend.main:app --port 8000
 ```
+
+> ⚠️ **Não use `--reload` para processar vídeos.** O Ultralytics e o
+> próprio pipeline escrevem arquivos durante a execução; com `--reload`
+> ativo, o uvicorn reinicia no meio do processamento, mata a
+> BackgroundTask e o job nunca termina. Use `--reload` só para iterar
+> nas rotas (sem subir vídeo). Você também pode forçar o YOLO a baixar
+> o `.pt` pra fora da pasta do projeto: o backend já faz isso por
+> padrão (`%TEMP%/kalidash_models`) ou via `KV_MODELS_DIR=/caminho`.
 
 A API expõe:
 

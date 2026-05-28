@@ -26,14 +26,28 @@ log = logging.getLogger("kalidash.worker")
 _YOLO = None
 
 
+def _modelo_path(nome: str) -> str:
+    """Resolve o caminho do .pt em uma pasta FORA da raiz do projeto.
+
+    Se o Ultralytics baixar o .pt na pasta atual e ela for observada pelo
+    `uvicorn --reload`, o reload é disparado no meio do processamento e
+    mata a BackgroundTask. Pra evitar isso, baixamos em
+    KV_MODELS_DIR (default: %TEMP%/kalidash_models).
+    """
+    base = Path(os.environ.get("KV_MODELS_DIR", "")) if os.environ.get("KV_MODELS_DIR") else Path(tempfile.gettempdir()) / "kalidash_models"
+    base.mkdir(parents=True, exist_ok=True)
+    return str(base / nome)
+
+
 def _get_yolo():
     global _YOLO
     if _YOLO is None:
         from ultralytics import YOLO
         from .pipeline import YOLO_MODEL
 
-        log.info(f"Carregando YOLO {YOLO_MODEL} (uma vez por processo)")
-        _YOLO = YOLO(YOLO_MODEL)
+        destino = _modelo_path(YOLO_MODEL)
+        log.info(f"Carregando YOLO {YOLO_MODEL} → {destino} (uma vez por processo)")
+        _YOLO = YOLO(destino)
     return _YOLO
 
 
