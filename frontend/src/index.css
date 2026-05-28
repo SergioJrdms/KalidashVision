@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-white text-slate-800;
+}
+
+/* Markdown rendering inside chat bubbles */
+.prose-chat p { @apply mb-2 leading-relaxed; }
+.prose-chat ul { @apply list-disc pl-5 mb-2; }
+.prose-chat ol { @apply list-decimal pl-5 mb-2; }
+.prose-chat li { @apply mb-1; }
+.prose-chat strong { @apply text-slate-900 font-semibold; }
+.prose-chat code { @apply bg-slate-100 px-1.5 py-0.5 rounded text-sm font-mono text-kv-purple-dark; }
+.prose-chat h1, .prose-chat h2, .prose-chat h3 { @apply font-semibold text-slate-900 mb-2 mt-3; }

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Frontend
+node_modules/
+dist/
+.env.local
+.env.development.local
+.env.production.local
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Modelos baixados pelo YOLO em runtime
+*.pt
+
+# Vídeos de teste
+*.mp4
+*.mov
+*.avi
+!frontend/public/*.mp4
