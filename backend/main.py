@@ -272,6 +272,57 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .data
     ) or []
 
+    # Transições agregadas (sequências por pessoa) — pra mostrar fluxo
+    from collections import Counter
+
+    evs = (
+        sb.table("eventos")
+        .select("video_id, pessoa_track_id, comportamento_label, label_corrigido, tempo_inicio_s, validacao_correto, validado_humano, origem_validacao")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .limit(50000)
+        .execute()
+        .data
+    ) or []
+    base = [e for e in evs if e.get("validacao_correto") is not False]
+    seqs: dict = {}
+    for e in base:
+        chave = (e.get("video_id"), e.get("pessoa_track_id"))
+        seqs.setdefault(chave, []).append(
+            (e.get("tempo_inicio_s") or 0, e.get("label_corrigido") or e.get("comportamento_label"))
+        )
+    contagem_t: Counter = Counter()
+    for lista in seqs.values():
+        lista.sort()
+        labels = [l for _, l in lista]
+        for x, y in zip(labels, labels[1:]):
+            if x != y:
+                contagem_t[(x, y)] += 1
+    transicoes = [
+        {"de": a, "para": b, "vezes": n} for (a, b), n in contagem_t.most_common(8)
+    ]
+
+    # Distribuição por origem (auto vs humano vs pendente)
+    origens: Counter = Counter()
+    for e in evs:
+        if e.get("validado_humano") is True and e.get("origem_validacao") == "humano":
+            origens["humano"] += 1
+        elif e.get("origem_validacao") in ("correcao_aprendida", "vocabulario_canonico"):
+            origens["auto"] += 1
+        else:
+            origens["pendente"] += 1
+
+    videos = (
+        sb.table("videos")
+        .select("id, nome, duracao_s, total_eventos, total_pessoas, processado_em")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .order("processado_em", desc=True)
+        .limit(50)
+        .execute()
+        .data
+    ) or []
+
     pendentes = (
         sb.table("eventos")
         .select("id", count="exact")
@@ -286,6 +337,13 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         "snapshot": snapshot,
         "sugestoes": sugs,
         "eventos_pendentes": pendentes.count or 0,
+        "transicoes": transicoes,
+        "origens": {
+            "auto": origens["auto"],
+            "humano": origens["humano"],
+            "pendente": origens["pendente"],
+        },
+        "videos": videos,
     }
 
 

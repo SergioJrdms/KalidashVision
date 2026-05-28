@@ -112,6 +112,55 @@ export function Spinner({ className = "" }: { className?: string }) {
   );
 }
 
+export function Tooltip({
+  children,
+  text,
+  width = 260,
+}: {
+  children?: React.ReactNode;
+  text: string;
+  width?: number;
+}) {
+  return (
+    <span className="relative inline-flex items-center group align-middle">
+      {children ?? (
+        <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold cursor-help select-none">
+          ?
+        </span>
+      )}
+      <span
+        style={{ width }}
+        className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-slate-900 text-white text-xs leading-snug rounded-lg px-3 py-2 shadow-lg z-50"
+      >
+        {text}
+        <span className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-slate-900" />
+      </span>
+    </span>
+  );
+}
+
+export function HelpBox({
+  title,
+  children,
+}: {
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl bg-kv-purple-50 border border-kv-purple-200 px-4 py-3 text-sm text-kv-purple-dark">
+      {title && (
+        <div className="font-semibold mb-1 flex items-center gap-1.5">
+          <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-kv-purple text-white text-[10px]">
+            i
+          </span>
+          {title}
+        </div>
+      )}
+      <div className="text-slate-700">{children}</div>
+    </div>
+  );
+}
+
 export function EmptyState({
   title,
   description,

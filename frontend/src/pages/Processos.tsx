@@ -29,11 +29,13 @@ export default function Processos() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Meus processos</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Cada processo é um contexto isolado de análise.
+          <p className="text-sm text-slate-500 mt-1 max-w-2xl">
+            Cada processo é um contexto <b>isolado</b> de análise. Dados,
+            comportamentos aprendidos e sugestões de um processo nunca
+            atravessam para outro — mesmo que tenham nomes iguais.
           </p>
         </div>
         <Button onClick={() => setOpen(true)}>+ Novo processo</Button>

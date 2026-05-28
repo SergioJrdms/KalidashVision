@@ -2,8 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { Button, Card, Spinner, Textarea } from "../components/UI";
-import { ProcessoTabs } from "../components/Layout";
+import { Button, Card, HelpBox, Spinner, Textarea } from "../components/UI";
 
 export default function DescricaoProcesso() {
   const { id } = useParams<{ id: string }>();
@@ -77,15 +76,21 @@ export default function DescricaoProcesso() {
 
   return (
     <div>
-      <ProcessoTabs />
       <Card className="p-8 max-w-3xl">
         <h2 className="text-xl font-semibold text-slate-900 mb-1">
           Descrição do processo
         </h2>
-        <p className="text-sm text-slate-500 mb-6">
+        <p className="text-sm text-slate-500 mb-4">
           Quanto mais clara a descrição, melhor a análise. Vale a pena revisar
           conforme você aprende mais sobre os resultados.
         </p>
+        <div className="mb-5">
+          <HelpBox>
+            Esse texto é injetado nos prompts da IA. Ele ajuda a (1) reconhecer
+            os comportamentos esperados, (2) usar vocabulário do seu domínio nos
+            labels e (3) sinalizar o que está <i>fora</i> do fluxo esperado.
+          </HelpBox>
+        </div>
         <form onSubmit={submit} className="space-y-4">
           <Textarea
             value={descricao}

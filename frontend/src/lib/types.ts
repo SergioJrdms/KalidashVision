@@ -49,6 +49,21 @@ export interface Sugestao {
   criado_em: string;
 }
 
+export interface Transicao {
+  de: string;
+  para: string;
+  vezes: number;
+}
+
+export interface VideoResumo {
+  id: string;
+  nome: string;
+  duracao_s: number;
+  total_eventos: number;
+  total_pessoas: number;
+  processado_em: string;
+}
+
 export interface DashboardData {
   snapshot: {
     videos_analisados: number;
@@ -60,6 +75,9 @@ export interface DashboardData {
   };
   sugestoes: Sugestao[];
   eventos_pendentes: number;
+  transicoes: Transicao[];
+  origens: { auto: number; humano: number; pendente: number };
+  videos: VideoResumo[];
 }
 
 export interface EventoPendente {

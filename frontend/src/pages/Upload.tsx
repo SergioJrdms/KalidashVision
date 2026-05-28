@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
-import { Button, Card, Spinner } from "../components/UI";
-import { ProcessoTabs } from "../components/Layout";
+import { Button, Card, HelpBox, Spinner } from "../components/UI";
 import type { JobStatus } from "../lib/types";
 
 const ETAPAS: { key: string; label: string }[] = [
@@ -92,17 +91,25 @@ export default function Upload() {
 
   return (
     <div>
-      <ProcessoTabs />
-
       {!job && (
         <Card className="p-8 max-w-3xl">
           <h2 className="text-xl font-semibold text-slate-900 mb-1">
             Enviar vídeo da operação
           </h2>
-          <p className="text-sm text-slate-500 mb-6">
+          <p className="text-sm text-slate-500 mb-4">
             O processamento pode levar alguns minutos. Você pode acompanhar o
             progresso por aqui.
           </p>
+          <div className="mb-6">
+            <HelpBox title="O que acontece quando você envia um vídeo">
+              1. A IA detecta as pessoas no vídeo e rastreia cada uma com um ID.
+              2. A cada poucos segundos, ela descreve em linguagem natural o que
+              cada pessoa está fazendo. 3. Descrições parecidas são agrupadas
+              em comportamentos canônicos. 4. Ao final, sugestões de melhoria
+              são geradas com base em <b>todos</b> os vídeos do processo —
+              quanto mais você envia, mais inteligente o sistema fica.
+            </HelpBox>
+          </div>
 
           <div
             onClick={() => inputRef.current?.click()}

@@ -2,7 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useAuth } from "./hooks/useAuth";
 import { Spinner } from "./components/UI";
-import { AppShell } from "./components/Layout";
+import { AppShell, ProcessoShell } from "./components/Layout";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 import Processos from "./pages/Processos";
@@ -43,11 +43,13 @@ export default function App() {
         <Route path="/cadastro" element={<PublicOnly><Signup /></PublicOnly>} />
         <Route element={<Protected><AppShell /></Protected>}>
           <Route path="/processos" element={<Processos />} />
-          <Route path="/processos/:id/descricao" element={<DescricaoProcesso />} />
-          <Route path="/processos/:id/upload" element={<Upload />} />
-          <Route path="/processos/:id/dashboard" element={<Dashboard />} />
-          <Route path="/processos/:id/validacao" element={<Validacao />} />
-          <Route path="/processos/:id/chat" element={<Chat />} />
+          <Route path="/processos/:id" element={<ProcessoShell />}>
+            <Route path="descricao" element={<DescricaoProcesso />} />
+            <Route path="upload" element={<Upload />} />
+            <Route path="dashboard" element={<Dashboard />} />
+            <Route path="validacao" element={<Validacao />} />
+            <Route path="chat" element={<Chat />} />
+          </Route>
         </Route>
         <Route path="*" element={<Navigate to="/processos" replace />} />
       </Routes>

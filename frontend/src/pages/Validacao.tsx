@@ -2,8 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 import { api, formatSeg } from "../lib/api";
-import { Badge, Button, Card, EmptyState, Input, Spinner } from "../components/UI";
-import { ProcessoTabs } from "../components/Layout";
+import { Badge, Button, Card, EmptyState, HelpBox, Input, Spinner } from "../components/UI";
 import type { EventoPendente } from "../lib/types";
 
 export default function Validacao() {
@@ -38,7 +37,16 @@ export default function Validacao() {
 
   return (
     <div>
-      <ProcessoTabs />
+      <div className="mb-4">
+        <HelpBox title="Por que validar?">
+          A IA descobre os comportamentos automaticamente, mas pode errar nos
+          primeiros vídeos. Quando você <b>confirma</b>, ela aprende que o label
+          está correto. Quando você <b>corrige</b>, ela aprende o mapeamento
+          certo. Quando você <b>descarta</b>, ela aprende que aquilo é falso
+          positivo. Depois de 2 confirmações do mesmo label, o sistema passa a
+          confirmar sozinho os eventos seguintes — sua carga de trabalho cai.
+        </HelpBox>
+      </div>
 
       {dashboard.data && (
         <Card className="p-4 mb-6 bg-gradient-to-r from-emerald-50 to-emerald-100/60 border-emerald-200">

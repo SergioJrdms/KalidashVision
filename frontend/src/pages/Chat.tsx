@@ -1,9 +1,9 @@
 import { FormEvent, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { Button, Card, Spinner, Textarea } from "../components/UI";
-import { ProcessoTabs } from "../components/Layout";
 
 const EXEMPLOS = [
   "Onde estamos perdendo mais tempo?",
@@ -48,12 +48,16 @@ export default function Chat() {
 
   return (
     <div>
-      <ProcessoTabs />
       <Card className="p-6">
         <h2 className="font-semibold text-slate-900">Chat com os dados do processo</h2>
-        <p className="text-sm text-slate-500 mt-1 mb-4">
-          Pergunte em linguagem natural. A IA combina seus dados agregados com
-          boas práticas de mercado (Lean / produtividade industrial).
+        <p className="text-sm text-slate-500 mt-1 mb-2">
+          Pergunte em linguagem natural. A IA combina <b>seus dados agregados</b>{" "}
+          (vídeos analisados, comportamentos, sequências) com <b>boas práticas de mercado</b>{" "}
+          (Lean, redução de desperdícios, balanceamento de linha) para responder.
+        </p>
+        <p className="text-xs text-slate-400 mb-4">
+          Cada nova pergunta vê o estado mais atual do banco — vale rodar várias
+          vezes conforme você processa mais vídeos.
         </p>
 
         <div className="flex flex-wrap gap-2 mb-4">
@@ -88,7 +92,7 @@ export default function Chat() {
               <div key={i} className="border-l-4 border-kv-purple pl-4">
                 <div className="text-xs font-medium text-kv-purple-dark mb-1">Consultor</div>
                 <div className="text-sm text-slate-800 prose-chat">
-                  <ReactMarkdown>{m.content}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
                 </div>
               </div>
             )
