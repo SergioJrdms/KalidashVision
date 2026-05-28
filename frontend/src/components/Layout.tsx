@@ -90,12 +90,22 @@ export function ProcessoShell() {
 
 export function ProcessoTabs() {
   const { id } = useParams();
+  const dashboard = useQuery({
+    queryKey: ["dashboard", id],
+    queryFn: () => api.processos.dashboard(id!),
+    enabled: !!id,
+    staleTime: 15_000,
+  });
+  const pendentesValid =
+    (dashboard.data?.eventos_pendentes ?? 0) +
+    (dashboard.data?.perguntas_pendentes ?? 0);
+
   const tabs = [
-    { to: `/processos/${id}/dashboard`, label: "Dashboard" },
-    { to: `/processos/${id}/upload`, label: "Novo vídeo" },
-    { to: `/processos/${id}/validacao`, label: "Validação" },
-    { to: `/processos/${id}/chat`, label: "Chat" },
-    { to: `/processos/${id}/descricao`, label: "Descrição" },
+    { to: `/processos/${id}/dashboard`, label: "Dashboard", count: 0 },
+    { to: `/processos/${id}/upload`, label: "Novo vídeo", count: 0 },
+    { to: `/processos/${id}/validacao`, label: "Validação", count: pendentesValid },
+    { to: `/processos/${id}/chat`, label: "Chat", count: 0 },
+    { to: `/processos/${id}/descricao`, label: "Descrição", count: 0 },
   ];
   return (
     <div className="border-b border-slate-200 mb-6">
@@ -105,7 +115,7 @@ export function ProcessoTabs() {
             key={t.to}
             to={t.to}
             className={({ isActive }) =>
-              `px-4 py-2.5 text-sm font-medium border-b-2 transition ${
+              `px-4 py-2.5 text-sm font-medium border-b-2 transition flex items-center gap-2 ${
                 isActive
                   ? "border-kv-purple text-kv-purple-dark"
                   : "border-transparent text-slate-500 hover:text-slate-800"
@@ -113,6 +123,11 @@ export function ProcessoTabs() {
             }
           >
             {t.label}
+            {t.count > 0 && (
+              <span className="inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold bg-kv-purple text-white">
+                {t.count > 99 ? "99+" : t.count}
+              </span>
+            )}
           </NavLink>
         ))}
       </nav>

@@ -64,6 +64,17 @@ export interface VideoResumo {
   processado_em: string;
 }
 
+export interface PerguntaProcesso {
+  id: string;
+  pergunta: string;
+  motivo: string | null;
+  comportamentos_relacionados: string[] | null;
+  status: "pendente" | "respondida" | "dispensada";
+  resposta: string | null;
+  respondida_em: string | null;
+  criada_em: string;
+}
+
 export interface DashboardData {
   snapshot: {
     videos_analisados: number;
@@ -75,6 +86,7 @@ export interface DashboardData {
   };
   sugestoes: Sugestao[];
   eventos_pendentes: number;
+  perguntas_pendentes: number;
   transicoes: Transicao[];
   origens: { auto: number; humano: number; pendente: number };
   videos: VideoResumo[];

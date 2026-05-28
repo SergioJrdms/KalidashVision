@@ -105,6 +105,10 @@ A API expõe:
 | `GET`  | `/eventos/{id}/frames` | 3 frames com bounding box (data URLs) |
 | `POST` | `/eventos/{id}/validar` | `{ acao: "confirmar"\|"corrigir"\|"descartar", label_corrigido? }` |
 | `POST` | `/processos/{id}/chat` | pergunta em linguagem natural |
+| `GET`  | `/processos/{id}/perguntas?status=pendente` | perguntas que a IA fez ao cliente |
+| `GET`  | `/processos/{id}/perguntas/contagem` | `{ pendentes }` para badge na UI |
+| `POST` | `/perguntas/{id}/responder` | `{ resposta }` — vira contexto de domínio |
+| `POST` | `/perguntas/{id}/dispensar` | cliente prefere não responder |
 | `GET`  | `/health` | health check |
 
 Autenticação: header `Authorization: Bearer <JWT do Supabase>`.
@@ -161,6 +165,23 @@ A lógica do notebook foi preservada 1-pra-1 em `backend/pipeline.py`:
   e não vão para a fila humana.
 - Tudo é isolado por `(empresa, processo)`. Dados de clientes diferentes
   nunca se misturam, mesmo que tenham labels idênticos.
+
+### Perguntas proativas (loop de aprendizado pelo diálogo)
+
+Ao final de cada vídeo processado, a IA também pode **fazer perguntas** ao
+cliente sobre lacunas que detectou (descrições parecidas com labels
+diferentes, ações que ficaram como `acao_indefinida`, transições estranhas,
+ordem de passos pouco clara). As perguntas são geradas pelo próprio LLM —
+não vêm de um catálogo — e ficam em `perguntas_processo`.
+
+> Ciclo: **IA detecta lacuna → cria pergunta → cliente responde no fluxo de
+> validação → resposta é injetada nos prompts do VLM, cluster, análise e
+> chat junto da descrição do processo**.
+
+Sem isso, as respostas não realimentariam nada. Com isso, perguntas
+respondidas viram verdade do domínio e ficam permanentes para as próximas
+análises daquele `(empresa, processo)`. O cliente também pode dispensar
+uma pergunta — ela não volta a aparecer.
 
 ---
 

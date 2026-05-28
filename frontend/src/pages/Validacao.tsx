@@ -3,11 +3,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 import { api, formatSeg } from "../lib/api";
 import { Badge, Button, Card, EmptyState, HelpBox, Input, Spinner } from "../components/UI";
-import type { EventoPendente } from "../lib/types";
+import type { EventoPendente, PerguntaProcesso } from "../lib/types";
 
 export default function Validacao() {
   const { id } = useParams<{ id: string }>();
   const qc = useQueryClient();
+
+  const perguntas = useQuery({
+    queryKey: ["perguntas-pendentes", id],
+    queryFn: () => api.perguntas.listar(id!, "pendente"),
+    enabled: !!id,
+  });
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["eventos-pendentes", id],
@@ -37,6 +43,16 @@ export default function Validacao() {
 
   return (
     <div>
+      {perguntas.data && perguntas.data.length > 0 && (
+        <PerguntasSecao
+          perguntas={perguntas.data}
+          onResolved={() => {
+            qc.invalidateQueries({ queryKey: ["perguntas-pendentes", id] });
+            qc.invalidateQueries({ queryKey: ["dashboard", id] });
+          }}
+        />
+      )}
+
       <div className="mb-4">
         <HelpBox title="Por que validar?">
           A IA descobre os comportamentos automaticamente, mas pode errar nos
@@ -222,5 +238,129 @@ function EventoCard({
         </div>
       )}
     </Card>
+  );
+}
+
+
+function PerguntasSecao({
+  perguntas,
+  onResolved,
+}: {
+  perguntas: PerguntaProcesso[];
+  onResolved: () => void;
+}) {
+  return (
+    <Card className="mb-6 p-5 bg-gradient-to-br from-kv-purple-50 to-kv-indigo-bg border-kv-purple-200">
+      <div className="flex items-start gap-3 mb-4">
+        <div className="h-9 w-9 rounded-full bg-kv-purple text-white flex items-center justify-center font-bold flex-shrink-0">
+          ?
+        </div>
+        <div>
+          <h2 className="font-semibold text-slate-900">
+            O sistema tem {perguntas.length === 1 ? "uma pergunta" : `${perguntas.length} perguntas`}
+          </h2>
+          <p className="text-sm text-slate-600 mt-1 max-w-2xl">
+            Conforme analisa seus vídeos, a IA percebe pontos que ainda não
+            entende bem. Responder é <b>opcional</b>, mas <b>cada resposta vira
+            verdade do domínio</b> e é injetada nos próximos prompts — as
+            análises seguintes ficam mais precisas e suas sugestões mais
+            assertivas.
+          </p>
+        </div>
+      </div>
+      <div className="space-y-3">
+        {perguntas.map((p) => (
+          <PerguntaCard key={p.id} pergunta={p} onResolved={onResolved} />
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function PerguntaCard({
+  pergunta,
+  onResolved,
+}: {
+  pergunta: PerguntaProcesso;
+  onResolved: () => void;
+}) {
+  const [resposta, setResposta] = useState("");
+  const [mostrarMotivo, setMostrarMotivo] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
+
+  const responder = useMutation({
+    mutationFn: () => api.perguntas.responder(pergunta.id, resposta.trim()),
+    onSuccess: () => {
+      setFeedback("Obrigado! Isso ajuda o sistema a aprender seu processo.");
+      setTimeout(onResolved, 1100);
+    },
+  });
+
+  const dispensar = useMutation({
+    mutationFn: () => api.perguntas.dispensar(pergunta.id),
+    onSuccess: () => {
+      setFeedback("Pergunta dispensada — não vai aparecer de novo.");
+      setTimeout(onResolved, 800);
+    },
+  });
+
+  if (feedback) {
+    return (
+      <div className="bg-white rounded-xl p-4 border border-emerald-200 text-sm text-emerald-700">
+        ✓ {feedback}
+      </div>
+    );
+  }
+
+  const ocupado = responder.isPending || dispensar.isPending;
+
+  return (
+    <div className="bg-white rounded-xl p-4 border border-slate-200">
+      <p className="text-sm text-slate-900 font-medium">{pergunta.pergunta}</p>
+      {pergunta.comportamentos_relacionados && pergunta.comportamentos_relacionados.length > 0 && (
+        <div className="flex gap-1 flex-wrap mt-2">
+          {pergunta.comportamentos_relacionados.slice(0, 6).map((c) => (
+            <code
+              key={c}
+              className="text-[10px] bg-kv-purple-50 text-kv-purple-dark px-1.5 py-0.5 rounded border border-kv-purple-200"
+            >
+              {c}
+            </code>
+          ))}
+        </div>
+      )}
+      {pergunta.motivo && (
+        <button
+          type="button"
+          onClick={() => setMostrarMotivo((v) => !v)}
+          className="block text-xs text-slate-500 hover:text-kv-purple-dark mt-2"
+        >
+          {mostrarMotivo ? "ocultar" : "por que essa pergunta?"}
+        </button>
+      )}
+      {mostrarMotivo && pergunta.motivo && (
+        <p className="text-xs text-slate-500 mt-1 italic">{pergunta.motivo}</p>
+      )}
+      <div className="mt-3 flex flex-col sm:flex-row gap-2">
+        <textarea
+          value={resposta}
+          onChange={(e) => setResposta(e.target.value)}
+          placeholder="Responda em 1-2 frases..."
+          rows={2}
+          className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-kv-purple focus:ring-2 focus:ring-kv-purple/20 outline-none"
+        />
+        <div className="flex sm:flex-col gap-2">
+          <Button
+            onClick={() => responder.mutate()}
+            disabled={ocupado || !resposta.trim()}
+          >
+            Responder
+          </Button>
+          <Button variant="ghost" onClick={() => dispensar.mutate()} disabled={ocupado}>
+            Dispensar
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }

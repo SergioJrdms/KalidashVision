@@ -82,6 +82,10 @@ class ChatBody(BaseModel):
     historico: list[dict[str, str]] | None = None
 
 
+class RespostaPerguntaBody(BaseModel):
+    resposta: str = Field(min_length=1, max_length=2000)
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # PROCESSOS
 # Cada processo é uma linha em `contexto_processo` para a empresa do usuário.
@@ -333,10 +337,21 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .execute()
     )
 
+    perguntas_pend = (
+        sb.table("perguntas_processo")
+        .select("id", count="exact")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .eq("status", "pendente")
+        .limit(1)
+        .execute()
+    )
+
     return {
         "snapshot": snapshot,
         "sugestoes": sugs,
         "eventos_pendentes": pendentes.count or 0,
+        "perguntas_pendentes": perguntas_pend.count or 0,
         "transicoes": transicoes,
         "origens": {
             "auto": origens["auto"],
@@ -503,6 +518,94 @@ def chat(processo_id: str, body: ChatBody, user: CurrentUser = Depends(get_curre
         historico=body.historico,
     )
     return {"resposta": resposta}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# PERGUNTAS PROATIVAS
+# ═════════════════════════════════════════════════════════════════════════
+@app.get("/processos/{processo_id}/perguntas")
+def listar_perguntas(
+    processo_id: str,
+    status_filter: str = Query("pendente", alias="status"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    q = (
+        sb.table("perguntas_processo")
+        .select("id, pergunta, motivo, comportamentos_relacionados, status, resposta, respondida_em, criada_em")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+    )
+    if status_filter and status_filter != "todas":
+        q = q.eq("status", status_filter)
+    r = q.order("criada_em", desc=True).limit(200).execute()
+    return r.data or []
+
+
+@app.get("/processos/{processo_id}/perguntas/contagem")
+def contagem_perguntas(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = (
+        sb.table("perguntas_processo")
+        .select("id", count="exact")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .eq("status", "pendente")
+        .limit(1)
+        .execute()
+    )
+    return {"pendentes": r.count or 0}
+
+
+@app.post("/perguntas/{pergunta_id}/responder")
+def responder_pergunta(
+    pergunta_id: str,
+    body: RespostaPerguntaBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    from datetime import datetime
+
+    sb = make_supabase_client()
+    r = (
+        sb.table("perguntas_processo")
+        .select("id, empresa, status")
+        .eq("id", pergunta_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Pergunta não encontrada")
+    if r.data[0]["empresa"] != user.empresa:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+    sb.table("perguntas_processo").update(
+        {
+            "resposta": body.resposta.strip(),
+            "status": "respondida",
+            "respondida_em": datetime.utcnow().isoformat(),
+        }
+    ).eq("id", pergunta_id).execute()
+    return {"ok": True}
+
+
+@app.post("/perguntas/{pergunta_id}/dispensar")
+def dispensar_pergunta(
+    pergunta_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    r = (
+        sb.table("perguntas_processo")
+        .select("id, empresa")
+        .eq("id", pergunta_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Pergunta não encontrada")
+    if r.data[0]["empresa"] != user.empresa:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+    sb.table("perguntas_processo").update({"status": "dispensada"}).eq("id", pergunta_id).execute()
+    return {"ok": True}
 
 
 # ═════════════════════════════════════════════════════════════════════════

@@ -80,6 +80,22 @@ create table if not exists contexto_processo (
     unique (empresa, processo)
 );
 
+-- Perguntas que a IA faz proativamente ao cliente sobre o processo.
+-- Ciclo: IA detecta lacuna → cria pergunta → cliente responde no fluxo
+-- de validação → resposta é injetada como domínio nos próximos prompts.
+create table if not exists perguntas_processo (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    pergunta text not null,
+    motivo text,
+    comportamentos_relacionados jsonb,
+    status text not null default 'pendente',  -- pendente | respondida | dispensada
+    resposta text,
+    respondida_em timestamptz,
+    criada_em timestamptz default now()
+);
+
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
 create index if not exists idx_comportamentos_ctx on comportamentos(empresa, processo);
 create index if not exists idx_eventos_ctx       on eventos(empresa, processo);
@@ -89,6 +105,7 @@ create index if not exists idx_eventos_pessoa    on eventos(pessoa_track_id);
 create index if not exists idx_eventos_origem    on eventos(origem_validacao);
 create index if not exists idx_sugestoes_ctx     on sugestoes_melhoria(empresa, processo);
 create index if not exists idx_contexto_proc     on contexto_processo(empresa, processo);
+create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, processo, status);
 
 
 -- ════════════════════════════════════════════════════════════════════════
@@ -103,6 +120,7 @@ alter table comportamentos      enable row level security;
 alter table eventos             enable row level security;
 alter table sugestoes_melhoria  enable row level security;
 alter table contexto_processo   enable row level security;
+alter table perguntas_processo  enable row level security;
 
 -- Função helper: empresa do usuário JWT
 create or replace function auth_empresa() returns text
@@ -117,7 +135,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo'] loop
+  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo'] loop
     execute format('drop policy if exists %1$s_select on %1$s', t);
     execute format('drop policy if exists %1$s_modify on %1$s', t);
     execute format($p$

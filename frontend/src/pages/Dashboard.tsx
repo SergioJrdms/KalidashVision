@@ -81,6 +81,30 @@ export default function Dashboard() {
     <div className="space-y-6">
       <KPIs data={data} />
 
+      {data.perguntas_pendentes > 0 && (
+        <Card className="p-4 bg-gradient-to-r from-kv-purple-50 to-kv-purple-100 border-kv-purple-300">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="h-9 w-9 rounded-full bg-kv-purple text-white flex items-center justify-center font-bold flex-shrink-0">
+              ?
+            </div>
+            <div className="flex-1 min-w-[14rem]">
+              <p className="text-sm font-medium text-kv-purple-dark">
+                A IA tem {data.perguntas_pendentes === 1
+                  ? "1 pergunta sobre o seu processo"
+                  : `${data.perguntas_pendentes} perguntas sobre o seu processo`}
+              </p>
+              <p className="text-xs text-slate-600 mt-1">
+                Cada resposta vira contexto de domínio e deixa as próximas
+                análises mais precisas. Responder é opcional.
+              </p>
+            </div>
+            <Link to={`/processos/${id}/validacao`}>
+              <Button variant="secondary">Responder agora</Button>
+            </Link>
+          </div>
+        </Card>
+      )}
+
       {data.eventos_pendentes > 0 && (
         <Card className="p-4 bg-gradient-to-r from-kv-purple-50 to-kv-indigo-bg border-kv-purple-200">
           <div className="flex items-center justify-between gap-4 flex-wrap">

@@ -139,6 +139,19 @@ create table if not exists contexto_processo (
     unique (empresa, processo)
 );
 
+create table if not exists perguntas_processo (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    pergunta text not null,
+    motivo text,
+    comportamentos_relacionados jsonb,
+    status text not null default 'pendente',
+    resposta text,
+    respondida_em timestamptz,
+    criada_em timestamptz default now()
+);
+
 alter table sugestoes_melhoria add column if not exists impacto_estimado text;
 
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
@@ -150,6 +163,7 @@ create index if not exists idx_eventos_pessoa    on eventos(pessoa_track_id);
 create index if not exists idx_eventos_origem    on eventos(origem_validacao);
 create index if not exists idx_sugestoes_ctx     on sugestoes_melhoria(empresa, processo);
 create index if not exists idx_contexto_proc     on contexto_processo(empresa, processo);
+create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, processo, status);
 """
 
 
@@ -325,6 +339,53 @@ def construir_bloco_processo(descricao: str) -> str:
         "vocabulário alinhado a ela. Ações que claramente NÃO se encaixam nesta "
         "descrição podem ser incomuns/anômalas — descreva-as com atenção.\n\n"
     )
+
+
+def construir_bloco_conhecimento_adquirido(
+    sb: Client, empresa: str, processo: str, limite: int = 30
+) -> str:
+    """Bloco montado a partir das perguntas que o sistema fez e o cliente
+    respondeu — é tratado como verdade do domínio nos prompts.
+
+    Retorna '' se ainda não houver respostas (degradação graciosa).
+    """
+    try:
+        r = (
+            sb.table("perguntas_processo")
+            .select("pergunta, resposta")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .eq("status", "respondida")
+            .order("respondida_em", desc=False)
+            .limit(limite)
+            .execute()
+        )
+        respondidas = r.data or []
+    except Exception as e:
+        log.warning(f"Falha ao carregar conhecimento adquirido: {e}")
+        return ""
+
+    respondidas = [
+        x for x in respondidas if (x.get("resposta") or "").strip() and (x.get("pergunta") or "").strip()
+    ]
+    if not respondidas:
+        return ""
+
+    linhas = [
+        "CONHECIMENTO ADICIONAL DO PROCESSO (perguntas que o sistema fez e o cliente respondeu — use isso como VERDADE do domínio, com peso igual ou maior que a descrição acima):",
+    ]
+    for x in respondidas:
+        linhas.append(f"- P: {x['pergunta'].strip()}")
+        linhas.append(f"  R: {x['resposta'].strip()}")
+    return "\n".join(linhas) + "\n\n"
+
+
+def construir_bloco_dominio(descricao: str, conhecimento: str) -> str:
+    """Combina descrição do processo + conhecimento adquirido.
+    Substitui chamadas a construir_bloco_processo() onde também queremos
+    injetar as respostas das perguntas proativas.
+    """
+    return construir_bloco_processo(descricao) + (conhecimento or "")
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -676,6 +737,7 @@ def _analisar_amostra_vlm(
     amostra: Amostra,
     descricao_processo: str,
     memoria: dict,
+    conhecimento_adquirido: str = "",
 ) -> dict[int, str]:
     frame_anotado = anotar_frame_com_ids(amostra.frame_bgr, amostra.pessoas)
     img_b64 = frame_para_base64(frame_anotado)
@@ -687,7 +749,7 @@ def _analisar_amostra_vlm(
     contexto = ". ".join(contexto_partes) if contexto_partes else "sem zonas pré-definidas"
 
     prompt = PROMPT_VLM.format(
-        bloco_processo=construir_bloco_processo(descricao_processo),
+        bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
         contexto_zonas=contexto,
     )
@@ -719,11 +781,14 @@ def etapa_analise_vlm(
     descricao_processo: str,
     memoria: dict,
     progress_cb: ProgressCb,
+    conhecimento_adquirido: str = "",
 ) -> list[dict]:
     progress_cb("vlm", 0, f"Analisando {len(amostras)} amostras com VLM")
     observacoes: list[dict] = []
     for i, am in enumerate(amostras):
-        descricoes = _analisar_amostra_vlm(groq_client, am, descricao_processo, memoria)
+        descricoes = _analisar_amostra_vlm(
+            groq_client, am, descricao_processo, memoria, conhecimento_adquirido
+        )
         for p in am.pessoas:
             desc = descricoes.get(p["track_id"])
             if desc:
@@ -754,6 +819,7 @@ def etapa_clusterizar(
     memoria: dict,
     limiar_auto_validacao: int,
     progress_cb: ProgressCb,
+    conhecimento_adquirido: str = "",
 ) -> tuple[dict[str, str], dict[str, str], Callable[[str], str], Callable[[str], str]]:
     """Retorna (mapa_desc_label, catalogo, label_de, origem_de)."""
     progress_cb("cluster", 0, "Agrupando descrições em comportamentos")
@@ -784,7 +850,7 @@ def etapa_clusterizar(
 
     if descricoes_novas:
         prompt_completo = PROMPT_CLUSTER.format(
-            bloco_processo=construir_bloco_processo(descricao_processo),
+            bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
             bloco_memoria=construir_bloco_memoria_cluster(memoria),
         )
         lista_formatada = "\n".join(f"- {d}" for d in descricoes_novas)
@@ -1046,6 +1112,7 @@ REGRAS:
 - Quantifique sempre que possível, usando os números do contexto.
 - NUNCA mencione pessoas específicas (track_ids). Fale em termos de processo e estação.
 - Se houver "descricao_processo_pelo_cliente", use-a como referência do fluxo que AGREGA valor: tempo gasto fora desse fluxo é candidato a desperdício.
+- Se houver "conhecimento_adquirido_do_cliente" (pares pergunta→resposta), trate-o como VERDADE confirmada do domínio — peso igual ou maior que a descrição.
 - Se houver "labels_descartados_pelo_cliente", ignore esses comportamentos (são falsos positivos).
 - Se a base ainda for pequena (poucos vídeos / pouco tempo observado), seja mais cauteloso e sinalize isso no impacto_estimado.
 - Seja específico e acionável. Evite frases genéricas como "melhorar o fluxo".
@@ -1068,6 +1135,7 @@ def montar_contexto_agregado(
     catalogo: dict[str, str] | None = None,
     descricao_processo: str = "",
     memoria: dict | None = None,
+    conhecimento_adquirido_texto: str = "",
     video_recem_processado: dict | None = None,
 ) -> dict:
     todos_eventos = (
@@ -1171,6 +1239,8 @@ def montar_contexto_agregado(
         contexto["video_recem_processado"] = video_recem_processado
     if descricao_processo:
         contexto["descricao_processo_pelo_cliente"] = descricao_processo
+    if conhecimento_adquirido_texto:
+        contexto["conhecimento_adquirido_do_cliente"] = conhecimento_adquirido_texto
     if memoria and memoria.get("descartados"):
         contexto["labels_descartados_pelo_cliente"] = memoria["descartados"]
 
@@ -1217,6 +1287,264 @@ def etapa_gerar_sugestoes(
     if linhas_sug:
         sb.table("sugestoes_melhoria").insert(linhas_sug).execute()
     return sugestoes
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# PERGUNTAS PROATIVAS — a IA pede esclarecimentos ao cliente, e cada
+# resposta vira contexto de domínio nos prompts seguintes.
+# ═════════════════════════════════════════════════════════════════════════
+PROMPT_PERGUNTAS = """Você é a IA de análise de processos industriais do Kalidash Vision, observando a empresa "{empresa}" no processo "{processo}". Você já analisou alguns vídeos da operação. Sua tarefa AGORA não é gerar sugestões de melhoria (isso já foi feito em outra etapa) — é IDENTIFICAR LACUNAS no seu próprio entendimento da operação e formular PERGUNTAS GENUÍNAS ao cliente que, se respondidas, te permitiriam classificar e analisar com muito mais precisão a partir do próximo vídeo.
+
+REGRAS DURAS:
+- Você está LIVRE para perguntar o que quiser. NÃO use um catálogo pré-fabricado. As perguntas têm que nascer de incertezas REAIS nos dados abaixo.
+- NÃO repita nenhuma pergunta que você já fez antes (lista mais abaixo) e NÃO crie variantes dela.
+- NÃO pergunte o que a "descrição do processo" e o "conhecimento já adquirido" já respondem.
+- Cada pergunta deve ser CURTA (1 frase), ESPECÍFICA e em linguagem de chão de fábrica. Nada de termos de IA, estatística ou Lean.
+- Priorize perguntas que ajudam a:
+    (a) DESAMBIGUAR comportamentos parecidos (mesmo objeto/ação descritos de formas diferentes; ou labels distintos que talvez sejam o mesmo);
+    (b) NOMEAR corretamente ações que ficaram como "acao_indefinida" ou de baixa confiança;
+    (c) Entender ORDEM e OBRIGATORIEDADE de passos (ex.: "é obrigatório conferir antes de embalar?");
+    (d) Distinguir o que AGREGA VALOR do que é apoio / verificação / espera.
+- Gere NO MÁXIMO {max_perguntas} perguntas. Se não há lacuna genuína, devolva uma lista VAZIA. NÃO invente perguntas para preencher cota.
+- NÃO comente o desempenho de pessoas; foque no processo.
+
+CONTEXTO QUE VOCÊ JÁ SABE DO PROCESSO:
+{bloco_dominio}
+
+LACUNAS DETECTADAS NOS DADOS:
+{bloco_lacunas}
+
+PERGUNTAS JÁ FEITAS (NÃO REPITA, NÃO CRIE VARIANTES):
+{bloco_perguntas_existentes}
+
+Responda APENAS um JSON estrito:
+{{"perguntas": [
+  {{"pergunta": "...",
+   "motivo": "1 frase explicando por que essa pergunta importa pra análise",
+   "comportamentos_relacionados": ["label_1", "label_2"]}},
+  ...
+]}}
+"""
+
+
+_STOPWORDS_PT = set(
+    """a o e ou de da do das dos para por em no na nos nas com sem como esse essa esses essas
+    isso isto aquele aquela aqueles aquelas que quem qual quais quando onde se já não nao um
+    uma uns umas é eh são sao ser está esta estão estao tem têm tinha tinham vai vão ele ela
+    eles elas você voce vocês voces o que""".split()
+)
+
+
+def _normalizar_pergunta(texto: str) -> set[str]:
+    """Tokeniza para comparação por sobreposição (Jaccard)."""
+    import re
+
+    txt = (texto or "").lower()
+    txt = re.sub(r"[^a-záàâãéêíóôõúüç0-9\s]", " ", txt)
+    toks = [t for t in txt.split() if t and t not in _STOPWORDS_PT and len(t) > 2]
+    return set(toks)
+
+
+def _eh_duplicada(nova: str, existentes_tokens: list[set[str]], limiar: float = 0.6) -> bool:
+    a = _normalizar_pergunta(nova)
+    if not a:
+        return True  # texto sem conteúdo útil
+    for b in existentes_tokens:
+        if not b:
+            continue
+        inter = len(a & b)
+        union = len(a | b)
+        if union and inter / union >= limiar:
+            return True
+    return False
+
+
+def _montar_bloco_lacunas(
+    observacoes_brutas: list[dict] | None,
+    catalogo: dict[str, str] | None,
+    contexto_agregado: dict | None,
+    memoria: dict | None,
+) -> str:
+    """Bloco em texto plano com os indícios mais úteis para a IA perguntar."""
+    linhas: list[str] = []
+
+    # Top descrições brutas (texto cru que o VLM gerou)
+    if observacoes_brutas:
+        contagem = Counter(o["descricao"] for o in observacoes_brutas if o.get("descricao"))
+        if contagem:
+            linhas.append("Descrições brutas mais frequentes vistas nas amostras (texto cru, antes da clusterização):")
+            for desc, n in contagem.most_common(12):
+                linhas.append(f"  - {n}× \"{desc}\"")
+            linhas.append("")
+
+    # Catálogo final de comportamentos detectados, com % do tempo agregado
+    if contexto_agregado and contexto_agregado.get("distribuicao_comportamentos"):
+        linhas.append("Comportamentos detectados (% do tempo observado · ocorrências):")
+        for c in contexto_agregado["distribuicao_comportamentos"][:12]:
+            linhas.append(
+                f"  - {c['comportamento']} ({c.get('descricao','')}) — "
+                f"{c.get('pct_do_tempo_observado', 0)}% · {c.get('ocorrencias_totais', 0)} ocorrências"
+            )
+        linhas.append("")
+
+    # Ações que caíram em acao_indefinida e suas descrições brutas
+    if observacoes_brutas:
+        indef = [
+            o["descricao"]
+            for o in observacoes_brutas
+            if o.get("label") == "acao_indefinida" or o.get("descricao") == "ação não identificada"
+        ]
+        if indef:
+            linhas.append(
+                "Ações que o sistema NÃO conseguiu nomear com clareza (acao_indefinida) — descrições brutas associadas:"
+            )
+            for desc, n in Counter(indef).most_common(8):
+                linhas.append(f"  - {n}× \"{desc}\"")
+            linhas.append("")
+
+    # Transições mais comuns (fluxo real)
+    if contexto_agregado and contexto_agregado.get("transicoes_dominantes"):
+        linhas.append("Sequências mais comuns observadas (comportamento A → comportamento B):")
+        for t in contexto_agregado["transicoes_dominantes"][:8]:
+            linhas.append(f"  - {t['de']} → {t['para']} ({t['vezes']}×)")
+        linhas.append("")
+
+    # Vocabulário com poucas confirmações (pode estar em formação)
+    if memoria and memoria.get("vocabulario"):
+        em_formacao = [
+            v for v in memoria["vocabulario"]
+            if v.get("n_confirmacoes", 0) < 2
+        ]
+        if em_formacao:
+            linhas.append("Comportamentos com poucas confirmações ainda (vocabulário em formação):")
+            for v in em_formacao[:8]:
+                linhas.append(f"  - {v['label']}: {v.get('descricao', '')} ({v.get('n_confirmacoes', 0)}× confirmado)")
+            linhas.append("")
+
+    if not linhas:
+        return "(nenhum sinal forte de lacuna no momento)"
+    return "\n".join(linhas)
+
+
+def gerar_perguntas_processo(
+    sb: Client,
+    groq_client: Groq,
+    empresa: str,
+    processo: str,
+    *,
+    descricao_processo: str = "",
+    memoria: dict | None = None,
+    catalogo: dict[str, str] | None = None,
+    observacoes_brutas: list[dict] | None = None,
+    contexto_agregado: dict | None = None,
+    max_perguntas: int = 4,
+) -> list[dict]:
+    """Gera (e persiste) perguntas proativas a partir das lacunas observadas.
+
+    - Carrega perguntas já feitas (pendentes + respondidas + dispensadas)
+      e o conhecimento adquirido, para a IA não repetir nem perguntar o
+      que já foi resolvido.
+    - Faz dedupe local por Jaccard (limiar 0.6) sobre tokens normalizados.
+    - Persiste e retorna apenas o que foi efetivamente gravado.
+    - Pode devolver lista vazia (e isso é OK).
+    """
+    # Perguntas já existentes neste contexto
+    try:
+        existentes = (
+            sb.table("perguntas_processo")
+            .select("pergunta, status")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .limit(500)
+            .execute()
+            .data
+        ) or []
+    except Exception as e:
+        log.warning(f"Não foi possível carregar perguntas existentes: {e}")
+        existentes = []
+
+    existentes_textos = [(x.get("pergunta") or "").strip() for x in existentes if x.get("pergunta")]
+    existentes_tokens = [_normalizar_pergunta(t) for t in existentes_textos]
+
+    if existentes_textos:
+        bloco_existentes = "\n".join(f"  - {t}" for t in existentes_textos[:60])
+    else:
+        bloco_existentes = "(nenhuma — esta é a primeira rodada de perguntas)"
+
+    conhecimento = construir_bloco_conhecimento_adquirido(sb, empresa, processo)
+    bloco_dominio = construir_bloco_dominio(descricao_processo or "", conhecimento)
+    if not bloco_dominio.strip():
+        bloco_dominio = "(o cliente ainda não forneceu descrição nem respondeu perguntas anteriores)"
+
+    bloco_lacunas = _montar_bloco_lacunas(
+        observacoes_brutas, catalogo, contexto_agregado, memoria
+    )
+
+    prompt = PROMPT_PERGUNTAS.format(
+        empresa=empresa,
+        processo=processo,
+        max_perguntas=max_perguntas,
+        bloco_dominio=bloco_dominio.strip(),
+        bloco_lacunas=bloco_lacunas.strip(),
+        bloco_perguntas_existentes=bloco_existentes,
+    )
+
+    try:
+        resposta = groq_text_call(
+            groq_client,
+            prompt,
+            model=GROQ_MODEL_ANALISE,
+            json_mode=True,
+            max_tokens=1200,
+            temperatura=0.4,
+        )
+        dados = json.loads(resposta)
+    except Exception as e:
+        log.warning(f"Falha ao gerar/parsear perguntas: {e}")
+        return []
+
+    cruas = dados.get("perguntas") or []
+    if not isinstance(cruas, list):
+        return []
+
+    novas_linhas: list[dict] = []
+    tokens_acc = list(existentes_tokens)  # vai crescendo pra evitar duplicatas internas no batch
+    for p in cruas[:max_perguntas]:
+        if not isinstance(p, dict):
+            continue
+        texto = (p.get("pergunta") or "").strip()
+        if not texto or len(texto) < 8:
+            continue
+        if _eh_duplicada(texto, tokens_acc):
+            log.info(f"Pergunta descartada por similaridade: {texto[:60]}…")
+            continue
+        comp_rel = p.get("comportamentos_relacionados")
+        if not isinstance(comp_rel, list):
+            comp_rel = []
+        novas_linhas.append(
+            {
+                "empresa": empresa,
+                "processo": processo,
+                "pergunta": texto,
+                "motivo": (p.get("motivo") or "").strip() or None,
+                "comportamentos_relacionados": [str(c) for c in comp_rel][:8],
+                "status": "pendente",
+            }
+        )
+        tokens_acc.append(_normalizar_pergunta(texto))
+
+    if not novas_linhas:
+        log.info("Nenhuma pergunta nova após dedupe.")
+        return []
+
+    try:
+        r = sb.table("perguntas_processo").insert(novas_linhas).execute()
+        salvas = r.data or novas_linhas
+        log.info(f"{len(salvas)} pergunta(s) proativa(s) persistida(s) em {empresa}/{processo}.")
+        return salvas
+    except Exception as e:
+        log.warning(f"Falha ao persistir perguntas: {e}")
+        return []
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1345,7 +1673,13 @@ def montar_snapshot_chat(sb: Client, empresa: str, processo: str) -> dict:
     }
 
 
-def system_prompt_chat(empresa: str, processo: str, descricao_processo: str, snapshot: dict) -> str:
+def system_prompt_chat(
+    empresa: str,
+    processo: str,
+    descricao_processo: str,
+    snapshot: dict,
+    conhecimento_adquirido: str = "",
+) -> str:
     partes = [
         "Você é um consultor sênior de produtividade industrial e engenharia de processos, especialista em Lean Manufacturing.",
         f'Está ajudando a empresa "{empresa}" a melhorar o processo "{processo}".',
@@ -1354,6 +1688,8 @@ def system_prompt_chat(empresa: str, processo: str, descricao_processo: str, sna
     ]
     if descricao_processo:
         partes += ["", "DESCRIÇÃO DO PROCESSO (fornecida pelo cliente):", descricao_processo]
+    if conhecimento_adquirido:
+        partes += ["", conhecimento_adquirido.rstrip()]
     partes += [
         "",
         "DADOS AGREGADOS DA OPERAÇÃO (JSON):",
@@ -1383,10 +1719,14 @@ def responder_chat(
 ) -> str:
     historico = historico or []
     descricao = resolver_descricao_processo(sb, empresa, processo, None)
+    conhecimento = construir_bloco_conhecimento_adquirido(sb, empresa, processo)
     snapshot = montar_snapshot_chat(sb, empresa, processo)
 
     mensagens = [
-        {"role": "system", "content": system_prompt_chat(empresa, processo, descricao, snapshot)}
+        {
+            "role": "system",
+            "content": system_prompt_chat(empresa, processo, descricao, snapshot, conhecimento),
+        }
     ]
     mensagens += historico[-max_trocas * 2 :]
     mensagens.append({"role": "user", "content": pergunta})
@@ -1430,10 +1770,12 @@ def processar_video(
     progress_cb("setup", 0, f"Iniciando · {empresa}/{processo}")
     memoria = carregar_memoria_do_negocio(sb, empresa, processo)
     descricao = resolver_descricao_processo(sb, empresa, processo, descricao_processo)
+    conhecimento = construir_bloco_conhecimento_adquirido(sb, empresa, processo)
     progress_cb(
         "setup",
         100,
-        f"Memória: {memoria['total_eventos_validados']} eventos validados",
+        f"Memória: {memoria['total_eventos_validados']} eventos validados"
+        + (f" · {conhecimento.count('- P:')} respostas no domínio" if conhecimento else ""),
     )
 
     amostras, info_video, ids_unicos = etapa_detectar_e_amostrar(
@@ -1447,9 +1789,13 @@ def processar_video(
             "n_eventos": 0,
             "n_auto_validados": 0,
             "n_sugestoes": 0,
+            "n_perguntas": 0,
         }
 
-    observacoes = etapa_analise_vlm(groq_client, amostras, descricao, memoria, progress_cb)
+    observacoes = etapa_analise_vlm(
+        groq_client, amostras, descricao, memoria, progress_cb,
+        conhecimento_adquirido=conhecimento,
+    )
 
     if not observacoes:
         progress_cb("concluido", 100, "Nenhuma observação obtida do VLM")
@@ -1458,10 +1804,12 @@ def processar_video(
             "n_eventos": 0,
             "n_auto_validados": 0,
             "n_sugestoes": 0,
+            "n_perguntas": 0,
         }
 
     _, catalogo, label_de, origem_de = etapa_clusterizar(
-        groq_client, observacoes, descricao, memoria, limiar_auto_validacao, progress_cb
+        groq_client, observacoes, descricao, memoria, limiar_auto_validacao, progress_cb,
+        conhecimento_adquirido=conhecimento,
     )
 
     progress_cb("segmentar", 0, "Formando eventos contínuos")
@@ -1492,6 +1840,7 @@ def processar_video(
         catalogo=catalogo,
         descricao_processo=descricao,
         memoria=memoria,
+        conhecimento_adquirido_texto=conhecimento,
         video_recem_processado={
             "nome": nome_video or Path(video_path).name,
             "duracao_s": round(info_video["duracao_s"], 1),
@@ -1501,10 +1850,31 @@ def processar_video(
     sugestoes = etapa_gerar_sugestoes(sb, groq_client, empresa, processo, video_id, contexto)
     progress_cb("sugestoes", 100, f"{len(sugestoes)} sugestões geradas")
 
+    # Geração proativa de perguntas — NÃO-FATAL.
+    n_perguntas = 0
+    try:
+        progress_cb("perguntas", 0, "Identificando lacunas pra perguntar ao cliente")
+        novas_perguntas = gerar_perguntas_processo(
+            sb,
+            groq_client,
+            empresa,
+            processo,
+            descricao_processo=descricao,
+            memoria=memoria,
+            catalogo=catalogo,
+            observacoes_brutas=observacoes,
+            contexto_agregado=contexto,
+        )
+        n_perguntas = len(novas_perguntas)
+        progress_cb("perguntas", 100, f"{n_perguntas} perguntas geradas")
+    except Exception as e:
+        log.warning(f"Geração de perguntas falhou (não-fatal): {e}")
+
     progress_cb("concluido", 100, "Processamento concluído")
     return {
         "video_id": video_id,
         "n_eventos": len(eventos),
         "n_auto_validados": n_auto,
         "n_sugestoes": len(sugestoes),
+        "n_perguntas": n_perguntas,
     }

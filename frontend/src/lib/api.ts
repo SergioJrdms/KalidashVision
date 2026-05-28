@@ -3,6 +3,7 @@ import type {
   DashboardData,
   EventoPendente,
   JobStatus,
+  PerguntaProcesso,
   Processo,
   ProcessoDetalhe,
   Sugestao,
@@ -84,6 +85,19 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ acao, label_corrigido }),
       }),
+  },
+  perguntas: {
+    listar: (processoId: string, status: "pendente" | "respondida" | "dispensada" | "todas" = "pendente") =>
+      req<PerguntaProcesso[]>(`/processos/${processoId}/perguntas?status=${status}`),
+    contagem: (processoId: string) =>
+      req<{ pendentes: number }>(`/processos/${processoId}/perguntas/contagem`),
+    responder: (id: string, resposta: string) =>
+      req<{ ok: boolean }>(`/perguntas/${id}/responder`, {
+        method: "POST",
+        body: JSON.stringify({ resposta }),
+      }),
+    dispensar: (id: string) =>
+      req<{ ok: boolean }>(`/perguntas/${id}/dispensar`, { method: "POST" }),
   },
 };
 

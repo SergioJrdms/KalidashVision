@@ -91,10 +91,11 @@ def executar_job(
             "setup": (0, 5),
             "deteccao": (5, 35),
             "vlm": (35, 70),
-            "cluster": (70, 78),
-            "segmentar": (78, 82),
-            "persistir": (82, 88),
-            "sugestoes": (88, 99),
+            "cluster": (70, 76),
+            "segmentar": (76, 80),
+            "persistir": (80, 86),
+            "sugestoes": (86, 94),
+            "perguntas": (94, 99),
             "concluido": (99, 100),
         }
 
