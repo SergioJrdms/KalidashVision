@@ -68,6 +68,7 @@ def executar_job(
     processo: str,
     storage_path: str,
     descricao_processo: str | None,
+    nome_original: str | None = None,
 ) -> None:
     """Entrypoint do worker. Atualiza o job conforme avança."""
     JOBS.update(
@@ -116,6 +117,8 @@ def executar_job(
             sb=sb,
             groq_client=groq_client,
             yolo_model=_get_yolo(),
+            nome_video=nome_original or Path(storage_path).name,
+            caminho_storage=storage_path,
         )
 
         JOBS.update(

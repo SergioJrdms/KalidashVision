@@ -927,16 +927,24 @@ def etapa_persistir(
     ids_unicos: list[int],
     catalogo: dict[str, str],
     origem_de: Callable[[str], str],
+    nome_video: str | None = None,
+    caminho_storage: str | None = None,
 ) -> tuple[str, int]:
-    """Persiste vídeo, comportamentos, eventos. Retorna (video_id, n_auto_validados)."""
+    """Persiste vídeo, comportamentos, eventos. Retorna (video_id, n_auto_validados).
+
+    `video_path` é o caminho LOCAL usado pelo OpenCV. `caminho_storage`
+    (opcional) é o que vai pra coluna `caminho` da tabela `videos` —
+    use o path do Supabase Storage aqui pra que o endpoint `/frames`
+    consiga baixar o vídeo depois.
+    """
     video_row = (
         sb.table("videos")
         .insert(
             {
                 "empresa": empresa,
                 "processo": processo,
-                "nome": Path(video_path).name,
-                "caminho": str(video_path),
+                "nome": nome_video or Path(video_path).name,
+                "caminho": caminho_storage or str(video_path),
                 "duracao_s": round(info_video["duracao_s"], 2),
                 "fps": round(info_video["fps"], 2),
                 "largura": info_video["largura"],
@@ -1420,6 +1428,8 @@ def processar_video(
     sb: Client | None = None,
     groq_client: Groq | None = None,
     yolo_model: YOLO | None = None,
+    nome_video: str | None = None,
+    caminho_storage: str | None = None,
 ) -> dict:
     """Roda o pipeline completo. Devolve dict com video_id, n_eventos,
     n_auto_validados, n_sugestoes.
@@ -1473,7 +1483,17 @@ def processar_video(
 
     progress_cb("persistir", 0, "Salvando no banco de dados")
     video_id, n_auto = etapa_persistir(
-        sb, empresa, processo, video_path, info_video, eventos, ids_unicos, catalogo, origem_de
+        sb,
+        empresa,
+        processo,
+        video_path,
+        info_video,
+        eventos,
+        ids_unicos,
+        catalogo,
+        origem_de,
+        nome_video=nome_video,
+        caminho_storage=caminho_storage,
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
 
@@ -1486,7 +1506,7 @@ def processar_video(
         descricao_processo=descricao,
         memoria=memoria,
         video_recem_processado={
-            "nome": Path(video_path).name,
+            "nome": nome_video or Path(video_path).name,
             "duracao_s": round(info_video["duracao_s"], 1),
             "eventos_neste_video": len(eventos),
         },

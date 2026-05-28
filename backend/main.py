@@ -224,6 +224,7 @@ async def upload_video(
         processo_nome,
         storage_path,
         descricao,
+        file.filename,
     )
     return {"job_id": job.id}
 
@@ -350,6 +351,14 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
     caminho = vid[0]["caminho"]  # storage_path original
     import tempfile
     from pathlib import Path
+
+    # Vídeos processados antes do fix gravavam o tempfile local como
+    # `caminho`. Se parece path absoluto local, não dá pra recuperar.
+    if not caminho or caminho.startswith(("/", "\\")) or (len(caminho) > 1 and caminho[1] == ":"):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Este vídeo foi processado com uma versão antiga (caminho local em vez do storage path). Reprocesse o vídeo para visualizar os frames.",
+        )
 
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
     try:
