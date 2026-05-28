@@ -12,6 +12,14 @@ import json
 import logging
 import os
 import time
+from pathlib import Path as _Path
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    _load_dotenv(_Path(__file__).resolve().parent / ".env", override=False)
+except ImportError:
+    pass
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime

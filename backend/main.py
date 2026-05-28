@@ -39,6 +39,17 @@ log = logging.getLogger("kalidash.api")
 
 app = FastAPI(title="Kalidash Vision", version="0.1.0")
 
+
+@app.on_event("startup")
+def _checar_segredos() -> None:
+    faltando = [k for k in ("SUPABASE_URL", "SUPABASE_KEY", "GROQ_API_KEY") if not os.environ.get(k)]
+    if faltando:
+        log.error(
+            "Variáveis de ambiente ausentes: %s. "
+            "Copie backend/.env.example para backend/.env e preencha as chaves.",
+            ", ".join(faltando),
+        )
+
 # CORS — em produção, restrinja a origem.
 app.add_middleware(
     CORSMiddleware,
