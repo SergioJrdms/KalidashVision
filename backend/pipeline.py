@@ -55,20 +55,7 @@ TRACKER_CONFIG = "botsort.yaml"
 DEFAULT_INTERVALO_AMOSTRAGEM_S = 3.0
 DEFAULT_LIMIAR_AUTO_VALIDACAO = 2
 
-DEFAULT_ROIS_CONTEXTO: dict[str, dict[str, Any]] = {
-    "PC": {
-        "pts_rel": [(0.55, 0.20), (0.75, 0.20), (0.75, 0.78), (0.55, 0.78)],
-        "descricao_contexto": "estação com computador",
-    },
-    "BENCH": {
-        "pts_rel": [(0.30, 0.20), (0.51, 0.20), (0.51, 0.78), (0.30, 0.78)],
-        "descricao_contexto": "bancada de trabalho manual",
-    },
-    "BACKGROUND": {
-        "pts_rel": [(0.0, 0.0), (1.0, 0.0), (1.0, 0.18), (0.0, 0.18)],
-        "descricao_contexto": "área de circulação",
-    },
-}
+DEFAULT_ROIS_CONTEXTO: dict[str, dict] = {}
 
 
 # ═════════════════════════════════════════════════════════════════════════
