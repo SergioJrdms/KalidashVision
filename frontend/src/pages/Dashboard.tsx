@@ -114,7 +114,7 @@ export default function Dashboard() {
       <BannersContextuais data={data} processoId={id!} />
 
       {/* B · Sugestões + Resumo das oportunidades */}
-      <SugestoesBloco sugestoes={data.sugestoes} />
+      <SugestoesBloco sugestoes={data.sugestoes} origens={data.origens} />
 
       {/* C · Várias óticas */}
       <div>
@@ -304,7 +304,13 @@ function BannersContextuais({
 // ════════════════════════════════════════════════════════════════════════
 type PrioFiltro = "todas" | "alta" | "media" | "info";
 
-function SugestoesBloco({ sugestoes }: { sugestoes: Sugestao[] }) {
+function SugestoesBloco({
+  sugestoes,
+  origens,
+}: {
+  sugestoes: Sugestao[];
+  origens: DashboardData["origens"];
+}) {
   const [prio, setPrio] = useState<PrioFiltro>("todas");
   const [areaFiltro, setAreaFiltro] = useState<string | null>(null);
   const [mostrarOutras, setMostrarOutras] = useState(false);
@@ -436,7 +442,9 @@ function SugestoesBloco({ sugestoes }: { sugestoes: Sugestao[] }) {
         )}
       </Card>
 
-      {/* Resumo das oportunidades */}
+      {/* Coluna direita: Estado do aprendizado em cima, Resumo embaixo */}
+      <div className="space-y-6">
+      <AprendizadoPanel origens={origens} />
       <Card className="p-6">
         <h2 className="font-semibold text-slate-900 flex items-center gap-2">
           Resumo das oportunidades
@@ -483,6 +491,7 @@ function SugestoesBloco({ sugestoes }: { sugestoes: Sugestao[] }) {
           </>
         )}
       </Card>
+      </div>
     </div>
   );
 }
@@ -548,7 +557,6 @@ function GraficosGrid({ data }: { data: DashboardData }) {
         distribuicao={data.snapshot.distribuicao_comportamentos}
       />
       <FluxoPanel transicoes={data.transicoes} />
-      <AprendizadoPanel origens={data.origens} />
     </div>
   );
 }
