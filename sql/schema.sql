@@ -28,8 +28,15 @@ create table if not exists comportamentos (
     total_ocorrencias int default 0,
     primeira_observacao timestamptz default now(),
     ultima_observacao timestamptz default now(),
+    -- Classificação Lean do comportamento (preenchida pela IA, sobrescrita pelo gestor)
+    categoria_lean text,        -- 'valor_agregado' | 'apoio' | 'desperdicio' | null
+    categoria_lean_origem text, -- 'ia' | 'humano' | null
     unique (empresa, processo, label)
 );
+
+-- Migração idempotente para bases já existentes
+alter table comportamentos add column if not exists categoria_lean        text;
+alter table comportamentos add column if not exists categoria_lean_origem text;
 
 create table if not exists eventos (
     id uuid primary key default gen_random_uuid(),

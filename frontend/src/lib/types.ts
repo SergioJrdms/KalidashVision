@@ -28,6 +28,8 @@ export interface JobStatus {
   resultado?: { n_eventos?: number; n_auto_validados?: number; n_sugestoes?: number } | null;
 }
 
+export type CategoriaLean = "valor_agregado" | "apoio" | "desperdicio";
+
 export interface DistribuicaoComportamento {
   comportamento: string;
   descricao: string;
@@ -35,6 +37,28 @@ export interface DistribuicaoComportamento {
   tempo_total_s: number;
   pct_tempo: number;
   em_n_videos: number;
+  categoria_lean?: CategoriaLean | null;
+  categoria_lean_origem?: "ia" | "humano" | null;
+  comportamento_id?: string | null;
+  pct_acumulado?: number;
+}
+
+export interface ComposicaoValor {
+  valor_agregado_pct: number;
+  apoio_pct: number;
+  desperdicio_pct: number;
+  nao_classificado_pct: number;
+  tempo_total_s: number;
+  por_categoria_s: Record<string, number>;
+}
+
+export interface ParetoItem {
+  comportamento: string;
+  descricao: string;
+  categoria_lean?: CategoriaLean | null;
+  pct_tempo: number;
+  tempo_total_s: number;
+  pct_acumulado: number;
 }
 
 export interface Sugestao {
@@ -90,6 +114,8 @@ export interface DashboardData {
   transicoes: Transicao[];
   origens: { auto: number; humano: number; pendente: number };
   videos: VideoResumo[];
+  composicao_valor: ComposicaoValor;
+  pareto: ParetoItem[];
 }
 
 export interface EventoPendente {

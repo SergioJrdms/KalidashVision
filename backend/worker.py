@@ -94,8 +94,9 @@ def executar_job(
             "cluster": (70, 76),
             "segmentar": (76, 80),
             "persistir": (80, 86),
-            "sugestoes": (86, 94),
-            "perguntas": (94, 99),
+            "sugestoes": (86, 92),
+            "lean": (92, 95),
+            "perguntas": (95, 99),
             "concluido": (99, 100),
         }
 

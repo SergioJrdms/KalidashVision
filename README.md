@@ -109,6 +109,7 @@ A API expõe:
 | `GET`  | `/processos/{id}/perguntas/contagem` | `{ pendentes }` para badge na UI |
 | `POST` | `/perguntas/{id}/responder` | `{ resposta }` — vira contexto de domínio |
 | `POST` | `/perguntas/{id}/dispensar` | cliente prefere não responder |
+| `PUT`  | `/comportamentos/{id}/categoria` | gestor classifica em `valor_agregado` / `apoio` / `desperdicio` (override da IA) |
 | `GET`  | `/health` | health check |
 
 Autenticação: header `Authorization: Bearer <JWT do Supabase>`.
@@ -165,6 +166,30 @@ A lógica do notebook foi preservada 1-pra-1 em `backend/pipeline.py`:
   e não vão para a fila humana.
 - Tudo é isolado por `(empresa, processo)`. Dados de clientes diferentes
   nunca se misturam, mesmo que tenham labels idênticos.
+
+### Classificação Lean dos comportamentos (Value-Added analysis)
+
+Cada comportamento canônico (`comportamentos.label`) recebe uma
+**categoria Lean**: `valor_agregado`, `apoio` ou `desperdicio`. Essa
+classificação alimenta o **Índice de Valor Agregado** (KPI estrela do
+dashboard) e colore os gráficos de Pareto e "Tempo por comportamento".
+
+Como é obtida:
+1. **Pela IA** (origem `'ia'`): ao final de `processar_video()`,
+   `classificar_comportamentos_lean()` pede ao `gpt-oss-120b` que
+   classifique cada comportamento ainda não-classificado, usando a
+   descrição do processo + as respostas das perguntas proativas como
+   base. Não-fatal.
+2. **Pelo gestor** (origem `'humano'`): no dashboard, clicando no chip
+   da categoria. O override do gestor **nunca é sobrescrito pela IA**.
+   Limpar a categoria (botão `×` no popover) devolve o comportamento ao
+   conjunto candidato à IA reclassificar na próxima execução.
+
+A plataforma só mede **como o tempo das pessoas é gasto**. Por isso o
+dashboard não inventa métricas que dependem de dados que não temos
+(OEE, scrap, peças/hora, custo, parada de máquina). Tudo o que aparece
+é derivado de `eventos`, `comportamentos`, durações, %, sequências,
+validações e da categoria Lean.
 
 ### Perguntas proativas (loop de aprendizado pelo diálogo)
 

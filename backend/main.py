@@ -86,6 +86,10 @@ class RespostaPerguntaBody(BaseModel):
     resposta: str = Field(min_length=1, max_length=2000)
 
 
+class CategoriaLeanBody(BaseModel):
+    categoria_lean: str | None = None  # 'valor_agregado' | 'apoio' | 'desperdicio' | None
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # PROCESSOS
 # Cada processo é uma linha em `contexto_processo` para a empresa do usuário.
@@ -347,6 +351,63 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .execute()
     )
 
+    # Categoria Lean por comportamento (mapa label → categoria)
+    comps_full = (
+        sb.table("comportamentos")
+        .select("id, label, descricao, categoria_lean, categoria_lean_origem")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .execute()
+        .data
+    ) or []
+    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps_full}
+    cat_origem_por_label = {c["label"]: c.get("categoria_lean_origem") for c in comps_full}
+    comp_id_por_label = {c["label"]: c["id"] for c in comps_full}
+
+    # Anexa categoria a cada item de distribuicao + acrescenta acumulado para Pareto
+    dist_enriquecida = []
+    total_tempo = sum(d.get("tempo_total_s", 0) for d in snapshot["distribuicao_comportamentos"]) or 1
+    acumulado = 0.0
+    for d in snapshot["distribuicao_comportamentos"]:
+        cat = cat_por_label.get(d["comportamento"])
+        acumulado += d.get("tempo_total_s", 0)
+        dist_enriquecida.append(
+            {
+                **d,
+                "categoria_lean": cat,
+                "categoria_lean_origem": cat_origem_por_label.get(d["comportamento"]),
+                "comportamento_id": comp_id_por_label.get(d["comportamento"]),
+                "pct_acumulado": round(acumulado / total_tempo * 100, 1),
+            }
+        )
+    snapshot["distribuicao_comportamentos"] = dist_enriquecida
+
+    # Composição de valor agregada (% sobre o tempo total observado)
+    soma_por_cat = {"valor_agregado": 0.0, "apoio": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+    for d in dist_enriquecida:
+        cat = d.get("categoria_lean") or "nao_classificado"
+        if cat not in soma_por_cat:
+            cat = "nao_classificado"
+        soma_por_cat[cat] += d.get("tempo_total_s", 0)
+    composicao_valor = {
+        f"{k}_pct": round(v / total_tempo * 100, 1) for k, v in soma_por_cat.items()
+    }
+    composicao_valor["tempo_total_s"] = round(total_tempo, 1)
+    composicao_valor["por_categoria_s"] = {k: round(v, 1) for k, v in soma_por_cat.items()}
+
+    # Pareto: top comportamentos com acumulado
+    pareto = [
+        {
+            "comportamento": d["comportamento"],
+            "descricao": d.get("descricao"),
+            "categoria_lean": d.get("categoria_lean"),
+            "pct_tempo": d.get("pct_tempo", 0),
+            "tempo_total_s": d.get("tempo_total_s", 0),
+            "pct_acumulado": d.get("pct_acumulado", 0),
+        }
+        for d in dist_enriquecida[:15]
+    ]
+
     return {
         "snapshot": snapshot,
         "sugestoes": sugs,
@@ -358,6 +419,8 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
             "humano": origens["humano"],
             "pendente": origens["pendente"],
         },
+        "composicao_valor": composicao_valor,
+        "pareto": pareto,
         "videos": videos,
     }
 
@@ -606,6 +669,45 @@ def dispensar_pergunta(
         raise HTTPException(status.HTTP_403_FORBIDDEN)
     sb.table("perguntas_processo").update({"status": "dispensada"}).eq("id", pergunta_id).execute()
     return {"ok": True}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# CLASSIFICAÇÃO LEAN — override do gestor
+# ═════════════════════════════════════════════════════════════════════════
+_CATS_LEAN_VALIDAS = {"valor_agregado", "apoio", "desperdicio"}
+
+
+@app.put("/comportamentos/{comportamento_id}/categoria")
+def setar_categoria_lean(
+    comportamento_id: str,
+    body: CategoriaLeanBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    cat = (body.categoria_lean or "").strip().lower() or None
+    if cat is not None and cat not in _CATS_LEAN_VALIDAS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "categoria_lean deve ser uma de: valor_agregado, apoio, desperdicio, ou null.",
+        )
+    sb = make_supabase_client()
+    r = (
+        sb.table("comportamentos")
+        .select("id, empresa")
+        .eq("id", comportamento_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Comportamento não encontrado")
+    if r.data[0]["empresa"] != user.empresa:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+
+    update = (
+        {"categoria_lean": cat, "categoria_lean_origem": "humano"}
+        if cat is not None
+        else {"categoria_lean": None, "categoria_lean_origem": None}  # libera pra IA reclassificar
+    )
+    sb.table("comportamentos").update(update).eq("id", comportamento_id).execute()
+    return {"ok": True, "categoria_lean": cat, "origem": "humano" if cat else None}
 
 
 # ═════════════════════════════════════════════════════════════════════════

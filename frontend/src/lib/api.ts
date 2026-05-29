@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import type {
+  CategoriaLean,
   DashboardData,
   EventoPendente,
   JobStatus,
@@ -98,6 +99,13 @@ export const api = {
       }),
     dispensar: (id: string) =>
       req<{ ok: boolean }>(`/perguntas/${id}/dispensar`, { method: "POST" }),
+  },
+  comportamentos: {
+    setCategoria: (comportamentoId: string, categoria_lean: CategoriaLean | null) =>
+      req<{ ok: boolean; categoria_lean: CategoriaLean | null; origem: string | null }>(
+        `/comportamentos/${comportamentoId}/categoria`,
+        { method: "PUT", body: JSON.stringify({ categoria_lean }) }
+      ),
   },
 };
 

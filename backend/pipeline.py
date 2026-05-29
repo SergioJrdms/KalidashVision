@@ -153,6 +153,8 @@ create table if not exists perguntas_processo (
 );
 
 alter table sugestoes_melhoria add column if not exists impacto_estimado text;
+alter table comportamentos    add column if not exists categoria_lean        text;
+alter table comportamentos    add column if not exists categoria_lean_origem text;
 
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
 create index if not exists idx_comportamentos_ctx on comportamentos(empresa, processo);
@@ -1290,6 +1292,134 @@ def etapa_gerar_sugestoes(
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# CLASSIFICAÇÃO LEAN — IA classifica cada comportamento em
+# valor_agregado | apoio | desperdicio (Lean / análise de valor).
+# Override do gestor (origem='humano') NUNCA é sobrescrito.
+# ═════════════════════════════════════════════════════════════════════════
+CATEGORIAS_LEAN_VALIDAS = {"valor_agregado", "apoio", "desperdicio"}
+
+PROMPT_CLASSIFICAR_LEAN = """Você é um especialista em Lean Manufacturing classificando comportamentos observados na operação da empresa "{empresa}" no processo "{processo}".
+
+Classifique CADA comportamento abaixo em UMA destas três categorias:
+- "valor_agregado": a atividade transforma o produto/serviço de modo que o cliente final pagaria por ela (ex.: montar, soldar, embalar a peça que será entregue, executar o serviço contratado).
+- "apoio": atividade necessária para que o valor agregado aconteça, mas que por si só não agrega valor ao cliente (ex.: conferir, registrar, organizar, abastecer, preparar máquina, comunicar).
+- "desperdicio": atividade que consome tempo sem necessidade — espera, ociosidade, deslocamento, retrabalho, movimentação excessiva, busca por itens.
+
+{bloco_dominio}
+
+REGRAS:
+- Decida pela ação MAIS PROVÁVEL dado o vocabulário e o contexto de domínio acima. Se a descrição do processo / conhecimento adquirido descrevem a ação como obrigatória/produtiva, ela tende a ser "valor_agregado" ou "apoio".
+- "acao_indefinida" sempre vira "apoio" (sem informação suficiente para chamar de desperdício).
+- Comportamentos como "operar_computador" geralmente são "apoio" (registro, conferência), a menos que a descrição do processo deixe claro que digitar É o trabalho.
+- Comportamentos como "andar", "esperar", "ocioso", "parado", "buscar" tendem a "desperdicio".
+- Responda APENAS um JSON estrito (categoria SEM espaços, snake_case):
+{{"classificacoes": [{{"label": "operar_computador", "categoria": "apoio"}}, ...]}}
+
+COMPORTAMENTOS A CLASSIFICAR:
+{lista_comportamentos}
+"""
+
+
+def classificar_comportamentos_lean(
+    sb: Client,
+    groq_client: Groq,
+    empresa: str,
+    processo: str,
+    *,
+    descricao_processo: str = "",
+    conhecimento_adquirido: str = "",
+    reclassificar_ia: bool = False,
+) -> int:
+    """Classifica em batch os comportamentos do contexto que ainda não têm
+    `categoria_lean`. Nunca toca em quem tem origem='humano' (override do gestor
+    sempre vence). Se `reclassificar_ia=True`, também reanalisa quem tem
+    origem='ia' (útil quando o conhecimento de domínio mudou bastante).
+
+    Retorna o número de comportamentos efetivamente atualizados.
+    Não-fatal: erros são apenas logados.
+    """
+    try:
+        r = (
+            sb.table("comportamentos")
+            .select("id, label, descricao, categoria_lean, categoria_lean_origem")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .limit(500)
+            .execute()
+        )
+        todos = r.data or []
+    except Exception as e:
+        log.warning(f"Lean: falha ao carregar comportamentos: {e}")
+        return 0
+
+    candidatos = []
+    for c in todos:
+        origem = c.get("categoria_lean_origem")
+        if origem == "humano":
+            continue
+        if c.get("categoria_lean") and origem == "ia" and not reclassificar_ia:
+            continue
+        candidatos.append(c)
+
+    if not candidatos:
+        return 0
+
+    bloco_dominio = construir_bloco_dominio(descricao_processo or "", conhecimento_adquirido or "")
+    if not bloco_dominio.strip():
+        bloco_dominio = "(o cliente não forneceu descrição nem respondeu perguntas — use convenções de Lean para decidir)"
+
+    lista_txt = "\n".join(
+        f'- label="{c["label"]}" · descricao="{(c.get("descricao") or "").strip()}"'
+        for c in candidatos
+    )
+
+    prompt = PROMPT_CLASSIFICAR_LEAN.format(
+        empresa=empresa,
+        processo=processo,
+        bloco_dominio=bloco_dominio.strip(),
+        lista_comportamentos=lista_txt,
+    )
+
+    try:
+        resposta = groq_text_call(
+            groq_client,
+            prompt,
+            model=GROQ_MODEL_ANALISE,
+            json_mode=True,
+            max_tokens=1200,
+            temperatura=0.1,
+        )
+        dados = json.loads(resposta)
+        classifs = dados.get("classificacoes") or []
+    except Exception as e:
+        log.warning(f"Lean: falha ao classificar: {e}")
+        return 0
+
+    por_label = {c["label"]: c["id"] for c in candidatos}
+    atualizados = 0
+    for item in classifs:
+        if not isinstance(item, dict):
+            continue
+        label = (item.get("label") or "").strip()
+        cat = (item.get("categoria") or "").strip().lower()
+        if label not in por_label:
+            continue
+        if cat not in CATEGORIAS_LEAN_VALIDAS:
+            log.info(f"Lean: categoria inválida ignorada ({label}={cat!r})")
+            continue
+        try:
+            sb.table("comportamentos").update(
+                {"categoria_lean": cat, "categoria_lean_origem": "ia"}
+            ).eq("id", por_label[label]).execute()
+            atualizados += 1
+        except Exception as e:
+            log.warning(f"Lean: falha ao atualizar {label}: {e}")
+
+    log.info(f"Lean: {atualizados}/{len(candidatos)} comportamentos classificados ({empresa}/{processo}).")
+    return atualizados
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # PERGUNTAS PROATIVAS — a IA pede esclarecimentos ao cliente, e cada
 # resposta vira contexto de domínio nos prompts seguintes.
 # ═════════════════════════════════════════════════════════════════════════
@@ -1849,6 +1979,22 @@ def processar_video(
     )
     sugestoes = etapa_gerar_sugestoes(sb, groq_client, empresa, processo, video_id, contexto)
     progress_cb("sugestoes", 100, f"{len(sugestoes)} sugestões geradas")
+
+    # Classificação Lean dos comportamentos — NÃO-FATAL.
+    # Roda antes das perguntas pra que a próxima execução já veja as categorias.
+    try:
+        n_classif = classificar_comportamentos_lean(
+            sb,
+            groq_client,
+            empresa,
+            processo,
+            descricao_processo=descricao,
+            conhecimento_adquirido=conhecimento,
+        )
+        if n_classif:
+            log.info(f"Classificação Lean atualizada para {n_classif} comportamento(s).")
+    except Exception as e:
+        log.warning(f"Classificação Lean falhou (não-fatal): {e}")
 
     # Geração proativa de perguntas — NÃO-FATAL.
     n_perguntas = 0
