@@ -180,3 +180,28 @@ export interface EventosTabelaParams {
 }
 
 export type AcaoEvento = "confirmar" | "corrigir" | "descartar" | "reabrir";
+
+export interface PrismConversa {
+  id: string;
+  titulo: string;
+  titulo_auto: boolean;
+  criada_em: string;
+  atualizada_em: string;
+}
+
+export interface PrismMensagem {
+  id?: string;
+  papel: "user" | "assistant";
+  conteudo: string;
+  criada_em?: string;
+}
+
+export interface PrismConversaDetalhe extends PrismConversa {
+  mensagens: PrismMensagem[];
+}
+
+export interface PrismEnvioResposta {
+  resposta: string;
+  titulo_auto: string | null;
+  fora_de_escopo: boolean;
+}

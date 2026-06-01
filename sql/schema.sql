@@ -103,6 +103,27 @@ create table if not exists perguntas_processo (
     criada_em timestamptz default now()
 );
 
+-- Prism · conversas e mensagens do chat lateral (persistência + tópicos)
+create table if not exists prism_conversas (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    titulo text not null default 'Nova conversa',
+    titulo_auto boolean not null default true,  -- true até o usuário renomear
+    criada_em timestamptz default now(),
+    atualizada_em timestamptz default now()
+);
+
+create table if not exists prism_mensagens (
+    id uuid primary key default gen_random_uuid(),
+    conversa_id uuid references prism_conversas(id) on delete cascade,
+    empresa text not null,
+    processo text not null,
+    papel text not null,          -- 'user' | 'assistant'
+    conteudo text not null,
+    criada_em timestamptz default now()
+);
+
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
 create index if not exists idx_comportamentos_ctx on comportamentos(empresa, processo);
 create index if not exists idx_eventos_ctx       on eventos(empresa, processo);
@@ -113,6 +134,8 @@ create index if not exists idx_eventos_origem    on eventos(origem_validacao);
 create index if not exists idx_sugestoes_ctx     on sugestoes_melhoria(empresa, processo);
 create index if not exists idx_contexto_proc     on contexto_processo(empresa, processo);
 create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, processo, status);
+create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, processo, atualizada_em desc);
+create index if not exists idx_prism_mensagens_conv on prism_mensagens(conversa_id, criada_em);
 
 
 -- ════════════════════════════════════════════════════════════════════════
@@ -128,6 +151,8 @@ alter table eventos             enable row level security;
 alter table sugestoes_melhoria  enable row level security;
 alter table contexto_processo   enable row level security;
 alter table perguntas_processo  enable row level security;
+alter table prism_conversas     enable row level security;
+alter table prism_mensagens     enable row level security;
 
 -- Função helper: empresa do usuário JWT
 create or replace function auth_empresa() returns text
@@ -142,7 +167,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo'] loop
+  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo','prism_conversas','prism_mensagens'] loop
     execute format('drop policy if exists %1$s_select on %1$s', t);
     execute format('drop policy if exists %1$s_modify on %1$s', t);
     execute format($p$

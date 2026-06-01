@@ -8,6 +8,9 @@ import type {
   EventosTabelaResposta,
   JobStatus,
   PerguntaProcesso,
+  PrismConversa,
+  PrismConversaDetalhe,
+  PrismEnvioResposta,
   Processo,
   ProcessoDetalhe,
   Sugestao,
@@ -120,6 +123,32 @@ export const api = {
         `/comportamentos/${comportamentoId}/categoria`,
         { method: "PUT", body: JSON.stringify({ categoria_lean }) }
       ),
+  },
+  prism: {
+    listarConversas: (processoId: string) =>
+      req<PrismConversa[]>(`/processos/${processoId}/prism/conversas`),
+    criarConversa: (processoId: string) =>
+      req<PrismConversa>(`/processos/${processoId}/prism/conversas`, { method: "POST" }),
+    getConversa: (processoId: string, conversaId: string) =>
+      req<PrismConversaDetalhe>(`/processos/${processoId}/prism/conversas/${conversaId}`),
+    renomear: (processoId: string, conversaId: string, titulo: string) =>
+      req<{ ok: boolean }>(`/processos/${processoId}/prism/conversas/${conversaId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ titulo }),
+      }),
+    excluir: (processoId: string, conversaId: string) =>
+      req<{ ok: boolean }>(`/processos/${processoId}/prism/conversas/${conversaId}`, {
+        method: "DELETE",
+      }),
+    enviarMensagem: (processoId: string, conversaId: string, pergunta: string) =>
+      req<PrismEnvioResposta>(
+        `/processos/${processoId}/prism/conversas/${conversaId}/mensagens`,
+        { method: "POST", body: JSON.stringify({ pergunta }) }
+      ),
+    sugestoes: (processoId: string, excluir: string[] = []) => {
+      const qs = excluir.length > 0 ? `?excluir=${encodeURIComponent(excluir.join("|"))}` : "";
+      return req<{ sugestoes: string[] }>(`/processos/${processoId}/prism/sugestoes${qs}`);
+    },
   },
 };
 

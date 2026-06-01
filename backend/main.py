@@ -32,6 +32,8 @@ from .pipeline import (
     montar_snapshot_chat,
     resolver_descricao_processo,
     responder_chat,
+    gerar_titulo_conversa,
+    gerar_sugestoes_chat,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -94,6 +96,14 @@ class RespostaPerguntaBody(BaseModel):
 
 class CategoriaLeanBody(BaseModel):
     categoria_lean: str | None = None  # 'valor_agregado' | 'apoio' | 'desperdicio' | None
+
+
+class PrismMensagemBody(BaseModel):
+    pergunta: str = Field(min_length=1, max_length=4000)
+
+
+class PrismRenomearBody(BaseModel):
+    titulo: str = Field(min_length=1, max_length=120)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -910,6 +920,223 @@ def setar_categoria_lean(
     )
     sb.table("comportamentos").update(update).eq("id", comportamento_id).execute()
     return {"ok": True, "categoria_lean": cat, "origem": "humano" if cat else None}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# PRISM — chat lateral (conversas persistidas + tópicos + sugestões dinâmicas)
+# ═════════════════════════════════════════════════════════════════════════
+_PRISM_MAX_TROCAS = 6  # últimas N trocas mandadas como histórico ao LLM
+
+
+def _carregar_conversa_propria(sb, user: CurrentUser, processo_nome: str, conversa_id: str) -> dict:
+    """Carrega uma conversa garantindo que pertence à empresa+processo do usuário."""
+    r = (
+        sb.table("prism_conversas")
+        .select("id, empresa, processo, titulo, titulo_auto, criada_em, atualizada_em")
+        .eq("id", conversa_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversa não encontrada")
+    c = r.data[0]
+    if c["empresa"] != user.empresa or c["processo"] != processo_nome:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+    return c
+
+
+@app.get("/processos/{processo_id}/prism/conversas")
+def prism_listar_conversas(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = (
+        sb.table("prism_conversas")
+        .select("id, titulo, titulo_auto, criada_em, atualizada_em")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .order("atualizada_em", desc=True)
+        .limit(200)
+        .execute()
+    )
+    return r.data or []
+
+
+@app.post("/processos/{processo_id}/prism/conversas")
+def prism_criar_conversa(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = (
+        sb.table("prism_conversas")
+        .insert({"empresa": user.empresa, "processo": nome})
+        .execute()
+    )
+    return r.data[0]
+
+
+@app.get("/processos/{processo_id}/prism/conversas/{conversa_id}")
+def prism_get_conversa(
+    processo_id: str,
+    conversa_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    c = _carregar_conversa_propria(sb, user, nome, conversa_id)
+    msgs = (
+        sb.table("prism_mensagens")
+        .select("id, papel, conteudo, criada_em")
+        .eq("conversa_id", conversa_id)
+        .order("criada_em", desc=False)
+        .limit(500)
+        .execute()
+        .data
+    ) or []
+    return {**c, "mensagens": msgs}
+
+
+@app.patch("/processos/{processo_id}/prism/conversas/{conversa_id}")
+def prism_renomear_conversa(
+    processo_id: str,
+    conversa_id: str,
+    body: PrismRenomearBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    from datetime import datetime
+
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    _carregar_conversa_propria(sb, user, nome, conversa_id)
+    sb.table("prism_conversas").update(
+        {
+            "titulo": body.titulo.strip(),
+            "titulo_auto": False,
+            "atualizada_em": datetime.utcnow().isoformat(),
+        }
+    ).eq("id", conversa_id).execute()
+    return {"ok": True}
+
+
+@app.delete("/processos/{processo_id}/prism/conversas/{conversa_id}")
+def prism_excluir_conversa(
+    processo_id: str,
+    conversa_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    _carregar_conversa_propria(sb, user, nome, conversa_id)
+    sb.table("prism_conversas").delete().eq("id", conversa_id).execute()
+    return {"ok": True}
+
+
+@app.post("/processos/{processo_id}/prism/conversas/{conversa_id}/mensagens")
+def prism_enviar_mensagem(
+    processo_id: str,
+    conversa_id: str,
+    body: PrismMensagemBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    from datetime import datetime
+
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    conv = _carregar_conversa_propria(sb, user, nome, conversa_id)
+
+    # Histórico (em ordem cronológica) — usado tanto pra mandar ao LLM quanto
+    # pra detectar se é a primeira troca (pra título auto).
+    msgs_existentes = (
+        sb.table("prism_mensagens")
+        .select("papel, conteudo")
+        .eq("conversa_id", conversa_id)
+        .order("criada_em", desc=False)
+        .limit(_PRISM_MAX_TROCAS * 4)
+        .execute()
+        .data
+    ) or []
+    eh_primeira_troca = len(msgs_existentes) == 0
+
+    # Grava a mensagem do usuário antes de chamar o LLM (defensivo: se a
+    # geração falhar, a pergunta fica registrada e o front pode tentar de novo).
+    sb.table("prism_mensagens").insert(
+        {
+            "conversa_id": conversa_id,
+            "empresa": user.empresa,
+            "processo": nome,
+            "papel": "user",
+            "conteudo": body.pergunta.strip(),
+        }
+    ).execute()
+
+    historico_chat = [
+        {"role": m["papel"], "content": m["conteudo"]}
+        for m in msgs_existentes
+        if m.get("papel") in ("user", "assistant")
+    ]
+
+    groq_client = make_groq_client()
+    try:
+        resposta = responder_chat(
+            groq_client,
+            sb,
+            user.empresa,
+            nome,
+            body.pergunta.strip(),
+            historico=historico_chat,
+            max_trocas=_PRISM_MAX_TROCAS,
+        )
+    except Exception as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Falha ao consultar o Prism: {e}")
+
+    resposta_txt = (resposta or "").strip() or "Desculpe, não consegui responder agora."
+
+    sb.table("prism_mensagens").insert(
+        {
+            "conversa_id": conversa_id,
+            "empresa": user.empresa,
+            "processo": nome,
+            "papel": "assistant",
+            "conteudo": resposta_txt,
+        }
+    ).execute()
+
+    # Título automático na primeira troca — NÃO-FATAL.
+    titulo_auto: str | None = None
+    if eh_primeira_troca and conv.get("titulo_auto"):
+        try:
+            t = gerar_titulo_conversa(groq_client, body.pergunta, resposta_txt)
+            if t:
+                sb.table("prism_conversas").update(
+                    {"titulo": t, "atualizada_em": datetime.utcnow().isoformat()}
+                ).eq("id", conversa_id).execute()
+                titulo_auto = t
+        except Exception as e:
+            log.warning(f"Prism: título auto falhou (não-fatal): {e}")
+
+    if titulo_auto is None:
+        sb.table("prism_conversas").update(
+            {"atualizada_em": datetime.utcnow().isoformat()}
+        ).eq("id", conversa_id).execute()
+
+    return {
+        "resposta": resposta_txt,
+        "titulo_auto": titulo_auto,
+        "fora_de_escopo": False,
+    }
+
+
+@app.get("/processos/{processo_id}/prism/sugestoes")
+def prism_sugestoes(
+    processo_id: str,
+    excluir: str = "",
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    excluidas = [s.strip() for s in excluir.split("|") if s.strip()] if excluir else []
+    groq_client = make_groq_client()
+    sugestoes = gerar_sugestoes_chat(
+        sb, groq_client, user.empresa, nome, excluir=excluidas, n=4
+    )
+    return {"sugestoes": sugestoes}
 
 
 # ═════════════════════════════════════════════════════════════════════════

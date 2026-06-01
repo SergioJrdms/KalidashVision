@@ -107,7 +107,14 @@ A API expõe:
 | `POST` | `/eventos/{id}/validar` | `{ acao: "confirmar"\|"corrigir"\|"descartar"\|"reabrir", label_corrigido? }` |
 | `POST` | `/eventos/{id}/reabrir` | devolve o evento à fila (estado pendente) |
 | `POST` | `/eventos/lote` | `{ ids, acao, label_corrigido? }` — ação em lote |
-| `POST` | `/processos/{id}/chat` | pergunta em linguagem natural |
+| `POST` | `/processos/{id}/chat` | pergunta em linguagem natural (legado; o front usa o Prism abaixo) |
+| `GET`  | `/processos/{id}/prism/conversas` | lista de conversas com o Prism |
+| `POST` | `/processos/{id}/prism/conversas` | cria nova conversa |
+| `GET`  | `/processos/{id}/prism/conversas/{cid}` | conversa + mensagens |
+| `PATCH`| `/processos/{id}/prism/conversas/{cid}` | renomeia (`{ titulo }`) |
+| `DELETE`| `/processos/{id}/prism/conversas/{cid}` | exclui conversa (cascata) |
+| `POST` | `/processos/{id}/prism/conversas/{cid}/mensagens` | envia pergunta; resposta + `titulo_auto?` |
+| `GET`  | `/processos/{id}/prism/sugestoes?excluir=a\|b` | sugestões dinâmicas (3-4 perguntas curtas) |
 | `GET`  | `/processos/{id}/perguntas?status=pendente` | perguntas que a IA fez ao cliente |
 | `GET`  | `/processos/{id}/perguntas/contagem` | `{ pendentes }` para badge na UI |
 | `POST` | `/perguntas/{id}/responder` | `{ resposta }` — vira contexto de domínio |
@@ -156,7 +163,21 @@ Telas:
   ordenação, paginação, edição por linha (com frames sob demanda e autocomplete de
   labels) e ações em lote. Aqui o cliente audita e **corrige a qualquer momento** —
   inclusive eventos já validados.
-- **/processos/:id/chat** — chat com os dados (Markdown + perguntas prontas).
+- **Prism** — *painel lateral deslizante* (estilo Copilot), disponível em **todas**
+  as telas de dentro de um processo, aberto pelo botão flutuante no canto inferior
+  direito. É o chat conversacional com a IA da plataforma:
+  - **Conversas persistidas** em `prism_conversas` + `prism_mensagens` — recarregar
+    a página traz o histórico.
+  - **Tópicos**: você pode criar nova conversa, alternar entre elas, **renomear** e
+    **excluir** as antigas. O título é gerado **automaticamente pela IA** após a
+    primeira troca (e fica editável depois).
+  - **Sugestões de assunto** geradas dinamicamente a partir do estado atual dos
+    dados do processo — não são fixas; mudam a cada nova conversa.
+  - **Escopo restrito**: o Prism só fala de melhorar processos com base nos dados
+    do cliente. Fora disso, recusa em 1 frase e redireciona.
+  - **Avatar**: dropar `frontend/public/prism.png` (256×256, fundo transparente).
+    Enquanto o arquivo não existir, o avatar mostra um placeholder roxo neutro com
+    a letra "P" — UI continua funcional.
 
 > **Editar re-treina o sistema.** A memória do negócio
 > (`carregar_memoria_do_negocio`) é recalculada do estado atual dos eventos a cada

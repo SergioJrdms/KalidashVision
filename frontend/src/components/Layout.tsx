@@ -4,6 +4,8 @@ import { useAuth } from "../hooks/useAuth";
 import { supabase } from "../lib/supabase";
 import { api } from "../lib/api";
 import { Button, Spinner } from "./UI";
+import { PrismProvider } from "./PrismProvider";
+import { PrismPanel } from "./PrismPanel";
 
 export function AppShell() {
   const { user, empresa } = useAuth();
@@ -61,30 +63,33 @@ export function ProcessoShell() {
   if (setupMode) return <Outlet />;
 
   return (
-    <div>
-      <div className="mb-3 flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-2 text-sm">
-          <Link
-            to="/processos"
-            className="inline-flex items-center gap-1 text-slate-500 hover:text-kv-purple-dark"
-          >
-            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            Processos
-          </Link>
-          <span className="text-slate-300">/</span>
-          <span className="text-slate-900 font-medium truncate max-w-md">
-            {isLoading ? <Spinner className="h-3 w-3" /> : data?.processo || "—"}
-          </span>
+    <PrismProvider processoId={id!}>
+      <div>
+        <div className="mb-3 flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-2 text-sm">
+            <Link
+              to="/processos"
+              className="inline-flex items-center gap-1 text-slate-500 hover:text-kv-purple-dark"
+            >
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              Processos
+            </Link>
+            <span className="text-slate-300">/</span>
+            <span className="text-slate-900 font-medium truncate max-w-md">
+              {isLoading ? <Spinner className="h-3 w-3" /> : data?.processo || "—"}
+            </span>
+          </div>
+          <div className="text-xs text-slate-400">
+            {data?.n_videos ?? 0} vídeo(s) analisado(s)
+          </div>
         </div>
-        <div className="text-xs text-slate-400">
-          {data?.n_videos ?? 0} vídeo(s) analisado(s)
-        </div>
+        <ProcessoTabs />
+        <Outlet />
       </div>
-      <ProcessoTabs />
-      <Outlet />
-    </div>
+      <PrismPanel />
+    </PrismProvider>
   );
 }
 
@@ -105,7 +110,6 @@ export function ProcessoTabs() {
     { to: `/processos/${id}/upload`, label: "Novo vídeo", count: 0 },
     { to: `/processos/${id}/validacao`, label: "Validação", count: pendentesValid },
     { to: `/processos/${id}/eventos`, label: "Eventos", count: 0 },
-    { to: `/processos/${id}/chat`, label: "Chat", count: 0 },
     { to: `/processos/${id}/descricao`, label: "Descrição", count: 0 },
   ];
   return (

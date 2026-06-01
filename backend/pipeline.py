@@ -152,6 +152,26 @@ create table if not exists perguntas_processo (
     criada_em timestamptz default now()
 );
 
+create table if not exists prism_conversas (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    titulo text not null default 'Nova conversa',
+    titulo_auto boolean not null default true,
+    criada_em timestamptz default now(),
+    atualizada_em timestamptz default now()
+);
+
+create table if not exists prism_mensagens (
+    id uuid primary key default gen_random_uuid(),
+    conversa_id uuid references prism_conversas(id) on delete cascade,
+    empresa text not null,
+    processo text not null,
+    papel text not null,          -- 'user' | 'assistant'
+    conteudo text not null,
+    criada_em timestamptz default now()
+);
+
 alter table sugestoes_melhoria add column if not exists impacto_estimado text;
 alter table comportamentos    add column if not exists categoria_lean        text;
 alter table comportamentos    add column if not exists categoria_lean_origem text;
@@ -166,6 +186,8 @@ create index if not exists idx_eventos_origem    on eventos(origem_validacao);
 create index if not exists idx_sugestoes_ctx     on sugestoes_melhoria(empresa, processo);
 create index if not exists idx_contexto_proc     on contexto_processo(empresa, processo);
 create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, processo, status);
+create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, processo, atualizada_em desc);
+create index if not exists idx_prism_mensagens_conv on prism_mensagens(conversa_id, criada_em);
 """
 
 
@@ -1811,8 +1833,13 @@ def system_prompt_chat(
     conhecimento_adquirido: str = "",
 ) -> str:
     partes = [
-        "Você é um consultor sênior de produtividade industrial e engenharia de processos, especialista em Lean Manufacturing.",
+        "Você é o Prism, a inteligência por trás da plataforma Kalidash Vision.",
+        "Fala como um especialista sênior em produtividade industrial e engenharia de processos (Lean), em português do Brasil: confiante, direto e prático.",
         f'Está ajudando a empresa "{empresa}" a melhorar o processo "{processo}".',
+        "",
+        "ESCOPO — REGRA INEGOCIÁVEL:",
+        "Você SÓ trata de MELHORAR A OPERAÇÃO DESTE CLIENTE com base nos dados dele: produtividade, comportamentos detectados, distribuição do tempo, gargalos, desperdícios (Lean), padrões, sequências, indicadores e sugestões de melhoria DESTE processo. NADA além disso.",
+        'Se a pergunta fugir desse escopo (assuntos gerais, programação, conversa aleatória, outros domínios, opinião pessoal, perguntas pessoais sobre você), RECUSE em UMA frase e redirecione, por exemplo: "Sou o Prism, focado na sua operação — posso te ajudar a ver onde o tempo está indo, achar gargalos ou ler seus indicadores. Sobre isso, o que você quer ver?". NÃO responda o conteúdo fora de escopo, mesmo se insistirem.',
         "",
         "Você tem acesso a dados reais coletados por visão computacional sobre a operação (abaixo, em JSON). Use-os para embasar suas respostas com números concretos.",
     ]
@@ -1868,6 +1895,161 @@ def responder_chat(
         max_completion_tokens=1500,
     )
     return r.choices[0].message.content
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# PRISM — título automático da conversa e sugestões dinâmicas
+# Ambas são funções AUXILIARES (não-fatais): falhar nunca pode quebrar
+# o envio de mensagem nem a abertura do painel.
+# ═════════════════════════════════════════════════════════════════════════
+def gerar_titulo_conversa(
+    groq_client: Groq,
+    pergunta: str,
+    resposta: str,
+    max_palavras: int = 6,
+) -> str | None:
+    """Gera um título curto (3-6 palavras) para uma conversa do Prism, a
+    partir da primeira pergunta + primeira resposta. Devolve None se falhar.
+    """
+    if not pergunta.strip() or not resposta.strip():
+        return None
+    prompt = (
+        "Crie um TÍTULO CURTO (no máximo {n} palavras, em português do Brasil) "
+        "que resuma o assunto da troca abaixo entre um gestor e o consultor de "
+        "produtividade. Sem aspas, sem emojis, sem ponto final. Apenas o título.\n\n"
+        "PERGUNTA DO GESTOR:\n{p}\n\nRESPOSTA DO CONSULTOR:\n{r}\n\nTÍTULO:"
+    ).format(n=max_palavras, p=pergunta.strip()[:400], r=resposta.strip()[:600])
+    try:
+        bruto = groq_text_call(
+            groq_client,
+            prompt,
+            model=GROQ_MODEL_RAPIDO,
+            json_mode=False,
+            max_tokens=40,
+            temperatura=0.3,
+        )
+    except Exception as e:
+        log.warning(f"Prism: falha ao gerar título da conversa: {e}")
+        return None
+
+    titulo = (bruto or "").strip().splitlines()[0].strip()
+    # limpeza: tira aspas e pontuação final, limita comprimento
+    titulo = titulo.strip('"\'“”‘’ \t.!?')
+    palavras = titulo.split()
+    if not palavras:
+        return None
+    if len(palavras) > max_palavras + 2:
+        titulo = " ".join(palavras[: max_palavras + 2])
+    if len(titulo) > 80:
+        titulo = titulo[:80].rstrip()
+    return titulo or None
+
+
+_SUGESTOES_FALLBACK = [
+    "Onde estamos perdendo mais tempo?",
+    "Quais as 3 maiores oportunidades de produtividade?",
+    "O que foge do fluxo esperado do processo?",
+]
+
+
+def gerar_sugestoes_chat(
+    sb: Client,
+    groq_client: Groq,
+    empresa: str,
+    processo: str,
+    *,
+    excluir: list[str] | None = None,
+    n: int = 4,
+) -> list[str]:
+    """Gera N sugestões CURTAS de assunto, baseadas no snapshot atual dos
+    dados do processo, evitando repetir as já mostradas (lista `excluir`).
+    Não-fatal: em caso de falha, devolve um fallback genérico (marcado).
+    """
+    excluir = [s.strip() for s in (excluir or []) if s and s.strip()]
+    try:
+        snapshot = montar_snapshot_chat(sb, empresa, processo)
+    except Exception as e:
+        log.warning(f"Prism: snapshot indisponível para sugestões: {e}")
+        return list(_SUGESTOES_FALLBACK[:n])
+
+    # snapshot leve pra economizar tokens
+    distrib = snapshot.get("distribuicao_comportamentos") or []
+    leve = {
+        "videos_analisados": snapshot.get("videos_analisados"),
+        "tempo_total_min": snapshot.get("tempo_total_observado_min"),
+        "pct_validado": snapshot.get("pct_validado_por_humano"),
+        "top_comportamentos": [
+            {
+                "comportamento": d.get("comportamento"),
+                "pct_tempo": d.get("pct_tempo"),
+            }
+            for d in distrib[:6]
+        ],
+        "sugestoes_recentes": [
+            {"area": s.get("area"), "sugestao": s.get("sugestao")}
+            for s in (snapshot.get("sugestoes_recentes") or [])[:3]
+        ],
+    }
+    bloco_excluir = (
+        "\n".join(f"- {x}" for x in excluir[:20])
+        if excluir
+        else "(nenhuma — primeira rodada)"
+    )
+
+    prompt = (
+        "Você é o Prism, inteligência de produtividade industrial da Kalidash Vision.\n"
+        "Com base no RESUMO DOS DADOS deste processo (abaixo), gere {n} perguntas "
+        "CURTAS (máximo 9 palavras cada) que um gestor faria para entender e "
+        "melhorar a operação.\n\n"
+        "REGRAS:\n"
+        "- Cada pergunta deve ser ESPECÍFICA aos dados (cite o que salta aos olhos: "
+        "comportamento que mais consome tempo, desperdícios, transições estranhas, "
+        "baixa validação, etc.).\n"
+        "- VARIADAS entre si e DIFERENTES das já mostradas (lista a evitar abaixo).\n"
+        "- Só sobre produtividade / processo / dados DESTE cliente. Nada fora disso.\n"
+        "- Linguagem de chão de fábrica, sem termos técnicos de IA ou estatística.\n"
+        "- Termine com ponto de interrogação.\n\n"
+        "RESUMO DOS DADOS (JSON):\n{snap}\n\n"
+        "PERGUNTAS JÁ MOSTRADAS (evite repetir ou criar variantes):\n{ex}\n\n"
+        'Responda APENAS: {{"sugestoes": ["...", "...", "..."]}}'
+    ).format(n=n, snap=json.dumps(leve, ensure_ascii=False, indent=2), ex=bloco_excluir)
+
+    try:
+        resp = groq_text_call(
+            groq_client,
+            prompt,
+            model=GROQ_MODEL_RAPIDO,
+            json_mode=True,
+            max_tokens=400,
+            temperatura=0.9,
+        )
+        dados = json.loads(resp)
+        cruas = dados.get("sugestoes") or []
+    except Exception as e:
+        log.warning(f"Prism: falha ao gerar sugestões: {e}")
+        return list(_SUGESTOES_FALLBACK[:n])
+
+    saidas: list[str] = []
+    vistos = {s.lower().strip(" ?.!") for s in excluir}
+    for s in cruas:
+        if not isinstance(s, str):
+            continue
+        t = s.strip().strip('"\'“”')
+        if not t or len(t) < 6 or len(t.split()) > 14:
+            continue
+        chave = t.lower().strip(" ?.!")
+        if chave in vistos:
+            continue
+        if not t.endswith("?"):
+            t = t.rstrip(".") + "?"
+        saidas.append(t)
+        vistos.add(chave)
+        if len(saidas) >= n:
+            break
+
+    if not saidas:
+        return list(_SUGESTOES_FALLBACK[:n])
+    return saidas
 
 
 # ═════════════════════════════════════════════════════════════════════════

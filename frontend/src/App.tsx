@@ -11,7 +11,6 @@ import Upload from "./pages/Upload";
 import Dashboard from "./pages/Dashboard";
 import Validacao from "./pages/Validacao";
 import Eventos from "./pages/Eventos";
-import Chat from "./pages/Chat";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -50,7 +49,6 @@ export default function App() {
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="validacao" element={<Validacao />} />
             <Route path="eventos" element={<Eventos />} />
-            <Route path="chat" element={<Chat />} />
           </Route>
         </Route>
         <Route path="*" element={<Navigate to="/processos" replace />} />
