@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 import { api, formatSeg } from "../lib/api";
-import { Badge, Button, Card, EmptyState, HelpBox, Input, Spinner } from "../components/UI";
+import { Badge, Button, Card, EmptyState, Input, Spinner } from "../components/UI";
 import type {
   AcaoEvento,
   EventosTabelaParams,
@@ -154,14 +154,7 @@ export default function Eventos() {
 
   return (
     <div>
-      <div className="mb-4">
-        <HelpBox title="Planilha mestre de eventos">
-          Aqui está <b>tudo</b> que o sistema já detectou neste processo — inclusive o
-          que já foi validado. Você pode <b>consultar, reclassificar, descartar ou
-          reabrir</b> qualquer evento a qualquer momento. Toda correção feita aqui{" "}
-          <b>re-treina o sistema</b> do mesmo jeito que na tela de Validação.
-        </HelpBox>
-      </div>
+      <ExplicacaoStatusEAprendizado />
 
       {/* Controles */}
       <Card className="p-4 mb-4">
@@ -578,5 +571,147 @@ function PainelEdicao({
         </div>
       )}
     </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Painel explicativo retrátil — para quem nunca usou a plataforma
+// entender o que cada status significa e como sua correção ensina a IA.
+// ────────────────────────────────────────────────────────────────────────
+function ExplicacaoStatusEAprendizado() {
+  const [aberto, setAberto] = useState(false);
+  return (
+    <Card className="mb-4 overflow-hidden">
+      <button
+        onClick={() => setAberto((v) => !v)}
+        className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-slate-50 transition"
+        aria-expanded={aberto}
+      >
+        <div className="flex items-center gap-3">
+          <span className="h-8 w-8 rounded-full bg-kv-purple-100 text-kv-purple-dark flex items-center justify-center font-bold text-sm">
+            i
+          </span>
+          <div>
+            <div className="font-medium text-slate-900">
+              Entenda os status e como o sistema aprende com você
+            </div>
+            <div className="text-xs text-slate-500">
+              Em 1 minuto: o que cada coluna quer dizer e por que sua correção vale ouro.
+            </div>
+          </div>
+        </div>
+        <span className="text-slate-400 text-sm">{aberto ? "▲" : "▼"}</span>
+      </button>
+
+      {aberto && (
+        <div className="px-5 pb-5 border-t border-slate-100 pt-5 space-y-6">
+          {/* O que cada status significa */}
+          <div>
+            <h3 className="font-semibold text-slate-900 mb-3">
+              O que cada status significa
+            </h3>
+            <ul className="space-y-3 text-sm">
+              <ExplicaStatus tone="neutral" titulo="Pendente">
+                A IA detectou um evento mas ainda <b>não tem certeza se
+                acertou</b> — está aguardando sua revisão. Quem decide é você.
+              </ExplicaStatus>
+              <ExplicaStatus tone="success" titulo="Confirmado">
+                Você olhou e disse que a IA <b>acertou</b> o nome da
+                atividade. Cada confirmação reforça o aprendizado.
+              </ExplicaStatus>
+              <ExplicaStatus tone="info" titulo="Corrigido">
+                A IA chamou a atividade de uma forma e você ajustou para o
+                <b> nome certo da sua operação</b>. Daqui em diante, o sistema
+                passa a usar o nome novo.
+              </ExplicaStatus>
+              <ExplicaStatus tone="alta" titulo="Descartado">
+                Você marcou como <b>falso alarme</b> — aquilo não era uma
+                atividade relevante. O sistema para de marcar coisas
+                parecidas no futuro.
+              </ExplicaStatus>
+              <ExplicaStatus tone="warning" titulo="Auto-validado">
+                A IA aprovou <b>sozinha</b> porque você já confirmou esse
+                mesmo tipo de atividade pelo menos 2 vezes antes. Sua carga
+                de trabalho cai com o tempo.
+              </ExplicaStatus>
+            </ul>
+          </div>
+
+          {/* Como aprende com você */}
+          <div>
+            <h3 className="font-semibold text-slate-900 mb-3">
+              Como o sistema aprende com você
+            </h3>
+            <ol className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <PassoAprendizado n={1} titulo="A IA observa o vídeo">
+                Identifica as pessoas e descreve, em linguagem natural, o que
+                cada uma está fazendo.
+              </PassoAprendizado>
+              <PassoAprendizado n={2} titulo="Você ensina">
+                Confirma, corrige ou descarta. Pode fazer isso aqui mesmo, em
+                qualquer evento, a qualquer momento.
+              </PassoAprendizado>
+              <PassoAprendizado n={3} titulo="A IA aprende">
+                Cada confirmação reforça o nome certo. Depois de 2 confirmações
+                iguais, ela passa a aprovar sozinha (Auto-validado).
+              </PassoAprendizado>
+              <PassoAprendizado n={4} titulo="Próximo vídeo vem melhor">
+                Quando você processar o próximo vídeo, o sistema já parte do
+                que você ensinou — menos trabalho, análise mais certeira.
+              </PassoAprendizado>
+            </ol>
+          </div>
+
+          <p className="text-xs text-slate-500 italic">
+            Dica: <b>Reabrir</b> um evento devolve ele para a fila como
+            "Pendente" — útil quando você quer rever uma decisão antiga sem
+            apagá-la do histórico.
+          </p>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function ExplicaStatus({
+  tone,
+  titulo,
+  children,
+}: {
+  tone: "neutral" | "success" | "info" | "alta" | "warning";
+  titulo: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <li className="flex items-start gap-3">
+      <span className="flex-shrink-0 mt-0.5 w-28">
+        <Badge tone={tone}>{titulo}</Badge>
+      </span>
+      <p className="text-slate-700 leading-relaxed flex-1">{children}</p>
+    </li>
+  );
+}
+
+function PassoAprendizado({
+  n,
+  titulo,
+  children,
+}: {
+  n: number;
+  titulo: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <li className="bg-gradient-to-br from-kv-purple-50 to-white border border-kv-purple-200 rounded-xl p-3.5">
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="h-6 w-6 rounded-full bg-kv-purple text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
+          {n}
+        </span>
+        <span className="font-medium text-slate-900 text-sm leading-tight">
+          {titulo}
+        </span>
+      </div>
+      <p className="text-xs text-slate-600 leading-relaxed">{children}</p>
+    </li>
   );
 }
