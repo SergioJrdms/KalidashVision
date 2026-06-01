@@ -107,7 +107,11 @@ A API expõe:
 | `POST` | `/eventos/{id}/validar` | `{ acao: "confirmar"\|"corrigir"\|"descartar"\|"reabrir", label_corrigido? }` |
 | `POST` | `/eventos/{id}/reabrir` | devolve o evento à fila (estado pendente) |
 | `POST` | `/eventos/lote` | `{ ids, acao, label_corrigido? }` — ação em lote |
+| `DELETE`| `/processos/{id}` | exclui o processo e TODOS os seus dados (storage + tabelas, via RPC transacional) |
 | `POST` | `/processos/{id}/chat` | pergunta em linguagem natural (legado; o front usa o Prism abaixo) |
+| `GET`  | `/prism/conversas` · `POST` · `GET/PATCH/DELETE /{id}` · `POST /{id}/mensagens` | Prism **global** (visão de portfólio) |
+| `GET`  | `/prism/sugestoes` | sugestões de assunto globais dinâmicas |
+| `GET`  | `/prism/insights-globais` | insights de portfólio (qual priorizar, padrões entre processos) |
 | `GET`  | `/processos/{id}/prism/conversas` | lista de conversas com o Prism |
 | `POST` | `/processos/{id}/prism/conversas` | cria nova conversa |
 | `GET`  | `/processos/{id}/prism/conversas/{cid}` | conversa + mensagens |
@@ -163,9 +167,19 @@ Telas:
   ordenação, paginação, edição por linha (com frames sob demanda e autocomplete de
   labels) e ações em lote. Aqui o cliente audita e **corrige a qualquer momento** —
   inclusive eventos já validados.
-- **Prism** — *painel lateral deslizante* (estilo Copilot), disponível em **todas**
-  as telas de dentro de um processo, aberto pelo botão flutuante no canto inferior
-  direito. É o chat conversacional com a IA da plataforma:
+- **/processos** — *painel da operação*: insights consolidados do Prism no topo
+  (qual processo priorizar, maior oportunidade, padrões entre processos) + grid de
+  **cards enriquecidos** (vídeos, % validado, sugestões de alta prioridade,
+  pendências e mini-barra de valor agregado). Cada card tem menu (⋮) → **Excluir
+  processo**, com confirmação forte (digite o nome, estilo GitHub). A exclusão
+  remove **tudo**: vídeos no Storage + todas as linhas de `(empresa, processo)` via
+  RPC transacional `excluir_processo`, e recalcula os insights. `insights_globais`
+  (da empresa) não é apagada — só recalculada.
+- **Prism** — *painel lateral deslizante* (estilo Copilot), montado no shell raiz e
+  disponível em **todas** as telas, aberto pelo botão flutuante no canto inferior
+  direito. Detecta o **escopo pela rota**: dentro de um processo fala daquele
+  processo; em `/processos` entra em **modo global** (visão de portfólio — compara
+  processos, prioriza, acha padrões). É o chat conversacional com a IA da plataforma:
   - **Conversas persistidas** em `prism_conversas` + `prism_mensagens` — recarregar
     a página traz o histórico.
   - **Tópicos**: você pode criar nova conversa, alternar entre elas, **renomear** e

@@ -1,7 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useMatch } from "react-router-dom";
+
+type Escopo = "global" | "processo";
 
 interface PrismCtx {
-  processoId: string;
+  escopo: Escopo;
+  processoId: string | null; // null no modo global
   aberto: boolean;
   abrir: () => void;
   fechar: () => void;
@@ -12,20 +16,23 @@ interface PrismCtx {
 
 const Ctx = createContext<PrismCtx | null>(null);
 
-export function PrismProvider({
-  processoId,
-  children,
-}: {
-  processoId: string;
-  children: React.ReactNode;
-}) {
+/**
+ * Provider único, montado no AppShell. Detecta o escopo pela rota:
+ * - dentro de /processos/:id/... → modo processo
+ * - em /processos e demais rotas  → modo global (visão de portfólio)
+ */
+export function PrismProvider({ children }: { children: React.ReactNode }) {
+  const match = useMatch("/processos/:id/*");
+  const processoId = match?.params.id ?? null;
+  const escopo: Escopo = processoId ? "processo" : "global";
+
   const [aberto, setAberto] = useState(false);
   const [conversaAtivaId, setConversaAtivaId] = useState<string | null>(null);
 
-  // Trocou de processo: reseta tudo
+  // Mudou o contexto (entrou/saiu de um processo, ou trocou de processo):
+  // reseta a conversa ativa para o Prism recarregar no escopo certo.
   useEffect(() => {
     setConversaAtivaId(null);
-    setAberto(false);
   }, [processoId]);
 
   const abrir = useCallback(() => setAberto(true), []);
@@ -34,8 +41,8 @@ export function PrismProvider({
   const setConversaAtiva = useCallback((id: string | null) => setConversaAtivaId(id), []);
 
   const value = useMemo(
-    () => ({ processoId, aberto, abrir, fechar, toggle, conversaAtivaId, setConversaAtiva }),
-    [processoId, aberto, abrir, fechar, toggle, conversaAtivaId, setConversaAtiva]
+    () => ({ escopo, processoId, aberto, abrir, fechar, toggle, conversaAtivaId, setConversaAtiva }),
+    [escopo, processoId, aberto, abrir, fechar, toggle, conversaAtivaId, setConversaAtiva]
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

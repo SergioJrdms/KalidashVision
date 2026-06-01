@@ -34,6 +34,10 @@ from .pipeline import (
     responder_chat,
     gerar_titulo_conversa,
     gerar_sugestoes_chat,
+    agregar_portfolio,
+    responder_chat_global,
+    gerar_sugestoes_chat_global,
+    gerar_insights_globais,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -148,7 +152,24 @@ def listar_processos(user: CurrentUser = Depends(get_current_user)):
         .order("atualizado_em", desc=True)
         .execute()
     )
-    return r.data or []
+    linhas = r.data or []
+    # Enriquecimento por processo — uma passada por empresa (não N× queries)
+    try:
+        portfolio = agregar_portfolio(sb, user.empresa)
+    except Exception as e:
+        log.warning(f"Falha ao agregar portfólio: {e}")
+        portfolio = {}
+    for row in linhas:
+        st = portfolio.get(row["processo"], {})
+        row["n_videos"] = st.get("n_videos", 0)
+        row["eventos_pendentes"] = st.get("eventos_pendentes", 0)
+        row["pct_validado"] = st.get("pct_validado", 0)
+        row["n_sugestoes"] = st.get("n_sugestoes", 0)
+        row["n_sugestoes_alta"] = st.get("n_sugestoes_alta", 0)
+        row["tempo_total_min"] = st.get("tempo_total_min", 0)
+        row["ultimo_video_em"] = st.get("ultimo_video_em")
+        row["composicao_valor"] = st.get("composicao_valor")
+    return linhas
 
 
 @app.get("/processos/{processo_id}")
@@ -196,6 +217,70 @@ def atualizar_descricao(
     if not r.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Processo não encontrado")
     resolver_descricao_processo(sb, user.empresa, r.data[0]["processo"], body.descricao)
+    return {"ok": True}
+
+
+@app.delete("/processos/{processo_id}")
+def excluir_processo_endpoint(
+    processo_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Exclui um processo e TODOS os seus dados: arquivos no Storage +
+    todas as tabelas-folha de (empresa, processo), via RPC transacional.
+    Não apaga insights_globais (são da empresa) — apenas recalcula depois.
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+
+    # 1) Remove os vídeos do Storage (lê os caminhos antes de apagar as linhas)
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    try:
+        vids = (
+            sb.table("videos")
+            .select("caminho")
+            .eq("empresa", user.empresa)
+            .eq("processo", nome)
+            .execute()
+            .data
+        ) or []
+        caminhos = [
+            v["caminho"]
+            for v in vids
+            if v.get("caminho")
+            and not v["caminho"].startswith(("/", "\\"))
+            and not (len(v["caminho"]) > 1 and v["caminho"][1] == ":")
+        ]
+        if caminhos:
+            sb.storage.from_(bucket).remove(caminhos)
+    except Exception as e:
+        log.warning(f"Falha ao remover vídeos do storage (segue mesmo assim): {e}")
+
+    # 2) Apaga todas as linhas numa transação (RPC). Fallback: deletes em ordem.
+    try:
+        sb.rpc("excluir_processo", {"p_empresa": user.empresa, "p_processo": nome}).execute()
+    except Exception as e:
+        log.warning(f"RPC excluir_processo falhou ({e}); aplicando deletes em sequência.")
+        for tabela in (
+            "prism_mensagens",
+            "prism_conversas",
+            "eventos",
+            "sugestoes_melhoria",
+            "comportamentos",
+            "perguntas_processo",
+            "videos",
+            "contexto_processo",
+        ):
+            try:
+                sb.table(tabela).delete().eq("empresa", user.empresa).eq("processo", nome).execute()
+            except Exception as e2:
+                log.error(f"Falha ao limpar {tabela} de {user.empresa}/{nome}: {e2}")
+
+    # 3) Recalcula insights de portfólio — não-fatal.
+    try:
+        gerar_insights_globais(sb, make_groq_client(), user.empresa)
+    except Exception as e:
+        log.warning(f"Recalcular insights após exclusão falhou: {e}")
+
     return {"ok": True}
 
 
@@ -1137,6 +1222,202 @@ def prism_sugestoes(
         sb, groq_client, user.empresa, nome, excluir=excluidas, n=4
     )
     return {"sugestoes": sugestoes}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# PRISM GLOBAL — visão de portfólio (toda a empresa). Conversas com
+# escopo='global' e processo=null. RLS continua por empresa.
+# ═════════════════════════════════════════════════════════════════════════
+def _carregar_conversa_global(sb, user: CurrentUser, conversa_id: str) -> dict:
+    r = (
+        sb.table("prism_conversas")
+        .select("id, empresa, escopo, titulo, titulo_auto, criada_em, atualizada_em")
+        .eq("id", conversa_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversa não encontrada")
+    c = r.data[0]
+    if c["empresa"] != user.empresa or c.get("escopo") != "global":
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+    return c
+
+
+@app.get("/prism/conversas")
+def prism_g_listar(user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    r = (
+        sb.table("prism_conversas")
+        .select("id, titulo, titulo_auto, criada_em, atualizada_em")
+        .eq("empresa", user.empresa)
+        .eq("escopo", "global")
+        .order("atualizada_em", desc=True)
+        .limit(200)
+        .execute()
+    )
+    return r.data or []
+
+
+@app.post("/prism/conversas")
+def prism_g_criar(user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    r = (
+        sb.table("prism_conversas")
+        .insert({"empresa": user.empresa, "processo": None, "escopo": "global"})
+        .execute()
+    )
+    return r.data[0]
+
+
+@app.get("/prism/conversas/{conversa_id}")
+def prism_g_get(conversa_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    c = _carregar_conversa_global(sb, user, conversa_id)
+    msgs = (
+        sb.table("prism_mensagens")
+        .select("id, papel, conteudo, criada_em")
+        .eq("conversa_id", conversa_id)
+        .order("criada_em", desc=False)
+        .limit(500)
+        .execute()
+        .data
+    ) or []
+    return {**c, "mensagens": msgs}
+
+
+@app.patch("/prism/conversas/{conversa_id}")
+def prism_g_renomear(
+    conversa_id: str,
+    body: PrismRenomearBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    from datetime import datetime
+
+    sb = make_supabase_client()
+    _carregar_conversa_global(sb, user, conversa_id)
+    sb.table("prism_conversas").update(
+        {
+            "titulo": body.titulo.strip(),
+            "titulo_auto": False,
+            "atualizada_em": datetime.utcnow().isoformat(),
+        }
+    ).eq("id", conversa_id).execute()
+    return {"ok": True}
+
+
+@app.delete("/prism/conversas/{conversa_id}")
+def prism_g_excluir(conversa_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    _carregar_conversa_global(sb, user, conversa_id)
+    sb.table("prism_conversas").delete().eq("id", conversa_id).execute()
+    return {"ok": True}
+
+
+@app.post("/prism/conversas/{conversa_id}/mensagens")
+def prism_g_enviar(
+    conversa_id: str,
+    body: PrismMensagemBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    from datetime import datetime
+
+    sb = make_supabase_client()
+    conv = _carregar_conversa_global(sb, user, conversa_id)
+
+    msgs_existentes = (
+        sb.table("prism_mensagens")
+        .select("papel, conteudo")
+        .eq("conversa_id", conversa_id)
+        .order("criada_em", desc=False)
+        .limit(_PRISM_MAX_TROCAS * 4)
+        .execute()
+        .data
+    ) or []
+    eh_primeira_troca = len(msgs_existentes) == 0
+
+    sb.table("prism_mensagens").insert(
+        {
+            "conversa_id": conversa_id,
+            "empresa": user.empresa,
+            "processo": None,
+            "papel": "user",
+            "conteudo": body.pergunta.strip(),
+        }
+    ).execute()
+
+    historico_chat = [
+        {"role": m["papel"], "content": m["conteudo"]}
+        for m in msgs_existentes
+        if m.get("papel") in ("user", "assistant")
+    ]
+
+    groq_client = make_groq_client()
+    try:
+        resposta = responder_chat_global(
+            groq_client,
+            sb,
+            user.empresa,
+            body.pergunta.strip(),
+            historico=historico_chat,
+            max_trocas=_PRISM_MAX_TROCAS,
+        )
+    except Exception as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Falha ao consultar o Prism: {e}")
+
+    resposta_txt = (resposta or "").strip() or "Desculpe, não consegui responder agora."
+
+    sb.table("prism_mensagens").insert(
+        {
+            "conversa_id": conversa_id,
+            "empresa": user.empresa,
+            "processo": None,
+            "papel": "assistant",
+            "conteudo": resposta_txt,
+        }
+    ).execute()
+
+    titulo_auto: str | None = None
+    if eh_primeira_troca and conv.get("titulo_auto"):
+        try:
+            t = gerar_titulo_conversa(groq_client, body.pergunta, resposta_txt)
+            if t:
+                sb.table("prism_conversas").update(
+                    {"titulo": t, "atualizada_em": datetime.utcnow().isoformat()}
+                ).eq("id", conversa_id).execute()
+                titulo_auto = t
+        except Exception as e:
+            log.warning(f"Prism global: título auto falhou: {e}")
+
+    if titulo_auto is None:
+        sb.table("prism_conversas").update(
+            {"atualizada_em": datetime.utcnow().isoformat()}
+        ).eq("id", conversa_id).execute()
+
+    return {"resposta": resposta_txt, "titulo_auto": titulo_auto, "fora_de_escopo": False}
+
+
+@app.get("/prism/sugestoes")
+def prism_g_sugestoes(excluir: str = "", user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    excluidas = [s.strip() for s in excluir.split("|") if s.strip()] if excluir else []
+    sugestoes = gerar_sugestoes_chat_global(
+        sb, make_groq_client(), user.empresa, excluir=excluidas, n=4
+    )
+    return {"sugestoes": sugestoes}
+
+
+@app.get("/prism/insights-globais")
+def prism_insights_globais(user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    r = (
+        sb.table("insights_globais")
+        .select("id, prioridade, titulo, descricao, processos_relacionados, criado_em")
+        .eq("empresa", user.empresa)
+        .order("criado_em", desc=True)
+        .limit(20)
+        .execute()
+    )
+    return r.data or []
 
 
 # ═════════════════════════════════════════════════════════════════════════

@@ -8,9 +8,14 @@ import { Spinner } from "./UI";
 import { PrismAvatar } from "./PrismAvatar";
 import { usePrism } from "./PrismProvider";
 
+/** Chave estável da query, distinguindo escopo global vs processo. */
+function escopoKey(processoId: string | null): string {
+  return processoId ? `proc:${processoId}` : "global";
+}
+
 /** Botão flutuante (visível só quando o painel está fechado). */
 export function PrismFAB() {
-  const { aberto, abrir } = usePrism();
+  const { aberto, abrir, escopo } = usePrism();
   if (aberto) return null;
   return (
     <button
@@ -20,29 +25,31 @@ export function PrismFAB() {
       title="Conversar com o Prism"
     >
       <PrismAvatar size={36} />
-      <span className="text-sm font-medium text-kv-purple-dark">Perguntar ao Prism</span>
+      <span className="text-sm font-medium text-kv-purple-dark">
+        {escopo === "global" ? "Prism · visão geral" : "Perguntar ao Prism"}
+      </span>
     </button>
   );
 }
 
 /** Painel lateral deslizante. */
 export function PrismPanel() {
-  const { processoId, aberto, fechar, conversaAtivaId, setConversaAtiva } = usePrism();
+  const { processoId, escopo, aberto, fechar, conversaAtivaId, setConversaAtiva } = usePrism();
   const qc = useQueryClient();
   const [historicoAberto, setHistoricoAberto] = useState(false);
+  const ek = escopoKey(processoId);
+  const prism = useMemo(() => api.prism(processoId), [processoId]);
 
   const conversas = useQuery({
-    queryKey: ["prism-conversas", processoId],
-    queryFn: () => api.prism.listarConversas(processoId),
+    queryKey: ["prism-conversas", ek],
+    queryFn: () => prism.listarConversas(),
     enabled: aberto,
   });
 
-  // Se abriu e não tem conversa ativa, escolhe a mais recente; se não houver,
-  // cria uma nova automaticamente.
   const criarConversa = useMutation({
-    mutationFn: () => api.prism.criarConversa(processoId),
+    mutationFn: () => prism.criarConversa(),
     onSuccess: (nova) => {
-      qc.invalidateQueries({ queryKey: ["prism-conversas", processoId] });
+      qc.invalidateQueries({ queryKey: ["prism-conversas", ek] });
       setConversaAtiva(nova.id);
     },
   });
@@ -65,14 +72,15 @@ export function PrismPanel() {
           role="dialog"
           aria-label="Prism"
         >
-          {/* Cabeçalho */}
           <header className="flex items-center justify-between gap-2 p-3 border-b border-slate-200">
             <div className="flex items-center gap-2.5 min-w-0">
               <PrismAvatar size={36} />
               <div className="min-w-0">
                 <div className="font-semibold text-slate-900 leading-tight">Prism</div>
                 <div className="text-[11px] text-slate-500 leading-tight truncate">
-                  inteligência da sua operação
+                  {escopo === "global"
+                    ? "visão geral da operação"
+                    : "inteligência da sua operação"}
                 </div>
               </div>
             </div>
@@ -108,21 +116,22 @@ export function PrismPanel() {
                 setConversaAtiva(id);
                 setHistoricoAberto(false);
               }}
-              onRenomeada={() => qc.invalidateQueries({ queryKey: ["prism-conversas", processoId] })}
+              onRenomeada={() => qc.invalidateQueries({ queryKey: ["prism-conversas", ek] })}
               onExcluida={(id) => {
-                qc.invalidateQueries({ queryKey: ["prism-conversas", processoId] });
+                qc.invalidateQueries({ queryKey: ["prism-conversas", ek] });
                 if (conversaAtivaId === id) setConversaAtiva(null);
               }}
-              processoId={processoId}
+              prism={prism}
             />
           )}
 
-          {/* Corpo da conversa */}
           {conversaAtivaId ? (
             <ConversaAtiva
               key={conversaAtivaId}
-              processoId={processoId}
+              ek={ek}
               conversaId={conversaAtivaId}
+              prism={prism}
+              escopo={escopo}
             />
           ) : (
             <div className="flex-1 flex items-center justify-center text-sm text-slate-400">
@@ -134,6 +143,8 @@ export function PrismPanel() {
     </>
   );
 }
+
+type PrismApi = ReturnType<typeof api.prism>;
 
 function IconBtn({
   children,
@@ -163,7 +174,7 @@ function IconBtn({
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Histórico (lista de conversas com renomear/excluir/trocar)
+// Histórico
 // ════════════════════════════════════════════════════════════════════════
 function HistoricoConversas({
   conversas,
@@ -172,7 +183,7 @@ function HistoricoConversas({
   onAtivar,
   onRenomeada,
   onExcluida,
-  processoId,
+  prism,
 }: {
   conversas: PrismConversa[];
   isLoading: boolean;
@@ -180,7 +191,7 @@ function HistoricoConversas({
   onAtivar: (id: string) => void;
   onRenomeada: () => void;
   onExcluida: (id: string) => void;
-  processoId: string;
+  prism: PrismApi;
 }) {
   return (
     <div className="border-b border-slate-200 max-h-64 overflow-y-auto bg-slate-50">
@@ -201,7 +212,7 @@ function HistoricoConversas({
             onAtivar={() => onAtivar(c.id)}
             onRenomeada={onRenomeada}
             onExcluida={() => onExcluida(c.id)}
-            processoId={processoId}
+            prism={prism}
           />
         ))}
       </ul>
@@ -215,26 +226,26 @@ function LinhaConversa({
   onAtivar,
   onRenomeada,
   onExcluida,
-  processoId,
+  prism,
 }: {
   c: PrismConversa;
   ativa: boolean;
   onAtivar: () => void;
   onRenomeada: () => void;
   onExcluida: () => void;
-  processoId: string;
+  prism: PrismApi;
 }) {
   const [editando, setEditando] = useState(false);
   const [titulo, setTitulo] = useState(c.titulo);
   const renomear = useMutation({
-    mutationFn: (t: string) => api.prism.renomear(processoId, c.id, t),
+    mutationFn: (t: string) => prism.renomear(c.id, t),
     onSuccess: () => {
       setEditando(false);
       onRenomeada();
     },
   });
   const excluir = useMutation({
-    mutationFn: () => api.prism.excluir(processoId, c.id),
+    mutationFn: () => prism.excluir(c.id),
     onSuccess: onExcluida,
   });
 
@@ -264,11 +275,7 @@ function LinhaConversa({
           className="flex-1 text-sm bg-white border border-kv-purple-300 rounded px-2 py-1 outline-none"
         />
       ) : (
-        <button
-          onClick={onAtivar}
-          className="flex-1 text-left min-w-0"
-          title={c.titulo}
-        >
+        <button onClick={onAtivar} className="flex-1 text-left min-w-0" title={c.titulo}>
           <div className={`text-sm truncate ${ativa ? "font-medium text-kv-purple-dark" : "text-slate-800"}`}>
             {c.titulo}
           </div>
@@ -303,21 +310,30 @@ function LinhaConversa({
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Conversa ativa (mensagens + sugestões + envio)
+// Conversa ativa
 // ════════════════════════════════════════════════════════════════════════
-function ConversaAtiva({ processoId, conversaId }: { processoId: string; conversaId: string }) {
+function ConversaAtiva({
+  ek,
+  conversaId,
+  prism,
+  escopo,
+}: {
+  ek: string;
+  conversaId: string;
+  prism: PrismApi;
+  escopo: "global" | "processo";
+}) {
   const qc = useQueryClient();
   const conversa = useQuery({
-    queryKey: ["prism-conversa", processoId, conversaId],
-    queryFn: () => api.prism.getConversa(processoId, conversaId),
+    queryKey: ["prism-conversa", ek, conversaId],
+    queryFn: () => prism.getConversa(conversaId),
   });
   const mensagens: PrismMensagem[] = conversa.data?.mensagens || [];
   const vazia = !conversa.isLoading && mensagens.length === 0;
 
-  // Sugestões dinâmicas — renovam ao abrir uma conversa nova/vazia.
   const sugestoes = useQuery({
-    queryKey: ["prism-sugestoes", processoId, conversaId],
-    queryFn: () => api.prism.sugestoes(processoId, []),
+    queryKey: ["prism-sugestoes", ek, conversaId],
+    queryFn: () => prism.sugestoes([]),
     enabled: vazia,
     staleTime: 0,
   });
@@ -331,14 +347,14 @@ function ConversaAtiva({ processoId, conversaId }: { processoId: string; convers
   }, [mensagens.length, pensando]);
 
   const enviar = useMutation({
-    mutationFn: (txt: string) => api.prism.enviarMensagem(processoId, conversaId, txt),
+    mutationFn: (txt: string) => prism.enviarMensagem(conversaId, txt),
     onMutate: () => {
       setPensando(true);
       setErro(null);
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["prism-conversa", processoId, conversaId] });
-      qc.invalidateQueries({ queryKey: ["prism-conversas", processoId] });
+      qc.invalidateQueries({ queryKey: ["prism-conversa", ek, conversaId] });
+      qc.invalidateQueries({ queryKey: ["prism-conversas", ek] });
     },
     onError: (e: Error) => setErro(e.message),
     onSettled: () => setPensando(false),
@@ -362,7 +378,7 @@ function ConversaAtiva({ processoId, conversaId }: { processoId: string; convers
   return (
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-4 space-y-3">
-        {vazia && <SaudacaoInicial />}
+        {vazia && <SaudacaoInicial escopo={escopo} />}
         {mensagens.map((m, i) =>
           m.papel === "user" ? (
             <BolhaUser key={m.id || i} conteudo={m.conteudo} />
@@ -370,9 +386,7 @@ function ConversaAtiva({ processoId, conversaId }: { processoId: string; convers
             <BolhaPrism key={m.id || i} conteudo={m.conteudo} />
           )
         )}
-        {pensando && (
-          <BolhaPensando />
-        )}
+        {pensando && <BolhaPensando />}
         {erro && (
           <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
             {erro}
@@ -408,14 +422,16 @@ function ConversaAtiva({ processoId, conversaId }: { processoId: string; convers
           onChange={(e) => setPergunta(e.target.value)}
           onKeyDown={aoTeclar}
           rows={2}
-          placeholder="Pergunte ao Prism sobre sua operação…"
+          placeholder={
+            escopo === "global"
+              ? "Pergunte sobre o conjunto dos seus processos…"
+              : "Pergunte ao Prism sobre sua operação…"
+          }
           disabled={pensando}
           className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-kv-purple focus:ring-2 focus:ring-kv-purple/20 outline-none resize-none disabled:bg-slate-50"
         />
         <div className="flex items-center justify-between">
-          <span className="text-[10px] text-slate-400">
-            Enter envia · Shift+Enter quebra linha
-          </span>
+          <span className="text-[10px] text-slate-400">Enter envia · Shift+Enter quebra linha</span>
           <button
             type="submit"
             disabled={pensando || !pergunta.trim()}
@@ -429,17 +445,24 @@ function ConversaAtiva({ processoId, conversaId }: { processoId: string; convers
   );
 }
 
-function SaudacaoInicial() {
+function SaudacaoInicial({ escopo }: { escopo: "global" | "processo" }) {
   return (
     <div className="flex items-start gap-2.5">
       <PrismAvatar size={32} />
       <div className="bg-kv-purple-50 border border-kv-purple-100 rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-sm text-slate-800 leading-relaxed">
-        Sou o <b>Prism</b>. Posso te ajudar a entender onde o tempo da sua
-        operação está indo, achar gargalos e ler seus indicadores.
+        {escopo === "global" ? (
+          <>
+            Sou o <b>Prism</b>. Estou vendo <b>todos os seus processos</b>. Posso
+            comparar, priorizar e achar padrões entre eles.
+          </>
+        ) : (
+          <>
+            Sou o <b>Prism</b>. Posso te ajudar a entender onde o tempo da sua
+            operação está indo, achar gargalos e ler seus indicadores.
+          </>
+        )}
         <br />
-        <span className="text-xs text-slate-500">
-          Sobre o que você quer falar?
-        </span>
+        <span className="text-xs text-slate-500">Sobre o que você quer falar?</span>
       </div>
     </div>
   );

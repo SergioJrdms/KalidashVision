@@ -3,6 +3,29 @@ export interface Processo {
   processo: string;
   descricao: string | null;
   atualizado_em: string;
+  // enriquecimento (GET /processos)
+  n_videos?: number;
+  eventos_pendentes?: number;
+  pct_validado?: number;
+  n_sugestoes?: number;
+  n_sugestoes_alta?: number;
+  tempo_total_min?: number;
+  ultimo_video_em?: string | null;
+  composicao_valor?: {
+    valor_agregado_pct: number;
+    apoio_pct: number;
+    desperdicio_pct: number;
+    nao_classificado_pct: number;
+  } | null;
+}
+
+export interface InsightGlobal {
+  id: string;
+  prioridade: "alta" | "media" | "info" | string;
+  titulo: string;
+  descricao: string;
+  processos_relacionados: string[] | null;
+  criado_em: string;
 }
 
 export interface ProcessoDetalhe extends Processo {

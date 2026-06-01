@@ -7,6 +7,7 @@ import type {
   EventosTabelaParams,
   EventosTabelaResposta,
   JobStatus,
+  InsightGlobal,
   PerguntaProcesso,
   PrismConversa,
   PrismConversaDetalhe,
@@ -58,11 +59,8 @@ export const api = {
     sugestoes: (id: string) => req<Sugestao[]>(`/processos/${id}/sugestoes`),
     eventosPendentes: (id: string) =>
       req<EventoPendente[]>(`/processos/${id}/eventos?status=pendente`),
-    chat: (id: string, pergunta: string, historico?: { role: string; content: string }[]) =>
-      req<{ resposta: string }>(`/processos/${id}/chat`, {
-        method: "POST",
-        body: JSON.stringify({ pergunta, historico }),
-      }),
+    excluir: (id: string) =>
+      req<{ ok: boolean }>(`/processos/${id}`, { method: "DELETE" }),
   },
   videos: {
     upload: async (processoId: string, file: File): Promise<{ job_id: string }> => {
@@ -124,32 +122,33 @@ export const api = {
         { method: "PUT", body: JSON.stringify({ categoria_lean }) }
       ),
   },
-  prism: {
-    listarConversas: (processoId: string) =>
-      req<PrismConversa[]>(`/processos/${processoId}/prism/conversas`),
-    criarConversa: (processoId: string) =>
-      req<PrismConversa>(`/processos/${processoId}/prism/conversas`, { method: "POST" }),
-    getConversa: (processoId: string, conversaId: string) =>
-      req<PrismConversaDetalhe>(`/processos/${processoId}/prism/conversas/${conversaId}`),
-    renomear: (processoId: string, conversaId: string, titulo: string) =>
-      req<{ ok: boolean }>(`/processos/${processoId}/prism/conversas/${conversaId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ titulo }),
-      }),
-    excluir: (processoId: string, conversaId: string) =>
-      req<{ ok: boolean }>(`/processos/${processoId}/prism/conversas/${conversaId}`, {
-        method: "DELETE",
-      }),
-    enviarMensagem: (processoId: string, conversaId: string, pergunta: string) =>
-      req<PrismEnvioResposta>(
-        `/processos/${processoId}/prism/conversas/${conversaId}/mensagens`,
-        { method: "POST", body: JSON.stringify({ pergunta }) }
-      ),
-    sugestoes: (processoId: string, excluir: string[] = []) => {
-      const qs = excluir.length > 0 ? `?excluir=${encodeURIComponent(excluir.join("|"))}` : "";
-      return req<{ sugestoes: string[] }>(`/processos/${processoId}/prism/sugestoes${qs}`);
-    },
+  // Prism com escopo: processoId definido → modo processo; null → modo global.
+  prism: (processoId: string | null) => {
+    const base = processoId ? `/processos/${processoId}/prism` : `/prism`;
+    return {
+      listarConversas: () => req<PrismConversa[]>(`${base}/conversas`),
+      criarConversa: () => req<PrismConversa>(`${base}/conversas`, { method: "POST" }),
+      getConversa: (conversaId: string) =>
+        req<PrismConversaDetalhe>(`${base}/conversas/${conversaId}`),
+      renomear: (conversaId: string, titulo: string) =>
+        req<{ ok: boolean }>(`${base}/conversas/${conversaId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ titulo }),
+        }),
+      excluir: (conversaId: string) =>
+        req<{ ok: boolean }>(`${base}/conversas/${conversaId}`, { method: "DELETE" }),
+      enviarMensagem: (conversaId: string, pergunta: string) =>
+        req<PrismEnvioResposta>(`${base}/conversas/${conversaId}/mensagens`, {
+          method: "POST",
+          body: JSON.stringify({ pergunta }),
+        }),
+      sugestoes: (excluir: string[] = []) => {
+        const qs = excluir.length > 0 ? `?excluir=${encodeURIComponent(excluir.join("|"))}` : "";
+        return req<{ sugestoes: string[] }>(`${base}/sugestoes${qs}`);
+      },
+    };
   },
+  insightsGlobais: () => req<InsightGlobal[]>(`/prism/insights-globais`),
 };
 
 export function formatSeg(s: number): string {

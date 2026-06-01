@@ -124,6 +124,22 @@ create table if not exists prism_mensagens (
     criada_em timestamptz default now()
 );
 
+-- Insights consolidados de portfólio (por empresa)
+create table if not exists insights_globais (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    prioridade text,                       -- alta | media | info
+    titulo text,
+    descricao text,
+    processos_relacionados jsonb,
+    criado_em timestamptz default now()
+);
+
+-- Prism: suporte a conversas globais (escopo='global', processo null)
+alter table prism_conversas add column if not exists escopo text not null default 'processo';
+alter table prism_conversas alter column processo drop not null;
+alter table prism_mensagens alter column processo drop not null;
+
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
 create index if not exists idx_comportamentos_ctx on comportamentos(empresa, processo);
 create index if not exists idx_eventos_ctx       on eventos(empresa, processo);
@@ -134,8 +150,30 @@ create index if not exists idx_eventos_origem    on eventos(origem_validacao);
 create index if not exists idx_sugestoes_ctx     on sugestoes_melhoria(empresa, processo);
 create index if not exists idx_contexto_proc     on contexto_processo(empresa, processo);
 create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, processo, status);
-create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, processo, atualizada_em desc);
+create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, escopo, atualizada_em desc);
 create index if not exists idx_prism_mensagens_conv on prism_mensagens(conversa_id, criada_em);
+create index if not exists idx_insights_globais_emp on insights_globais(empresa, criado_em desc);
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- RPC transacional: exclui um processo inteiro (todas as tabelas-folha).
+-- O backend remove os vídeos do Storage ANTES de chamar isto.
+-- ════════════════════════════════════════════════════════════════════════
+create or replace function excluir_processo(p_empresa text, p_processo text)
+returns void
+language plpgsql
+as $$
+begin
+  delete from prism_mensagens    where empresa = p_empresa and processo = p_processo;
+  delete from prism_conversas    where empresa = p_empresa and processo = p_processo;
+  delete from eventos            where empresa = p_empresa and processo = p_processo;
+  delete from sugestoes_melhoria where empresa = p_empresa and processo = p_processo;
+  delete from comportamentos     where empresa = p_empresa and processo = p_processo;
+  delete from perguntas_processo where empresa = p_empresa and processo = p_processo;
+  delete from videos             where empresa = p_empresa and processo = p_processo;
+  delete from contexto_processo  where empresa = p_empresa and processo = p_processo;
+end;
+$$;
 
 
 -- ════════════════════════════════════════════════════════════════════════
@@ -153,6 +191,7 @@ alter table contexto_processo   enable row level security;
 alter table perguntas_processo  enable row level security;
 alter table prism_conversas     enable row level security;
 alter table prism_mensagens     enable row level security;
+alter table insights_globais    enable row level security;
 
 -- Função helper: empresa do usuário JWT
 create or replace function auth_empresa() returns text
@@ -167,7 +206,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo','prism_conversas','prism_mensagens'] loop
+  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo','prism_conversas','prism_mensagens','insights_globais'] loop
     execute format('drop policy if exists %1$s_select on %1$s', t);
     execute format('drop policy if exists %1$s_modify on %1$s', t);
     execute format($p$

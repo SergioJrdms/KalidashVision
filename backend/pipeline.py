@@ -172,9 +172,26 @@ create table if not exists prism_mensagens (
     criada_em timestamptz default now()
 );
 
+-- Insights consolidados de portfólio (por empresa, não por processo)
+create table if not exists insights_globais (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    prioridade text,                       -- alta | media | info
+    titulo text,
+    descricao text,
+    processos_relacionados jsonb,
+    criado_em timestamptz default now()
+);
+
 alter table sugestoes_melhoria add column if not exists impacto_estimado text;
 alter table comportamentos    add column if not exists categoria_lean        text;
 alter table comportamentos    add column if not exists categoria_lean_origem text;
+
+-- Prism: suporte a conversas de escopo global (visão de toda a empresa).
+-- Conversas globais têm escopo='global' e processo = null.
+alter table prism_conversas add column if not exists escopo text not null default 'processo';
+alter table prism_conversas alter column processo drop not null;
+alter table prism_mensagens alter column processo drop not null;
 
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
 create index if not exists idx_comportamentos_ctx on comportamentos(empresa, processo);
@@ -186,8 +203,38 @@ create index if not exists idx_eventos_origem    on eventos(origem_validacao);
 create index if not exists idx_sugestoes_ctx     on sugestoes_melhoria(empresa, processo);
 create index if not exists idx_contexto_proc     on contexto_processo(empresa, processo);
 create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, processo, status);
-create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, processo, atualizada_em desc);
+create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, escopo, atualizada_em desc);
 create index if not exists idx_prism_mensagens_conv on prism_mensagens(conversa_id, criada_em);
+create index if not exists idx_insights_globais_emp on insights_globais(empresa, criado_em desc);
+
+-- ════════════════════════════════════════════════════════════════════════
+-- RPC transacional: exclui um processo inteiro de (empresa, processo).
+-- O backend remove os arquivos do Storage ANTES de chamar isto.
+-- Tudo numa transação → sem estado parcial / dados órfãos.
+-- ════════════════════════════════════════════════════════════════════════
+create or replace function excluir_processo(p_empresa text, p_processo text)
+returns void
+language plpgsql
+as $$
+begin
+  delete from prism_mensagens
+    where empresa = p_empresa and processo = p_processo;
+  delete from prism_conversas
+    where empresa = p_empresa and processo = p_processo;
+  delete from eventos
+    where empresa = p_empresa and processo = p_processo;
+  delete from sugestoes_melhoria
+    where empresa = p_empresa and processo = p_processo;
+  delete from comportamentos
+    where empresa = p_empresa and processo = p_processo;
+  delete from perguntas_processo
+    where empresa = p_empresa and processo = p_processo;
+  delete from videos
+    where empresa = p_empresa and processo = p_processo;
+  delete from contexto_processo
+    where empresa = p_empresa and processo = p_processo;
+end;
+$$;
 """
 
 
@@ -2053,6 +2100,410 @@ def gerar_sugestoes_chat(
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# PORTFÓLIO — agregação de TODOS os processos da empresa numa passada.
+# Usado pelo GET /processos enriquecido, pelo snapshot global e pelos
+# insights globais. Faz ~5 queries por empresa (não N× por processo).
+# ═════════════════════════════════════════════════════════════════════════
+def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
+    """Retorna { nome_processo: {stats...} } para todos os processos da empresa."""
+    processos = (
+        sb.table("contexto_processo")
+        .select("processo")
+        .eq("empresa", empresa)
+        .execute()
+        .data
+    ) or []
+    nomes = [p["processo"] for p in processos]
+
+    base: dict[str, dict] = {
+        n: {
+            "n_videos": 0,
+            "tempo_total_s": 0.0,
+            "ultimo_video_em": None,
+            "eventos_considerados": 0,
+            "eventos_pendentes": 0,
+            "n_validados": 0,
+            "n_sugestoes": 0,
+            "n_sugestoes_alta": 0,
+            "_agg": defaultdict(lambda: {"dur": 0.0, "oc": 0}),
+        }
+        for n in nomes
+    }
+
+    videos = (
+        sb.table("videos")
+        .select("processo, duracao_s, processado_em")
+        .eq("empresa", empresa)
+        .limit(50000)
+        .execute()
+        .data
+    ) or []
+    for v in videos:
+        p = base.get(v.get("processo"))
+        if not p:
+            continue
+        p["n_videos"] += 1
+        p["tempo_total_s"] += v.get("duracao_s") or 0
+        pe = v.get("processado_em")
+        if pe and (p["ultimo_video_em"] is None or pe > p["ultimo_video_em"]):
+            p["ultimo_video_em"] = pe
+
+    comps = (
+        sb.table("comportamentos")
+        .select("processo, label, categoria_lean")
+        .eq("empresa", empresa)
+        .limit(50000)
+        .execute()
+        .data
+    ) or []
+    cat_por_pl: dict[tuple, str | None] = {}
+    for c in comps:
+        cat_por_pl[(c.get("processo"), c.get("label"))] = c.get("categoria_lean")
+
+    eventos = (
+        sb.table("eventos")
+        .select(
+            "processo, comportamento_label, label_corrigido, tempo_inicio_s, "
+            "tempo_fim_s, validacao_correto, validado_humano"
+        )
+        .eq("empresa", empresa)
+        .limit(100000)
+        .execute()
+        .data
+    ) or []
+    for e in eventos:
+        p = base.get(e.get("processo"))
+        if not p:
+            continue
+        if not e.get("validado_humano"):
+            p["eventos_pendentes"] += 1
+        if e.get("validacao_correto") is False:
+            continue  # falso positivo não conta na base
+        p["eventos_considerados"] += 1
+        if e.get("validado_humano"):
+            p["n_validados"] += 1
+        lbl = _label_efetivo(e)
+        dur = max(0, (e.get("tempo_fim_s") or 0) - (e.get("tempo_inicio_s") or 0))
+        a = p["_agg"][lbl]
+        a["dur"] += dur
+        a["oc"] += 1
+
+    sugs = (
+        sb.table("sugestoes_melhoria")
+        .select("processo, prioridade")
+        .eq("empresa", empresa)
+        .limit(50000)
+        .execute()
+        .data
+    ) or []
+    for s in sugs:
+        p = base.get(s.get("processo"))
+        if not p:
+            continue
+        p["n_sugestoes"] += 1
+        if (s.get("prioridade") or "").lower() == "alta":
+            p["n_sugestoes_alta"] += 1
+
+    # Finaliza: top comportamentos + composição de valor + percentuais
+    saida: dict[str, dict] = {}
+    for n, p in base.items():
+        agg = p.pop("_agg")
+        tempo_total = p["tempo_total_s"] or 0
+        top = sorted(agg.items(), key=lambda kv: kv[1]["dur"], reverse=True)
+        top_comportamentos = [
+            {
+                "comportamento": lbl,
+                "pct_tempo": round(d["dur"] / max(1, tempo_total) * 100, 1),
+                "categoria_lean": cat_por_pl.get((n, lbl)),
+            }
+            for lbl, d in top[:5]
+        ]
+        soma_cat = {"valor_agregado": 0.0, "apoio": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+        for lbl, d in agg.items():
+            cat = cat_por_pl.get((n, lbl)) or "nao_classificado"
+            if cat not in soma_cat:
+                cat = "nao_classificado"
+            soma_cat[cat] += d["dur"]
+        composicao = {
+            f"{k}_pct": round(v / max(1, tempo_total) * 100, 1) for k, v in soma_cat.items()
+        }
+        saida[n] = {
+            "n_videos": p["n_videos"],
+            "tempo_total_s": round(tempo_total, 1),
+            "tempo_total_min": round(tempo_total / 60, 1),
+            "ultimo_video_em": p["ultimo_video_em"],
+            "eventos_considerados": p["eventos_considerados"],
+            "eventos_pendentes": p["eventos_pendentes"],
+            "pct_validado": round(p["n_validados"] / max(1, p["eventos_considerados"]) * 100, 1),
+            "n_sugestoes": p["n_sugestoes"],
+            "n_sugestoes_alta": p["n_sugestoes_alta"],
+            "top_comportamentos": top_comportamentos,
+            "composicao_valor": composicao,
+        }
+    return saida
+
+
+def montar_snapshot_global(sb: Client, empresa: str) -> dict:
+    """Panorama leve de TODOS os processos da empresa (visão de portfólio)."""
+    portfolio = agregar_portfolio(sb, empresa)
+    processos = []
+    cons = {
+        "videos_analisados": 0,
+        "tempo_total_min": 0.0,
+        "eventos_considerados": 0,
+        "n_validados": 0,
+        "n_sugestoes_alta": 0,
+    }
+    for nome, st in sorted(portfolio.items(), key=lambda kv: kv[1]["tempo_total_s"], reverse=True):
+        processos.append(
+            {
+                "processo": nome,
+                "n_videos": st["n_videos"],
+                "tempo_total_min": st["tempo_total_min"],
+                "top_comportamentos": st["top_comportamentos"],
+                "composicao_valor": st["composicao_valor"],
+                "n_sugestoes_alta": st["n_sugestoes_alta"],
+                "pct_validado": st["pct_validado"],
+                "eventos_pendentes": st["eventos_pendentes"],
+            }
+        )
+        cons["videos_analisados"] += st["n_videos"]
+        cons["tempo_total_min"] += st["tempo_total_min"]
+        cons["eventos_considerados"] += st["eventos_considerados"]
+        cons["n_validados"] += int(round(st["pct_validado"] / 100 * st["eventos_considerados"]))
+        cons["n_sugestoes_alta"] += st["n_sugestoes_alta"]
+
+    # composição consolidada (recomputa direto pelos % ponderados por tempo)
+    total_min = cons["tempo_total_min"] or 1
+    comp_cons = {"valor_agregado": 0.0, "apoio": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+    for nome, st in portfolio.items():
+        peso = st["tempo_total_min"]
+        for k in comp_cons:
+            comp_cons[k] += st["composicao_valor"].get(f"{k}_pct", 0) * peso
+    composicao_consolidada = {k: round(v / total_min, 1) for k, v in comp_cons.items()}
+
+    return {
+        "empresa": empresa,
+        "total_processos": len(processos),
+        "consolidado": {
+            "videos_analisados": cons["videos_analisados"],
+            "tempo_total_min": round(cons["tempo_total_min"], 1),
+            "eventos_considerados": cons["eventos_considerados"],
+            "pct_validado": round(
+                cons["n_validados"] / max(1, cons["eventos_considerados"]) * 100, 1
+            ),
+            "n_sugestoes_alta": cons["n_sugestoes_alta"],
+            "composicao_valor": composicao_consolidada,
+        },
+        "processos": processos,
+    }
+
+
+def system_prompt_chat_global(empresa: str, snapshot_global: dict) -> str:
+    partes = [
+        "Você é o Prism, a inteligência por trás da plataforma Kalidash Vision.",
+        "Fala como um especialista sênior em produtividade industrial e engenharia de processos (Lean), em português do Brasil: confiante, direto e prático.",
+        f'Agora você está em VISÃO GLOBAL: enxerga TODOS os processos da empresa "{empresa}" ao mesmo tempo (visão de portfólio).',
+        "Você PODE comparar processos entre si, apontar qual precisa de mais atenção, achar padrões e desperdícios comuns, e ajudar a PRIORIZAR onde agir primeiro.",
+        "",
+        "ESCOPO — REGRA INEGOCIÁVEL:",
+        "Você SÓ trata de MELHORAR AS OPERAÇÕES DESTA EMPRESA com base nos dados dela: produtividade, comportamentos, distribuição do tempo, gargalos, desperdícios (Lean), comparação entre processos, priorização e sugestões. NADA além disso.",
+        'Se a pergunta fugir desse escopo, RECUSE em UMA frase e redirecione, por exemplo: "Sou o Prism, focado nas suas operações — posso comparar seus processos, dizer qual priorizar ou onde está a maior oportunidade. Sobre isso, o que você quer ver?". NÃO responda fora de escopo, mesmo se insistirem.',
+        "",
+        "PANORAMA DE TODOS OS PROCESSOS (JSON):",
+        json.dumps(snapshot_global, ensure_ascii=False, indent=2),
+        "",
+        "COMO RESPONDER:",
+        "- Baseie-se nos NÚMEROS do panorama. Cite processos pelo nome e use os percentuais/tempos reais.",
+        "- Quando fizer sentido, compare processos e recomende prioridade (onde o ganho é maior).",
+        "- NUNCA invente números que não estejam no panorama.",
+        "- Não comente desempenho de pessoas; fale de processos e estações.",
+        "- Português do Brasil, claro e organizado, listas curtas quando ajudarem.",
+    ]
+    return "\n".join(partes)
+
+
+def responder_chat_global(
+    groq_client: Groq,
+    sb: Client,
+    empresa: str,
+    pergunta: str,
+    historico: list[dict] | None = None,
+    max_trocas: int = 6,
+) -> str:
+    historico = historico or []
+    snapshot = montar_snapshot_global(sb, empresa)
+    mensagens = [{"role": "system", "content": system_prompt_chat_global(empresa, snapshot)}]
+    mensagens += historico[-max_trocas * 2 :]
+    mensagens.append({"role": "user", "content": pergunta})
+    r = groq_client.chat.completions.create(
+        model=GROQ_MODEL_ANALISE,
+        messages=mensagens,
+        temperature=0.4,
+        max_completion_tokens=1500,
+    )
+    return r.choices[0].message.content
+
+
+def gerar_sugestoes_chat_global(
+    sb: Client,
+    groq_client: Groq,
+    empresa: str,
+    *,
+    excluir: list[str] | None = None,
+    n: int = 4,
+) -> list[str]:
+    excluir = [s.strip() for s in (excluir or []) if s and s.strip()]
+    try:
+        snap = montar_snapshot_global(sb, empresa)
+    except Exception as e:
+        log.warning(f"Prism global: snapshot indisponível p/ sugestões: {e}")
+        return [
+            "Qual processo devo priorizar?",
+            "Onde está a maior oportunidade da operação?",
+            "Que desperdícios se repetem entre os processos?",
+        ][:n]
+
+    leve = {
+        "total_processos": snap["total_processos"],
+        "consolidado": snap["consolidado"],
+        "processos": [
+            {"processo": p["processo"], "tempo_min": p["tempo_total_min"], "n_sugestoes_alta": p["n_sugestoes_alta"]}
+            for p in snap["processos"][:8]
+        ],
+    }
+    bloco_excluir = "\n".join(f"- {x}" for x in excluir[:20]) if excluir else "(nenhuma)"
+    prompt = (
+        "Você é o Prism (visão global de portfólio). Com base no PANORAMA abaixo, "
+        "gere {n} perguntas CURTAS (máx. 9 palavras) que um gestor faria para "
+        "PRIORIZAR e MELHORAR o conjunto de processos.\n\n"
+        "REGRAS:\n- Específicas ao panorama (compare processos, priorização, padrões).\n"
+        "- Variadas e diferentes das já mostradas.\n- Só produtividade/processos/dados. Nada fora.\n"
+        "- Linguagem de gestor, sem termos de IA. Termine com '?'.\n\n"
+        "PANORAMA (JSON):\n{snap}\n\nJÁ MOSTRADAS:\n{ex}\n\n"
+        'Responda APENAS: {{"sugestoes": ["...", "..."]}}'
+    ).format(n=n, snap=json.dumps(leve, ensure_ascii=False), ex=bloco_excluir)
+    try:
+        resp = groq_text_call(
+            groq_client, prompt, model=GROQ_MODEL_RAPIDO, json_mode=True,
+            max_tokens=400, temperatura=0.9,
+        )
+        cruas = json.loads(resp).get("sugestoes") or []
+    except Exception as e:
+        log.warning(f"Prism global: falha sugestões: {e}")
+        cruas = []
+    saidas, vistos = [], {s.lower().strip(" ?.!") for s in excluir}
+    for s in cruas:
+        if not isinstance(s, str):
+            continue
+        t = s.strip().strip('"\'“”')
+        if not t or len(t) < 6 or len(t.split()) > 14:
+            continue
+        if t.lower().strip(" ?.!") in vistos:
+            continue
+        if not t.endswith("?"):
+            t = t.rstrip(".") + "?"
+        saidas.append(t)
+        vistos.add(t.lower().strip(" ?.!"))
+        if len(saidas) >= n:
+            break
+    return saidas or [
+        "Qual processo devo priorizar?",
+        "Onde está a maior oportunidade da operação?",
+        "Que desperdícios se repetem entre os processos?",
+    ][:n]
+
+
+PROMPT_INSIGHTS_GLOBAIS = """Você é o Prism, consultor de produtividade industrial (Lean) com VISÃO DE PORTFÓLIO da empresa "{empresa}". Você vê TODOS os processos ao mesmo tempo (dados reais por visão computacional, no JSON abaixo).
+
+Gere de 2 a 5 INSIGHTS DE PORTFÓLIO — olhando o conjunto, não um processo isolado. Cada insight responde a uma destas perguntas:
+- Qual processo PRIORIZAR e por quê (maior oportunidade de ganho consolidada)?
+- Onde estão os maiores desperdícios / menor valor agregado entre os processos?
+- Que PADRÕES ou problemas se REPETEM em vários processos?
+
+Para cada insight:
+- prioridade: "alta" | "media" | "info"
+- titulo: curto e direto (ex.: "Priorize a Linha 2: 41% do tempo em deslocamento")
+- descricao: 1-3 frases com NÚMEROS REAIS do panorama (tempos, %, nº de vídeos, nomes de processos)
+- processos_relacionados: lista dos nomes de processos citados
+
+REGRAS:
+- Use SÓ números que aparecem no panorama. NUNCA invente.
+- Compare processos quando fizer sentido (priorização é o mais valioso).
+- Se a base é pequena (poucos vídeos), seja cauteloso e diga isso.
+- Não comente pessoas; fale de processos e estações.
+
+Responda APENAS um JSON:
+{{"insights": [{{"prioridade": "...", "titulo": "...", "descricao": "...", "processos_relacionados": ["..."]}}, ...]}}
+
+PANORAMA DE TODOS OS PROCESSOS (JSON):
+"""
+
+
+def gerar_insights_globais(sb: Client, groq_client: Groq, empresa: str) -> int:
+    """Recalcula os insights de portfólio da empresa (substitui os anteriores).
+    Não-fatal. Retorna quantos insights foram persistidos.
+    """
+    try:
+        snap = montar_snapshot_global(sb, empresa)
+    except Exception as e:
+        log.warning(f"Insights globais: snapshot indisponível: {e}")
+        return 0
+
+    if snap["consolidado"]["videos_analisados"] == 0:
+        # Sem dados — limpa insights antigos e não gera nada.
+        try:
+            sb.table("insights_globais").delete().eq("empresa", empresa).execute()
+        except Exception:
+            pass
+        return 0
+
+    prompt = PROMPT_INSIGHTS_GLOBAIS.format(empresa=empresa)
+    try:
+        resp = groq_text_call(
+            groq_client,
+            prompt + json.dumps(snap, ensure_ascii=False, indent=2),
+            model=GROQ_MODEL_ANALISE,
+            json_mode=True,
+            max_tokens=2500,
+            temperatura=0.3,
+        )
+        insights = json.loads(resp).get("insights") or []
+    except Exception as e:
+        log.warning(f"Insights globais: falha ao gerar: {e}")
+        return 0
+
+    linhas = []
+    for it in insights:
+        if not isinstance(it, dict):
+            continue
+        rel = it.get("processos_relacionados")
+        if not isinstance(rel, list):
+            rel = []
+        linhas.append(
+            {
+                "empresa": empresa,
+                "prioridade": (it.get("prioridade") or "info").lower(),
+                "titulo": (it.get("titulo") or "").strip(),
+                "descricao": (it.get("descricao") or "").strip(),
+                "processos_relacionados": [str(x) for x in rel][:10],
+            }
+        )
+    if not linhas:
+        return 0
+
+    # Substitui o estado vigente (apaga antigos, insere novos)
+    try:
+        sb.table("insights_globais").delete().eq("empresa", empresa).execute()
+        sb.table("insights_globais").insert(linhas).execute()
+    except Exception as e:
+        log.warning(f"Insights globais: falha ao persistir: {e}")
+        return 0
+    log.info(f"Insights globais recalculados para {empresa}: {len(linhas)}")
+    return len(linhas)
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # ORQUESTRADOR — chamada principal do worker
 # ═════════════════════════════════════════════════════════════════════════
 def processar_video(
@@ -2197,6 +2648,12 @@ def processar_video(
         progress_cb("perguntas", 100, f"{n_perguntas} perguntas geradas")
     except Exception as e:
         log.warning(f"Geração de perguntas falhou (não-fatal): {e}")
+
+    # Recalcula insights de portfólio da empresa — NÃO-FATAL.
+    try:
+        gerar_insights_globais(sb, groq_client, empresa)
+    except Exception as e:
+        log.warning(f"Insights globais falharam (não-fatal): {e}")
 
     progress_cb("concluido", 100, "Processamento concluído")
     return {

@@ -17,32 +17,35 @@ export function AppShell() {
   }
 
   return (
-    <div className="min-h-full bg-slate-50">
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
-        <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
-          <button
-            onClick={() => navigate("/processos")}
-            className="flex items-center gap-2"
-            title="Ir para a lista de processos"
-          >
-            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-kv-purple to-kv-purple-dark flex items-center justify-center text-white font-bold">
-              K
+    <PrismProvider>
+      <div className="min-h-full bg-slate-50">
+        <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
+          <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
+            <button
+              onClick={() => navigate("/processos")}
+              className="flex items-center gap-2"
+              title="Ir para a lista de processos"
+            >
+              <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-kv-purple to-kv-purple-dark flex items-center justify-center text-white font-bold">
+                K
+              </div>
+              <span className="font-semibold text-slate-900">Kalidash Vision</span>
+            </button>
+            <div className="flex items-center gap-3 text-sm">
+              <div className="text-right leading-tight">
+                <div className="text-slate-900 font-medium">{empresa}</div>
+                <div className="text-slate-500 text-xs">{user?.email}</div>
+              </div>
+              <Button variant="ghost" onClick={signOut}>Sair</Button>
             </div>
-            <span className="font-semibold text-slate-900">Kalidash Vision</span>
-          </button>
-          <div className="flex items-center gap-3 text-sm">
-            <div className="text-right leading-tight">
-              <div className="text-slate-900 font-medium">{empresa}</div>
-              <div className="text-slate-500 text-xs">{user?.email}</div>
-            </div>
-            <Button variant="ghost" onClick={signOut}>Sair</Button>
           </div>
-        </div>
-      </header>
-      <main className="max-w-7xl mx-auto px-6 py-8">
-        <Outlet />
-      </main>
-    </div>
+        </header>
+        <main className="max-w-7xl mx-auto px-6 py-8">
+          <Outlet />
+        </main>
+        <PrismPanel />
+      </div>
+    </PrismProvider>
   );
 }
 
@@ -63,33 +66,30 @@ export function ProcessoShell() {
   if (setupMode) return <Outlet />;
 
   return (
-    <PrismProvider processoId={id!}>
-      <div>
-        <div className="mb-3 flex items-center justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-2 text-sm">
-            <Link
-              to="/processos"
-              className="inline-flex items-center gap-1 text-slate-500 hover:text-kv-purple-dark"
-            >
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              Processos
-            </Link>
-            <span className="text-slate-300">/</span>
-            <span className="text-slate-900 font-medium truncate max-w-md">
-              {isLoading ? <Spinner className="h-3 w-3" /> : data?.processo || "—"}
-            </span>
-          </div>
-          <div className="text-xs text-slate-400">
-            {data?.n_videos ?? 0} vídeo(s) analisado(s)
-          </div>
+    <div>
+      <div className="mb-3 flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-2 text-sm">
+          <Link
+            to="/processos"
+            className="inline-flex items-center gap-1 text-slate-500 hover:text-kv-purple-dark"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Processos
+          </Link>
+          <span className="text-slate-300">/</span>
+          <span className="text-slate-900 font-medium truncate max-w-md">
+            {isLoading ? <Spinner className="h-3 w-3" /> : data?.processo || "—"}
+          </span>
         </div>
-        <ProcessoTabs />
-        <Outlet />
+        <div className="text-xs text-slate-400">
+          {data?.n_videos ?? 0} vídeo(s) analisado(s)
+        </div>
       </div>
-      <PrismPanel />
-    </PrismProvider>
+      <ProcessoTabs />
+      <Outlet />
+    </div>
   );
 }
 
