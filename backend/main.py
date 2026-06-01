@@ -989,13 +989,14 @@ def setar_categoria_lean(
     sb = make_supabase_client()
     r = (
         sb.table("comportamentos")
-        .select("id, empresa")
+        .select("id, empresa, processo, label")
         .eq("id", comportamento_id)
         .execute()
     )
     if not r.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Comportamento não encontrado")
-    if r.data[0]["empresa"] != user.empresa:
+    alvo = r.data[0]
+    if alvo["empresa"] != user.empresa:
         raise HTTPException(status.HTTP_403_FORBIDDEN)
 
     update = (
@@ -1004,7 +1005,43 @@ def setar_categoria_lean(
         else {"categoria_lean": None, "categoria_lean_origem": None}  # libera pra IA reclassificar
     )
     sb.table("comportamentos").update(update).eq("id", comportamento_id).execute()
-    return {"ok": True, "categoria_lean": cat, "origem": "humano" if cat else None}
+
+    # Propagação cross-processo (mesma empresa, MESMO label):
+    # a decisão do gestor para 'andar' vale em toda a fábrica. Atualiza
+    # registros com o mesmo label que NÃO foram tocados manualmente em
+    # outros processos (origem em 'ia' | 'aprendido' | null), marcando-os
+    # como 'aprendido'. Nunca toca em 'humano' (cada processo pode ter
+    # decisão própria de propósito).
+    propagados = 0
+    if cat is not None and alvo.get("label"):
+        try:
+            r2 = (
+                sb.table("comportamentos")
+                .select("id, categoria_lean_origem")
+                .eq("empresa", user.empresa)
+                .eq("label", alvo["label"])
+                .neq("id", comportamento_id)
+                .execute()
+            )
+            for c in r2.data or []:
+                if (c.get("categoria_lean_origem") or "") == "humano":
+                    continue  # respeitar override deliberado em outro processo
+                try:
+                    sb.table("comportamentos").update(
+                        {"categoria_lean": cat, "categoria_lean_origem": "aprendido"}
+                    ).eq("id", c["id"]).execute()
+                    propagados += 1
+                except Exception as e:
+                    log.warning(f"Lean: falha ao propagar p/ {c['id']}: {e}")
+        except Exception as e:
+            log.warning(f"Lean: falha ao listar comportamentos para propagação: {e}")
+
+    return {
+        "ok": True,
+        "categoria_lean": cat,
+        "origem": "humano" if cat else None,
+        "propagados": propagados,
+    }
 
 
 # ═════════════════════════════════════════════════════════════════════════

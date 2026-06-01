@@ -709,13 +709,23 @@ function TempoPorComportamentoPanel({
 }) {
   const qc = useQueryClient();
   const [editId, setEditId] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
   const setCat = useMutation({
     mutationFn: ({ id, cat }: { id: string; cat: CategoriaLean | null }) =>
       api.comportamentos.setCategoria(id, cat),
-    onSuccess: () => {
+    onSuccess: (resp) => {
+      // Garante refresh dos KPIs, Pareto e composição em todas as telas.
       qc.invalidateQueries({ queryKey: ["dashboard"] });
+      qc.invalidateQueries({ queryKey: ["processos"] });
+      qc.invalidateQueries({ queryKey: ["insights-globais"] });
       setEditId(null);
+      const extra =
+        resp && (resp as { propagados?: number }).propagados
+          ? ` Aplicado também em ${(resp as { propagados: number }).propagados} comportamento(s) com o mesmo nome em outros processos.`
+          : "";
+      setFeedback(`Anotado. O Prism vai usar isso para classificar comportamentos parecidos.${extra}`);
+      window.setTimeout(() => setFeedback(null), 4500);
     },
   });
 
@@ -725,9 +735,14 @@ function TempoPorComportamentoPanel({
     <Card className="p-6">
       <PanelHeader
         titulo="Tempo por comportamento"
-        ajuda="Os comportamentos que mais consomem tempo. As cores das barras refletem a categoria Lean (verde = valor agregado, âmbar = apoio, vermelho = desperdício, cinza = ainda não classificado). Clique no chip da categoria para reclassificar."
+        ajuda="Os comportamentos que mais consomem tempo. Cores: verde = valor agregado, âmbar = apoio, vermelho = desperdício, cinza = não classificado. Clique no chip para reclassificar — sua decisão vale para comportamentos com o mesmo nome em outros processos. Marca ✓ = definida por você · ↺ = aprendida de você · ~ = sugestão da IA."
         leitura="A cor diz se aquele tempo está agregando valor ou não."
       />
+      {feedback && (
+        <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">
+          {feedback}
+        </div>
+      )}
       {dados.length === 0 ? (
         <p className="text-sm text-slate-500">Sem dados ainda.</p>
       ) : (
@@ -782,7 +797,7 @@ function CategoriaChip({
   pending,
 }: {
   cat: CategoriaLean | null | undefined;
-  origem: "ia" | "humano" | null;
+  origem: "ia" | "humano" | "aprendido" | null;
   editando: boolean;
   onClick: () => void;
   onSet: (c: CategoriaLean | null) => void;
@@ -820,19 +835,38 @@ function CategoriaChip({
       </div>
     );
   }
+  const origemTexto =
+    origem === "humano"
+      ? "definida por você"
+      : origem === "aprendido"
+        ? "aprendida de uma decisão sua anterior — mesmo nome em outro processo"
+        : origem === "ia"
+          ? "sugerida pela IA (sem precedente seu ainda)"
+          : "ainda não classificada";
+  const origemMarca =
+    origem === "humano" ? "✓" : origem === "aprendido" ? "↺" : origem === "ia" ? "~" : "";
+  const origemClasse =
+    origem === "humano"
+      ? "text-kv-purple-dark"
+      : origem === "aprendido"
+        ? "text-emerald-600"
+        : origem === "ia"
+          ? "text-slate-400"
+          : "";
+
   return (
     <button
       onClick={onClick}
-      title={
-        cat
-          ? `${labelCategoria(cat)}${origem === "humano" ? " · reclassificado por você" : " · pela IA"} (clique para mudar)`
-          : "Não classificado — clique para definir"
-      }
+      title={cat ? `${labelCategoria(cat)} · ${origemTexto} (clique para mudar)` : "Não classificado — clique para definir"}
       className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border border-slate-200 hover:border-slate-400 transition"
     >
       <span className="inline-block h-2 w-2 rounded-sm" style={{ background: cor }} />
       <span className="text-slate-600">{labelCategoria(cat)}</span>
-      {origem === "humano" && <span className="text-kv-purple-dark">✓</span>}
+      {origemMarca && (
+        <span className={origemClasse} aria-label={origemTexto}>
+          {origemMarca}
+        </span>
+      )}
     </button>
   );
 }

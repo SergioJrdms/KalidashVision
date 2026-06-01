@@ -117,10 +117,15 @@ export const api = {
   },
   comportamentos: {
     setCategoria: (comportamentoId: string, categoria_lean: CategoriaLean | null) =>
-      req<{ ok: boolean; categoria_lean: CategoriaLean | null; origem: string | null }>(
-        `/comportamentos/${comportamentoId}/categoria`,
-        { method: "PUT", body: JSON.stringify({ categoria_lean }) }
-      ),
+      req<{
+        ok: boolean;
+        categoria_lean: CategoriaLean | null;
+        origem: string | null;
+        propagados?: number;
+      }>(`/comportamentos/${comportamentoId}/categoria`, {
+        method: "PUT",
+        body: JSON.stringify({ categoria_lean }),
+      }),
   },
   // Prism com escopo: processoId definido → modo processo; null → modo global.
   prism: (processoId: string | null) => {

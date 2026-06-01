@@ -224,16 +224,37 @@ Cada comportamento canônico (`comportamentos.label`) recebe uma
 classificação alimenta o **Índice de Valor Agregado** (KPI estrela do
 dashboard) e colore os gráficos de Pareto e "Tempo por comportamento".
 
-Como é obtida:
-1. **Pela IA** (origem `'ia'`): ao final de `processar_video()`,
-   `classificar_comportamentos_lean()` pede ao `gpt-oss-120b` que
-   classifique cada comportamento ainda não-classificado, usando a
-   descrição do processo + as respostas das perguntas proativas como
-   base. Não-fatal.
-2. **Pelo gestor** (origem `'humano'`): no dashboard, clicando no chip
-   da categoria. O override do gestor **nunca é sobrescrito pela IA**.
-   Limpar a categoria (botão `×` no popover) devolve o comportamento ao
-   conjunto candidato à IA reclassificar na próxima execução.
+Como é obtida (três origens em `categoria_lean_origem`):
+
+1. **`'humano'`** — definida pelo gestor no dashboard, clicando no chip
+   da categoria. **Inviolável**: a IA nunca sobrescreve. Limpar (botão `×`
+   no popover) devolve o comportamento ao conjunto candidato à IA.
+2. **`'aprendido'`** — herdada de uma decisão humana anterior do mesmo
+   cliente (mesmo `label`, mesma empresa) por **match exato e
+   determinístico**, sem chamada ao LLM. Acontece de duas formas:
+   - na hora em que o gestor classifica um comportamento, a decisão é
+     **propagada para o mesmo `label` em outros processos da empresa**
+     que ainda não tinham override humano (o endpoint `PUT
+     /comportamentos/{id}/categoria` devolve `propagados`);
+   - no próximo `processar_video()`, qualquer comportamento novo cujo
+     `label` já tem decisão humana na empresa nasce já com a categoria
+     correta.
+3. **`'ia'`** — palpite do `gpt-oss-120b` para um `label` sem precedente
+   humano. A chamada agora recebe um **bloco de exemplos do cliente**
+   (`construir_bloco_categoria_aprendida`) com as decisões humanas
+   agrupadas por categoria, então a IA classifica alinhada ao critério
+   daquele cliente, não a um critério genérico. Não-fatal.
+
+> **Duas memórias separadas.** A memória de **label**
+> (`carregar_memoria_do_negocio`, lê de `eventos` validados) responde
+> *"qual comportamento é?"*. A memória de **categoria Lean**
+> (`carregar_memoria_categoria`, lê de `comportamentos.categoria_lean`
+> com origem humana) responde *"qual o valor daquele comportamento?"*.
+> Têm fontes, formatos e usos diferentes — não são unificadas.
+>
+> **Escopo da categoria** é a empresa (o valor de "andar" tende a ser
+> estável em toda a fábrica). Em conflito, a decisão do **processo
+> atual** vence.
 
 A plataforma só mede **como o tempo das pessoas é gasto**. Por isso o
 dashboard não inventa métricas que dependem de dados que não temos

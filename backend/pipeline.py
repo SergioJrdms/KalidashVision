@@ -1363,9 +1363,120 @@ def etapa_gerar_sugestoes(
 # ═════════════════════════════════════════════════════════════════════════
 # CLASSIFICAÇÃO LEAN — IA classifica cada comportamento em
 # valor_agregado | apoio | desperdicio (Lean / análise de valor).
-# Override do gestor (origem='humano') NUNCA é sobrescrito.
+#
+# Esta é a SEGUNDA MEMÓRIA da plataforma. Distinta da memória de label
+# (carregar_memoria_do_negocio). Aqui aprendemos o VALOR de cada
+# comportamento a partir das decisões humanas do gestor.
+#
+# Origens em comportamentos.categoria_lean_origem:
+#   'humano'   → o gestor classificou manualmente. INVIOLÁVEL pela IA.
+#   'aprendido'→ herdado de uma decisão humana anterior por match exato
+#                de label (mesma empresa). Alta confiança, sem LLM.
+#   'ia'       → palpite do LLM para um label sem precedente humano,
+#                guiado pelos exemplos do cliente quando disponíveis.
+#
+# Escopo: a memória de categoria é por EMPRESA (o valor de "andar"
+# costuma ser estável em toda a empresa), com preferência para a
+# decisão do PRÓPRIO processo quando houver conflito.
 # ═════════════════════════════════════════════════════════════════════════
 CATEGORIAS_LEAN_VALIDAS = {"valor_agregado", "apoio", "desperdicio"}
+
+
+def carregar_memoria_categoria(
+    sb: Client, empresa: str, processo: str | None = None
+) -> dict:
+    """Lê as decisões humanas de categoria Lean da empresa.
+
+    Retorna:
+      - 'mapa_humano':       label → categoria (vencedora). Preferência
+                              para a decisão do `processo` quando há
+                              conflito com outros processos da empresa.
+      - 'exemplos_por_cat':  {categoria: [labels...]} para o bloco
+                              de exemplos do prompt (até ~10 por categoria).
+      - 'n_decisoes':        contagem total de decisões humanas (para log).
+    """
+    memoria = {"mapa_humano": {}, "exemplos_por_cat": {}, "n_decisoes": 0}
+    try:
+        r = (
+            sb.table("comportamentos")
+            .select("label, categoria_lean, categoria_lean_origem, processo")
+            .eq("empresa", empresa)
+            .eq("categoria_lean_origem", "humano")
+            .limit(2000)
+            .execute()
+        )
+        humanos = r.data or []
+    except Exception as e:
+        log.warning(f"Lean: falha ao carregar memória de categoria: {e}")
+        return memoria
+
+    if not humanos:
+        return memoria
+
+    # Conflito entre processos: vence a decisão do processo atual; fora
+    # disso, a categoria mais frequente para aquele label entre processos
+    # da empresa.
+    por_label_local: dict[str, str] = {}
+    por_label_outros: dict[str, Counter] = {}
+    for h in humanos:
+        label = (h.get("label") or "").strip()
+        cat = (h.get("categoria_lean") or "").strip().lower()
+        if not label or cat not in CATEGORIAS_LEAN_VALIDAS:
+            continue
+        if processo and h.get("processo") == processo:
+            por_label_local[label] = cat
+        else:
+            por_label_outros.setdefault(label, Counter())[cat] += 1
+
+    mapa: dict[str, str] = {}
+    for lbl, ctr in por_label_outros.items():
+        mapa[lbl] = ctr.most_common(1)[0][0]
+    mapa.update(por_label_local)  # local sobrescreve
+
+    exemplos: dict[str, list[str]] = {c: [] for c in CATEGORIAS_LEAN_VALIDAS}
+    for lbl, cat in mapa.items():
+        if len(exemplos[cat]) < 12:
+            exemplos[cat].append(lbl)
+
+    memoria["mapa_humano"] = mapa
+    memoria["exemplos_por_cat"] = exemplos
+    memoria["n_decisoes"] = len(mapa)
+    log.info(
+        f"Lean memória categoria · {empresa}: {len(mapa)} labels com decisão humana "
+        f"(VA:{len(exemplos['valor_agregado'])}, Apoio:{len(exemplos['apoio'])}, "
+        f"Desp:{len(exemplos['desperdicio'])})"
+    )
+    return memoria
+
+
+def construir_bloco_categoria_aprendida(memoria_categoria: dict) -> str:
+    """Bloco de texto pro prompt: exemplos das decisões do gestor para
+    cada categoria. Vazio se não houver decisões."""
+    exemplos = memoria_categoria.get("exemplos_por_cat") or {}
+    if not any(exemplos.values()):
+        return ""
+    linhas = [
+        "CRITÉRIO DE CATEGORIA DESTE CLIENTE (decisões anteriores do gestor — USE como referência: comportamentos semanticamente parecidos a estes provavelmente caem na MESMA categoria):"
+    ]
+    rotulos = {
+        "valor_agregado": "VALOR AGREGADO (o cliente considera estas como valor):",
+        "apoio": "APOIO (o cliente considera estas como apoio):",
+        "desperdicio": "DESPERDÍCIO (o cliente considera estas como desperdício):",
+    }
+    for cat in ("valor_agregado", "apoio", "desperdicio"):
+        lst = exemplos.get(cat) or []
+        if not lst:
+            continue
+        linhas.append("")
+        linhas.append(rotulos[cat])
+        for lbl in lst:
+            linhas.append(f"  - {lbl}")
+    linhas.append("")
+    linhas.append(
+        "REGRA DURA: se o comportamento a classificar é semanticamente equivalente a um dos exemplos acima, USE a mesma categoria do exemplo. Não invente uma categoria diferente."
+    )
+    return "\n".join(linhas) + "\n\n"
+
 
 PROMPT_CLASSIFICAR_LEAN = """Você é um especialista em Lean Manufacturing classificando comportamentos observados na operação da empresa "{empresa}" no processo "{processo}".
 
@@ -1374,13 +1485,12 @@ Classifique CADA comportamento abaixo em UMA destas três categorias:
 - "apoio": atividade necessária para que o valor agregado aconteça, mas que por si só não agrega valor ao cliente (ex.: conferir, registrar, organizar, abastecer, preparar máquina, comunicar).
 - "desperdicio": atividade que consome tempo sem necessidade — espera, ociosidade, deslocamento, retrabalho, movimentação excessiva, busca por itens.
 
-{bloco_dominio}
-
-REGRAS:
+{bloco_dominio}{bloco_categoria}REGRAS:
 - Decida pela ação MAIS PROVÁVEL dado o vocabulário e o contexto de domínio acima. Se a descrição do processo / conhecimento adquirido descrevem a ação como obrigatória/produtiva, ela tende a ser "valor_agregado" ou "apoio".
 - "acao_indefinida" sempre vira "apoio" (sem informação suficiente para chamar de desperdício).
 - Comportamentos como "operar_computador" geralmente são "apoio" (registro, conferência), a menos que a descrição do processo deixe claro que digitar É o trabalho.
 - Comportamentos como "andar", "esperar", "ocioso", "parado", "buscar" tendem a "desperdicio".
+- PRIORIDADE: se o "critério de categoria deste cliente" (acima) cobre o caso, alinhe a essa decisão — esse é o critério REAL do cliente.
 - Responda APENAS um JSON estrito (categoria SEM espaços, snake_case):
 {{"classificacoes": [{{"label": "operar_computador", "categoria": "apoio"}}, ...]}}
 
@@ -1400,12 +1510,16 @@ def classificar_comportamentos_lean(
     reclassificar_ia: bool = False,
 ) -> int:
     """Classifica em batch os comportamentos do contexto que ainda não têm
-    `categoria_lean`. Nunca toca em quem tem origem='humano' (override do gestor
-    sempre vence). Se `reclassificar_ia=True`, também reanalisa quem tem
-    origem='ia' (útil quando o conhecimento de domínio mudou bastante).
+    `categoria_lean` definitiva.
 
-    Retorna o número de comportamentos efetivamente atualizados.
-    Não-fatal: erros são apenas logados.
+    Estratégia em 2 níveis:
+      1) Match exato por label na memória humana da empresa (sem LLM) →
+         categoria 'aprendido'. Decisão do próprio processo prevalece.
+      2) Para os restantes (sem precedente humano), uma única chamada ao
+         LLM com o bloco de exemplos do cliente → categoria 'ia'.
+
+    Nunca toca em quem tem origem='humano'. Não-fatal.
+    Retorna total de comportamentos atualizados.
     """
     try:
         r = (
@@ -1425,27 +1539,56 @@ def classificar_comportamentos_lean(
     for c in todos:
         origem = c.get("categoria_lean_origem")
         if origem == "humano":
-            continue
-        if c.get("categoria_lean") and origem == "ia" and not reclassificar_ia:
+            continue  # inviolável
+        # 'aprendido' e 'ia' são candidatos a refinamento se reclassificar_ia
+        if c.get("categoria_lean") and origem in ("ia", "aprendido") and not reclassificar_ia:
             continue
         candidatos.append(c)
 
     if not candidatos:
         return 0
 
+    # ─── Nível 1: match exato pela memória humana (escopo empresa) ────
+    mem_cat = carregar_memoria_categoria(sb, empresa, processo)
+    mapa_humano: dict[str, str] = mem_cat.get("mapa_humano") or {}
+
+    aprendidos = 0
+    para_llm = []
+    for c in candidatos:
+        lbl = c.get("label") or ""
+        cat = mapa_humano.get(lbl)
+        if cat in CATEGORIAS_LEAN_VALIDAS:
+            try:
+                sb.table("comportamentos").update(
+                    {"categoria_lean": cat, "categoria_lean_origem": "aprendido"}
+                ).eq("id", c["id"]).execute()
+                aprendidos += 1
+            except Exception as e:
+                log.warning(f"Lean: falha ao aplicar match aprendido em {lbl}: {e}")
+        else:
+            para_llm.append(c)
+
+    if aprendidos:
+        log.info(f"Lean: {aprendidos} comportamento(s) herdaram categoria humana por match exato.")
+
+    if not para_llm:
+        return aprendidos
+
+    # ─── Nível 2: LLM, guiado pelos exemplos do cliente ───────────────
     bloco_dominio = construir_bloco_dominio(descricao_processo or "", conhecimento_adquirido or "")
     if not bloco_dominio.strip():
-        bloco_dominio = "(o cliente não forneceu descrição nem respondeu perguntas — use convenções de Lean para decidir)"
+        bloco_dominio = "(o cliente não forneceu descrição nem respondeu perguntas — use convenções de Lean para decidir)\n\n"
+    bloco_categoria = construir_bloco_categoria_aprendida(mem_cat)
 
     lista_txt = "\n".join(
         f'- label="{c["label"]}" · descricao="{(c.get("descricao") or "").strip()}"'
-        for c in candidatos
+        for c in para_llm
     )
-
     prompt = PROMPT_CLASSIFICAR_LEAN.format(
         empresa=empresa,
         processo=processo,
-        bloco_dominio=bloco_dominio.strip(),
+        bloco_dominio=bloco_dominio.rstrip() + "\n\n" if bloco_dominio.strip() else "",
+        bloco_categoria=bloco_categoria,
         lista_comportamentos=lista_txt,
     )
 
@@ -1461,11 +1604,11 @@ def classificar_comportamentos_lean(
         dados = json.loads(resposta)
         classifs = dados.get("classificacoes") or []
     except Exception as e:
-        log.warning(f"Lean: falha ao classificar: {e}")
-        return 0
+        log.warning(f"Lean: falha ao classificar via LLM: {e}")
+        return aprendidos
 
-    por_label = {c["label"]: c["id"] for c in candidatos}
-    atualizados = 0
+    por_label = {c["label"]: c["id"] for c in para_llm}
+    atualizados_ia = 0
     for item in classifs:
         if not isinstance(item, dict):
             continue
@@ -1480,12 +1623,15 @@ def classificar_comportamentos_lean(
             sb.table("comportamentos").update(
                 {"categoria_lean": cat, "categoria_lean_origem": "ia"}
             ).eq("id", por_label[label]).execute()
-            atualizados += 1
+            atualizados_ia += 1
         except Exception as e:
             log.warning(f"Lean: falha ao atualizar {label}: {e}")
 
-    log.info(f"Lean: {atualizados}/{len(candidatos)} comportamentos classificados ({empresa}/{processo}).")
-    return atualizados
+    log.info(
+        f"Lean: {empresa}/{processo} · {aprendidos} aprendidos (match humano) "
+        f"+ {atualizados_ia} via IA (de {len(para_llm)} candidatos novos)."
+    )
+    return aprendidos + atualizados_ia
 
 
 # ═════════════════════════════════════════════════════════════════════════

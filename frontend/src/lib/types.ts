@@ -61,7 +61,7 @@ export interface DistribuicaoComportamento {
   pct_tempo: number;
   em_n_videos: number;
   categoria_lean?: CategoriaLean | null;
-  categoria_lean_origem?: "ia" | "humano" | null;
+  categoria_lean_origem?: "ia" | "humano" | "aprendido" | null;
   comportamento_id?: string | null;
   pct_acumulado?: number;
 }
