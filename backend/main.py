@@ -38,6 +38,8 @@ from .pipeline import (
     responder_chat_global,
     gerar_sugestoes_chat_global,
     gerar_insights_globais,
+    montar_serie_temporal,
+    analisar_padroes_globais,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -275,11 +277,13 @@ def excluir_processo_endpoint(
             except Exception as e2:
                 log.error(f"Falha ao limpar {tabela} de {user.empresa}/{nome}: {e2}")
 
-    # 3) Recalcula insights de portfólio — não-fatal.
+    # 3) Recalcula insights e padrões globais — o portfólio mudou. Não-fatal.
     try:
-        gerar_insights_globais(sb, make_groq_client(), user.empresa)
+        gc = make_groq_client()
+        gerar_insights_globais(sb, gc, user.empresa)
+        analisar_padroes_globais(sb, gc, user.empresa)
     except Exception as e:
-        log.warning(f"Recalcular insights após exclusão falhou: {e}")
+        log.warning(f"Recalcular insights/padrões após exclusão falhou: {e}")
 
     return {"ok": True}
 
@@ -523,6 +527,17 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         "composicao_valor": composicao_valor,
         "pareto": pareto,
         "videos": videos,
+        "padroes_resumo": (
+            sb.table("padroes_processo")
+            .select("id, tipo, camada, titulo, relevancia, confianca")
+            .eq("empresa", user.empresa)
+            .eq("processo", nome)
+            .order("criado_em", desc=True)
+            .limit(4)
+            .execute()
+            .data
+        )
+        or [],
     }
 
 
@@ -1452,6 +1467,50 @@ def prism_insights_globais(user: CurrentUser = Depends(get_current_user)):
         .eq("empresa", user.empresa)
         .order("criado_em", desc=True)
         .limit(20)
+        .execute()
+    )
+    return r.data or []
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# PADRÕES (temporais/estruturais por processo + globais por empresa)
+# ═════════════════════════════════════════════════════════════════════════
+@app.get("/processos/{processo_id}/padroes")
+def padroes_do_processo(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = (
+        sb.table("padroes_processo")
+        .select(
+            "id, tipo, camada, titulo, descricao, comportamentos_relacionados, "
+            "categoria_relacionada, confianca, relevancia, recomendacao, n_videos_analisados, criado_em"
+        )
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .order("criado_em", desc=True)
+        .limit(50)
+        .execute()
+    )
+    return r.data or []
+
+
+@app.get("/processos/{processo_id}/serie-temporal")
+def serie_temporal_processo(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    serie = montar_serie_temporal(sb, user.empresa, nome)
+    return serie
+
+
+@app.get("/prism/padroes-globais")
+def padroes_globais_empresa(user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    r = (
+        sb.table("padroes_globais")
+        .select("id, tipo, titulo, descricao, processos_relacionados, confianca, relevancia, recomendacao, criado_em")
+        .eq("empresa", user.empresa)
+        .order("criado_em", desc=True)
+        .limit(30)
         .execute()
     )
     return r.data or []

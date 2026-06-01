@@ -113,6 +113,32 @@ export default function Dashboard() {
       {/* Banners de ação */}
       <BannersContextuais data={data} processoId={id!} />
 
+      {data.padroes_resumo && data.padroes_resumo.length > 0 && (
+        <Card className="p-4 bg-gradient-to-r from-kv-purple-50 to-white border-kv-purple-200">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="min-w-[14rem] flex-1">
+              <p className="text-sm font-medium text-kv-purple-dark mb-1">
+                O Prism identificou padrões na sua operação
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {data.padroes_resumo.slice(0, 4).map((p) => (
+                  <span
+                    key={p.id}
+                    className="text-xs bg-white border border-kv-purple-200 text-slate-700 rounded-full px-2.5 py-0.5"
+                    title={`${p.camada} · confiança ${p.confianca}`}
+                  >
+                    {p.titulo}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <Link to={`/processos/${id}/padroes`}>
+              <Button variant="secondary">Ver padrões</Button>
+            </Link>
+          </div>
+        </Card>
+      )}
+
       {/* B · Sugestões + Resumo das oportunidades */}
       <SugestoesBloco sugestoes={data.sugestoes} origens={data.origens} />
 

@@ -11,6 +11,7 @@ import Upload from "./pages/Upload";
 import Dashboard from "./pages/Dashboard";
 import Validacao from "./pages/Validacao";
 import Eventos from "./pages/Eventos";
+import Padroes from "./pages/Padroes";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -49,6 +50,7 @@ export default function App() {
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="validacao" element={<Validacao />} />
             <Route path="eventos" element={<Eventos />} />
+            <Route path="padroes" element={<Padroes />} />
           </Route>
         </Route>
         <Route path="*" element={<Navigate to="/processos" replace />} />

@@ -183,6 +183,40 @@ create table if not exists insights_globais (
     criado_em timestamptz default now()
 );
 
+-- Padrões por processo (recorrência/evolução — distinto de sugestoes_melhoria)
+create table if not exists padroes_processo (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    tipo text,                             -- tendencia|recorrencia|desvio|volatilidade|fluxo|desperdicio|valor
+    camada text,                           -- temporal | estrutural
+    titulo text,
+    descricao text,
+    comportamentos_relacionados jsonb,
+    categoria_relacionada text,            -- valor_agregado|apoio|desperdicio|null
+    confianca text,                        -- alta | media | baixa
+    relevancia text,                       -- alta | media | info
+    recomendacao text,
+    evidencia jsonb,                       -- números que sustentam o padrão
+    n_videos_analisados int,
+    criado_em timestamptz default now()
+);
+
+-- Padrões globais (entre processos da empresa — sistêmicos/benchmarking)
+create table if not exists padroes_globais (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    tipo text,                             -- compartilhado|benchmarking|sistemico
+    titulo text,
+    descricao text,
+    processos_relacionados jsonb,
+    confianca text,
+    relevancia text,
+    recomendacao text,
+    evidencia jsonb,
+    criado_em timestamptz default now()
+);
+
 alter table sugestoes_melhoria add column if not exists impacto_estimado text;
 alter table comportamentos    add column if not exists categoria_lean        text;
 alter table comportamentos    add column if not exists categoria_lean_origem text;
@@ -206,6 +240,8 @@ create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, 
 create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, escopo, atualizada_em desc);
 create index if not exists idx_prism_mensagens_conv on prism_mensagens(conversa_id, criada_em);
 create index if not exists idx_insights_globais_emp on insights_globais(empresa, criado_em desc);
+create index if not exists idx_padroes_proc_ctx on padroes_processo(empresa, processo, criado_em desc);
+create index if not exists idx_padroes_globais_emp on padroes_globais(empresa, criado_em desc);
 
 -- ════════════════════════════════════════════════════════════════════════
 -- RPC transacional: exclui um processo inteiro de (empresa, processo).
@@ -226,6 +262,8 @@ begin
   delete from sugestoes_melhoria
     where empresa = p_empresa and processo = p_processo;
   delete from comportamentos
+    where empresa = p_empresa and processo = p_processo;
+  delete from padroes_processo
     where empresa = p_empresa and processo = p_processo;
   delete from perguntas_processo
     where empresa = p_empresa and processo = p_processo;
@@ -2015,6 +2053,7 @@ def montar_snapshot_chat(sb: Client, empresa: str, processo: str) -> dict:
         "pct_validado_por_humano": round(n_val / max(1, len(base)) * 100, 1),
         "distribuicao_comportamentos": distrib,
         "sugestoes_recentes": sugs,
+        "padroes_vigentes": resumir_padroes_para_snapshot(sb, empresa, processo),
     }
 
 
@@ -2442,6 +2481,7 @@ def montar_snapshot_global(sb: Client, empresa: str) -> dict:
             "composicao_valor": composicao_consolidada,
         },
         "processos": processos,
+        "padroes_globais_vigentes": resumir_padroes_para_snapshot(sb, empresa, None),
     }
 
 
@@ -2650,6 +2690,539 @@ def gerar_insights_globais(sb: Client, groq_client: Groq, empresa: str) -> int:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# INTELIGÊNCIA DE PADRÕES (recorrência e evolução ao longo do tempo)
+#
+# PRINCÍPIO: todos os NÚMEROS (tendência, recorrência, z-score, sobreposição
+# entre processos) são calculados aqui em Python — determinístico e
+# auditável. O LLM SÓ interpreta e dá linguagem; nunca inventa número.
+#
+# Padrão ≠ retrato: o eixo é RECORRÊNCIA e EVOLUÇÃO, não o estado atual
+# (que já é coberto por sugestoes_melhoria e insights_globais).
+#
+# A plataforma mede TEMPO das pessoas. "Padrão de erro" = padrão de
+# DESPERDÍCIO de tempo (categoria 'desperdicio'); "padrão de acerto" =
+# VALOR AGREGADO. Nunca defeito/refugo/qualidade/output.
+# ═════════════════════════════════════════════════════════════════════════
+MIN_VIDEOS_PADRAO = 3
+MIN_PROCESSOS_GLOBAL = 2
+
+
+def _media(xs: list[float]) -> float:
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _desvio_padrao(xs: list[float]) -> float:
+    if len(xs) < 2:
+        return 0.0
+    m = _media(xs)
+    return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+
+
+def montar_serie_temporal(sb: Client, empresa: str, processo: str) -> dict:
+    """Série por vídeo (ordenada por processado_em) com o SHARE de % do
+    tempo por comportamento (label efetivo) e por categoria Lean. Tudo
+    normalizado para ser comparável entre turnos de durações diferentes.
+    """
+    videos = (
+        sb.table("videos")
+        .select("id, nome, duracao_s, processado_em")
+        .eq("empresa", empresa)
+        .eq("processo", processo)
+        .order("processado_em", desc=False)
+        .limit(500)
+        .execute()
+        .data
+    ) or []
+
+    eventos = (
+        sb.table("eventos")
+        .select(
+            "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
+            "tempo_fim_s, validacao_correto, pessoa_track_id"
+        )
+        .eq("empresa", empresa)
+        .eq("processo", processo)
+        .limit(100000)
+        .execute()
+        .data
+    ) or []
+
+    comps = (
+        sb.table("comportamentos")
+        .select("label, categoria_lean")
+        .eq("empresa", empresa)
+        .eq("processo", processo)
+        .execute()
+        .data
+    ) or []
+    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+
+    # agrupa eventos por vídeo
+    por_video: dict = defaultdict(list)
+    for e in eventos:
+        if e.get("validacao_correto") is False:
+            continue
+        por_video[e.get("video_id")].append(e)
+
+    pontos = []
+    for v in videos:
+        evs = por_video.get(v["id"], [])
+        dur_por_label: dict[str, float] = defaultdict(float)
+        dur_por_cat: dict[str, float] = defaultdict(float)
+        pessoas = set()
+        total = 0.0
+        for e in evs:
+            lbl = _label_efetivo(e)
+            d = max(0, (e.get("tempo_fim_s") or 0) - (e.get("tempo_inicio_s") or 0))
+            dur_por_label[lbl] += d
+            cat = cat_por_label.get(lbl) or "nao_classificado"
+            dur_por_cat[cat] += d
+            pessoas.add(e.get("pessoa_track_id"))
+            total += d
+        total = total or 1
+        pontos.append(
+            {
+                "video_id": v["id"],
+                "nome": v.get("nome"),
+                "processado_em": v.get("processado_em"),
+                "n_eventos": len(evs),
+                "n_pessoas": len(pessoas),
+                "share_comportamento": {
+                    k: round(val / total * 100, 1) for k, val in dur_por_label.items()
+                },
+                "share_categoria": {
+                    k: round(val / total * 100, 1) for k, val in dur_por_cat.items()
+                },
+            }
+        )
+
+    # labels e categorias que aparecem na série
+    labels = sorted({k for p in pontos for k in p["share_comportamento"]})
+    cats = sorted({k for p in pontos for k in p["share_categoria"]})
+    return {"pontos": pontos, "labels": labels, "categorias": cats, "n_videos": len(pontos)}
+
+
+def _serie_de(serie: dict, chave: str, item: str) -> list[float]:
+    """Extrai a série temporal (com 0 onde ausente) de um label/categoria."""
+    return [p[chave].get(item, 0.0) for p in serie["pontos"]]
+
+
+def calcular_sinais_padroes(serie: dict) -> dict:
+    """Camada A (temporal) + B (estrutural), tudo em Python.
+
+    Retorna um dict de sinais quantitativos prontos para o LLM interpretar.
+    """
+    pontos = serie["pontos"]
+    n = len(pontos)
+    sinais: dict = {
+        "n_videos": n,
+        "tendencias": [],
+        "recorrencias": [],
+        "desvios": [],
+        "volatilidades": [],
+        "estrutural_desperdicio": [],
+        "estrutural_valor": [],
+    }
+    if n < MIN_VIDEOS_PADRAO:
+        return sinais
+
+    def analisa(chave: str, itens: list[str], rotulo: str):
+        for item in itens:
+            s = _serie_de(serie, chave, item)
+            if not any(s):
+                continue
+            media = _media(s)
+            std = _desvio_padrao(s)
+            # tendência: 1º terço vs último terço
+            terco = max(1, n // 3)
+            ini = _media(s[:terco])
+            fim = _media(s[-terco:])
+            delta = round(fim - ini, 1)
+            recorr = round(sum(1 for x in s if x > 0.5) / n * 100, 0)
+            # desvio recente (z-score do último ponto vs histórico anterior)
+            z = 0.0
+            if n >= 4:
+                hist = s[:-1]
+                m_h, sd_h = _media(hist), _desvio_padrao(hist)
+                if sd_h > 0:
+                    z = round((s[-1] - m_h) / sd_h, 2)
+            if abs(delta) >= 5:
+                sinais["tendencias"].append(
+                    {
+                        "tipo": rotulo,
+                        "item": item,
+                        "direcao": "subindo" if delta > 0 else "descendo",
+                        "delta_pp": delta,
+                        "share_inicial_pct": round(ini, 1),
+                        "share_final_pct": round(fim, 1),
+                        "media_pct": round(media, 1),
+                    }
+                )
+            if recorr >= 70 and media >= 3:
+                sinais["recorrencias"].append(
+                    {"tipo": rotulo, "item": item, "presenca_pct_turnos": recorr, "media_pct": round(media, 1)}
+                )
+            if abs(z) >= 2:
+                sinais["desvios"].append(
+                    {
+                        "tipo": rotulo,
+                        "item": item,
+                        "z_score": z,
+                        "ultimo_pct": round(s[-1], 1),
+                        "media_historica_pct": round(_media(s[:-1]), 1),
+                    }
+                )
+            if std >= 8 and media >= 3:
+                sinais["volatilidades"].append(
+                    {"tipo": rotulo, "item": item, "desvio_padrao_pp": round(std, 1), "media_pct": round(media, 1)}
+                )
+
+    analisa("share_comportamento", serie["labels"], "comportamento")
+    analisa("share_categoria", serie["categorias"], "categoria")
+
+    # ── Camada B: estrutural (desperdício e valor recorrentes) ──
+    # média do share por categoria ao longo dos turnos
+    for cat, alvo in (("desperdicio", "estrutural_desperdicio"), ("valor_agregado", "estrutural_valor")):
+        ranking = []
+        for lbl in serie["labels"]:
+            s = _serie_de(serie, "share_comportamento", lbl)
+            if not any(s):
+                continue
+            ranking.append((lbl, _media(s), round(sum(1 for x in s if x > 0.5) / len(s) * 100, 0)))
+        ranking.sort(key=lambda x: x[1], reverse=True)
+        # share médio da categoria
+        s_cat = _serie_de(serie, "share_categoria", cat)
+        media_cat = round(_media(s_cat), 1)
+        if media_cat >= 1:
+            sinais[alvo].append(
+                {
+                    "categoria": cat,
+                    "media_share_pct": media_cat,
+                    "recorrencia_pct_turnos": round(sum(1 for x in s_cat if x > 0.5) / len(s_cat) * 100, 0),
+                    "top_comportamentos": [
+                        {"item": lbl, "media_pct": round(m, 1), "presenca_pct": rec}
+                        for lbl, m, rec in ranking[:4]
+                    ],
+                }
+            )
+
+    return sinais
+
+
+def calcular_sinais_globais(sb: Client, empresa: str) -> dict:
+    """Camada C — cruza os processos da empresa (em Python)."""
+    portfolio = agregar_portfolio(sb, empresa)
+    processos_com_dados = {n: st for n, st in portfolio.items() if st["n_videos"] > 0}
+    n_proc = len(processos_com_dados)
+
+    sinais: dict = {
+        "n_processos_com_dados": n_proc,
+        "compartilhados": [],
+        "benchmarking": [],
+        "sistemicos": [],
+    }
+    if n_proc < MIN_PROCESSOS_GLOBAL:
+        return sinais
+
+    # comportamento (label) → em quantos processos aparece com share relevante (>=5%)
+    presenca: dict[str, list] = defaultdict(list)
+    presenca_desp: dict[str, list] = defaultdict(list)
+    for nome, st in processos_com_dados.items():
+        for tc in st.get("top_comportamentos", []):
+            lbl = tc.get("comportamento")
+            pct = tc.get("pct_tempo", 0)
+            cat = tc.get("categoria_lean")
+            if pct >= 5:
+                presenca[lbl].append({"processo": nome, "pct": pct, "categoria": cat})
+                if cat == "desperdicio":
+                    presenca_desp[lbl].append({"processo": nome, "pct": pct})
+
+    for lbl, ocorr in presenca.items():
+        if len(ocorr) >= max(2, round(n_proc * 0.5)):
+            sinais["compartilhados"].append(
+                {
+                    "item": lbl,
+                    "n_processos": len(ocorr),
+                    "de_total": n_proc,
+                    "categoria": ocorr[0].get("categoria"),
+                    "share_medio_pct": round(_media([o["pct"] for o in ocorr]), 1),
+                    "processos": [o["processo"] for o in ocorr],
+                }
+            )
+
+    # sistêmico: um DESPERDÍCIO recorrente em vários processos
+    for lbl, ocorr in presenca_desp.items():
+        if len(ocorr) >= max(2, round(n_proc * 0.5)):
+            sinais["sistemicos"].append(
+                {
+                    "item": lbl,
+                    "n_processos": len(ocorr),
+                    "de_total": n_proc,
+                    "share_medio_pct": round(_media([o["pct"] for o in ocorr]), 1),
+                    "processos": [o["processo"] for o in ocorr],
+                }
+            )
+
+    # benchmarking: ranking por índice de valor agregado
+    ranking_va = sorted(
+        (
+            {
+                "processo": nome,
+                "valor_agregado_pct": st["composicao_valor"].get("valor_agregado_pct", 0),
+                "desperdicio_pct": st["composicao_valor"].get("desperdicio_pct", 0),
+                "n_videos": st["n_videos"],
+            }
+            for nome, st in processos_com_dados.items()
+        ),
+        key=lambda x: x["valor_agregado_pct"],
+        reverse=True,
+    )
+    sinais["benchmarking"] = ranking_va
+    return sinais
+
+
+# ─── Interpretação por LLM (só dá linguagem aos números) ──────────────────
+PROMPT_PADROES_PROCESSO = """Você é o Prism, especialista em produtividade industrial (Lean), analisando PADRÕES na operação da empresa "{empresa}", processo "{processo}".
+
+DIFERENÇA CRUCIAL: você NÃO está descrevendo o estado atual (isso já foi feito em outra etapa). Você está identificando PADRÕES de RECORRÊNCIA e EVOLUÇÃO ao longo dos turnos (vídeos). Ex.: "o desperdício subiu de 18% para 31% em 6 turnos" (tendência), "deslocamento aparece em 100% dos turnos" (recorrência), "o último turno destoou muito" (desvio).
+
+OS NÚMEROS JÁ ESTÃO CALCULADOS (abaixo, em JSON). Sua tarefa é INTERPRETAR e dar linguagem — NUNCA invente ou estime números. Use só os que estão nos sinais.
+
+{bloco_dominio}Para cada padrão relevante, produza:
+- tipo: "tendencia" | "recorrencia" | "desvio" | "volatilidade" | "fluxo" | "desperdicio" | "valor"
+- camada: "temporal" (tendência/recorrência/desvio/volatilidade) ou "estrutural" (fluxo/desperdicio/valor)
+- titulo: curto e direto, com o número-chave (ex.: "Desperdício subindo: 18% → 31% em 6 turnos")
+- descricao: 1-3 frases interpretando o padrão com os NÚMEROS REAIS dos sinais
+- comportamentos_relacionados: lista de labels citados
+- categoria_relacionada: "valor_agregado" | "apoio" | "desperdicio" | null
+- confianca: "alta" | "media" | "baixa" (conforme nº de turnos: poucos turnos = baixa/média)
+- relevancia: "alta" | "media" | "info"
+- recomendacao: ação ancorada NO PADRÃO (ex.: "como o deslocamento vem crescendo, investigar mudança recente de layout") — diferente de sugestão pontual; pode ser null se não houver ação clara
+
+REGRAS:
+- "Padrão de erro" = desperdício de TEMPO (categoria desperdicio). NUNCA fale de defeito, refugo, qualidade ou output — a plataforma não mede isso.
+- Se há poucos turnos (n_videos baixo), seja cauteloso e use confiança baixa/média.
+- Gere de 0 a 6 padrões. Se os sinais não sustentam nenhum padrão claro, devolva lista vazia.
+
+SINAIS QUANTITATIVOS (JSON, já calculados):
+{sinais}
+
+Responda APENAS um JSON:
+{{"padroes": [{{"tipo":"...","camada":"...","titulo":"...","descricao":"...","comportamentos_relacionados":[...],"categoria_relacionada":"...","confianca":"...","relevancia":"...","recomendacao":"..."}}]}}
+"""
+
+
+PROMPT_PADROES_GLOBAIS = """Você é o Prism, com VISÃO DE PORTFÓLIO da empresa "{empresa}". Identifique PADRÕES SISTÊMICOS entre os processos (não o retrato atual, que já foi feito).
+
+Tipos de padrão global:
+- "compartilhado": o mesmo comportamento relevante aparece em vários processos
+- "benchmarking": qual processo é referência (melhor índice de valor agregado) e o contraste com os demais
+- "sistemico": um DESPERDÍCIO recorrente em várias linhas → sinal de causa-raiz organizacional (alto valor para a direção)
+
+OS NÚMEROS JÁ ESTÃO CALCULADOS (abaixo). INTERPRETE, não invente.
+
+Para cada padrão:
+- tipo: "compartilhado" | "benchmarking" | "sistemico"
+- titulo: curto com o número-chave (ex.: "'andar' é desperdício dominante em 4 de 5 linhas")
+- descricao: 1-3 frases com os NÚMEROS REAIS
+- processos_relacionados: nomes dos processos citados
+- confianca: "alta" | "media" | "baixa"
+- relevancia: "alta" | "media" | "info"
+- recomendacao: ação de nível EMPRESA ancorada no padrão (ex.: replicar o layout da linha referência); pode ser null
+
+REGRAS:
+- Só desperdício/valor de TEMPO. Nunca defeito/qualidade/output.
+- Poucos processos = confiança menor.
+- Gere de 0 a 5 padrões; lista vazia se não houver padrão claro.
+
+SINAIS GLOBAIS (JSON, já calculados):
+{sinais}
+
+Responda APENAS: {{"padroes": [{{"tipo":"...","titulo":"...","descricao":"...","processos_relacionados":[...],"confianca":"...","relevancia":"...","recomendacao":"..."}}]}}
+"""
+
+
+def _confianca_por_n(n: int, minimo: int) -> str:
+    if n >= minimo + 4:
+        return "alta"
+    if n >= minimo + 1:
+        return "media"
+    return "baixa"
+
+
+def analisar_padroes_processo(
+    sb: Client,
+    groq_client: Groq,
+    empresa: str,
+    processo: str,
+    *,
+    descricao_processo: str = "",
+    conhecimento_adquirido: str = "",
+) -> int:
+    """Calcula sinais (Python) e pede ao LLM a interpretação. Persiste
+    (substituindo os vigentes). Não-fatal. Retorna nº de padrões."""
+    serie = montar_serie_temporal(sb, empresa, processo)
+    if serie["n_videos"] < MIN_VIDEOS_PADRAO:
+        # massa insuficiente — limpa vigentes e não chama LLM
+        try:
+            sb.table("padroes_processo").delete().eq("empresa", empresa).eq("processo", processo).execute()
+        except Exception:
+            pass
+        return 0
+
+    sinais = calcular_sinais_padroes(serie)
+    tem_sinal = any(
+        sinais[k]
+        for k in ("tendencias", "recorrencias", "desvios", "volatilidades", "estrutural_desperdicio", "estrutural_valor")
+    )
+    if not tem_sinal:
+        try:
+            sb.table("padroes_processo").delete().eq("empresa", empresa).eq("processo", processo).execute()
+        except Exception:
+            pass
+        return 0
+
+    bloco_dominio = construir_bloco_dominio(descricao_processo or "", conhecimento_adquirido or "")
+    prompt = PROMPT_PADROES_PROCESSO.format(
+        empresa=empresa,
+        processo=processo,
+        bloco_dominio=(bloco_dominio.rstrip() + "\n\n") if bloco_dominio.strip() else "",
+        sinais=json.dumps(sinais, ensure_ascii=False, indent=2),
+    )
+    try:
+        resp = groq_text_call(
+            groq_client, prompt, model=GROQ_MODEL_ANALISE, json_mode=True,
+            max_tokens=2500, temperatura=0.3,
+        )
+        padroes = json.loads(resp).get("padroes") or []
+    except Exception as e:
+        log.warning(f"Padrões processo: falha LLM ({empresa}/{processo}): {e}")
+        return 0
+
+    conf_base = _confianca_por_n(serie["n_videos"], MIN_VIDEOS_PADRAO)
+    linhas = []
+    for p in padroes:
+        if not isinstance(p, dict):
+            continue
+        cr = p.get("comportamentos_relacionados")
+        linhas.append(
+            {
+                "empresa": empresa,
+                "processo": processo,
+                "tipo": (p.get("tipo") or "").strip()[:40] or None,
+                "camada": (p.get("camada") or "").strip()[:20] or None,
+                "titulo": (p.get("titulo") or "").strip(),
+                "descricao": (p.get("descricao") or "").strip(),
+                "comportamentos_relacionados": [str(x) for x in cr][:10] if isinstance(cr, list) else [],
+                "categoria_relacionada": (p.get("categoria_relacionada") or None),
+                "confianca": (p.get("confianca") or conf_base),
+                "relevancia": (p.get("relevancia") or "media"),
+                "recomendacao": (p.get("recomendacao") or None),
+                "evidencia": sinais,
+                "n_videos_analisados": serie["n_videos"],
+            }
+        )
+    if not linhas:
+        return 0
+    try:
+        sb.table("padroes_processo").delete().eq("empresa", empresa).eq("processo", processo).execute()
+        sb.table("padroes_processo").insert(linhas).execute()
+    except Exception as e:
+        log.warning(f"Padrões processo: falha ao persistir: {e}")
+        return 0
+    log.info(f"Padrões recalculados {empresa}/{processo}: {len(linhas)}")
+    return len(linhas)
+
+
+def analisar_padroes_globais(sb: Client, groq_client: Groq, empresa: str) -> int:
+    """Calcula sinais globais (Python) + interpretação LLM. Substitui os
+    vigentes da empresa. Não-fatal."""
+    sinais = calcular_sinais_globais(sb, empresa)
+    if sinais["n_processos_com_dados"] < MIN_PROCESSOS_GLOBAL:
+        try:
+            sb.table("padroes_globais").delete().eq("empresa", empresa).execute()
+        except Exception:
+            pass
+        return 0
+    if not (sinais["compartilhados"] or sinais["sistemicos"] or len(sinais["benchmarking"]) >= 2):
+        try:
+            sb.table("padroes_globais").delete().eq("empresa", empresa).execute()
+        except Exception:
+            pass
+        return 0
+
+    prompt = PROMPT_PADROES_GLOBAIS.format(
+        empresa=empresa, sinais=json.dumps(sinais, ensure_ascii=False, indent=2)
+    )
+    try:
+        resp = groq_text_call(
+            groq_client, prompt, model=GROQ_MODEL_ANALISE, json_mode=True,
+            max_tokens=2200, temperatura=0.3,
+        )
+        padroes = json.loads(resp).get("padroes") or []
+    except Exception as e:
+        log.warning(f"Padrões globais: falha LLM ({empresa}): {e}")
+        return 0
+
+    conf_base = _confianca_por_n(sinais["n_processos_com_dados"], MIN_PROCESSOS_GLOBAL)
+    linhas = []
+    for p in padroes:
+        if not isinstance(p, dict):
+            continue
+        pr = p.get("processos_relacionados")
+        linhas.append(
+            {
+                "empresa": empresa,
+                "tipo": (p.get("tipo") or "").strip()[:40] or None,
+                "titulo": (p.get("titulo") or "").strip(),
+                "descricao": (p.get("descricao") or "").strip(),
+                "processos_relacionados": [str(x) for x in pr][:20] if isinstance(pr, list) else [],
+                "confianca": (p.get("confianca") or conf_base),
+                "relevancia": (p.get("relevancia") or "media"),
+                "recomendacao": (p.get("recomendacao") or None),
+                "evidencia": sinais,
+            }
+        )
+    if not linhas:
+        return 0
+    try:
+        sb.table("padroes_globais").delete().eq("empresa", empresa).execute()
+        sb.table("padroes_globais").insert(linhas).execute()
+    except Exception as e:
+        log.warning(f"Padrões globais: falha ao persistir: {e}")
+        return 0
+    log.info(f"Padrões globais recalculados {empresa}: {len(linhas)}")
+    return len(linhas)
+
+
+def resumir_padroes_para_snapshot(sb: Client, empresa: str, processo: str | None = None) -> list[dict]:
+    """Resumo enxuto dos padrões vigentes para injetar no snapshot do Prism."""
+    try:
+        if processo:
+            r = (
+                sb.table("padroes_processo")
+                .select("tipo, titulo, relevancia, confianca")
+                .eq("empresa", empresa)
+                .eq("processo", processo)
+                .order("criado_em", desc=True)
+                .limit(10)
+                .execute()
+            )
+        else:
+            r = (
+                sb.table("padroes_globais")
+                .select("tipo, titulo, relevancia, confianca")
+                .eq("empresa", empresa)
+                .order("criado_em", desc=True)
+                .limit(10)
+                .execute()
+            )
+        return r.data or []
+    except Exception:
+        return []
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # ORQUESTRADOR — chamada principal do worker
 # ═════════════════════════════════════════════════════════════════════════
 def processar_video(
@@ -2800,6 +3373,20 @@ def processar_video(
         gerar_insights_globais(sb, groq_client, empresa)
     except Exception as e:
         log.warning(f"Insights globais falharam (não-fatal): {e}")
+
+    # Recalcula PADRÕES — do processo (A+B) e, em seguida, globais (C),
+    # pois a série deste processo mudou. NÃO-FATAL.
+    try:
+        analisar_padroes_processo(
+            sb, groq_client, empresa, processo,
+            descricao_processo=descricao, conhecimento_adquirido=conhecimento,
+        )
+    except Exception as e:
+        log.warning(f"Padrões do processo falharam (não-fatal): {e}")
+    try:
+        analisar_padroes_globais(sb, groq_client, empresa)
+    except Exception as e:
+        log.warning(f"Padrões globais falharam (não-fatal): {e}")
 
     progress_cb("concluido", 100, "Processamento concluído")
     return {

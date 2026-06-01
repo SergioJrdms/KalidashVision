@@ -28,6 +28,52 @@ export interface InsightGlobal {
   criado_em: string;
 }
 
+export type ConfiancaPadrao = "alta" | "media" | "baixa";
+
+export interface PadraoProcesso {
+  id: string;
+  tipo: string; // tendencia|recorrencia|desvio|volatilidade|fluxo|desperdicio|valor
+  camada: "temporal" | "estrutural" | string;
+  titulo: string;
+  descricao: string;
+  comportamentos_relacionados: string[] | null;
+  categoria_relacionada: string | null;
+  confianca: ConfiancaPadrao | string;
+  relevancia: "alta" | "media" | "info" | string;
+  recomendacao: string | null;
+  n_videos_analisados: number | null;
+  criado_em: string;
+}
+
+export interface PadraoGlobal {
+  id: string;
+  tipo: string; // compartilhado|benchmarking|sistemico
+  titulo: string;
+  descricao: string;
+  processos_relacionados: string[] | null;
+  confianca: ConfiancaPadrao | string;
+  relevancia: string;
+  recomendacao: string | null;
+  criado_em: string;
+}
+
+export interface SerieTemporalPonto {
+  video_id: string;
+  nome: string | null;
+  processado_em: string | null;
+  n_eventos: number;
+  n_pessoas: number;
+  share_comportamento: Record<string, number>;
+  share_categoria: Record<string, number>;
+}
+
+export interface SerieTemporal {
+  pontos: SerieTemporalPonto[];
+  labels: string[];
+  categorias: string[];
+  n_videos: number;
+}
+
 export interface ProcessoDetalhe extends Processo {
   videos: Array<{
     id: string;
@@ -139,6 +185,14 @@ export interface DashboardData {
   videos: VideoResumo[];
   composicao_valor: ComposicaoValor;
   pareto: ParetoItem[];
+  padroes_resumo: Array<{
+    id: string;
+    tipo: string;
+    camada: string;
+    titulo: string;
+    relevancia: string;
+    confianca: string;
+  }>;
 }
 
 export interface EventoPendente {

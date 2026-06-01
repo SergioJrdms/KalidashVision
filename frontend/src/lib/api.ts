@@ -8,7 +8,10 @@ import type {
   EventosTabelaResposta,
   JobStatus,
   InsightGlobal,
+  PadraoGlobal,
+  PadraoProcesso,
   PerguntaProcesso,
+  SerieTemporal,
   PrismConversa,
   PrismConversaDetalhe,
   PrismEnvioResposta,
@@ -154,6 +157,13 @@ export const api = {
     };
   },
   insightsGlobais: () => req<InsightGlobal[]>(`/prism/insights-globais`),
+  padroes: {
+    doProcesso: (processoId: string) =>
+      req<PadraoProcesso[]>(`/processos/${processoId}/padroes`),
+    serie: (processoId: string) =>
+      req<SerieTemporal>(`/processos/${processoId}/serie-temporal`),
+    globais: () => req<PadraoGlobal[]>(`/prism/padroes-globais`),
+  },
 };
 
 export function formatSeg(s: number): string {

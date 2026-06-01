@@ -135,6 +135,40 @@ create table if not exists insights_globais (
     criado_em timestamptz default now()
 );
 
+-- Padrões por processo (recorrência/evolução — distinto de sugestoes_melhoria)
+create table if not exists padroes_processo (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    tipo text,
+    camada text,                           -- temporal | estrutural
+    titulo text,
+    descricao text,
+    comportamentos_relacionados jsonb,
+    categoria_relacionada text,
+    confianca text,                        -- alta | media | baixa
+    relevancia text,                       -- alta | media | info
+    recomendacao text,
+    evidencia jsonb,
+    n_videos_analisados int,
+    criado_em timestamptz default now()
+);
+
+-- Padrões globais (entre processos da empresa)
+create table if not exists padroes_globais (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    tipo text,                             -- compartilhado|benchmarking|sistemico
+    titulo text,
+    descricao text,
+    processos_relacionados jsonb,
+    confianca text,
+    relevancia text,
+    recomendacao text,
+    evidencia jsonb,
+    criado_em timestamptz default now()
+);
+
 -- Prism: suporte a conversas globais (escopo='global', processo null)
 alter table prism_conversas add column if not exists escopo text not null default 'processo';
 alter table prism_conversas alter column processo drop not null;
@@ -153,6 +187,8 @@ create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, 
 create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, escopo, atualizada_em desc);
 create index if not exists idx_prism_mensagens_conv on prism_mensagens(conversa_id, criada_em);
 create index if not exists idx_insights_globais_emp on insights_globais(empresa, criado_em desc);
+create index if not exists idx_padroes_proc_ctx on padroes_processo(empresa, processo, criado_em desc);
+create index if not exists idx_padroes_globais_emp on padroes_globais(empresa, criado_em desc);
 
 
 -- ════════════════════════════════════════════════════════════════════════
@@ -169,6 +205,7 @@ begin
   delete from eventos            where empresa = p_empresa and processo = p_processo;
   delete from sugestoes_melhoria where empresa = p_empresa and processo = p_processo;
   delete from comportamentos     where empresa = p_empresa and processo = p_processo;
+  delete from padroes_processo   where empresa = p_empresa and processo = p_processo;
   delete from perguntas_processo where empresa = p_empresa and processo = p_processo;
   delete from videos             where empresa = p_empresa and processo = p_processo;
   delete from contexto_processo  where empresa = p_empresa and processo = p_processo;
@@ -192,6 +229,8 @@ alter table perguntas_processo  enable row level security;
 alter table prism_conversas     enable row level security;
 alter table prism_mensagens     enable row level security;
 alter table insights_globais    enable row level security;
+alter table padroes_processo    enable row level security;
+alter table padroes_globais     enable row level security;
 
 -- Função helper: empresa do usuário JWT
 create or replace function auth_empresa() returns text
@@ -206,7 +245,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo','prism_conversas','prism_mensagens','insights_globais'] loop
+  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo','prism_conversas','prism_mensagens','insights_globais','padroes_processo','padroes_globais'] loop
     execute format('drop policy if exists %1$s_select on %1$s', t);
     execute format('drop policy if exists %1$s_modify on %1$s', t);
     execute format($p$

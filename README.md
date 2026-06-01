@@ -279,6 +279,49 @@ respondidas viram verdade do domínio e ficam permanentes para as próximas
 análises daquele `(empresa, processo)`. O cliente também pode dispensar
 uma pergunta — ela não volta a aparecer.
 
+### Inteligência de padrões (recorrência e evolução no tempo)
+
+Além dos **retratos** (sugestões pontuais e insights globais, que olham o
+estado atual), a plataforma detecta **padrões** — cujo eixo é a
+recorrência e a evolução ao longo dos turnos. São três camadas:
+
+- **A · Temporais (por processo)**: tendência (share subindo/descendo
+  comparando 1º vs último terço dos turnos), recorrência (% de turnos em
+  que aparece), desvio (z-score do último turno vs histórico) e
+  volatilidade (desvio-padrão do share). Tabela `padroes_processo`.
+- **B · Estruturais (por processo)**: desperdício e valor recorrentes
+  (concentração + presença ao longo dos turnos).
+- **C · Globais (entre processos da empresa)**: padrões compartilhados
+  (mesmo comportamento relevante em várias linhas), benchmarking (ranking
+  por índice de valor agregado) e sistêmicos (um desperdício recorrente em
+  várias linhas → causa-raiz organizacional). Tabela `padroes_globais`.
+
+> **Números em Python, LLM só interpreta.** Todas as tendências,
+> recorrências, z-scores e sobreposições são calculadas em código
+> determinístico (`montar_serie_temporal`, `calcular_sinais_padroes`,
+> `calcular_sinais_globais`). O LLM (`analisar_padroes_processo` /
+> `analisar_padroes_globais`) apenas dá linguagem e recomendação aos
+> números prontos — nunca estima nem inventa.
+>
+> **Massa mínima**: padrões por processo exigem ≥ 3 vídeos
+> (`MIN_VIDEOS_PADRAO`); padrões globais exigem ≥ 2 processos com dados
+> (`MIN_PROCESSOS_GLOBAL`). Abaixo disso, estado vazio sem chamar o LLM.
+> A confiança (alta/média/baixa) reflete a massa de dados.
+>
+> **O que NÃO é padrão aqui**: "padrão de erro" = padrão de **desperdício
+> de tempo** (categoria `desperdicio`); "padrão de acerto" = **valor
+> agregado**. A plataforma não mede defeito, refugo, qualidade ou output —
+> não há padrões desse tipo.
+
+Recálculo (não-fatal) ao fim de `processar_video` (padrões do processo,
+depois globais) e após excluir um processo (globais). UI: aba **Padrões**
+por processo (gráfico de evolução turno a turno + cards por tipo com
+recomendação) e bloco **"Padrões da sua operação"** na tela inicial. O
+resumo dos padrões vigentes também entra no snapshot do Prism, para ele
+responder "que padrões você vê?" de forma consistente com as telas.
+Endpoints: `GET /processos/{id}/padroes`, `GET /processos/{id}/serie-temporal`,
+`GET /prism/padroes-globais`.
+
 ---
 
 ## Não exponha segredos no front

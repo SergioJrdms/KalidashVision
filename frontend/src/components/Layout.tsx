@@ -110,6 +110,7 @@ export function ProcessoTabs() {
     { to: `/processos/${id}/upload`, label: "Novo vídeo", count: 0 },
     { to: `/processos/${id}/validacao`, label: "Validação", count: pendentesValid },
     { to: `/processos/${id}/eventos`, label: "Eventos", count: 0 },
+    { to: `/processos/${id}/padroes`, label: "Padrões", count: 0 },
     { to: `/processos/${id}/descricao`, label: "Descrição", count: 0 },
   ];
   return (

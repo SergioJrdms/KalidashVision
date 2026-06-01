@@ -4,7 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { Badge, Button, Card, EmptyState, Input, Spinner } from "../components/UI";
 import { PrismAvatar } from "../components/PrismAvatar";
-import type { InsightGlobal, Processo } from "../lib/types";
+import type { InsightGlobal, PadraoGlobal, Processo } from "../lib/types";
 
 export default function Processos() {
   const qc = useQueryClient();
@@ -16,6 +16,10 @@ export default function Processos() {
   const insights = useQuery({
     queryKey: ["insights-globais"],
     queryFn: () => api.insightsGlobais(),
+  });
+  const padroesGlobais = useQuery({
+    queryKey: ["padroes-globais"],
+    queryFn: () => api.padroes.globais(),
   });
 
   if (isLoading)
@@ -55,6 +59,11 @@ export default function Processos() {
           carregando={insights.isLoading}
           temVideo={algumComVideo}
         />
+      )}
+
+      {/* Padrões da operação (Camada C) */}
+      {processos.length > 0 && (padroesGlobais.data?.length ?? 0) > 0 && (
+        <PadroesGlobaisBloco padroes={padroesGlobais.data || []} />
       )}
 
       {/* Grid de processos */}
@@ -359,6 +368,67 @@ function ConfirmarExclusao({
         </div>
       </Card>
     </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Padrões globais (Camada C)
+// ════════════════════════════════════════════════════════════════════════
+const TIPO_PADRAO_GLOBAL: Record<string, string> = {
+  compartilhado: "Compartilhado",
+  benchmarking: "Benchmarking",
+  sistemico: "Sistêmico",
+};
+
+function PadroesGlobaisBloco({ padroes }: { padroes: PadraoGlobal[] }) {
+  return (
+    <Card className="p-6">
+      <div className="flex items-center gap-2.5 mb-1">
+        <PrismAvatar size={32} />
+        <h2 className="font-semibold text-slate-900">Padrões da sua operação</h2>
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        O que se <b>repete</b> entre suas linhas — padrões compartilhados,
+        benchmarking e problemas sistêmicos. Diferente dos insights acima, aqui
+        o eixo é a recorrência entre processos.
+      </p>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        {padroes.map((p) => (
+          <div key={p.id} className="bg-white rounded-xl border border-slate-200 p-4">
+            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+              <span className="text-xs font-medium text-kv-purple-dark bg-kv-purple-50 border border-kv-purple-200 rounded-full px-2 py-0.5">
+                {TIPO_PADRAO_GLOBAL[p.tipo] || p.tipo}
+              </span>
+              <Badge
+                tone={p.confianca === "alta" ? "success" : p.confianca === "media" ? "warning" : "neutral"}
+              >
+                confiança {p.confianca}
+              </Badge>
+            </div>
+            <h4 className="font-semibold text-slate-900 text-sm">{p.titulo}</h4>
+            <p className="text-sm text-slate-600 mt-1 leading-relaxed">{p.descricao}</p>
+            {p.recomendacao && (
+              <div className="mt-2 text-sm text-slate-700 bg-slate-50 rounded-lg p-2.5 border border-slate-100">
+                <span className="font-semibold text-slate-800">Recomendação. </span>
+                {p.recomendacao}
+              </div>
+            )}
+            {p.processos_relacionados && p.processos_relacionados.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                {p.processos_relacionados.map((nome) => (
+                  <span
+                    key={nome}
+                    className="text-[11px] bg-kv-purple-50 text-kv-purple-dark px-2 py-0.5 rounded-full border border-kv-purple-200"
+                  >
+                    {nome}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
 
