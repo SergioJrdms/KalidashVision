@@ -1,8 +1,11 @@
 import { supabase } from "./supabase";
 import type {
+  AcaoEvento,
   CategoriaLean,
   DashboardData,
   EventoPendente,
+  EventosTabelaParams,
+  EventosTabelaResposta,
   JobStatus,
   PerguntaProcesso,
   Processo,
@@ -77,15 +80,26 @@ export const api = {
   },
   eventos: {
     frames: (id: string) => req<{ frames: string[] }>(`/eventos/${id}/frames`),
-    validar: (
-      id: string,
-      acao: "confirmar" | "corrigir" | "descartar",
-      label_corrigido?: string
-    ) =>
+    validar: (id: string, acao: AcaoEvento, label_corrigido?: string) =>
       req<{ ok: boolean }>(`/eventos/${id}/validar`, {
         method: "POST",
         body: JSON.stringify({ acao, label_corrigido }),
       }),
+    reabrir: (id: string) =>
+      req<{ ok: boolean }>(`/eventos/${id}/reabrir`, { method: "POST" }),
+    lote: (ids: string[], acao: AcaoEvento, label_corrigido?: string) =>
+      req<{ ok: boolean; aplicados: number }>(`/eventos/lote`, {
+        method: "POST",
+        body: JSON.stringify({ ids, acao, label_corrigido }),
+      }),
+    tabela: (processoId: string, params: EventosTabelaParams = {}) => {
+      const qs = new URLSearchParams();
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+      });
+      const sufixo = qs.toString() ? `?${qs.toString()}` : "";
+      return req<EventosTabelaResposta>(`/processos/${processoId}/eventos/tabela${sufixo}`);
+    },
   },
   perguntas: {
     listar: (processoId: string, status: "pendente" | "respondida" | "dispensada" | "todas" = "pendente") =>

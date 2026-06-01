@@ -101,9 +101,12 @@ A API expõe:
 | `GET`  | `/jobs/{job_id}` | status do job (polling do front) |
 | `GET`  | `/processos/{id}/dashboard` | snapshot agregado + sugestões + pendências |
 | `GET`  | `/processos/{id}/sugestoes` | todas as sugestões do contexto |
-| `GET`  | `/processos/{id}/eventos?status=pendente` | eventos para validação |
+| `GET`  | `/processos/{id}/eventos?status=pendente` | fila de eventos para validação |
+| `GET`  | `/processos/{id}/eventos/tabela` | planilha mestre paginada/filtrável (auditoria) |
 | `GET`  | `/eventos/{id}/frames` | 3 frames com bounding box (data URLs) |
-| `POST` | `/eventos/{id}/validar` | `{ acao: "confirmar"\|"corrigir"\|"descartar", label_corrigido? }` |
+| `POST` | `/eventos/{id}/validar` | `{ acao: "confirmar"\|"corrigir"\|"descartar"\|"reabrir", label_corrigido? }` |
+| `POST` | `/eventos/{id}/reabrir` | devolve o evento à fila (estado pendente) |
+| `POST` | `/eventos/lote` | `{ ids, acao, label_corrigido? }` — ação em lote |
 | `POST` | `/processos/{id}/chat` | pergunta em linguagem natural |
 | `GET`  | `/processos/{id}/perguntas?status=pendente` | perguntas que a IA fez ao cliente |
 | `GET`  | `/processos/{id}/perguntas/contagem` | `{ pendentes }` para badge na UI |
@@ -146,8 +149,20 @@ Telas:
 - **/processos/:id/descricao** — texto opcional de domínio (e/ou ancoragem).
 - **/processos/:id/upload** — drag-and-drop do vídeo + barra com etapas.
 - **/processos/:id/dashboard** — KPIs, sugestões, distribuição de comportamentos.
-- **/processos/:id/validacao** — fila de eventos pendentes (auto-validados já saem da fila).
+- **/processos/:id/validacao** — *caixa de entrada*: fila enxuta dos eventos que
+  pedem atenção agora (auto-validados já saem da fila) + perguntas proativas da IA.
+- **/processos/:id/eventos** — *planilha mestre*: tabela com **todos** os eventos
+  acumulados do processo, com busca, filtros (status / comportamento / vídeo),
+  ordenação, paginação, edição por linha (com frames sob demanda e autocomplete de
+  labels) e ações em lote. Aqui o cliente audita e **corrige a qualquer momento** —
+  inclusive eventos já validados.
 - **/processos/:id/chat** — chat com os dados (Markdown + perguntas prontas).
+
+> **Editar re-treina o sistema.** A memória do negócio
+> (`carregar_memoria_do_negocio`) é recalculada do estado atual dos eventos a cada
+> `processar_video`. Por isso, confirmar / corrigir / descartar / reabrir na tela
+> "Eventos" tem exatamente o mesmo efeito de aprendizado que na "Validação": o
+> próximo vídeo já reflete a correção. Reabrir devolve o evento à fila como pendente.
 
 ---
 

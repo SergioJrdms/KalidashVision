@@ -132,3 +132,51 @@ export interface EventoPendente {
   origem_validacao: string | null;
   pessoa_track_id: number;
 }
+
+export type StatusEfetivo =
+  | "pendente"
+  | "confirmado"
+  | "corrigido"
+  | "descartado"
+  | "auto";
+
+export interface EventoTabela {
+  id: string;
+  video_id: string;
+  video_nome: string;
+  pessoa_track_id: number;
+  comportamento_label: string;
+  label_corrigido: string | null;
+  label_efetivo: string;
+  descricao_bruta: string;
+  tempo_inicio_s: number;
+  tempo_fim_s: number;
+  duracao_s: number;
+  confianca: number;
+  validado_humano: boolean | null;
+  validacao_correto: boolean | null;
+  origem_validacao: string | null;
+  status_efetivo: StatusEfetivo;
+  criado_em: string;
+  validado_em: string | null;
+}
+
+export interface EventosTabelaResposta {
+  itens: EventoTabela[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface EventosTabelaParams {
+  page?: number;
+  page_size?: number;
+  status?: "todos" | StatusEfetivo;
+  label?: string;
+  video_id?: string;
+  busca?: string;
+  sort?: "criado_em" | "tempo_inicio_s" | "duracao_s" | "comportamento_label" | "confianca";
+  order?: "asc" | "desc";
+}
+
+export type AcaoEvento = "confirmar" | "corrigir" | "descartar" | "reabrir";

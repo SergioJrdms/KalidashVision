@@ -73,7 +73,13 @@ class ProcessoUpdateDescricao(BaseModel):
 
 
 class ValidacaoBody(BaseModel):
-    acao: str  # "confirmar" | "corrigir" | "descartar"
+    acao: str  # "confirmar" | "corrigir" | "descartar" | "reabrir"
+    label_corrigido: str | None = None
+
+
+class LoteBody(BaseModel):
+    ids: list[str] = Field(min_length=1)
+    acao: str  # "confirmar" | "corrigir" | "descartar" | "reabrir"
     label_corrigido: str | None = None
 
 
@@ -470,6 +476,123 @@ def listar_eventos(
     return r.data or []
 
 
+def _status_efetivo(ev: dict) -> str:
+    """Regra única de status derivado (front não reimplementa)."""
+    if not ev.get("validado_humano"):
+        return "pendente"
+    if ev.get("validacao_correto") is False:
+        return "descartado"
+    origem = ev.get("origem_validacao")
+    if origem in ("correcao_aprendida", "vocabulario_canonico"):
+        return "auto"
+    if ev.get("label_corrigido"):
+        return "corrigido"
+    return "confirmado"
+
+
+_SORT_COLS = {
+    "criado_em",
+    "tempo_inicio_s",
+    "duracao_s",
+    "comportamento_label",
+    "confianca",
+}
+
+
+@app.get("/processos/{processo_id}/eventos/tabela")
+def listar_eventos_tabela(
+    processo_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    status_filter: str = Query("todos", alias="status"),
+    label: str | None = None,
+    video_id: str | None = None,
+    busca: str | None = None,
+    sort: str = Query("criado_em"),
+    order: str = Query("desc"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+
+    campos = (
+        "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
+        "descricao_bruta, tempo_inicio_s, tempo_fim_s, duracao_s, confianca, "
+        "validado_humano, validacao_correto, origem_validacao, criado_em, validado_em"
+    )
+    q = (
+        sb.table("eventos")
+        .select(campos, count="exact")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+    )
+
+    # Filtros de status (mapeados para combinações de colunas)
+    if status_filter == "pendente":
+        q = q.or_("validado_humano.eq.false,validado_humano.is.null")
+    elif status_filter == "descartado":
+        q = q.eq("validacao_correto", False)
+    elif status_filter == "auto":
+        q = q.eq("validado_humano", True).in_(
+            "origem_validacao", ["correcao_aprendida", "vocabulario_canonico"]
+        )
+    elif status_filter == "corrigido":
+        q = (
+            q.eq("validado_humano", True)
+            .eq("validacao_correto", True)
+            .eq("origem_validacao", "humano")
+            .filter("label_corrigido", "not.is", "null")
+        )
+    elif status_filter == "confirmado":
+        q = (
+            q.eq("validado_humano", True)
+            .eq("validacao_correto", True)
+            .eq("origem_validacao", "humano")
+            .filter("label_corrigido", "is", "null")
+        )
+    # "todos" → sem filtro
+
+    if label:
+        q = q.eq("comportamento_label", label)
+    if video_id:
+        q = q.eq("video_id", video_id)
+    if busca:
+        q = q.ilike("descricao_bruta", f"%{busca}%")
+
+    sort_col = sort if sort in _SORT_COLS else "criado_em"
+    desc = order != "asc"
+    q = q.order(sort_col, desc=desc)
+
+    inicio = (page - 1) * page_size
+    fim = inicio + page_size - 1
+    r = q.range(inicio, fim).execute()
+    itens = r.data or []
+
+    # "Join" leve com videos só para a página atual
+    vids = {v["video_id"] for v in itens if v.get("video_id")}
+    nomes: dict[str, str] = {}
+    if vids:
+        rv = (
+            sb.table("videos")
+            .select("id, nome")
+            .in_("id", list(vids))
+            .execute()
+        )
+        nomes = {v["id"]: v.get("nome", "") for v in (rv.data or [])}
+
+    for ev in itens:
+        ev["video_nome"] = nomes.get(ev.get("video_id"), "—")
+        ev["label_efetivo"] = ev.get("label_corrigido") or ev.get("comportamento_label")
+        ev["status_efetivo"] = _status_efetivo(ev)
+
+    return {
+        "itens": itens,
+        "total": r.count or 0,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
 @app.get("/eventos/{evento_id}/frames")
 def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user)):
     sb = make_supabase_client()
@@ -522,14 +645,71 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
     }
 
 
+def _montar_update_validacao(acao: str, label_original: str, label_corrigido: str | None) -> dict[str, Any]:
+    """Calcula o estado final do evento para cada ação humana.
+
+    IMPORTANTE (coerência do aprendizado): a memória do negócio é recalculada
+    do zero a cada processar_video (carregar_memoria_do_negocio lê o estado
+    ATUAL dos eventos). Logo, não há cache a invalidar — basta gravar aqui o
+    estado final correto e o efeito se propaga no próximo processamento.
+
+    Tabela de transições:
+      confirmar  → VH=true,  VC=true,  LC=null,         OV=humano, VE=now
+      corrigir   → VH=true,  VC=true,  LC=X (ou null),  OV=humano, VE=now
+      descartar  → VH=true,  VC=false, LC=inalterado,   OV=humano, VE=now
+      reabrir    → VH=false, VC=null,  LC=null,         OV=null,   VE=null
+    """
+    from datetime import datetime
+
+    now = datetime.utcnow().isoformat()
+    if acao == "confirmar":
+        # Confirmar = "o label original está certo": limpa qualquer correção antiga.
+        return {
+            "validado_humano": True,
+            "validacao_correto": True,
+            "label_corrigido": None,
+            "origem_validacao": "humano",
+            "validado_em": now,
+        }
+    if acao == "corrigir":
+        novo = (label_corrigido or "").strip()
+        if not novo:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "label_corrigido obrigatório")
+        # Se o "corrigido" é igual ao original, não é correção: limpa LC.
+        lc = novo if novo != label_original else None
+        return {
+            "validado_humano": True,
+            "validacao_correto": True,
+            "label_corrigido": lc,
+            "origem_validacao": "humano",
+            "validado_em": now,
+        }
+    if acao == "descartar":
+        # Falso positivo. Mantém label_corrigido inalterado (não enviado no update).
+        return {
+            "validado_humano": True,
+            "validacao_correto": False,
+            "origem_validacao": "humano",
+            "validado_em": now,
+        }
+    if acao == "reabrir":
+        # Devolve à fila como pendente, limpando toda marca de validação.
+        return {
+            "validado_humano": False,
+            "validacao_correto": None,
+            "label_corrigido": None,
+            "origem_validacao": None,
+            "validado_em": None,
+        }
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, "ação inválida")
+
+
 @app.post("/eventos/{evento_id}/validar")
 def validar_evento(
     evento_id: str,
     body: ValidacaoBody,
     user: CurrentUser = Depends(get_current_user),
 ):
-    from datetime import datetime
-
     sb = make_supabase_client()
     r = sb.table("eventos").select("id, empresa, comportamento_label").eq("id", evento_id).execute()
     if not r.data:
@@ -538,27 +718,49 @@ def validar_evento(
     if ev["empresa"] != user.empresa:
         raise HTTPException(status.HTTP_403_FORBIDDEN)
 
-    update: dict[str, Any] = {
-        "validado_humano": True,
-        "validado_em": datetime.utcnow().isoformat(),
-        "origem_validacao": "humano",
-    }
-    if body.acao == "confirmar":
-        update["validacao_correto"] = True
-    elif body.acao == "corrigir":
-        novo = (body.label_corrigido or "").strip()
-        if not novo:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "label_corrigido obrigatório")
-        update["validacao_correto"] = True
-        if novo != ev["comportamento_label"]:
-            update["label_corrigido"] = novo
-    elif body.acao == "descartar":
-        update["validacao_correto"] = False
-    else:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ação inválida")
-
+    update = _montar_update_validacao(body.acao, ev["comportamento_label"], body.label_corrigido)
     sb.table("eventos").update(update).eq("id", evento_id).execute()
     return {"ok": True}
+
+
+@app.post("/eventos/{evento_id}/reabrir")
+def reabrir_evento(evento_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    r = sb.table("eventos").select("id, empresa, comportamento_label").eq("id", evento_id).execute()
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Evento não encontrado")
+    if r.data[0]["empresa"] != user.empresa:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+    update = _montar_update_validacao("reabrir", r.data[0]["comportamento_label"], None)
+    sb.table("eventos").update(update).eq("id", evento_id).execute()
+    return {"ok": True}
+
+
+@app.post("/eventos/lote")
+def validar_lote(body: LoteBody, user: CurrentUser = Depends(get_current_user)):
+    if body.acao not in ("confirmar", "corrigir", "descartar", "reabrir"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ação inválida")
+    sb = make_supabase_client()
+    # Carrega todos os eventos do lote e valida que pertencem à empresa do usuário.
+    r = (
+        sb.table("eventos")
+        .select("id, empresa, comportamento_label")
+        .in_("id", body.ids)
+        .execute()
+    )
+    encontrados = r.data or []
+    if len(encontrados) != len(set(body.ids)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Um ou mais eventos não foram encontrados")
+    for ev in encontrados:
+        if ev["empresa"] != user.empresa:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Acesso negado a um dos eventos")
+
+    aplicados = 0
+    for ev in encontrados:
+        update = _montar_update_validacao(body.acao, ev["comportamento_label"], body.label_corrigido)
+        sb.table("eventos").update(update).eq("id", ev["id"]).execute()
+        aplicados += 1
+    return {"ok": True, "aplicados": aplicados}
 
 
 # ═════════════════════════════════════════════════════════════════════════
