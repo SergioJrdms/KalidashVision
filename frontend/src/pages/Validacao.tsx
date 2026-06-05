@@ -6,7 +6,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapPendentes, mapPerguntas, type PendMock, type PergMock, type ProcHeaderMock } from "../lib/adapt";
 import { nivelDe, leanCor, leanLabel, fmtSeg } from "../design/helpers";
-import { Btn, Card, Icon, Prism, Ring, CameraScene, toast } from "../design/ui";
+import { Btn, Card, Icon, Prism, Ring, toast } from "../design/ui";
+import { FrameStripReal, FrameReal } from "../lib/frames";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
 
@@ -229,7 +230,7 @@ function FilaFoco({ evento, restantes, total, onResolver, labels }: { evento: Pe
           <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{restantes} na fila</span>
         </div>
 
-        <FrameStrip ativo={evento} />
+        <FrameStripReal ativo={evento} />
 
         <div style={{ padding: "16px 20px 20px" }}>
           <div className="row gap2" style={{ marginBottom: 4 }}>
@@ -287,22 +288,6 @@ function FilaFoco({ evento, restantes, total, onResolver, labels }: { evento: Pe
   );
 }
 
-function FrameStrip({ ativo }: { ativo: PendMock }) {
-  const boxes = [{ id: `P-${String(ativo.pessoa).padStart(2, "0")}`, x: 30, y: 24, w: 24, h: 52, act: ativo.label.split(" ").slice(0, 2).join(" ") }];
-  return (
-    <div className="row" style={{ gap: 2, padding: 2, background: "#0d0820" }}>
-      {[0, 1, 2].map((i) => (
-        <div key={i} style={{ flex: 1, position: "relative" }}>
-          <CameraScene height={180} hud={i === 1} boxes={boxes.map((b) => ({ ...b, x: b.x + i * 4 }))} />
-          <span style={{ position: "absolute", bottom: 6, left: 6, fontSize: 9.5, fontFamily: "var(--mono)", color: "rgba(255,255,255,.7)", background: "rgba(0,0,0,.5)", padding: "1px 6px", borderRadius: 5 }}>
-            {(ativo.ini + (i * (ativo.fim - ativo.ini)) / 2).toFixed(1)}s
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolver: (ev: PendMock, k: "confirmar" | "corrigir" | "descartar", l?: string) => void; labels: string[] }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 14 }}>
@@ -317,7 +302,7 @@ function CardEvento({ ev, onResolver, labels }: { ev: PendMock; onResolver: (ev:
   function act(kind: "confirmar" | "corrigir" | "descartar", lbl?: string) { setLeaving(kind); setTimeout(() => onResolver(ev, kind, lbl), 360); }
   return (
     <div className={`card ${leaving ? (leaving === "descartar" ? "leave-r" : "leave-l") : "anim-fadeup"}`} style={{ padding: 0, overflow: "hidden" }}>
-      <CameraScene height={130} hud={false} boxes={[{ id: `P-${String(ev.pessoa).padStart(2, "0")}`, x: 34, y: 26, w: 26, h: 50, act: "" }]} />
+      <FrameReal id={ev.id} pessoa={ev.pessoa} height={130} />
       <div style={{ padding: 14 }}>
         <div className="row gap2" style={{ marginBottom: 6, justifyContent: "space-between" }}>
           <span className="font-mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>P-{String(ev.pessoa).padStart(2, "0")} · {fmtSeg(ev.fim - ev.ini)}</span>

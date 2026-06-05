@@ -6,7 +6,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapEventosTabela, type EvTabMock, type ProcHeaderMock } from "../lib/adapt";
 import { fmtSeg } from "../design/helpers";
-import { Btn, Card, Icon, Badge, Empty, CameraScene, toast } from "../design/ui";
+import { Btn, Card, Icon, Badge, Empty, toast } from "../design/ui";
+import { FrameReal } from "../lib/frames";
 import type { AcaoEvento } from "../lib/types";
 
 const STATUS_LIST = ["pendente", "confirmado", "corrigido", "descartado", "auto"];
@@ -151,7 +152,7 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver }: { e: Ev
         <tr style={{ background: "var(--soft)" }}>
           <td colSpan={7} style={{ padding: 16 }}>
             <div className="row gap3 wrap" style={{ alignItems: "flex-start" }}>
-              <div style={{ width: 240, flex: "none" }}><CameraScene height={140} hud={false} boxes={[{ id: `P-${String(e.pessoa).padStart(2, "0")}`, x: 34, y: 26, w: 26, h: 50, act: "" }]} /></div>
+              <div style={{ width: 240, flex: "none" }}><FrameReal id={e.id} pessoa={e.pessoa} height={140} /></div>
               <div className="grow" style={{ minWidth: 220 }}>
                 <p style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginBottom: 12 }}>{e.descricao}</p>
                 <div className="row gap1 wrap">
