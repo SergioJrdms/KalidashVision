@@ -142,6 +142,14 @@ Para produção com muitos vídeos simultâneos, troque por uma fila externa
 
 ## Frontend
 
+> **Design system "Vibrante" · Validação "Foco único" · Dashboard "Denso".**
+> O frontend foi totalmente refatorado para o novo design system (paleta
+> roxa `--p-700: #5330C0`, fontes Plus Jakarta Sans + Inter, primitivos
+> `.btn / .card / .field / .badge` em `src/index.css`). O Prism é o nome
+> da inteligência — o produto continua sendo **Kalidash Vision**. O
+> avatar do Prism vive em `public/prism.png` (sempre em fundo branco,
+> com halo `.prism-badge`). As páginas usam `lucide-react` para ícones.
+
 ```bash
 cd frontend
 npm install
@@ -200,6 +208,25 @@ Telas:
 > próximo vídeo já reflete a correção. Reabrir devolve o evento à fila como pendente.
 
 ---
+
+### Maturidade do Prism (índice composto, derivado)
+
+Cada processo expõe um **índice 0–100** (`maturidade`) calculado em
+`agregar_portfolio` (não persistido), com saturação para não inflar com
+pouca base:
+
+```
+M = 20·min(1, n_videos/10)                            // volume         · até 20
+  + 25·min(1, eventos_considerados/250)               // base           · até 25
+  + 30·(pct_validado_humano/100)                      // confiança humana · até 30
+  + 15·(n_origem_auto / total_origens)                // auto-validação   · até 15
+  +  5·(1 − n_nao_classif / max(1, n_comportamentos)) // cobertura Lean   · até 5
+  +  5·min(1, n_padroes_alta_confianca / 4)           // padrões maduros  · até 5
+```
+
+Níveis: **Conhecendo** `0–34` · **Aprendendo** `35–59` · **Confiante**
+`60–81` · **Especialista** `82–100`. Renderizado como anel no card de
+processo (`RingMaturidade`).
 
 ## Como o pipeline aprende
 

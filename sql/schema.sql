@@ -83,9 +83,12 @@ create table if not exists contexto_processo (
     empresa text not null,
     processo text not null,
     descricao text,
+    area text,                              -- ex.: Estamparia, Logística, Montagem
     atualizado_em timestamptz default now(),
     unique (empresa, processo)
 );
+
+alter table contexto_processo add column if not exists area text;
 
 -- Perguntas que a IA faz proativamente ao cliente sobre o processo.
 -- Ciclo: IA detecta lacuna → cria pergunta → cliente responde no fluxo

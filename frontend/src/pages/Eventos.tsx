@@ -1,14 +1,31 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
-import { api, formatSeg } from "../lib/api";
-import { Badge, Button, Card, EmptyState, Input, Spinner } from "../components/UI";
+import { api } from "../lib/api";
+import {
+  Badge,
+  Btn,
+  Card,
+  Empty,
+  Icon,
+  Spinner,
+  fmtSeg,
+  toast,
+} from "../components/UIKit";
 import type {
   AcaoEvento,
   EventosTabelaParams,
   EventoTabela,
   StatusEfetivo,
 } from "../lib/types";
+
+const STATUS_META: Record<StatusEfetivo, { tone: "neutral" | "ok" | "info" | "warn" | "high"; label: string; icon: string }> = {
+  pendente: { tone: "neutral", label: "Pendente", icon: "clock" },
+  confirmado: { tone: "ok", label: "Confirmado", icon: "check" },
+  corrigido: { tone: "info", label: "Corrigido", icon: "pencil" },
+  descartado: { tone: "high", label: "Descartado", icon: "x" },
+  auto: { tone: "warn", label: "Auto-validado", icon: "zap" },
+};
 
 const STATUS_OPCOES: { v: "todos" | StatusEfetivo; label: string }[] = [
   { v: "todos", label: "Todos" },
@@ -19,298 +36,235 @@ const STATUS_OPCOES: { v: "todos" | StatusEfetivo; label: string }[] = [
   { v: "auto", label: "Auto-validados" },
 ];
 
-const SORT_OPCOES: { v: NonNullable<EventosTabelaParams["sort"]>; label: string }[] = [
-  { v: "criado_em", label: "Data de detecção" },
-  { v: "tempo_inicio_s", label: "Tempo no vídeo" },
-  { v: "duracao_s", label: "Duração" },
-  { v: "comportamento_label", label: "Comportamento" },
-  { v: "confianca", label: "Confiança" },
-];
-
-function statusBadge(s: StatusEfetivo) {
-  const map: Record<StatusEfetivo, { tone: "neutral" | "success" | "info" | "alta" | "warning"; texto: string }> = {
-    pendente: { tone: "neutral", texto: "Pendente" },
-    confirmado: { tone: "success", texto: "Confirmado" },
-    corrigido: { tone: "info", texto: "Corrigido" },
-    descartado: { tone: "alta", texto: "Descartado" },
-    auto: { tone: "warning", texto: "Auto-validado" },
-  };
-  const { tone, texto } = map[s];
-  return <Badge tone={tone}>{texto}</Badge>;
-}
-
 export default function Eventos() {
   const { id } = useParams<{ id: string }>();
   const qc = useQueryClient();
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
-  const [statusF, setStatusF] = useState<"todos" | StatusEfetivo>("todos");
-  const [labelF, setLabelF] = useState("");
+  const [status, setStatus] = useState<"todos" | StatusEfetivo>("todos");
+  const [label, setLabel] = useState("");
   const [videoF, setVideoF] = useState("");
   const [buscaInput, setBuscaInput] = useState("");
   const [busca, setBusca] = useState("");
   const [sort, setSort] = useState<NonNullable<EventosTabelaParams["sort"]>>("criado_em");
   const [order, setOrder] = useState<"asc" | "desc">("desc");
-  const [selecionados, setSelecionados] = useState<Set<string>>(new Set());
-  const [expandido, setExpandido] = useState<string | null>(null);
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [expand, setExpand] = useState<string | null>(null);
 
-  // debounce da busca
   useEffect(() => {
     const t = setTimeout(() => setBusca(buscaInput.trim()), 400);
     return () => clearTimeout(t);
   }, [buscaInput]);
-
-  // qualquer mudança de filtro volta pra página 1
   useEffect(() => {
     setPage(1);
-    setSelecionados(new Set());
-  }, [statusF, labelF, videoF, busca, sort, order, pageSize]);
+    setSel(new Set());
+  }, [status, label, videoF, busca, sort, order, pageSize]);
 
   const params: EventosTabelaParams = {
     page,
     page_size: pageSize,
-    status: statusF,
-    label: labelF || undefined,
+    status,
+    label: label || undefined,
     video_id: videoF || undefined,
     busca: busca || undefined,
     sort,
     order,
   };
-
-  const { data, isLoading, error, isFetching } = useQuery({
+  const { data, isLoading, isFetching } = useQuery({
     queryKey: ["eventos-tabela", id, params],
     queryFn: () => api.eventos.tabela(id!, params),
     enabled: !!id,
   });
-
-  // opções de filtro (labels e vídeos) vêm do dashboard já cacheado
-  const dashboard = useQuery({
+  const dash = useQuery({
     queryKey: ["dashboard", id],
     queryFn: () => api.processos.dashboard(id!),
     enabled: !!id,
     staleTime: 30_000,
   });
-  const labelsCanonicos = useMemo(
-    () =>
-      (dashboard.data?.snapshot.distribuicao_comportamentos || [])
-        .map((d) => d.comportamento)
-        .sort(),
-    [dashboard.data]
+  const labels = useMemo(
+    () => (dash.data?.snapshot.distribuicao_comportamentos || []).map((d) => d.comportamento).sort(),
+    [dash.data]
   );
-  const videos = dashboard.data?.videos || [];
+  const videos = dash.data?.videos || [];
 
-  function invalidarTudo() {
+  function invalidar() {
     qc.invalidateQueries({ queryKey: ["eventos-tabela", id] });
     qc.invalidateQueries({ queryKey: ["dashboard", id] });
     qc.invalidateQueries({ queryKey: ["eventos-pendentes", id] });
   }
 
   const lote = useMutation({
-    mutationFn: ({ acao, label }: { acao: AcaoEvento; label?: string }) =>
-      api.eventos.lote(Array.from(selecionados), acao, label),
-    onSuccess: () => {
-      setSelecionados(new Set());
-      invalidarTudo();
+    mutationFn: ({ acao, lbl }: { acao: AcaoEvento; lbl?: string }) =>
+      api.eventos.lote(Array.from(sel), acao, lbl),
+    onSuccess: (_d, vars) => {
+      setSel(new Set());
+      invalidar();
+      toast(`${vars.acao} aplicada em lote.`, { icon: "check", color: "#3EE6AE" });
     },
   });
 
-  const itens = data?.itens || [];
-  const total = data?.total || 0;
-  const totalPaginas = Math.max(1, Math.ceil(total / pageSize));
-
-  function toggleSel(eid: string) {
-    setSelecionados((prev) => {
-      const n = new Set(prev);
-      if (n.has(eid)) n.delete(eid);
-      else n.add(eid);
-      return n;
-    });
-  }
-  function toggleTodosPagina() {
-    setSelecionados((prev) => {
-      const todosNaPagina = itens.every((e) => prev.has(e.id));
-      const n = new Set(prev);
-      if (todosNaPagina) itens.forEach((e) => n.delete(e.id));
-      else itens.forEach((e) => n.add(e.id));
-      return n;
-    });
-  }
-
   function acaoLote(acao: AcaoEvento) {
-    if (selecionados.size === 0) return;
-    let label: string | undefined;
+    if (sel.size === 0) return;
+    let lbl: string | undefined;
     if (acao === "corrigir") {
-      label = window.prompt(
-        `Reclassificar ${selecionados.size} evento(s) para qual comportamento?\n(use um label existente quando possível, ex.: ${labelsCanonicos[0] || "operar_computador"})`
-      )?.trim();
-      if (!label) return;
+      lbl = window
+        .prompt(
+          `Reclassificar ${sel.size} evento(s) para qual comportamento?\n(use um label existente quando possível)`
+        )
+        ?.trim();
+      if (!lbl) return;
     } else {
       const verbo = { confirmar: "confirmar", descartar: "descartar", reabrir: "reabrir" }[acao];
-      if (!window.confirm(`Tem certeza que deseja ${verbo} ${selecionados.size} evento(s)?`)) return;
+      if (!window.confirm(`${verbo} ${sel.size} evento(s)?`)) return;
     }
-    lote.mutate({ acao, label });
+    lote.mutate({ acao, lbl });
   }
 
+  if (isLoading)
+    return (
+      <div className="center" style={{ padding: 60 }}>
+        <Spinner size={26} />
+      </div>
+    );
+
+  const itens = data?.itens || [];
+  const total = data?.total || 0;
+  const totalPag = Math.max(1, Math.ceil(total / pageSize));
+
   return (
-    <div>
-      <ExplicacaoStatusEAprendizado />
+    <div className="col" style={{ gap: 14 }}>
+      <ExplicacaoEventos />
 
       {/* Controles */}
-      <Card className="p-4 mb-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-          <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">Buscar descrição</label>
-            <Input
-              value={buscaInput}
-              onChange={(e) => setBuscaInput(e.target.value)}
-              placeholder="ex.: caixa, computador..."
-            />
-          </div>
-          <SelectFiltro
-            label="Status"
-            value={statusF}
-            onChange={(v) => setStatusF(v as "todos" | StatusEfetivo)}
-            options={STATUS_OPCOES.map((o) => ({ value: o.v, label: o.label }))}
-          />
-          <SelectFiltro
-            label="Comportamento"
-            value={labelF}
-            onChange={setLabelF}
-            options={[
-              { value: "", label: "Todos" },
-              ...labelsCanonicos.map((l) => ({ value: l, label: l })),
-            ]}
-          />
-          <SelectFiltro
-            label="Vídeo"
-            value={videoF}
-            onChange={setVideoF}
-            options={[
-              { value: "", label: "Todos" },
-              ...videos.map((v) => ({ value: v.id, label: v.nome })),
-            ]}
-          />
+      <Card style={{ padding: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 }}>
+          <Campo label="Buscar descrição" valor={buscaInput} onChange={setBuscaInput} placeholder="ex.: caixa…" />
+          <Select label="Status" valor={status} onChange={(v) => setStatus(v as "todos" | StatusEfetivo)} opts={STATUS_OPCOES.map((o) => ({ value: o.v, label: o.label }))} />
+          <Select label="Comportamento" valor={label} onChange={setLabel} opts={[{ value: "", label: "Todos" }, ...labels.map((l) => ({ value: l, label: l }))]} />
+          <Select label="Vídeo" valor={videoF} onChange={setVideoF} opts={[{ value: "", label: "Todos" }, ...videos.map((v) => ({ value: v.id, label: v.nome }))]} />
         </div>
-        <div className="flex items-center justify-between gap-3 flex-wrap mt-3">
-          <div className="flex items-end gap-3 flex-wrap">
-            <SelectFiltro
-              label="Ordenar por"
-              value={sort}
-              onChange={(v) => setSort(v as NonNullable<EventosTabelaParams["sort"]>)}
-              options={SORT_OPCOES.map((o) => ({ value: o.v, label: o.label }))}
-            />
+        <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", marginTop: 10 }}>
+          <div className="row gap2">
+            <Select label="Ordenar" valor={sort} onChange={(v) => setSort(v as NonNullable<EventosTabelaParams["sort"]>)} opts={[
+              { value: "criado_em", label: "Data" },
+              { value: "tempo_inicio_s", label: "Tempo no vídeo" },
+              { value: "duracao_s", label: "Duração" },
+              { value: "comportamento_label", label: "Comportamento" },
+              { value: "confianca", label: "Confiança" },
+            ]} compact />
             <button
               onClick={() => setOrder((o) => (o === "asc" ? "desc" : "asc"))}
-              className="px-3 py-2 rounded-lg border border-slate-300 text-sm text-slate-600 hover:bg-slate-50"
+              className="btn btn-secondary btn-sm"
               title="Inverter ordem"
             >
-              {order === "asc" ? "↑ crescente" : "↓ decrescente"}
+              <Icon name={order === "asc" ? "arrow-up" : "arrow-down"} size={14} />
+              {order === "asc" ? "crescente" : "decrescente"}
             </button>
-            <SelectFiltro
+            <Select
               label="Por página"
-              value={String(pageSize)}
+              valor={String(pageSize)}
               onChange={(v) => setPageSize(Number(v))}
-              options={[25, 50, 100, 200].map((n) => ({ value: String(n), label: String(n) }))}
+              opts={[25, 50, 100, 200].map((n) => ({ value: String(n), label: String(n) }))}
+              compact
             />
           </div>
-          <div className="text-sm text-slate-500 flex items-center gap-2">
-            {isFetching && <Spinner className="h-4 w-4" />}
+          <div className="row gap2" style={{ fontSize: 12.5, color: "var(--muted)" }}>
+            {isFetching && <Spinner size={14} />}
             <span>
-              {total.toLocaleString("pt-BR")} evento(s) · página {page} de {totalPaginas}
+              {total.toLocaleString("pt-BR")} eventos · página {page} de {totalPag}
             </span>
           </div>
         </div>
       </Card>
 
-      {/* Barra de seleção em lote */}
-      {selecionados.size > 0 && (
-        <Card className="p-3 mb-4 bg-kv-purple-50 border-kv-purple-200 sticky top-16 z-10">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <span className="text-sm font-medium text-kv-purple-dark">
-              {selecionados.size} selecionado(s)
+      {sel.size > 0 && (
+        <Card style={{ padding: 12, background: "var(--accent-soft)", border: "1px solid var(--p-200)", position: "sticky", top: 70, zIndex: 4 }}>
+          <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--accent-deep)" }}>
+              {sel.size} selecionado(s)
             </span>
-            <div className="flex gap-2 flex-wrap">
-              <Button variant="success" onClick={() => acaoLote("confirmar")} disabled={lote.isPending}>
-                ✓ Confirmar
-              </Button>
-              <Button variant="secondary" onClick={() => acaoLote("corrigir")} disabled={lote.isPending}>
-                ✎ Corrigir
-              </Button>
-              <Button variant="danger" onClick={() => acaoLote("descartar")} disabled={lote.isPending}>
-                ✕ Descartar
-              </Button>
-              <Button variant="ghost" onClick={() => acaoLote("reabrir")} disabled={lote.isPending}>
-                ↺ Reabrir
-              </Button>
-              <Button variant="ghost" onClick={() => setSelecionados(new Set())}>
-                Limpar seleção
-              </Button>
+            <div className="row gap2 wrap">
+              <Btn size="sm" variant="ok" icon="check" onClick={() => acaoLote("confirmar")} disabled={lote.isPending}>
+                Confirmar
+              </Btn>
+              <Btn size="sm" variant="secondary" icon="pencil" onClick={() => acaoLote("corrigir")} disabled={lote.isPending}>
+                Corrigir
+              </Btn>
+              <Btn size="sm" variant="danger" icon="x" onClick={() => acaoLote("descartar")} disabled={lote.isPending}>
+                Descartar
+              </Btn>
+              <Btn size="sm" variant="ghost" icon="rotate-ccw" onClick={() => acaoLote("reabrir")} disabled={lote.isPending}>
+                Reabrir
+              </Btn>
+              <Btn size="sm" variant="ghost" onClick={() => setSel(new Set())}>
+                Limpar
+              </Btn>
             </div>
           </div>
         </Card>
       )}
 
-      {isLoading && (
-        <div className="flex items-center justify-center py-20">
-          <Spinner className="h-8 w-8" />
-        </div>
-      )}
-      {error && (
-        <div className="text-red-700 bg-red-50 border border-red-200 rounded-lg p-4">
-          {(error as Error).message}
-        </div>
-      )}
-
-      {data && itens.length === 0 && (
-        <Card className="p-2">
-          <EmptyState
+      {itens.length === 0 ? (
+        <Card style={{ padding: 6 }}>
+          <Empty
+            icon="table-2"
             title="Nenhum evento encontrado"
-            description={
-              total === 0 && statusF === "todos" && !busca && !labelF && !videoF
-                ? "Este processo ainda não tem eventos. Envie um vídeo para começar."
-                : "Nenhum evento corresponde aos filtros selecionados."
+            desc={
+              total === 0 && status === "todos" && !busca && !label && !videoF
+                ? "Envie um vídeo para começar."
+                : "Nenhum evento corresponde aos filtros."
             }
           />
         </Card>
-      )}
-
-      {itens.length > 0 && (
-        <Card className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+      ) : (
+        <Card style={{ overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
               <thead>
-                <tr className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-                  <th className="p-3 w-8">
+                <tr style={{ background: "var(--soft)", color: "var(--muted)", textTransform: "uppercase", fontSize: 10.5, letterSpacing: ".07em" }}>
+                  <Th style={{ width: 30 }}>
                     <input
                       type="checkbox"
-                      checked={itens.length > 0 && itens.every((e) => selecionados.has(e.id))}
-                      onChange={toggleTodosPagina}
-                      className="accent-kv-purple"
+                      checked={itens.length > 0 && itens.every((e) => sel.has(e.id))}
+                      onChange={() =>
+                        setSel((s) => {
+                          const todos = itens.every((e) => s.has(e.id));
+                          const n = new Set(s);
+                          if (todos) itens.forEach((e) => n.delete(e.id));
+                          else itens.forEach((e) => n.add(e.id));
+                          return n;
+                        })
+                      }
+                      style={{ accentColor: "var(--accent)" }}
                     />
-                  </th>
-                  <th className="p-3 text-left">Comportamento</th>
-                  <th className="p-3 text-left">Descrição</th>
-                  <th className="p-3 text-left">Vídeo · tempo</th>
-                  <th className="p-3 text-center">Pessoa</th>
-                  <th className="p-3 text-center">Conf.</th>
-                  <th className="p-3 text-center">Status</th>
-                  <th className="p-3 w-8"></th>
+                  </Th>
+                  <Th>Comportamento</Th>
+                  <Th>Descrição</Th>
+                  <Th>Vídeo · tempo</Th>
+                  <Th center>Pessoa</Th>
+                  <Th center>Conf.</Th>
+                  <Th center>Status</Th>
+                  <Th style={{ width: 30 }} />
                 </tr>
               </thead>
               <tbody>
                 {itens.map((ev) => (
-                  <LinhaEvento
+                  <Linha
                     key={ev.id}
                     ev={ev}
-                    selecionado={selecionados.has(ev.id)}
-                    onToggleSel={() => toggleSel(ev.id)}
-                    expandido={expandido === ev.id}
-                    onToggleExpandir={() =>
-                      setExpandido((cur) => (cur === ev.id ? null : ev.id))
-                    }
-                    labelsCanonicos={labelsCanonicos}
-                    onResolved={invalidarTudo}
+                    sel={sel.has(ev.id)}
+                    onToggleSel={() => {
+                      setSel((s) => {
+                        const n = new Set(s);
+                        n.has(ev.id) ? n.delete(ev.id) : n.add(ev.id);
+                        return n;
+                      });
+                    }}
+                    expandido={expand === ev.id}
+                    onExpand={() => setExpand((e) => (e === ev.id ? null : ev.id))}
+                    labels={labels}
+                    onResolvido={invalidar}
                   />
                 ))}
               </tbody>
@@ -319,163 +273,223 @@ export default function Eventos() {
         </Card>
       )}
 
-      {/* Paginação */}
-      {totalPaginas > 1 && (
-        <div className="flex items-center justify-center gap-2 mt-4">
-          <Button variant="ghost" disabled={page <= 1} onClick={() => setPage(1)}>
-            « Primeira
-          </Button>
-          <Button variant="ghost" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-            ‹ Anterior
-          </Button>
-          <span className="text-sm text-slate-600 px-2">
-            {page} / {totalPaginas}
+      {totalPag > 1 && (
+        <div className="row gap2" style={{ justifyContent: "center", marginTop: 6 }}>
+          <Btn size="sm" variant="ghost" disabled={page <= 1} onClick={() => setPage(1)}>« Primeira</Btn>
+          <Btn size="sm" variant="ghost" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>‹</Btn>
+          <span className="font-mono" style={{ fontSize: 13, color: "var(--text)", padding: "0 6px" }}>
+            {page} / {totalPag}
           </span>
-          <Button variant="ghost" disabled={page >= totalPaginas} onClick={() => setPage((p) => p + 1)}>
-            Próxima ›
-          </Button>
-          <Button variant="ghost" disabled={page >= totalPaginas} onClick={() => setPage(totalPaginas)}>
-            Última »
-          </Button>
+          <Btn size="sm" variant="ghost" disabled={page >= totalPag} onClick={() => setPage((p) => p + 1)}>›</Btn>
+          <Btn size="sm" variant="ghost" disabled={page >= totalPag} onClick={() => setPage(totalPag)}>Última »</Btn>
         </div>
       )}
     </div>
   );
 }
 
-function SelectFiltro({
+function Th({ children, center, style }: { children?: React.ReactNode; center?: boolean; style?: React.CSSProperties }) {
+  return (
+    <th
+      style={{
+        padding: "10px 12px",
+        textAlign: center ? "center" : "left",
+        fontWeight: 700,
+        ...style,
+      }}
+    >
+      {children}
+    </th>
+  );
+}
+
+function Campo({
   label,
-  value,
+  valor,
   onChange,
-  options,
+  placeholder,
 }: {
   label: string;
-  value: string;
+  valor: string;
   onChange: (v: string) => void;
-  options: { value: string; label: string }[];
+  placeholder?: string;
 }) {
   return (
-    <div>
-      <label className="block text-xs font-medium text-slate-600 mb-1">{label}</label>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-kv-purple focus:ring-2 focus:ring-kv-purple/20 outline-none bg-white"
-      >
-        {options.map((o) => (
+    <label className="col" style={{ gap: 5 }}>
+      <span className="label">{label}</span>
+      <input className="field" value={valor} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+    </label>
+  );
+}
+
+function Select({
+  label,
+  valor,
+  onChange,
+  opts,
+  compact,
+}: {
+  label: string;
+  valor: string;
+  onChange: (v: string) => void;
+  opts: { value: string; label: string }[];
+  compact?: boolean;
+}) {
+  return (
+    <label className="col" style={{ gap: 5, minWidth: compact ? 140 : "auto" }}>
+      <span className="label">{label}</span>
+      <select className="field" value={valor} onChange={(e) => onChange(e.target.value)}>
+        {opts.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>
         ))}
       </select>
-    </div>
+    </label>
   );
 }
 
-function LinhaEvento({
+function Linha({
   ev,
-  selecionado,
+  sel,
   onToggleSel,
   expandido,
-  onToggleExpandir,
-  labelsCanonicos,
-  onResolved,
+  onExpand,
+  labels,
+  onResolvido,
 }: {
   ev: EventoTabela;
-  selecionado: boolean;
+  sel: boolean;
   onToggleSel: () => void;
   expandido: boolean;
-  onToggleExpandir: () => void;
-  labelsCanonicos: string[];
-  onResolved: () => void;
+  onExpand: () => void;
+  labels: string[];
+  onResolvido: () => void;
 }) {
   const [labelEdit, setLabelEdit] = useState(ev.label_efetivo);
   const [msg, setMsg] = useState<string | null>(null);
-
   const acao = useMutation({
-    mutationFn: ({ a, label }: { a: AcaoEvento; label?: string }) =>
-      a === "reabrir" ? api.eventos.reabrir(ev.id) : api.eventos.validar(ev.id, a, label),
+    mutationFn: ({ a, lbl }: { a: AcaoEvento; lbl?: string }) =>
+      a === "reabrir" ? api.eventos.reabrir(ev.id) : api.eventos.validar(ev.id, a, lbl),
     onSuccess: (_d, vars) => {
       const txt: Record<AcaoEvento, string> = {
         confirmar: "confirmado",
-        corrigir: `corrigido para "${vars.label}"`,
+        corrigir: `corrigido para "${vars.lbl}"`,
         descartar: "descartado",
-        reabrir: "reaberto (voltou para a fila)",
+        reabrir: "reaberto",
       };
       setMsg(`✓ ${txt[vars.a]}`);
-      setTimeout(onResolved, 700);
+      window.setTimeout(onResolvido, 700);
     },
   });
-
+  const meta = STATUS_META[ev.status_efetivo] || STATUS_META.pendente;
   const houveCorrecao = ev.label_corrigido && ev.label_corrigido !== ev.comportamento_label;
+  const frames = useQuery({
+    queryKey: ["frames", ev.id],
+    queryFn: () => api.eventos.frames(ev.id),
+    enabled: expandido,
+    staleTime: 5 * 60 * 1000,
+  });
 
   return (
     <>
-      <tr className="border-t border-slate-100 hover:bg-slate-50/60">
-        <td className="p-3 align-top">
-          <input
-            type="checkbox"
-            checked={selecionado}
-            onChange={onToggleSel}
-            className="accent-kv-purple"
-          />
+      <tr style={{ borderTop: "1px solid var(--line-2)" }}>
+        <td style={{ padding: "10px 12px", verticalAlign: "top" }}>
+          <input type="checkbox" checked={sel} onChange={onToggleSel} style={{ accentColor: "var(--accent)" }} />
         </td>
-        <td className="p-3 align-top">
+        <td style={{ padding: "10px 12px", verticalAlign: "top" }}>
           {houveCorrecao ? (
-            <span className="text-xs">
-              <span className="line-through text-slate-400">{ev.comportamento_label}</span>
-              <span className="text-slate-400"> → </span>
-              <code className="bg-kv-purple-50 text-kv-purple-dark px-1.5 py-0.5 rounded">
+            <span className="font-mono" style={{ fontSize: 11.5 }}>
+              <span style={{ textDecoration: "line-through", color: "var(--faint)" }}>{ev.comportamento_label}</span>
+              <span style={{ color: "var(--faint)" }}> → </span>
+              <code style={{ background: "var(--accent-soft)", color: "var(--accent-deep)", padding: "1px 6px", borderRadius: 5 }}>
                 {ev.label_corrigido}
               </code>
             </span>
           ) : (
-            <code className="bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded text-xs">
+            <code style={{ background: "var(--line-2)", color: "var(--text)", padding: "1px 6px", borderRadius: 5, fontSize: 11.5, fontFamily: "var(--mono)" }}>
               {ev.comportamento_label}
             </code>
           )}
         </td>
-        <td className="p-3 align-top max-w-[14rem]">
-          <span className="text-slate-600 text-xs line-clamp-2" title={ev.descricao_bruta}>
+        <td style={{ padding: "10px 12px", verticalAlign: "top", maxWidth: 240 }}>
+          <span className="clamp2" style={{ fontSize: 12, color: "var(--text)" }} title={ev.descricao_bruta}>
             {ev.descricao_bruta || "—"}
           </span>
         </td>
-        <td className="p-3 align-top whitespace-nowrap text-xs text-slate-500">
-          <div className="truncate max-w-[10rem]" title={ev.video_nome}>{ev.video_nome}</div>
-          <div>
-            {ev.tempo_inicio_s.toFixed(0)}→{ev.tempo_fim_s.toFixed(0)}s ·{" "}
-            {formatSeg(ev.duracao_s)}
+        <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 11.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
+          <div className="truncate" title={ev.video_nome} style={{ maxWidth: 160 }}>
+            {ev.video_nome}
+          </div>
+          <div className="font-mono">
+            {ev.tempo_inicio_s.toFixed(0)}→{ev.tempo_fim_s.toFixed(0)}s · {fmtSeg(ev.duracao_s)}
           </div>
         </td>
-        <td className="p-3 align-top text-center text-xs text-slate-500">
-          {String(ev.pessoa_track_id).padStart(3, "0")}
+        <td style={{ padding: "10px 12px", verticalAlign: "top", textAlign: "center", fontSize: 12, color: "var(--muted)" }}>
+          #{String(ev.pessoa_track_id).padStart(3, "0")}
         </td>
-        <td className="p-3 align-top text-center text-xs text-slate-500">
+        <td style={{ padding: "10px 12px", verticalAlign: "top", textAlign: "center", fontSize: 12, color: "var(--muted)" }}>
           {(ev.confianca * 100).toFixed(0)}%
         </td>
-        <td className="p-3 align-top text-center">{statusBadge(ev.status_efetivo)}</td>
-        <td className="p-3 align-top text-center">
+        <td style={{ padding: "10px 12px", verticalAlign: "top", textAlign: "center" }}>
+          <Badge tone={meta.tone}>{meta.label}</Badge>
+        </td>
+        <td style={{ padding: "10px 12px", verticalAlign: "top", textAlign: "center" }}>
           <button
-            onClick={onToggleExpandir}
-            className="text-slate-400 hover:text-kv-purple-dark"
+            onClick={onExpand}
+            style={{ background: 0, border: 0, color: "var(--muted)" }}
             title="Inspecionar e editar"
           >
-            {expandido ? "▲" : "▸"}
+            <Icon name={expandido ? "chevron-up" : "chevron-down"} size={14} />
           </button>
         </td>
       </tr>
       {expandido && (
-        <tr className="bg-slate-50/80">
-          <td colSpan={8} className="p-4">
-            <PainelEdicao
-              ev={ev}
-              labelEdit={labelEdit}
-              setLabelEdit={setLabelEdit}
-              labelsCanonicos={labelsCanonicos}
-              onAcao={(a, label) => acao.mutate({ a, label })}
-              pending={acao.isPending}
-              msg={msg}
-            />
+        <tr style={{ background: "var(--soft)" }}>
+          <td colSpan={8} style={{ padding: 14 }}>
+            <div className="row gap2" style={{ overflowX: "auto", marginBottom: 10 }}>
+              {frames.isLoading && <div className="dotbg" style={{ width: "100%", height: 140, borderRadius: 10 }} />}
+              {frames.data?.frames.map((src, i) => (
+                <img key={i} src={src} alt={`q${i}`} style={{ height: 140, borderRadius: 10, border: "1px solid var(--line)" }} />
+              ))}
+              {frames.error && (
+                <div style={{ fontSize: 11.5, color: "var(--apoio)", background: "var(--apoio-bg)", border: "1px solid rgba(229,149,14,.2)", borderRadius: 8, padding: "6px 10px", maxWidth: 380 }}>
+                  {(frames.error as Error).message}
+                </div>
+              )}
+            </div>
+            {msg ? (
+              <div style={{ fontSize: 13, color: "var(--ok)" }}>{msg}</div>
+            ) : (
+              <div className="row gap2 wrap" style={{ alignItems: "center" }}>
+                <input
+                  list={`labs-tab-${ev.id}`}
+                  className="field"
+                  style={{ width: 320 }}
+                  value={labelEdit}
+                  onChange={(e) => setLabelEdit(e.target.value)}
+                />
+                <datalist id={`labs-tab-${ev.id}`}>
+                  {labels.map((l) => (
+                    <option key={l} value={l} />
+                  ))}
+                </datalist>
+                <Btn variant="ok" size="sm" icon="check" disabled={acao.isPending} onClick={() => acao.mutate({ a: "confirmar" })}>
+                  Confirmar
+                </Btn>
+                <Btn variant="secondary" size="sm" icon="pencil" disabled={acao.isPending || !labelEdit.trim()} onClick={() => acao.mutate({ a: "corrigir", lbl: labelEdit.trim() })}>
+                  Corrigir
+                </Btn>
+                <Btn variant="danger" size="sm" icon="x" disabled={acao.isPending} onClick={() => acao.mutate({ a: "descartar" })}>
+                  Descartar
+                </Btn>
+                {ev.status_efetivo !== "pendente" && (
+                  <Btn variant="ghost" size="sm" icon="rotate-ccw" disabled={acao.isPending} onClick={() => acao.mutate({ a: "reabrir" })}>
+                    Reabrir
+                  </Btn>
+                )}
+              </div>
+            )}
           </td>
         </tr>
       )}
@@ -483,190 +497,100 @@ function LinhaEvento({
   );
 }
 
-function PainelEdicao({
-  ev,
-  labelEdit,
-  setLabelEdit,
-  labelsCanonicos,
-  onAcao,
-  pending,
-  msg,
-}: {
-  ev: EventoTabela;
-  labelEdit: string;
-  setLabelEdit: (v: string) => void;
-  labelsCanonicos: string[];
-  onAcao: (a: AcaoEvento, label?: string) => void;
-  pending: boolean;
-  msg: string | null;
-}) {
-  const frames = useQuery({
-    queryKey: ["frames", ev.id],
-    queryFn: () => api.eventos.frames(ev.id),
-    staleTime: 5 * 60 * 1000,
-  });
-  const listaId = `labels-${ev.id}`;
-
-  return (
-    <div className="space-y-3">
-      <div className="flex gap-2 overflow-x-auto">
-        {frames.isLoading && (
-          <div className="h-40 w-56 bg-slate-100 rounded-lg flex items-center justify-center">
-            <Spinner />
-          </div>
-        )}
-        {frames.data?.frames.map((src, i) => (
-          <img
-            key={i}
-            src={src}
-            alt={`quadro ${i + 1}`}
-            className="h-40 rounded-lg border border-slate-200"
-          />
-        ))}
-        {frames.error && (
-          <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3 max-w-md">
-            {(frames.error as Error).message}
-          </div>
-        )}
-      </div>
-
-      {msg ? (
-        <div className="text-sm text-emerald-700 font-medium">{msg}</div>
-      ) : (
-        <div className="flex items-end gap-2 flex-wrap">
-          <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">
-              Comportamento (use um existente quando possível)
-            </label>
-            <input
-              list={listaId}
-              value={labelEdit}
-              onChange={(e) => setLabelEdit(e.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-kv-purple focus:ring-2 focus:ring-kv-purple/20 outline-none w-72"
-            />
-            <datalist id={listaId}>
-              {labelsCanonicos.map((l) => (
-                <option key={l} value={l} />
-              ))}
-            </datalist>
-          </div>
-          <Button variant="success" onClick={() => onAcao("confirmar")} disabled={pending}>
-            ✓ Confirmar
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => onAcao("corrigir", labelEdit.trim())}
-            disabled={pending || !labelEdit.trim()}
-          >
-            ✎ Corrigir
-          </Button>
-          <Button variant="danger" onClick={() => onAcao("descartar")} disabled={pending}>
-            ✕ Descartar
-          </Button>
-          {ev.status_efetivo !== "pendente" && (
-            <Button variant="ghost" onClick={() => onAcao("reabrir")} disabled={pending}>
-              ↺ Reabrir
-            </Button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Painel explicativo retrátil — para quem nunca usou a plataforma
-// entender o que cada status significa e como sua correção ensina a IA.
-// ────────────────────────────────────────────────────────────────────────
-function ExplicacaoStatusEAprendizado() {
+// ════════════════════════════════════════════════════════════════════════
+// Explicação retrátil
+// ════════════════════════════════════════════════════════════════════════
+function ExplicacaoEventos() {
   const [aberto, setAberto] = useState(false);
   return (
-    <Card className="mb-4 overflow-hidden">
+    <Card style={{ padding: 0 }}>
       <button
         onClick={() => setAberto((v) => !v)}
-        className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-slate-50 transition"
-        aria-expanded={aberto}
+        className="row gap2 click"
+        style={{
+          width: "100%",
+          background: "transparent",
+          border: 0,
+          padding: "12px 16px",
+          textAlign: "left",
+        }}
       >
-        <div className="flex items-center gap-3">
-          <span className="h-8 w-8 rounded-full bg-kv-purple-100 text-kv-purple-dark flex items-center justify-center font-bold text-sm">
-            i
-          </span>
-          <div>
-            <div className="font-medium text-slate-900">
-              Entenda os status e como o sistema aprende com você
-            </div>
-            <div className="text-xs text-slate-500">
-              Em 1 minuto: o que cada coluna quer dizer e por que sua correção vale ouro.
-            </div>
+        <span
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: "50%",
+            background: "var(--accent-soft)",
+            color: "var(--accent-deep)",
+            display: "grid",
+            placeItems: "center",
+            fontWeight: 800,
+            fontSize: 13,
+          }}
+        >
+          i
+        </span>
+        <div className="grow">
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>
+            Entenda os status e como o Prism aprende
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+            Em 1 minuto: o que cada coluna quer dizer e por que sua correção vale ouro.
           </div>
         </div>
-        <span className="text-slate-400 text-sm">{aberto ? "▲" : "▼"}</span>
+        <Icon name={aberto ? "chevron-up" : "chevron-down"} size={14} color="var(--muted)" />
       </button>
-
       {aberto && (
-        <div className="px-5 pb-5 border-t border-slate-100 pt-5 space-y-6">
-          {/* O que cada status significa */}
-          <div>
-            <h3 className="font-semibold text-slate-900 mb-3">
-              O que cada status significa
-            </h3>
-            <ul className="space-y-3 text-sm">
-              <ExplicaStatus tone="neutral" titulo="Pendente">
-                A IA detectou um evento mas ainda <b>não tem certeza se
-                acertou</b> — está aguardando sua revisão. Quem decide é você.
-              </ExplicaStatus>
-              <ExplicaStatus tone="success" titulo="Confirmado">
-                Você olhou e disse que a IA <b>acertou</b> o nome da
-                atividade. Cada confirmação reforça o aprendizado.
-              </ExplicaStatus>
-              <ExplicaStatus tone="info" titulo="Corrigido">
-                A IA chamou a atividade de uma forma e você ajustou para o
-                <b> nome certo da sua operação</b>. Daqui em diante, o sistema
-                passa a usar o nome novo.
-              </ExplicaStatus>
-              <ExplicaStatus tone="alta" titulo="Descartado">
-                Você marcou como <b>falso alarme</b> — aquilo não era uma
-                atividade relevante. O sistema para de marcar coisas
-                parecidas no futuro.
-              </ExplicaStatus>
-              <ExplicaStatus tone="warning" titulo="Auto-validado">
-                A IA aprovou <b>sozinha</b> porque você já confirmou esse
-                mesmo tipo de atividade pelo menos 2 vezes antes. Sua carga
-                de trabalho cai com o tempo.
-              </ExplicaStatus>
-            </ul>
+        <div style={{ padding: "0 20px 20px", borderTop: "1px solid var(--line)" }}>
+          <h4 style={{ fontSize: 13, fontWeight: 700, marginTop: 16, marginBottom: 10, color: "var(--ink)" }}>
+            O que cada status significa
+          </h4>
+          <ul className="col gap2" style={{ listStyle: "none", padding: 0, fontSize: 13 }}>
+            <ExplicaStatus tone="neutral" label="Pendente">
+              O Prism detectou e está aguardando sua revisão.
+            </ExplicaStatus>
+            <ExplicaStatus tone="ok" label="Confirmado">
+              Você disse que ele acertou — cada confirmação reforça o aprendizado.
+            </ExplicaStatus>
+            <ExplicaStatus tone="info" label="Corrigido">
+              Você ajustou o nome para o termo certo do seu chão de fábrica.
+            </ExplicaStatus>
+            <ExplicaStatus tone="high" label="Descartado">
+              Falso alarme — o Prism para de marcar coisas parecidas.
+            </ExplicaStatus>
+            <ExplicaStatus tone="warn" label="Auto-validado">
+              Confirmado sozinho (label já validado por você 2× ou mais).
+            </ExplicaStatus>
+          </ul>
+          <h4 style={{ fontSize: 13, fontWeight: 700, marginTop: 18, marginBottom: 10, color: "var(--ink)" }}>
+            Como o Prism aprende com você
+          </h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 8 }}>
+            {[
+              ["1", "O Prism observa o vídeo", "Identifica pessoas e descreve, em linguagem natural, o que cada uma faz."],
+              ["2", "Você ensina", "Confirma, corrige ou descarta. Pode aqui mesmo, a qualquer hora."],
+              ["3", "Ele aprende", "Cada confirmação reforça o nome certo. Após 2 iguais, ele aprova sozinho."],
+              ["4", "Próximo vídeo vem melhor", "Análises seguintes partem do que você ensinou."],
+            ].map(([n, t, d]) => (
+              <div
+                key={n}
+                style={{
+                  background: "linear-gradient(135deg, var(--accent-soft), #fff)",
+                  border: "1px solid var(--p-100)",
+                  borderRadius: 12,
+                  padding: 10,
+                }}
+              >
+                <div className="row gap2" style={{ marginBottom: 4 }}>
+                  <span style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 800 }}>
+                    {n}
+                  </span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }}>{t}</span>
+                </div>
+                <p style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45 }}>{d}</p>
+              </div>
+            ))}
           </div>
-
-          {/* Como aprende com você */}
-          <div>
-            <h3 className="font-semibold text-slate-900 mb-3">
-              Como o sistema aprende com você
-            </h3>
-            <ol className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <PassoAprendizado n={1} titulo="A IA observa o vídeo">
-                Identifica as pessoas e descreve, em linguagem natural, o que
-                cada uma está fazendo.
-              </PassoAprendizado>
-              <PassoAprendizado n={2} titulo="Você ensina">
-                Confirma, corrige ou descarta. Pode fazer isso aqui mesmo, em
-                qualquer evento, a qualquer momento.
-              </PassoAprendizado>
-              <PassoAprendizado n={3} titulo="A IA aprende">
-                Cada confirmação reforça o nome certo. Depois de 2 confirmações
-                iguais, ela passa a aprovar sozinha (Auto-validado).
-              </PassoAprendizado>
-              <PassoAprendizado n={4} titulo="Próximo vídeo vem melhor">
-                Quando você processar o próximo vídeo, o sistema já parte do
-                que você ensinou — menos trabalho, análise mais certeira.
-              </PassoAprendizado>
-            </ol>
-          </div>
-
-          <p className="text-xs text-slate-500 italic">
-            Dica: <b>Reabrir</b> um evento devolve ele para a fila como
-            "Pendente" — útil quando você quer rever uma decisão antiga sem
-            apagá-la do histórico.
-          </p>
         </div>
       )}
     </Card>
@@ -675,43 +599,19 @@ function ExplicacaoStatusEAprendizado() {
 
 function ExplicaStatus({
   tone,
-  titulo,
+  label,
   children,
 }: {
-  tone: "neutral" | "success" | "info" | "alta" | "warning";
-  titulo: string;
+  tone: "neutral" | "ok" | "info" | "warn" | "high";
+  label: string;
   children: React.ReactNode;
 }) {
   return (
-    <li className="flex items-start gap-3">
-      <span className="flex-shrink-0 mt-0.5 w-28">
-        <Badge tone={tone}>{titulo}</Badge>
+    <li className="row gap2">
+      <span style={{ minWidth: 110 }}>
+        <Badge tone={tone}>{label}</Badge>
       </span>
-      <p className="text-slate-700 leading-relaxed flex-1">{children}</p>
-    </li>
-  );
-}
-
-function PassoAprendizado({
-  n,
-  titulo,
-  children,
-}: {
-  n: number;
-  titulo: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <li className="bg-gradient-to-br from-kv-purple-50 to-white border border-kv-purple-200 rounded-xl p-3.5">
-      <div className="flex items-center gap-2 mb-1.5">
-        <span className="h-6 w-6 rounded-full bg-kv-purple text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
-          {n}
-        </span>
-        <span className="font-medium text-slate-900 text-sm leading-tight">
-          {titulo}
-        </span>
-      </div>
-      <p className="text-xs text-slate-600 leading-relaxed">{children}</p>
+      <span style={{ color: "var(--text)" }}>{children}</span>
     </li>
   );
 }

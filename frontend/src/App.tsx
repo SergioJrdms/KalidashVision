@@ -1,10 +1,9 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useAuth } from "./hooks/useAuth";
-import { Spinner } from "./components/UI";
-import { AppShell, ProcessoShell } from "./components/Layout";
+import { Spinner, ToastHost } from "./components/UIKit";
+import { AppShell } from "./components/Layout";
 import Login from "./pages/Login";
-import Signup from "./pages/Signup";
 import Processos from "./pages/Processos";
 import DescricaoProcesso from "./pages/DescricaoProcesso";
 import Upload from "./pages/Upload";
@@ -21,8 +20,8 @@ function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   if (loading)
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <Spinner className="h-8 w-8" />
+      <div className="center" style={{ minHeight: "100vh" }}>
+        <Spinner size={28} />
       </div>
     );
   if (!user) return <Navigate to="/login" replace />;
@@ -41,20 +40,19 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <Routes>
         <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
-        <Route path="/cadastro" element={<PublicOnly><Signup /></PublicOnly>} />
+        <Route path="/cadastro" element={<PublicOnly><Login /></PublicOnly>} />
         <Route element={<Protected><AppShell /></Protected>}>
           <Route path="/processos" element={<Processos />} />
-          <Route path="/processos/:id" element={<ProcessoShell />}>
-            <Route path="descricao" element={<DescricaoProcesso />} />
-            <Route path="upload" element={<Upload />} />
-            <Route path="dashboard" element={<Dashboard />} />
-            <Route path="validacao" element={<Validacao />} />
-            <Route path="eventos" element={<Eventos />} />
-            <Route path="padroes" element={<Padroes />} />
-          </Route>
+          <Route path="/processos/:id/dashboard" element={<Dashboard />} />
+          <Route path="/processos/:id/validacao" element={<Validacao />} />
+          <Route path="/processos/:id/eventos" element={<Eventos />} />
+          <Route path="/processos/:id/padroes" element={<Padroes />} />
+          <Route path="/processos/:id/upload" element={<Upload />} />
+          <Route path="/processos/:id/descricao" element={<DescricaoProcesso />} />
         </Route>
         <Route path="*" element={<Navigate to="/processos" replace />} />
       </Routes>
+      <ToastHost />
     </QueryClientProvider>
   );
 }
