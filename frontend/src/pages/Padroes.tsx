@@ -1,225 +1,116 @@
-import { useMemo, useState } from "react";
+// ============================================================
+// Padrões — porte fiel de padroes.jsx, com dados reais.
+// ============================================================
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Tooltip as RTooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { api } from "../lib/api";
-import { Badge, Button, Card, EmptyState, Spinner, Tooltip } from "../components/UI";
-import { PrismAvatar } from "../components/PrismAvatar";
-import type { PadraoProcesso, SerieTemporal } from "../lib/types";
+import { mapSerie, mapPadroes, type SerieMock, type PadProcMock, type ProcHeaderMock } from "../lib/adapt";
+import { leanCor, leanLabel } from "../design/helpers";
+import { Card, Icon, Prism, Badge, PanelHead, Empty, Btn } from "../design/ui";
+import type { Go } from "../design/Shell";
 
-const CORES = [
-  "#7c3aed", "#10b981", "#f59e0b", "#ef4444", "#6366f1",
-  "#a855f7", "#0ea5e9", "#84cc16", "#ec4899", "#14b8a6",
-];
-
-const TIPO_INFO: Record<string, { icone: string; rotulo: string }> = {
-  tendencia: { icone: "↗", rotulo: "Tendência" },
-  recorrencia: { icone: "↻", rotulo: "Recorrência" },
-  desvio: { icone: "⚠", rotulo: "Desvio" },
-  volatilidade: { icone: "∿", rotulo: "Volatilidade" },
-  fluxo: { icone: "⇄", rotulo: "Fluxo" },
-  desperdicio: { icone: "▼", rotulo: "Desperdício recorrente" },
-  valor: { icone: "▲", rotulo: "Valor recorrente" },
+const TIPO_PADRAO: Record<string, { icon: string; label: string }> = {
+  tendencia: { icon: "trending-up", label: "Tendência" },
+  recorrencia: { icon: "repeat", label: "Recorrência" },
+  desvio: { icon: "alert-triangle", label: "Desvio" },
+  volatilidade: { icon: "activity", label: "Volatilidade" },
+  fluxo: { icon: "git-branch", label: "Fluxo" },
+  desperdicio: { icon: "arrow-down", label: "Desperdício recorrente" },
+  valor: { icon: "arrow-up", label: "Valor recorrente" },
 };
 
-function tomConfianca(c: string): "success" | "warning" | "neutral" {
-  if (c === "alta") return "success";
-  if (c === "media") return "warning";
-  return "neutral";
-}
+export default function Padroes({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
+  const serieQ = useQuery({ queryKey: ["serie", proc.id], queryFn: () => api.padroes.serie(proc.id) });
+  const padQ = useQuery({ queryKey: ["padroes", proc.id], queryFn: () => api.padroes.doProcesso(proc.id) });
 
-export default function Padroes() {
-  const { id } = useParams<{ id: string }>();
-  const padroes = useQuery({
-    queryKey: ["padroes", id],
-    queryFn: () => api.padroes.doProcesso(id!),
-    enabled: !!id,
-  });
-  const serie = useQuery({
-    queryKey: ["serie-temporal", id],
-    queryFn: () => api.padroes.serie(id!),
-    enabled: !!id,
-  });
+  if (serieQ.isLoading || padQ.isLoading) return <Card><Empty icon="loader" title="Carregando padrões…" /></Card>;
+  const serie = serieQ.data ? mapSerie(serieQ.data) : { nVideos: 0, pontos: [] };
+  const padroes = mapPadroes(padQ.data || []);
 
-  if (padroes.isLoading || serie.isLoading)
+  if (serie.nVideos < 3) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <Spinner className="h-8 w-8" />
-      </div>
-    );
-
-  const nVideos = serie.data?.n_videos ?? 0;
-  const lista = padroes.data || [];
-
-  // série insuficiente
-  if (nVideos < 3) {
-    return (
-      <Card className="p-2">
-        <EmptyState
-          title="Ainda não há série suficiente para detectar padrões"
-          description={`Padrões precisam de pelo menos 3 vídeos processados (você tem ${nVideos}). Processe mais alguns turnos para o Prism identificar tendências, recorrências e desvios ao longo do tempo.`}
-          action={
-            <Link to={`/processos/${id}/upload`}>
-              <Button>Enviar vídeo</Button>
-            </Link>
-          }
-        />
+      <Card>
+        <Empty icon="activity" title="Ainda não há série suficiente para detectar padrões"
+          desc={`Padrões precisam de pelo menos 3 vídeos processados (você tem ${serie.nVideos}). Envie mais turnos para o Prism identificar tendências, recorrências e desvios.`}
+          action={<Btn icon="upload" onClick={() => go("processo", proc.id, "upload")}>Enviar vídeo</Btn>} />
       </Card>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-2.5">
-        <PrismAvatar size={32} />
+    <div className="col" style={{ gap: 18 }}>
+      <div className="row gap3">
+        <Prism size={36} ring />
         <div>
-          <h2 className="font-semibold text-slate-900 leading-tight">
-            Padrões da operação
-          </h2>
-          <p className="text-xs text-slate-500 leading-tight">
-            Recorrência e evolução ao longo dos turnos — diferente das sugestões
-            pontuais, que olham o estado atual.
-          </p>
+          <h1 className="font-display" style={{ fontSize: 20, fontWeight: 700 }}>Padrões da operação</h1>
+          <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>Recorrência e evolução ao longo dos turnos — diferente das sugestões pontuais, que olham o estado atual.</p>
         </div>
       </div>
 
-      {serie.data && <GraficoEvolucao serie={serie.data} />}
+      <GraficoEvolucao serie={serie} />
 
-      {lista.length === 0 ? (
-        <Card className="p-6">
-          <p className="text-sm text-slate-500">
-            Nenhum padrão forte detectado nesta série ainda. Conforme você
-            processa mais turnos, tendências e recorrências ficam mais nítidas.
-          </p>
-        </Card>
+      {padroes.length === 0 ? (
+        <Card style={{ padding: 18 }}><p style={{ fontSize: 13.5, color: "var(--muted)" }}>Nenhum padrão forte detectado ainda. Conforme você envia mais turnos, as recorrências e tendências ficam mais nítidas.</p></Card>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {lista.map((p) => (
-            <PadraoCard key={p.id} p={p} />
-          ))}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(380px,1fr))", gap: 14 }}>
+          {padroes.map((p) => <PadraoCard key={p.id} p={p} />)}
         </div>
       )}
     </div>
   );
 }
 
-function GraficoEvolucao({ serie }: { serie: SerieTemporal }) {
-  const [modo, setModo] = useState<"comportamento" | "categoria">("categoria");
-
-  const { dados, chaves } = useMemo(() => {
-    const campo = modo === "categoria" ? "share_categoria" : "share_comportamento";
-    // chaves mais relevantes (maior média) — limita a 6 para não poluir
-    const somas: Record<string, number> = {};
-    serie.pontos.forEach((pt) => {
-      const obj = pt[campo] as Record<string, number>;
-      Object.entries(obj).forEach(([k, v]) => {
-        somas[k] = (somas[k] || 0) + v;
-      });
-    });
-    const chaves = Object.entries(somas)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([k]) => k);
-    const dados = serie.pontos.map((pt, i) => {
-      const obj = pt[campo] as Record<string, number>;
-      const linha: Record<string, number | string> = {
-        turno: `T${i + 1}`,
-      };
-      chaves.forEach((k) => {
-        linha[k] = obj[k] ?? 0;
-      });
-      return linha;
-    });
-    return { dados, chaves };
-  }, [serie, modo]);
-
+function GraficoEvolucao({ serie }: { serie: SerieMock }) {
+  const pts = serie.pontos;
+  const W = 920, H = 280, padL = 34, padR = 16, padT = 16, padB = 28;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const x = (i: number) => padL + (pts.length <= 1 ? iw / 2 : (i / (pts.length - 1)) * iw);
+  const y = (v: number) => padT + (1 - v / 100) * ih;
+  const order: (keyof SerieMock["pontos"][number])[] = ["va", "apoio", "desp", "none"];
+  const bands = order.map((cat, ci) => {
+    const lowKeys = order.slice(0, ci);
+    const top = pts.map((p, i) => ({ i, v: lowKeys.reduce((s, k) => s + (p[k] as number), 0) + (p[cat] as number) }));
+    const bot = pts.map((p, i) => ({ i, v: lowKeys.reduce((s, k) => s + (p[k] as number), 0) }));
+    const path = "M" + top.map((t) => `${x(t.i).toFixed(1)},${y(t.v).toFixed(1)}`).join(" L ") + " L " + bot.slice().reverse().map((b) => `${x(b.i).toFixed(1)},${y(b.v).toFixed(1)}`).join(" L ") + " Z";
+    return { cat: cat as string, path };
+  });
   return (
-    <Card className="p-6">
-      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
-        <h3 className="font-semibold text-slate-900 flex items-center gap-2">
-          Evolução ao longo dos turnos
-          <Tooltip text="Share de % do tempo (eixo Y) de cada comportamento/categoria, turno a turno (cada vídeo é um turno, em ordem cronológica). Permite VER a tendência." />
-        </h3>
-        <div className="flex gap-1 text-xs">
-          {(["categoria", "comportamento"] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setModo(m)}
-              className={`px-2.5 py-1 rounded-full border transition ${
-                modo === m
-                  ? "bg-kv-purple text-white border-kv-purple"
-                  : "bg-white text-slate-600 border-slate-200 hover:border-kv-purple-200"
-              }`}
-            >
-              {m === "categoria" ? "Por categoria" : "Por comportamento"}
-            </button>
-          ))}
-        </div>
-      </div>
-      <p className="text-xs text-slate-500 mb-3">
-        {serie.n_videos} turnos analisados.
-      </p>
-      <div style={{ width: "100%", height: 280 }}>
-        <ResponsiveContainer>
-          <AreaChart data={dados} margin={{ left: 0, right: 12, top: 8 }}>
-            <CartesianGrid stroke="#f1f5f9" />
-            <XAxis dataKey="turno" fontSize={11} />
-            <YAxis tickFormatter={(v) => `${v}%`} fontSize={11} />
-            <RTooltip formatter={(v: number, n: string) => [`${v}%`, n]} />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            {chaves.map((k, i) => (
-              <Area
-                key={k}
-                type="monotone"
-                dataKey={k}
-                stackId="1"
-                stroke={CORES[i % CORES.length]}
-                fill={CORES[i % CORES.length]}
-                fillOpacity={0.18}
-              />
-            ))}
-          </AreaChart>
-        </ResponsiveContainer>
+    <Card style={{ padding: 20 }}>
+      <PanelHead titulo="Evolução ao longo dos turnos" ajuda="Share de % do tempo de cada categoria, turno a turno (cada vídeo é um turno, em ordem cronológica). Permite VER a tendência." leitura={`${serie.nVideos} turnos analisados.`} />
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }}>
+        {[0, 25, 50, 75, 100].map((g) => (
+          <g key={g}><line x1={padL} x2={W - padR} y1={y(g)} y2={y(g)} stroke="var(--line-2)" /><text x={padL - 6} y={y(g) + 3} fontSize="9" textAnchor="end" fill="var(--faint)" className="font-mono">{g}%</text></g>
+        ))}
+        {bands.map((b) => <path key={b.cat} d={b.path} fill={leanCor(b.cat)} fillOpacity={b.cat === "none" ? 0.28 : 0.82} stroke={leanCor(b.cat)} strokeOpacity={0.3} strokeWidth=".5" />)}
+        {pts.map((p, i) => i % 2 === 0 && <text key={i} x={x(i)} y={H - padB + 16} fontSize="9" textAnchor="middle" fill="var(--muted)" className="font-mono">{p.turno}</text>)}
+      </svg>
+      <div className="row wrap" style={{ gap: 14, marginTop: 8, justifyContent: "center" }}>
+        {["va", "apoio", "desp", "none"].map((k) => (
+          <span key={k} className="row gap1" style={{ fontSize: 12, color: "var(--text)" }}><i style={{ width: 11, height: 11, borderRadius: 3, background: leanCor(k) }} /> {leanLabel(k)}</span>
+        ))}
       </div>
     </Card>
   );
 }
 
-function PadraoCard({ p }: { p: PadraoProcesso }) {
-  const info = TIPO_INFO[p.tipo] || { icone: "•", rotulo: p.tipo };
+function PadraoCard({ p }: { p: PadProcMock }) {
+  const info = TIPO_PADRAO[p.tipo] || { icon: "circle", label: p.tipo };
   return (
-    <Card className="p-4">
-      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-        <span className="inline-flex items-center gap-1 text-xs font-medium text-kv-purple-dark bg-kv-purple-50 border border-kv-purple-200 rounded-full px-2 py-0.5">
-          <span aria-hidden>{info.icone}</span> {info.rotulo}
-        </span>
-        <Badge tone={tomConfianca(p.confianca)}>confiança {p.confianca}</Badge>
-        {p.relevancia === "alta" && <Badge tone="alta">ALTA</Badge>}
+    <Card style={{ padding: 18 }}>
+      <div className="row gap2 wrap" style={{ marginBottom: 8 }}>
+        <span className="chip"><Icon name={info.icon} size={12} /> {info.label}</span>
+        <Badge tone={p.confianca === "alta" ? "ok" : "warn"}>confiança {p.confianca}</Badge>
+        {p.relevancia === "alta" && <Badge tone="high">ALTA</Badge>}
       </div>
-      <h4 className="font-semibold text-slate-900 text-sm">{p.titulo}</h4>
-      <p className="text-sm text-slate-600 mt-1 leading-relaxed">{p.descricao}</p>
+      <h4 style={{ fontSize: 15.5, fontWeight: 700 }}>{p.titulo}</h4>
+      <p className="pretty" style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginTop: 6 }}>{p.descricao}</p>
       {p.recomendacao && (
-        <div className="mt-2 text-sm text-slate-700 bg-slate-50 rounded-lg p-2.5 border border-slate-100">
-          <span className="font-semibold text-slate-800">Recomendação. </span>
-          {p.recomendacao}
+        <div className="soft" style={{ borderRadius: 10, padding: "10px 12px", marginTop: 10, fontSize: 12.5, color: "var(--text)", border: "1px solid var(--line)" }}>
+          <b style={{ color: "var(--ink)" }}>Recomendação. </b>{p.recomendacao}
         </div>
       )}
-      {p.comportamentos_relacionados && p.comportamentos_relacionados.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-2">
-          {p.comportamentos_relacionados.slice(0, 6).map((c) => (
-            <code key={c} className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">
-              {c}
-            </code>
-          ))}
+      {p.comportamentos?.length > 0 && (
+        <div className="row wrap gap1" style={{ marginTop: 10 }}>
+          {p.comportamentos.map((c) => <code key={c} className="font-mono" style={{ fontSize: 10, background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 6 }}>{c}</code>)}
         </div>
       )}
     </Card>

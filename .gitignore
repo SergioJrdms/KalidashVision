@@ -27,3 +27,4 @@ dist/
 *.mov
 *.avi
 !frontend/public/*.mp4
+*.tsbuildinfo

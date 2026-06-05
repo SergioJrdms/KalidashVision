@@ -220,6 +220,7 @@ create table if not exists padroes_globais (
 alter table sugestoes_melhoria add column if not exists impacto_estimado text;
 alter table comportamentos    add column if not exists categoria_lean        text;
 alter table comportamentos    add column if not exists categoria_lean_origem text;
+alter table contexto_processo add column if not exists area text;
 
 -- Prism: suporte a conversas de escopo global (visão de toda a empresa).
 -- Conversas globais têm escopo='global' e processo = null.
@@ -2349,7 +2350,7 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
         sb.table("eventos")
         .select(
             "processo, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, validacao_correto, validado_humano"
+            "tempo_fim_s, validacao_correto, validado_humano, origem_validacao"
         )
         .eq("empresa", empresa)
         .limit(100000)
@@ -2360,8 +2361,14 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
         p = base.get(e.get("processo"))
         if not p:
             continue
+        ov = e.get("origem_validacao") or ""
         if not e.get("validado_humano"):
             p["eventos_pendentes"] += 1
+            p["n_origem_pendente"] = p.get("n_origem_pendente", 0) + 1
+        elif ov in ("correcao_aprendida", "vocabulario_canonico"):
+            p["n_origem_auto"] = p.get("n_origem_auto", 0) + 1
+        else:
+            p["n_origem_humano"] = p.get("n_origem_humano", 0) + 1
         if e.get("validacao_correto") is False:
             continue  # falso positivo não conta na base
         p["eventos_considerados"] += 1
@@ -2389,7 +2396,24 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
         if (s.get("prioridade") or "").lower() == "alta":
             p["n_sugestoes_alta"] += 1
 
-    # Finaliza: top comportamentos + composição de valor + percentuais
+    # Padrões com confiança alta — entram na fórmula de maturidade
+    n_padroes_alta: dict[str, int] = defaultdict(int)
+    try:
+        pads = (
+            sb.table("padroes_processo")
+            .select("processo, confianca")
+            .eq("empresa", empresa)
+            .limit(5000)
+            .execute()
+            .data
+        ) or []
+        for r in pads:
+            if (r.get("confianca") or "").lower() == "alta":
+                n_padroes_alta[r.get("processo")] += 1
+    except Exception:
+        pass
+
+    # Finaliza: top comportamentos + composição de valor + MATURIDADE
     saida: dict[str, dict] = {}
     for n, p in base.items():
         agg = p.pop("_agg")
@@ -2404,26 +2428,54 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
             for lbl, d in top[:5]
         ]
         soma_cat = {"valor_agregado": 0.0, "apoio": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+        n_comp_local = 0
+        n_nao_classif = 0
         for lbl, d in agg.items():
-            cat = cat_por_pl.get((n, lbl)) or "nao_classificado"
+            cat = cat_por_pl.get((n, lbl))
+            n_comp_local += 1
+            if not cat:
+                n_nao_classif += 1
+                cat = "nao_classificado"
             if cat not in soma_cat:
                 cat = "nao_classificado"
             soma_cat[cat] += d["dur"]
         composicao = {
             f"{k}_pct": round(v / max(1, tempo_total) * 100, 1) for k, v in soma_cat.items()
         }
+
+        # ── Maturidade do Prism (0-100, derivada, saturada) ──
+        n_videos = p["n_videos"]
+        ev_cons = p["eventos_considerados"]
+        pct_val = p["n_validados"] / max(1, ev_cons)
+        n_auto = p.get("n_origem_auto", 0)
+        n_humano = p.get("n_origem_humano", 0)
+        n_pend = p.get("n_origem_pendente", 0)
+        pct_auto = n_auto / max(1, n_auto + n_humano + n_pend)
+        cobertura_lean = 1 - (n_nao_classif / max(1, n_comp_local))
+        n_pad = n_padroes_alta.get(n, 0)
+        maturidade = (
+            20 * min(1, n_videos / 10)
+            + 25 * min(1, ev_cons / 250)
+            + 30 * pct_val
+            + 15 * pct_auto
+            + 5 * cobertura_lean
+            + 5 * min(1, n_pad / 4)
+        )
+        maturidade = max(0, min(100, round(maturidade)))
+
         saida[n] = {
-            "n_videos": p["n_videos"],
+            "n_videos": n_videos,
             "tempo_total_s": round(tempo_total, 1),
             "tempo_total_min": round(tempo_total / 60, 1),
             "ultimo_video_em": p["ultimo_video_em"],
-            "eventos_considerados": p["eventos_considerados"],
+            "eventos_considerados": ev_cons,
             "eventos_pendentes": p["eventos_pendentes"],
-            "pct_validado": round(p["n_validados"] / max(1, p["eventos_considerados"]) * 100, 1),
+            "pct_validado": round(pct_val * 100, 1),
             "n_sugestoes": p["n_sugestoes"],
             "n_sugestoes_alta": p["n_sugestoes_alta"],
             "top_comportamentos": top_comportamentos,
             "composicao_valor": composicao,
+            "maturidade": maturidade,
         }
     return saida
 

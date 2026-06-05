@@ -1,481 +1,167 @@
-import { useEffect, useMemo, useState } from "react";
+// ============================================================
+// Eventos — porte fiel de eventos.jsx, com dados reais.
+// ============================================================
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
-import { api, formatSeg } from "../lib/api";
-import { Badge, Button, Card, EmptyState, Input, Spinner } from "../components/UI";
-import type {
-  AcaoEvento,
-  EventosTabelaParams,
-  EventoTabela,
-  StatusEfetivo,
-} from "../lib/types";
+import { api } from "../lib/api";
+import { mapEventosTabela, type EvTabMock, type ProcHeaderMock } from "../lib/adapt";
+import { fmtSeg } from "../design/helpers";
+import { Btn, Card, Icon, Badge, Empty, CameraScene, toast } from "../design/ui";
+import type { AcaoEvento } from "../lib/types";
 
-const STATUS_OPCOES: { v: "todos" | StatusEfetivo; label: string }[] = [
-  { v: "todos", label: "Todos" },
-  { v: "pendente", label: "Pendentes" },
-  { v: "confirmado", label: "Confirmados" },
-  { v: "corrigido", label: "Corrigidos" },
-  { v: "descartado", label: "Descartados" },
-  { v: "auto", label: "Auto-validados" },
-];
+const STATUS_LIST = ["pendente", "confirmado", "corrigido", "descartado", "auto"];
+const STATUS_META: Record<string, { tone: string; label: string }> = {
+  pendente: { tone: "neutral", label: "Pendente" },
+  confirmado: { tone: "ok", label: "Confirmado" },
+  corrigido: { tone: "info", label: "Corrigido" },
+  descartado: { tone: "high", label: "Descartado" },
+  auto: { tone: "warn", label: "Auto-validado" },
+};
 
-const SORT_OPCOES: { v: NonNullable<EventosTabelaParams["sort"]>; label: string }[] = [
-  { v: "criado_em", label: "Data de detecção" },
-  { v: "tempo_inicio_s", label: "Tempo no vídeo" },
-  { v: "duracao_s", label: "Duração" },
-  { v: "comportamento_label", label: "Comportamento" },
-  { v: "confianca", label: "Confiança" },
-];
-
-function statusBadge(s: StatusEfetivo) {
-  const map: Record<StatusEfetivo, { tone: "neutral" | "success" | "info" | "alta" | "warning"; texto: string }> = {
-    pendente: { tone: "neutral", texto: "Pendente" },
-    confirmado: { tone: "success", texto: "Confirmado" },
-    corrigido: { tone: "info", texto: "Corrigido" },
-    descartado: { tone: "alta", texto: "Descartado" },
-    auto: { tone: "warning", texto: "Auto-validado" },
-  };
-  const { tone, texto } = map[s];
-  return <Badge tone={tone}>{texto}</Badge>;
-}
-
-export default function Eventos() {
-  const { id } = useParams<{ id: string }>();
+export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
   const qc = useQueryClient();
-
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
-  const [statusF, setStatusF] = useState<"todos" | StatusEfetivo>("todos");
-  const [labelF, setLabelF] = useState("");
-  const [videoF, setVideoF] = useState("");
-  const [buscaInput, setBuscaInput] = useState("");
+  const [status, setStatus] = useState("todos");
   const [busca, setBusca] = useState("");
-  const [sort, setSort] = useState<NonNullable<EventosTabelaParams["sort"]>>("criado_em");
-  const [order, setOrder] = useState<"asc" | "desc">("desc");
-  const [selecionados, setSelecionados] = useState<Set<string>>(new Set());
-  const [expandido, setExpandido] = useState<string | null>(null);
+  const [comp, setComp] = useState("");
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [expand, setExpand] = useState<string | null>(null);
 
-  // debounce da busca
-  useEffect(() => {
-    const t = setTimeout(() => setBusca(buscaInput.trim()), 400);
-    return () => clearTimeout(t);
-  }, [buscaInput]);
+  const q = useQuery({ queryKey: ["eventos-tabela", proc.id], queryFn: () => api.eventos.tabela(proc.id, { page: 1, page_size: 200, sort: "criado_em", order: "desc" }) });
+  const rows: EvTabMock[] = useMemo(() => mapEventosTabela(q.data?.itens || []), [q.data]);
 
-  // qualquer mudança de filtro volta pra página 1
-  useEffect(() => {
-    setPage(1);
-    setSelecionados(new Set());
-  }, [statusF, labelF, videoF, busca, sort, order, pageSize]);
-
-  const params: EventosTabelaParams = {
-    page,
-    page_size: pageSize,
-    status: statusF,
-    label: labelF || undefined,
-    video_id: videoF || undefined,
-    busca: busca || undefined,
-    sort,
-    order,
-  };
-
-  const { data, isLoading, error, isFetching } = useQuery({
-    queryKey: ["eventos-tabela", id, params],
-    queryFn: () => api.eventos.tabela(id!, params),
-    enabled: !!id,
-  });
-
-  // opções de filtro (labels e vídeos) vêm do dashboard já cacheado
-  const dashboard = useQuery({
-    queryKey: ["dashboard", id],
-    queryFn: () => api.processos.dashboard(id!),
-    enabled: !!id,
-    staleTime: 30_000,
-  });
-  const labelsCanonicos = useMemo(
-    () =>
-      (dashboard.data?.snapshot.distribuicao_comportamentos || [])
-        .map((d) => d.comportamento)
-        .sort(),
-    [dashboard.data]
+  const comps = useMemo(() => Array.from(new Set(rows.map((e) => e.label))), [rows]);
+  const filtrados = useMemo(
+    () => rows.filter((e) => (status === "todos" || e.status === status) && (!comp || e.label === comp) && (!busca || (e.label + e.descricao).toLowerCase().includes(busca.toLowerCase()))),
+    [rows, status, comp, busca]
   );
-  const videos = dashboard.data?.videos || [];
+  const contagem = useMemo(() => { const c: Record<string, number> = { todos: rows.length }; STATUS_LIST.forEach((s) => (c[s] = rows.filter((e) => e.status === s).length)); return c; }, [rows]);
 
-  function invalidarTudo() {
-    qc.invalidateQueries({ queryKey: ["eventos-tabela", id] });
-    qc.invalidateQueries({ queryKey: ["dashboard", id] });
-    qc.invalidateQueries({ queryKey: ["eventos-pendentes", id] });
-  }
-
-  const lote = useMutation({
-    mutationFn: ({ acao, label }: { acao: AcaoEvento; label?: string }) =>
-      api.eventos.lote(Array.from(selecionados), acao, label),
-    onSuccess: () => {
-      setSelecionados(new Set());
-      invalidarTudo();
-    },
+  function invalidar() { qc.invalidateQueries({ queryKey: ["eventos-tabela", proc.id] }); qc.invalidateQueries({ queryKey: ["dashboard", proc.id] }); qc.invalidateQueries({ queryKey: ["pendentes", proc.id] }); }
+  const loteMut = useMutation({ mutationFn: ({ ids, acao, label }: { ids: string[]; acao: AcaoEvento; label?: string }) => api.eventos.lote(ids, acao, label), onSuccess: invalidar });
+  const acaoMut = useMutation({
+    mutationFn: ({ id, acao, label }: { id: string; acao: AcaoEvento; label?: string }) => (acao === "reabrir" ? api.eventos.reabrir(id) : api.eventos.validar(id, acao, label)),
+    onSuccess: invalidar,
   });
 
-  const itens = data?.itens || [];
-  const total = data?.total || 0;
-  const totalPaginas = Math.max(1, Math.ceil(total / pageSize));
-
-  function toggleSel(eid: string) {
-    setSelecionados((prev) => {
-      const n = new Set(prev);
-      if (n.has(eid)) n.delete(eid);
-      else n.add(eid);
-      return n;
-    });
-  }
-  function toggleTodosPagina() {
-    setSelecionados((prev) => {
-      const todosNaPagina = itens.every((e) => prev.has(e.id));
-      const n = new Set(prev);
-      if (todosNaPagina) itens.forEach((e) => n.delete(e.id));
-      else itens.forEach((e) => n.add(e.id));
-      return n;
-    });
-  }
-
-  function acaoLote(acao: AcaoEvento) {
-    if (selecionados.size === 0) return;
+  function toggle(id: string) { setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
+  function toggleAll() { setSel((s) => (s.size === filtrados.length ? new Set() : new Set(filtrados.map((e) => e.id)))); }
+  function aplicarLote(acao: AcaoEvento) {
     let label: string | undefined;
-    if (acao === "corrigir") {
-      label = window.prompt(
-        `Reclassificar ${selecionados.size} evento(s) para qual comportamento?\n(use um label existente quando possível, ex.: ${labelsCanonicos[0] || "operar_computador"})`
-      )?.trim();
-      if (!label) return;
-    } else {
-      const verbo = { confirmar: "confirmar", descartar: "descartar", reabrir: "reabrir" }[acao];
-      if (!window.confirm(`Tem certeza que deseja ${verbo} ${selecionados.size} evento(s)?`)) return;
-    }
-    lote.mutate({ acao, label });
+    if (acao === "corrigir") { label = window.prompt(`Reclassificar ${sel.size} evento(s) para qual comportamento?`)?.trim(); if (!label) return; }
+    loteMut.mutate({ ids: Array.from(sel), acao, label });
+    toast(`${sel.size} evento(s) — ação aplicada.`, { icon: "check" });
+    setSel(new Set());
   }
+  function resolver(id: string, acao: AcaoEvento) { acaoMut.mutate({ id, acao }); toast(`Evento ${acao === "reabrir" ? "reaberto" : acao + "do"}.`, { icon: "check" }); }
 
   return (
-    <div>
-      <ExplicacaoStatusEAprendizado />
+    <div className="col" style={{ gap: 16 }}>
+      <ExplicaStatus />
 
-      {/* Controles */}
-      <Card className="p-4 mb-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-          <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">Buscar descrição</label>
-            <Input
-              value={buscaInput}
-              onChange={(e) => setBuscaInput(e.target.value)}
-              placeholder="ex.: caixa, computador..."
-            />
+      <Card style={{ padding: 14 }}>
+        <div className="row gap2 wrap">
+          <div style={{ position: "relative", flex: "1 1 220px" }}>
+            <Icon name="search" size={15} color="var(--faint)" style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)" }} />
+            <input className="field" style={{ paddingLeft: 34 }} value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Buscar comportamento ou descrição…" />
           </div>
-          <SelectFiltro
-            label="Status"
-            value={statusF}
-            onChange={(v) => setStatusF(v as "todos" | StatusEfetivo)}
-            options={STATUS_OPCOES.map((o) => ({ value: o.v, label: o.label }))}
-          />
-          <SelectFiltro
-            label="Comportamento"
-            value={labelF}
-            onChange={setLabelF}
-            options={[
-              { value: "", label: "Todos" },
-              ...labelsCanonicos.map((l) => ({ value: l, label: l })),
-            ]}
-          />
-          <SelectFiltro
-            label="Vídeo"
-            value={videoF}
-            onChange={setVideoF}
-            options={[
-              { value: "", label: "Todos" },
-              ...videos.map((v) => ({ value: v.id, label: v.nome })),
-            ]}
-          />
+          <select className="field" style={{ flex: "0 1 180px" }} value={comp} onChange={(e) => setComp(e.target.value)}>
+            <option value="">Todos os comportamentos</option>
+            {comps.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <span className="grow" />
+          <span style={{ fontSize: 12.5, color: "var(--muted)", alignSelf: "center" }}>{filtrados.length} de {rows.length} eventos</span>
         </div>
-        <div className="flex items-center justify-between gap-3 flex-wrap mt-3">
-          <div className="flex items-end gap-3 flex-wrap">
-            <SelectFiltro
-              label="Ordenar por"
-              value={sort}
-              onChange={(v) => setSort(v as NonNullable<EventosTabelaParams["sort"]>)}
-              options={SORT_OPCOES.map((o) => ({ value: o.v, label: o.label }))}
-            />
-            <button
-              onClick={() => setOrder((o) => (o === "asc" ? "desc" : "asc"))}
-              className="px-3 py-2 rounded-lg border border-slate-300 text-sm text-slate-600 hover:bg-slate-50"
-              title="Inverter ordem"
-            >
-              {order === "asc" ? "↑ crescente" : "↓ decrescente"}
+        <div className="row gap1 wrap" style={{ marginTop: 12 }}>
+          {["todos", ...STATUS_LIST].map((s) => (
+            <button key={s} onClick={() => setStatus(s)} style={{ padding: "5px 12px", borderRadius: 99, fontSize: 12, fontWeight: 600, border: "1px solid", borderColor: status === s ? "var(--accent)" : "var(--line)", background: status === s ? "var(--accent)" : "#fff", color: status === s ? "#fff" : "var(--muted)" }}>
+              {s === "todos" ? "Todos" : STATUS_META[s].label} · {contagem[s] || 0}
             </button>
-            <SelectFiltro
-              label="Por página"
-              value={String(pageSize)}
-              onChange={(v) => setPageSize(Number(v))}
-              options={[25, 50, 100, 200].map((n) => ({ value: String(n), label: String(n) }))}
-            />
-          </div>
-          <div className="text-sm text-slate-500 flex items-center gap-2">
-            {isFetching && <Spinner className="h-4 w-4" />}
-            <span>
-              {total.toLocaleString("pt-BR")} evento(s) · página {page} de {totalPaginas}
-            </span>
-          </div>
+          ))}
         </div>
       </Card>
 
-      {/* Barra de seleção em lote */}
-      {selecionados.size > 0 && (
-        <Card className="p-3 mb-4 bg-kv-purple-50 border-kv-purple-200 sticky top-16 z-10">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <span className="text-sm font-medium text-kv-purple-dark">
-              {selecionados.size} selecionado(s)
-            </span>
-            <div className="flex gap-2 flex-wrap">
-              <Button variant="success" onClick={() => acaoLote("confirmar")} disabled={lote.isPending}>
-                ✓ Confirmar
-              </Button>
-              <Button variant="secondary" onClick={() => acaoLote("corrigir")} disabled={lote.isPending}>
-                ✎ Corrigir
-              </Button>
-              <Button variant="danger" onClick={() => acaoLote("descartar")} disabled={lote.isPending}>
-                ✕ Descartar
-              </Button>
-              <Button variant="ghost" onClick={() => acaoLote("reabrir")} disabled={lote.isPending}>
-                ↺ Reabrir
-              </Button>
-              <Button variant="ghost" onClick={() => setSelecionados(new Set())}>
-                Limpar seleção
-              </Button>
+      {sel.size > 0 && (
+        <Card className="anim-pop" style={{ padding: "10px 16px", background: "var(--accent-soft)", border: "1px solid var(--p-200)", position: "sticky", top: 70, zIndex: 20 }}>
+          <div className="row gap2 wrap" style={{ justifyContent: "space-between" }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--accent-deep)" }}>{sel.size} selecionado(s)</span>
+            <div className="row gap1 wrap">
+              <Btn variant="ok" size="sm" icon="check" onClick={() => aplicarLote("confirmar")}>Confirmar</Btn>
+              <Btn variant="secondary" size="sm" icon="pencil" onClick={() => aplicarLote("corrigir")}>Corrigir</Btn>
+              <Btn variant="danger" size="sm" icon="x" onClick={() => aplicarLote("descartar")}>Descartar</Btn>
+              <Btn variant="ghost" size="sm" onClick={() => setSel(new Set())}>Limpar</Btn>
             </div>
           </div>
         </Card>
       )}
 
-      {isLoading && (
-        <div className="flex items-center justify-center py-20">
-          <Spinner className="h-8 w-8" />
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ background: "var(--soft)", color: "var(--muted)", fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em" }}>
+                <th style={{ padding: "11px 12px", width: 34 }}><input type="checkbox" checked={filtrados.length > 0 && sel.size === filtrados.length} onChange={toggleAll} style={{ accentColor: "var(--accent)" }} /></th>
+                <th style={{ padding: "11px 12px", textAlign: "left" }}>Comportamento</th>
+                <th style={{ padding: "11px 12px", textAlign: "left" }}>Vídeo · tempo</th>
+                <th style={{ padding: "11px 12px", textAlign: "center" }}>Pessoa</th>
+                <th style={{ padding: "11px 12px", textAlign: "center" }}>Conf.</th>
+                <th style={{ padding: "11px 12px", textAlign: "center" }}>Status</th>
+                <th style={{ padding: "11px 12px", width: 110, textAlign: "right" }}>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtrados.map((e) => (
+                <LinhaEvento key={e.id} e={e} sel={sel.has(e.id)} onToggle={() => toggle(e.id)} expand={expand === e.id} onExpand={() => setExpand((c) => (c === e.id ? null : e.id))} onResolver={resolver} />
+              ))}
+            </tbody>
+          </table>
         </div>
-      )}
-      {error && (
-        <div className="text-red-700 bg-red-50 border border-red-200 rounded-lg p-4">
-          {(error as Error).message}
-        </div>
-      )}
-
-      {data && itens.length === 0 && (
-        <Card className="p-2">
-          <EmptyState
-            title="Nenhum evento encontrado"
-            description={
-              total === 0 && statusF === "todos" && !busca && !labelF && !videoF
-                ? "Este processo ainda não tem eventos. Envie um vídeo para começar."
-                : "Nenhum evento corresponde aos filtros selecionados."
-            }
-          />
-        </Card>
-      )}
-
-      {itens.length > 0 && (
-        <Card className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-                  <th className="p-3 w-8">
-                    <input
-                      type="checkbox"
-                      checked={itens.length > 0 && itens.every((e) => selecionados.has(e.id))}
-                      onChange={toggleTodosPagina}
-                      className="accent-kv-purple"
-                    />
-                  </th>
-                  <th className="p-3 text-left">Comportamento</th>
-                  <th className="p-3 text-left">Descrição</th>
-                  <th className="p-3 text-left">Vídeo · tempo</th>
-                  <th className="p-3 text-center">Pessoa</th>
-                  <th className="p-3 text-center">Conf.</th>
-                  <th className="p-3 text-center">Status</th>
-                  <th className="p-3 w-8"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {itens.map((ev) => (
-                  <LinhaEvento
-                    key={ev.id}
-                    ev={ev}
-                    selecionado={selecionados.has(ev.id)}
-                    onToggleSel={() => toggleSel(ev.id)}
-                    expandido={expandido === ev.id}
-                    onToggleExpandir={() =>
-                      setExpandido((cur) => (cur === ev.id ? null : ev.id))
-                    }
-                    labelsCanonicos={labelsCanonicos}
-                    onResolved={invalidarTudo}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
-
-      {/* Paginação */}
-      {totalPaginas > 1 && (
-        <div className="flex items-center justify-center gap-2 mt-4">
-          <Button variant="ghost" disabled={page <= 1} onClick={() => setPage(1)}>
-            « Primeira
-          </Button>
-          <Button variant="ghost" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-            ‹ Anterior
-          </Button>
-          <span className="text-sm text-slate-600 px-2">
-            {page} / {totalPaginas}
-          </span>
-          <Button variant="ghost" disabled={page >= totalPaginas} onClick={() => setPage((p) => p + 1)}>
-            Próxima ›
-          </Button>
-          <Button variant="ghost" disabled={page >= totalPaginas} onClick={() => setPage(totalPaginas)}>
-            Última »
-          </Button>
-        </div>
-      )}
+        {q.isLoading ? <Empty icon="loader" title="Carregando…" /> : filtrados.length === 0 && <Empty icon="search-x" title="Nenhum evento encontrado" desc="Ajuste os filtros para ver outros eventos." />}
+      </Card>
     </div>
   );
 }
 
-function SelectFiltro({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-}) {
-  return (
-    <div>
-      <label className="block text-xs font-medium text-slate-600 mb-1">{label}</label>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-kv-purple focus:ring-2 focus:ring-kv-purple/20 outline-none bg-white"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-function LinhaEvento({
-  ev,
-  selecionado,
-  onToggleSel,
-  expandido,
-  onToggleExpandir,
-  labelsCanonicos,
-  onResolved,
-}: {
-  ev: EventoTabela;
-  selecionado: boolean;
-  onToggleSel: () => void;
-  expandido: boolean;
-  onToggleExpandir: () => void;
-  labelsCanonicos: string[];
-  onResolved: () => void;
-}) {
-  const [labelEdit, setLabelEdit] = useState(ev.label_efetivo);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  const acao = useMutation({
-    mutationFn: ({ a, label }: { a: AcaoEvento; label?: string }) =>
-      a === "reabrir" ? api.eventos.reabrir(ev.id) : api.eventos.validar(ev.id, a, label),
-    onSuccess: (_d, vars) => {
-      const txt: Record<AcaoEvento, string> = {
-        confirmar: "confirmado",
-        corrigir: `corrigido para "${vars.label}"`,
-        descartar: "descartado",
-        reabrir: "reaberto (voltou para a fila)",
-      };
-      setMsg(`✓ ${txt[vars.a]}`);
-      setTimeout(onResolved, 700);
-    },
-  });
-
-  const houveCorrecao = ev.label_corrigido && ev.label_corrigido !== ev.comportamento_label;
-
+function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver }: { e: EvTabMock; sel: boolean; onToggle: () => void; expand: boolean; onExpand: () => void; onResolver: (id: string, acao: AcaoEvento) => void }) {
+  const m = STATUS_META[e.status] || STATUS_META.pendente;
   return (
     <>
-      <tr className="border-t border-slate-100 hover:bg-slate-50/60">
-        <td className="p-3 align-top">
-          <input
-            type="checkbox"
-            checked={selecionado}
-            onChange={onToggleSel}
-            className="accent-kv-purple"
-          />
-        </td>
-        <td className="p-3 align-top">
-          {houveCorrecao ? (
-            <span className="text-xs">
-              <span className="line-through text-slate-400">{ev.comportamento_label}</span>
-              <span className="text-slate-400"> → </span>
-              <code className="bg-kv-purple-50 text-kv-purple-dark px-1.5 py-0.5 rounded">
-                {ev.label_corrigido}
-              </code>
-            </span>
+      <tr style={{ borderTop: "1px solid var(--line-2)", background: sel ? "var(--accent-soft)" : expand ? "var(--soft)" : "#fff" }}>
+        <td style={{ padding: "10px 12px" }}><input type="checkbox" checked={sel} onChange={onToggle} style={{ accentColor: "var(--accent)" }} /></td>
+        <td style={{ padding: "10px 12px" }}>
+          {e.status === "corrigido" && e.corrigido ? (
+            <span style={{ fontSize: 12 }}><span style={{ textDecoration: "line-through", color: "var(--faint)" }}>{e.labelOrig}</span> <span style={{ color: "var(--faint)" }}>→</span> <code className="font-mono" style={{ background: "var(--accent-soft)", color: "var(--accent-deep)", padding: "2px 6px", borderRadius: 5 }}>{e.corrigido}</code></span>
           ) : (
-            <code className="bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded text-xs">
-              {ev.comportamento_label}
-            </code>
+            <code className="font-mono" style={{ background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 5, fontSize: 11.5 }}>{e.label}</code>
           )}
         </td>
-        <td className="p-3 align-top max-w-[14rem]">
-          <span className="text-slate-600 text-xs line-clamp-2" title={ev.descricao_bruta}>
-            {ev.descricao_bruta || "—"}
-          </span>
+        <td style={{ padding: "10px 12px", color: "var(--muted)", fontSize: 11.5 }}>
+          <div className="truncate" style={{ maxWidth: 150 }}>{e.video}</div>
+          <div className="font-mono">{e.ini.toFixed(0)}→{e.fim.toFixed(0)}s · {fmtSeg(e.fim - e.ini)}</div>
         </td>
-        <td className="p-3 align-top whitespace-nowrap text-xs text-slate-500">
-          <div className="truncate max-w-[10rem]" title={ev.video_nome}>{ev.video_nome}</div>
-          <div>
-            {ev.tempo_inicio_s.toFixed(0)}→{ev.tempo_fim_s.toFixed(0)}s ·{" "}
-            {formatSeg(ev.duracao_s)}
-          </div>
-        </td>
-        <td className="p-3 align-top text-center text-xs text-slate-500">
-          {String(ev.pessoa_track_id).padStart(3, "0")}
-        </td>
-        <td className="p-3 align-top text-center text-xs text-slate-500">
-          {(ev.confianca * 100).toFixed(0)}%
-        </td>
-        <td className="p-3 align-top text-center">{statusBadge(ev.status_efetivo)}</td>
-        <td className="p-3 align-top text-center">
-          <button
-            onClick={onToggleExpandir}
-            className="text-slate-400 hover:text-kv-purple-dark"
-            title="Inspecionar e editar"
-          >
-            {expandido ? "▲" : "▸"}
+        <td style={{ padding: "10px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12 }} className="font-mono">{String(e.pessoa).padStart(3, "0")}</td>
+        <td style={{ padding: "10px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12 }} className="tnum">{Math.round(e.conf * 100)}%</td>
+        <td style={{ padding: "10px 12px", textAlign: "center" }}><Badge tone={m.tone}>{m.label}</Badge></td>
+        <td style={{ padding: "10px 12px", textAlign: "right" }}>
+          <button onClick={onExpand} className="center" style={{ width: 28, height: 28, borderRadius: 7, border: "1px solid var(--line)", background: "#fff", color: "var(--muted)", display: "inline-grid" }}>
+            <Icon name={expand ? "chevron-up" : "chevron-down"} size={15} />
           </button>
         </td>
       </tr>
-      {expandido && (
-        <tr className="bg-slate-50/80">
-          <td colSpan={8} className="p-4">
-            <PainelEdicao
-              ev={ev}
-              labelEdit={labelEdit}
-              setLabelEdit={setLabelEdit}
-              labelsCanonicos={labelsCanonicos}
-              onAcao={(a, label) => acao.mutate({ a, label })}
-              pending={acao.isPending}
-              msg={msg}
-            />
+      {expand && (
+        <tr style={{ background: "var(--soft)" }}>
+          <td colSpan={7} style={{ padding: 16 }}>
+            <div className="row gap3 wrap" style={{ alignItems: "flex-start" }}>
+              <div style={{ width: 240, flex: "none" }}><CameraScene height={140} hud={false} boxes={[{ id: `P-${String(e.pessoa).padStart(2, "0")}`, x: 34, y: 26, w: 26, h: 50, act: "" }]} /></div>
+              <div className="grow" style={{ minWidth: 220 }}>
+                <p style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginBottom: 12 }}>{e.descricao}</p>
+                <div className="row gap1 wrap">
+                  <Btn variant="ok" size="sm" icon="check" onClick={() => onResolver(e.id, "confirmar")}>Confirmar</Btn>
+                  <Btn variant="secondary" size="sm" icon="pencil" onClick={() => onResolver(e.id, "corrigir")}>Corrigir</Btn>
+                  <Btn variant="danger" size="sm" icon="x" onClick={() => onResolver(e.id, "descartar")}>Descartar</Btn>
+                  {e.status !== "pendente" && <Btn variant="ghost" size="sm" icon="rotate-ccw" onClick={() => onResolver(e.id, "reabrir")}>Reabrir</Btn>}
+                </div>
+              </div>
+            </div>
           </td>
         </tr>
       )}
@@ -483,235 +169,36 @@ function LinhaEvento({
   );
 }
 
-function PainelEdicao({
-  ev,
-  labelEdit,
-  setLabelEdit,
-  labelsCanonicos,
-  onAcao,
-  pending,
-  msg,
-}: {
-  ev: EventoTabela;
-  labelEdit: string;
-  setLabelEdit: (v: string) => void;
-  labelsCanonicos: string[];
-  onAcao: (a: AcaoEvento, label?: string) => void;
-  pending: boolean;
-  msg: string | null;
-}) {
-  const frames = useQuery({
-    queryKey: ["frames", ev.id],
-    queryFn: () => api.eventos.frames(ev.id),
-    staleTime: 5 * 60 * 1000,
-  });
-  const listaId = `labels-${ev.id}`;
-
+function ExplicaStatus() {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="space-y-3">
-      <div className="flex gap-2 overflow-x-auto">
-        {frames.isLoading && (
-          <div className="h-40 w-56 bg-slate-100 rounded-lg flex items-center justify-center">
-            <Spinner />
-          </div>
-        )}
-        {frames.data?.frames.map((src, i) => (
-          <img
-            key={i}
-            src={src}
-            alt={`quadro ${i + 1}`}
-            className="h-40 rounded-lg border border-slate-200"
-          />
-        ))}
-        {frames.error && (
-          <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3 max-w-md">
-            {(frames.error as Error).message}
-          </div>
-        )}
-      </div>
-
-      {msg ? (
-        <div className="text-sm text-emerald-700 font-medium">{msg}</div>
-      ) : (
-        <div className="flex items-end gap-2 flex-wrap">
-          <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">
-              Comportamento (use um existente quando possível)
-            </label>
-            <input
-              list={listaId}
-              value={labelEdit}
-              onChange={(e) => setLabelEdit(e.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-kv-purple focus:ring-2 focus:ring-kv-purple/20 outline-none w-72"
-            />
-            <datalist id={listaId}>
-              {labelsCanonicos.map((l) => (
-                <option key={l} value={l} />
-              ))}
-            </datalist>
-          </div>
-          <Button variant="success" onClick={() => onAcao("confirmar")} disabled={pending}>
-            ✓ Confirmar
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => onAcao("corrigir", labelEdit.trim())}
-            disabled={pending || !labelEdit.trim()}
-          >
-            ✎ Corrigir
-          </Button>
-          <Button variant="danger" onClick={() => onAcao("descartar")} disabled={pending}>
-            ✕ Descartar
-          </Button>
-          {ev.status_efetivo !== "pendente" && (
-            <Button variant="ghost" onClick={() => onAcao("reabrir")} disabled={pending}>
-              ↺ Reabrir
-            </Button>
-          )}
+    <Card style={{ overflow: "hidden" }}>
+      <button onClick={() => setOpen((v) => !v)} className="row gap3" style={{ width: "100%", textAlign: "left", border: "none", background: "transparent", padding: "14px 18px" }}>
+        <span className="center" style={{ width: 34, height: 34, borderRadius: 10, background: "var(--accent-soft)", color: "var(--accent)", flex: "none" }}><Icon name="info" size={17} /></span>
+        <div className="grow">
+          <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>Entenda os status e como o Prism aprende com você</div>
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>Em 1 minuto: o que cada status quer dizer e por que sua correção vale ouro.</div>
         </div>
-      )}
-    </div>
-  );
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Painel explicativo retrátil — para quem nunca usou a plataforma
-// entender o que cada status significa e como sua correção ensina a IA.
-// ────────────────────────────────────────────────────────────────────────
-function ExplicacaoStatusEAprendizado() {
-  const [aberto, setAberto] = useState(false);
-  return (
-    <Card className="mb-4 overflow-hidden">
-      <button
-        onClick={() => setAberto((v) => !v)}
-        className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-slate-50 transition"
-        aria-expanded={aberto}
-      >
-        <div className="flex items-center gap-3">
-          <span className="h-8 w-8 rounded-full bg-kv-purple-100 text-kv-purple-dark flex items-center justify-center font-bold text-sm">
-            i
-          </span>
-          <div>
-            <div className="font-medium text-slate-900">
-              Entenda os status e como o sistema aprende com você
-            </div>
-            <div className="text-xs text-slate-500">
-              Em 1 minuto: o que cada coluna quer dizer e por que sua correção vale ouro.
-            </div>
-          </div>
-        </div>
-        <span className="text-slate-400 text-sm">{aberto ? "▲" : "▼"}</span>
+        <Icon name={open ? "chevron-up" : "chevron-down"} size={18} color="var(--muted)" />
       </button>
-
-      {aberto && (
-        <div className="px-5 pb-5 border-t border-slate-100 pt-5 space-y-6">
-          {/* O que cada status significa */}
-          <div>
-            <h3 className="font-semibold text-slate-900 mb-3">
-              O que cada status significa
-            </h3>
-            <ul className="space-y-3 text-sm">
-              <ExplicaStatus tone="neutral" titulo="Pendente">
-                A IA detectou um evento mas ainda <b>não tem certeza se
-                acertou</b> — está aguardando sua revisão. Quem decide é você.
-              </ExplicaStatus>
-              <ExplicaStatus tone="success" titulo="Confirmado">
-                Você olhou e disse que a IA <b>acertou</b> o nome da
-                atividade. Cada confirmação reforça o aprendizado.
-              </ExplicaStatus>
-              <ExplicaStatus tone="info" titulo="Corrigido">
-                A IA chamou a atividade de uma forma e você ajustou para o
-                <b> nome certo da sua operação</b>. Daqui em diante, o sistema
-                passa a usar o nome novo.
-              </ExplicaStatus>
-              <ExplicaStatus tone="alta" titulo="Descartado">
-                Você marcou como <b>falso alarme</b> — aquilo não era uma
-                atividade relevante. O sistema para de marcar coisas
-                parecidas no futuro.
-              </ExplicaStatus>
-              <ExplicaStatus tone="warning" titulo="Auto-validado">
-                A IA aprovou <b>sozinha</b> porque você já confirmou esse
-                mesmo tipo de atividade pelo menos 2 vezes antes. Sua carga
-                de trabalho cai com o tempo.
-              </ExplicaStatus>
-            </ul>
+      {open && (
+        <div style={{ padding: "0 18px 18px", borderTop: "1px solid var(--line-2)" }}>
+          <div className="row wrap" style={{ gap: 14, marginTop: 16 }}>
+            {[
+              ["pendente", "A IA detectou mas não tem certeza. Aguarda sua revisão."],
+              ["confirmado", "Você disse que a IA acertou. Reforça o aprendizado."],
+              ["corrigido", "Você ajustou para o nome certo da sua operação."],
+              ["descartado", "Falso alarme — a IA para de marcar coisas parecidas."],
+              ["auto", "A IA aprovou sozinha (você já confirmou 2× antes)."],
+            ].map(([s, d]) => (
+              <div key={s} className="row gap2" style={{ flex: "1 1 300px", alignItems: "flex-start" }}>
+                <span style={{ flex: "none", width: 104 }}><Badge tone={STATUS_META[s].tone}>{STATUS_META[s].label}</Badge></span>
+                <p style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.45 }}>{d}</p>
+              </div>
+            ))}
           </div>
-
-          {/* Como aprende com você */}
-          <div>
-            <h3 className="font-semibold text-slate-900 mb-3">
-              Como o sistema aprende com você
-            </h3>
-            <ol className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <PassoAprendizado n={1} titulo="A IA observa o vídeo">
-                Identifica as pessoas e descreve, em linguagem natural, o que
-                cada uma está fazendo.
-              </PassoAprendizado>
-              <PassoAprendizado n={2} titulo="Você ensina">
-                Confirma, corrige ou descarta. Pode fazer isso aqui mesmo, em
-                qualquer evento, a qualquer momento.
-              </PassoAprendizado>
-              <PassoAprendizado n={3} titulo="A IA aprende">
-                Cada confirmação reforça o nome certo. Depois de 2 confirmações
-                iguais, ela passa a aprovar sozinha (Auto-validado).
-              </PassoAprendizado>
-              <PassoAprendizado n={4} titulo="Próximo vídeo vem melhor">
-                Quando você processar o próximo vídeo, o sistema já parte do
-                que você ensinou — menos trabalho, análise mais certeira.
-              </PassoAprendizado>
-            </ol>
-          </div>
-
-          <p className="text-xs text-slate-500 italic">
-            Dica: <b>Reabrir</b> um evento devolve ele para a fila como
-            "Pendente" — útil quando você quer rever uma decisão antiga sem
-            apagá-la do histórico.
-          </p>
         </div>
       )}
     </Card>
-  );
-}
-
-function ExplicaStatus({
-  tone,
-  titulo,
-  children,
-}: {
-  tone: "neutral" | "success" | "info" | "alta" | "warning";
-  titulo: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <li className="flex items-start gap-3">
-      <span className="flex-shrink-0 mt-0.5 w-28">
-        <Badge tone={tone}>{titulo}</Badge>
-      </span>
-      <p className="text-slate-700 leading-relaxed flex-1">{children}</p>
-    </li>
-  );
-}
-
-function PassoAprendizado({
-  n,
-  titulo,
-  children,
-}: {
-  n: number;
-  titulo: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <li className="bg-gradient-to-br from-kv-purple-50 to-white border border-kv-purple-200 rounded-xl p-3.5">
-      <div className="flex items-center gap-2 mb-1.5">
-        <span className="h-6 w-6 rounded-full bg-kv-purple text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
-          {n}
-        </span>
-        <span className="font-medium text-slate-900 text-sm leading-tight">
-          {titulo}
-        </span>
-      </div>
-      <p className="text-xs text-slate-600 leading-relaxed">{children}</p>
-    </li>
   );
 }
