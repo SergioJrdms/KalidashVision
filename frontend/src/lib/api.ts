@@ -47,21 +47,16 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   processos: {
     list: () => req<Processo[]>("/processos"),
-    create: (nome: string, descricao?: string, area?: string) =>
+    create: (nome: string, descricao?: string) =>
       req<Processo>("/processos", {
         method: "POST",
-        body: JSON.stringify({ nome, descricao, area }),
+        body: JSON.stringify({ nome, descricao }),
       }),
     detalhe: (id: string) => req<ProcessoDetalhe>(`/processos/${id}`),
     setDescricao: (id: string, descricao: string) =>
       req<{ ok: boolean }>(`/processos/${id}/descricao`, {
         method: "PUT",
         body: JSON.stringify({ descricao }),
-      }),
-    setArea: (id: string, area: string | null) =>
-      req<{ ok: boolean; area: string | null }>(`/processos/${id}/area`, {
-        method: "PUT",
-        body: JSON.stringify({ area }),
       }),
     dashboard: (id: string) => req<DashboardData>(`/processos/${id}/dashboard`),
     sugestoes: (id: string) => req<Sugestao[]>(`/processos/${id}/sugestoes`),

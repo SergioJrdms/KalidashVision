@@ -2,7 +2,6 @@ export interface Processo {
   id: string;
   processo: string;
   descricao: string | null;
-  area: string | null;
   atualizado_em: string;
   // enriquecimento (GET /processos)
   n_videos?: number;
@@ -12,7 +11,6 @@ export interface Processo {
   n_sugestoes_alta?: number;
   tempo_total_min?: number;
   ultimo_video_em?: string | null;
-  maturidade?: number;
   composicao_valor?: {
     valor_agregado_pct: number;
     apoio_pct: number;
@@ -210,7 +208,6 @@ export interface EventoPendente {
   label_corrigido: string | null;
   origem_validacao: string | null;
   pessoa_track_id: number;
-  categoria_lean_prevista?: string | null;
 }
 
 export type StatusEfetivo =

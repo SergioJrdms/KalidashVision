@@ -74,15 +74,10 @@ app.add_middleware(
 class ProcessoCreate(BaseModel):
     nome: str = Field(min_length=1, max_length=120)
     descricao: str | None = None
-    area: str | None = Field(default=None, max_length=60)
 
 
 class ProcessoUpdateDescricao(BaseModel):
     descricao: str
-
-
-class ProcessoUpdateArea(BaseModel):
-    area: str | None = Field(default=None, max_length=60)
 
 
 class ValidacaoBody(BaseModel):
@@ -142,7 +137,6 @@ def criar_processo(body: ProcessoCreate, user: CurrentUser = Depends(get_current
                 "empresa": user.empresa,
                 "processo": body.nome,
                 "descricao": (body.descricao or "").strip(),
-                "area": (body.area or "").strip() or None,
             }
         )
         .execute()
@@ -155,7 +149,7 @@ def listar_processos(user: CurrentUser = Depends(get_current_user)):
     sb = make_supabase_client()
     r = (
         sb.table("contexto_processo")
-        .select("id, processo, descricao, area, atualizado_em")
+        .select("id, processo, descricao, atualizado_em")
         .eq("empresa", user.empresa)
         .order("atualizado_em", desc=True)
         .execute()
@@ -177,7 +171,6 @@ def listar_processos(user: CurrentUser = Depends(get_current_user)):
         row["tempo_total_min"] = st.get("tempo_total_min", 0)
         row["ultimo_video_em"] = st.get("ultimo_video_em")
         row["composicao_valor"] = st.get("composicao_valor")
-        row["maturidade"] = st.get("maturidade", 0)
     return linhas
 
 
@@ -186,7 +179,7 @@ def detalhe_processo(processo_id: str, user: CurrentUser = Depends(get_current_u
     sb = make_supabase_client()
     r = (
         sb.table("contexto_processo")
-        .select("id, processo, descricao, area, atualizado_em")
+        .select("id, processo, descricao, atualizado_em")
         .eq("id", processo_id)
         .eq("empresa", user.empresa)
         .execute()
@@ -227,27 +220,6 @@ def atualizar_descricao(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Processo não encontrado")
     resolver_descricao_processo(sb, user.empresa, r.data[0]["processo"], body.descricao)
     return {"ok": True}
-
-
-@app.put("/processos/{processo_id}/area")
-def atualizar_area(
-    processo_id: str,
-    body: ProcessoUpdateArea,
-    user: CurrentUser = Depends(get_current_user),
-):
-    sb = make_supabase_client()
-    r = (
-        sb.table("contexto_processo")
-        .select("id")
-        .eq("id", processo_id)
-        .eq("empresa", user.empresa)
-        .execute()
-    )
-    if not r.data:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Processo não encontrado")
-    val = (body.area or "").strip() or None
-    sb.table("contexto_processo").update({"area": val}).eq("id", processo_id).execute()
-    return {"ok": True, "area": val}
 
 
 @app.delete("/processos/{processo_id}")
@@ -611,29 +583,7 @@ def listar_eventos(
         q = q.eq("validado_humano", True)
 
     r = q.order("tempo_inicio_s").limit(500).execute()
-    itens = r.data or []
-
-    # Categoria Lean PREVISTA para cada evento (derivada do label aprendido).
-    # Sem novo cálculo pesado — só uma leitura em batch dos comportamentos.
-    labels_distintos = list({(i.get("label_corrigido") or i.get("comportamento_label")) for i in itens})
-    if labels_distintos:
-        try:
-            comp = (
-                sb.table("comportamentos")
-                .select("label, categoria_lean")
-                .eq("empresa", user.empresa)
-                .eq("processo", nome)
-                .in_("label", [l for l in labels_distintos if l])
-                .execute()
-                .data
-            ) or []
-            cat_por_label = {c["label"]: c.get("categoria_lean") for c in comp}
-        except Exception:
-            cat_por_label = {}
-        for i in itens:
-            lbl = i.get("label_corrigido") or i.get("comportamento_label")
-            i["categoria_lean_prevista"] = cat_por_label.get(lbl)
-    return itens
+    return r.data or []
 
 
 def _status_efetivo(ev: dict) -> str:

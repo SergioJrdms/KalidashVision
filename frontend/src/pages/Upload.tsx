@@ -1,19 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
-import { Btn, Card, Icon, Spinner } from "../components/UIKit";
+import { Button, Card, HelpBox, Spinner } from "../components/UI";
 import type { JobStatus } from "../lib/types";
 
 const ETAPAS: { key: string; label: string }[] = [
-  { key: "setup", label: "Preparando vídeo" },
-  { key: "deteccao", label: "Detectando e rastreando pessoas" },
-  { key: "vlm", label: "Descrevendo ações com IA" },
-  { key: "cluster", label: "Agrupando em comportamentos" },
+  { key: "setup", label: "Preparando" },
+  { key: "deteccao", label: "Detectando pessoas" },
+  { key: "vlm", label: "Analisando ações com IA" },
+  { key: "cluster", label: "Agrupando comportamentos" },
   { key: "segmentar", label: "Formando eventos" },
-  { key: "persistir", label: "Salvando na memória do Prism" },
-  { key: "sugestoes", label: "Gerando sugestões Lean" },
-  { key: "lean", label: "Atualizando categorias Lean" },
-  { key: "perguntas", label: "Formulando perguntas" },
+  { key: "persistir", label: "Salvando resultados" },
+  { key: "sugestoes", label: "Gerando sugestões" },
   { key: "concluido", label: "Concluído" },
 ];
 
@@ -21,39 +19,43 @@ export default function Upload() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const [file, setFile] = useState<File | null>(null);
-  const [drag, setDrag] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
   const [job, setJob] = useState<JobStatus | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [drag, setDrag] = useState(false);
 
   useEffect(() => {
     if (!job || job.status === "concluido" || job.status === "erro") return;
-    let m404 = 0;
+    let consecutivos404 = 0;
     const t = setInterval(async () => {
       try {
         const s = await api.jobs.status(job.id);
-        m404 = 0;
+        consecutivos404 = 0;
         setJob(s);
         if (s.status === "concluido") {
           clearInterval(t);
           setTimeout(() => nav(`/processos/${id}/dashboard`), 800);
         }
         if (s.status === "erro") clearInterval(t);
-      } catch (e) {
-        if ((e as Error).message.startsWith("404")) {
-          m404 += 1;
-          if (m404 >= 10) {
+      } catch (e: unknown) {
+        const msg = (e as Error).message || "";
+        if (msg.startsWith("404")) {
+          consecutivos404 += 1;
+          // Job sumiu (provavelmente o backend reiniciou no meio do
+          // processamento). Após ~15s sem encontrá-lo, paramos.
+          if (consecutivos404 >= 10) {
             clearInterval(t);
             setJob({
               ...job,
               status: "erro",
               erro:
-                "O backend perdeu este job — provavelmente o uvicorn reiniciou. Rode sem --reload e envie de novo.",
+                "O backend perdeu este job. Provavelmente o uvicorn reiniciou (--reload) ou foi encerrado durante o processamento. Rode o backend SEM --reload e envie o vídeo de novo.",
               mensagem: "Job perdido",
             });
           }
         }
+        /* outros erros: continua tentando no próximo tick */
       }
     }, 1500);
     return () => clearInterval(t);
@@ -64,16 +66,16 @@ export default function Upload() {
     setErro(null);
     setUploading(true);
     try {
-      const r = await api.videos.upload(id, file);
+      const { job_id } = await api.videos.upload(id, file);
       setJob({
-        id: r.job_id,
+        id: job_id,
         processo_id: id,
         status: "pendente",
         etapa_atual: "setup",
         progresso_pct: 0,
         mensagem: "Em fila",
       });
-    } catch (e) {
+    } catch (e: unknown) {
       setErro((e as Error).message);
     } finally {
       setUploading(false);
@@ -87,108 +89,97 @@ export default function Upload() {
     if (f) setFile(f);
   }
 
-  if (job) return <Progresso job={job} />;
-
   return (
-    <div className="col" style={{ gap: 18, maxWidth: 780, margin: "0 auto" }}>
-      <Card style={{ padding: 26 }}>
-        <h1 className="font-display" style={{ fontSize: 22, fontWeight: 700 }}>
-          Enviar vídeo da operação
-        </h1>
-        <p style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 6 }}>
-          O processamento leva alguns minutos. Você acompanha cada etapa abaixo.
-        </p>
-
-        <div
-          onClick={() => inputRef.current?.click()}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDrag(true);
-          }}
-          onDragLeave={() => setDrag(false)}
-          onDrop={onDrop}
-          className="click center"
-          style={{
-            marginTop: 18,
-            padding: 32,
-            border: `2px dashed ${drag ? "var(--accent)" : "var(--p-200)"}`,
-            background: drag ? "var(--accent-soft)" : "var(--soft)",
-            borderRadius: 16,
-            transition: "all .15s",
-            flexDirection: "column",
-            gap: 10,
-          }}
-        >
-          <span
-            style={{
-              width: 54,
-              height: 54,
-              borderRadius: "50%",
-              background: "#fff",
-              border: "1px solid var(--line)",
-              display: "grid",
-              placeItems: "center",
-            }}
-          >
-            <Icon name="upload-cloud" size={26} color="var(--accent)" />
-          </span>
-          <div style={{ fontSize: 14, color: "var(--text)" }}>
-            {file ? (
-              <>
-                <b style={{ color: "var(--ink)" }}>{file.name}</b> ·{" "}
-                <span style={{ color: "var(--muted)" }}>
-                  {(file.size / 1024 / 1024).toFixed(1)} MB
-                </span>
-              </>
-            ) : (
-              <>
-                Clique para selecionar ou{" "}
-                <b style={{ color: "var(--accent-deep)" }}>arraste o vídeo aqui</b>
-              </>
-            )}
+    <div>
+      {!job && (
+        <Card className="p-8 max-w-3xl">
+          <h2 className="text-xl font-semibold text-slate-900 mb-1">
+            Enviar vídeo da operação
+          </h2>
+          <p className="text-sm text-slate-500 mb-4">
+            O processamento pode levar alguns minutos. Você pode acompanhar o
+            progresso por aqui.
+          </p>
+          <div className="mb-6">
+            <HelpBox title="O que acontece quando você envia um vídeo">
+              1. A IA detecta as pessoas no vídeo e rastreia cada uma com um ID.
+              2. A cada poucos segundos, ela descreve em linguagem natural o que
+              cada pessoa está fazendo. 3. Descrições parecidas são agrupadas
+              em comportamentos canônicos. 4. Ao final, sugestões de melhoria
+              são geradas com base em <b>todos</b> os vídeos do processo —
+              quanto mais você envia, mais inteligente o sistema fica.
+            </HelpBox>
           </div>
-          <div style={{ fontSize: 11.5, color: "var(--faint)" }}>MP4, MOV ou AVI</div>
-          <input
-            ref={inputRef}
-            type="file"
-            accept="video/*"
-            style={{ display: "none" }}
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-          />
-        </div>
 
-        {erro && (
           <div
-            style={{
-              marginTop: 14,
-              fontSize: 13,
-              color: "var(--desp)",
-              background: "var(--desp-bg)",
-              border: "1px solid rgba(229,72,77,.2)",
-              borderRadius: 10,
-              padding: "8px 11px",
+            onClick={() => inputRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDrag(true);
             }}
+            onDragLeave={() => setDrag(false)}
+            onDrop={onDrop}
+            className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition ${
+              drag
+                ? "border-kv-purple bg-kv-purple-50"
+                : "border-slate-300 bg-slate-50 hover:bg-kv-purple-50 hover:border-kv-purple-300"
+            }`}
           >
-            {erro}
+            <div className="mx-auto h-12 w-12 rounded-full bg-kv-purple-100 flex items-center justify-center mb-3">
+              <svg className="h-6 w-6 text-kv-purple" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <p className="text-sm text-slate-700">
+              {file ? (
+                <>
+                  <span className="font-medium">{file.name}</span>{" "}
+                  <span className="text-slate-500">
+                    · {(file.size / 1024 / 1024).toFixed(1)} MB
+                  </span>
+                </>
+              ) : (
+                <>
+                  Clique para selecionar ou{" "}
+                  <span className="font-medium">arraste o vídeo</span> aqui
+                </>
+              )}
+            </p>
+            <p className="text-xs text-slate-400 mt-1">MP4, MOV ou AVI</p>
+            <input
+              ref={inputRef}
+              type="file"
+              accept="video/*"
+              className="hidden"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+            />
           </div>
-        )}
 
-        <div className="row gap2" style={{ marginTop: 18, justifyContent: "flex-end" }}>
-          {file && (
-            <Btn variant="ghost" onClick={() => setFile(null)}>
-              Trocar
-            </Btn>
+          {erro && (
+            <div className="mt-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+              {erro}
+            </div>
           )}
-          <Btn disabled={!file || uploading} onClick={enviar} icon="play">
-            {uploading ? "Enviando..." : "Iniciar análise"}
-          </Btn>
-        </div>
-      </Card>
+
+          <div className="mt-6 flex justify-end gap-2">
+            {file && (
+              <Button variant="ghost" onClick={() => setFile(null)}>
+                Trocar
+              </Button>
+            )}
+            <Button disabled={!file || uploading} onClick={enviar}>
+              {uploading ? "Enviando..." : "Iniciar análise"}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {job && <ProgressoJob job={job} />}
     </div>
   );
 }
 
-function Progresso({ job }: { job: JobStatus }) {
+function ProgressoJob({ job }: { job: JobStatus }) {
   const erro = job.status === "erro";
   const concluido = job.status === "concluido";
 
@@ -203,107 +194,66 @@ function Progresso({ job }: { job: JobStatus }) {
   }
 
   return (
-    <div className="col" style={{ gap: 18, maxWidth: 780, margin: "0 auto" }}>
-      <Card style={{ padding: 26 }}>
-        <h2 className="font-display" style={{ fontSize: 20, fontWeight: 700 }}>
-          {erro
-            ? "Erro no processamento"
-            : concluido
-              ? "Processamento concluído"
-              : "Processando seu vídeo"}
-        </h2>
-        <p style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 6 }}>
-          {erro
-            ? "Algo deu errado. Veja o detalhe abaixo."
-            : concluido
-              ? "Redirecionando para o dashboard..."
-              : "Pode levar alguns minutos — deixe a aba aberta."}
-        </p>
+    <Card className="p-8 max-w-3xl">
+      <h2 className="text-xl font-semibold text-slate-900">
+        {erro ? "Erro no processamento" : concluido ? "Processamento concluído" : "Processando seu vídeo"}
+      </h2>
+      <p className="text-sm text-slate-500 mt-1">
+        {erro
+          ? "Algo deu errado. Veja o detalhe abaixo."
+          : concluido
+            ? "Te redirecionando para o dashboard..."
+            : "Isso pode levar alguns minutos. Você pode deixar a aba aberta."}
+      </p>
 
-        <div style={{ marginTop: 20 }}>
-          <div
-            className="row"
-            style={{ justifyContent: "space-between", fontSize: 12, color: "var(--muted)", marginBottom: 6 }}
-          >
-            <span>{job.mensagem || "Trabalhando..."}</span>
-            <span className="font-mono tnum">{job.progresso_pct}%</span>
-          </div>
-          <div className="track" style={{ height: 10 }}>
-            <i
-              style={{
-                width: `${Math.max(2, job.progresso_pct)}%`,
-                background: erro ? "var(--desp)" : "var(--grad-cta)",
-              }}
-            />
-          </div>
+      <div className="mt-6">
+        <div className="flex justify-between text-xs text-slate-500 mb-1">
+          <span>{job.mensagem || "Trabalhando..."}</span>
+          <span>{job.progresso_pct}%</span>
         </div>
-
-        <ul className="col gap2" style={{ marginTop: 24, listStyle: "none", padding: 0 }}>
-          {ETAPAS.map((e) => {
-            const s = statusEtapa(e.key);
-            return (
-              <li key={e.key} className="row gap2" style={{ fontSize: 13.5 }}>
-                {s === "done" && (
-                  <span
-                    style={{
-                      width: 20,
-                      height: 20,
-                      borderRadius: "50%",
-                      background: "var(--ok)",
-                      color: "#fff",
-                      display: "grid",
-                      placeItems: "center",
-                      fontSize: 11,
-                    }}
-                  >
-                    ✓
-                  </span>
-                )}
-                {s === "active" && <Spinner size={16} />}
-                {s === "pending" && (
-                  <span
-                    style={{
-                      width: 20,
-                      height: 20,
-                      borderRadius: "50%",
-                      border: "2px solid var(--line)",
-                    }}
-                  />
-                )}
-                <span
-                  style={{
-                    color:
-                      s === "active"
-                        ? "var(--accent-deep)"
-                        : s === "done"
-                          ? "var(--text)"
-                          : "var(--faint)",
-                    fontWeight: s === "active" ? 700 : 500,
-                  }}
-                >
-                  {e.label}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-
-        {erro && (
+        <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
           <div
-            style={{
-              marginTop: 18,
-              fontSize: 13,
-              color: "var(--desp)",
-              background: "var(--desp-bg)",
-              border: "1px solid rgba(229,72,77,.2)",
-              borderRadius: 10,
-              padding: "8px 11px",
-            }}
-          >
-            {job.erro}
-          </div>
-        )}
-      </Card>
-    </div>
+            className={`h-full transition-all ${erro ? "bg-red-500" : "bg-kv-purple"}`}
+            style={{ width: `${Math.max(2, job.progresso_pct)}%` }}
+          />
+        </div>
+      </div>
+
+      <ul className="mt-8 space-y-3">
+        {ETAPAS.map((e) => {
+          const s = statusEtapa(e.key);
+          return (
+            <li key={e.key} className="flex items-center gap-3 text-sm">
+              {s === "done" && (
+                <span className="h-5 w-5 rounded-full bg-emerald-500 text-white flex items-center justify-center text-xs">
+                  ✓
+                </span>
+              )}
+              {s === "active" && <Spinner />}
+              {s === "pending" && (
+                <span className="h-5 w-5 rounded-full border-2 border-slate-200" />
+              )}
+              <span
+                className={
+                  s === "active"
+                    ? "text-kv-purple-dark font-medium"
+                    : s === "done"
+                      ? "text-slate-600"
+                      : "text-slate-400"
+                }
+              >
+                {e.label}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+
+      {erro && (
+        <div className="mt-6 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+          {job.erro}
+        </div>
+      )}
+    </Card>
   );
 }

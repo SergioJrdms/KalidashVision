@@ -1,117 +1,84 @@
 import { FormEvent, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
-import {
-  Badge,
-  Btn,
-  Card,
-  Empty,
-  Help,
-  Icon,
-  LeanBar,
-  Modal,
-  RingMaturidade,
-  Spinner,
-  iniciaisDe,
-  nivelDe,
-  tempoRelativo,
-  toast,
-} from "../components/UIKit";
+import { Badge, Button, Card, EmptyState, Input, Spinner } from "../components/UI";
 import { PrismAvatar } from "../components/PrismAvatar";
 import type { InsightGlobal, PadraoGlobal, Processo } from "../lib/types";
 
-const AREAS_SUGERIDAS = [
-  "Estamparia",
-  "Montagem",
-  "Logística",
-  "Soldagem",
-  "Usinagem",
-  "Embalagem",
-  "Picking",
-  "Pintura",
-  "Qualidade",
-];
-
 export default function Processos() {
   const qc = useQueryClient();
-  const [novo, setNovo] = useState(false);
-  const { data, isLoading } = useQuery({ queryKey: ["processos"], queryFn: () => api.processos.list() });
-  const insights = useQuery({ queryKey: ["insights-globais"], queryFn: () => api.insightsGlobais() });
-  const padroes = useQuery({ queryKey: ["padroes-globais"], queryFn: () => api.padroes.globais() });
+  const [open, setOpen] = useState(false);
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["processos"],
+    queryFn: () => api.processos.list(),
+  });
+  const insights = useQuery({
+    queryKey: ["insights-globais"],
+    queryFn: () => api.insightsGlobais(),
+  });
+  const padroesGlobais = useQuery({
+    queryKey: ["padroes-globais"],
+    queryFn: () => api.padroes.globais(),
+  });
 
   if (isLoading)
     return (
-      <div className="center" style={{ padding: 80 }}>
-        <Spinner size={28} />
+      <div className="flex items-center justify-center py-20">
+        <Spinner className="h-8 w-8" />
+      </div>
+    );
+  if (error)
+    return (
+      <div className="text-red-700 bg-red-50 border border-red-200 rounded-lg p-4">
+        {(error as Error).message}
       </div>
     );
 
-  const processos = (data || []) as Processo[];
+  const processos = data || [];
+  const algumComVideo = processos.some((p) => (p.n_videos ?? 0) > 0);
 
   return (
-    <div className="col" style={{ gap: 26, maxWidth: 1180, margin: "0 auto" }}>
-      <div
-        className="row"
-        style={{ justifyContent: "space-between", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}
-      >
+    <div className="space-y-8">
+      {/* Cabeçalho */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="font-display" style={{ fontSize: 28, fontWeight: 800 }}>
-            Sua operação
-          </h1>
-          <p
-            className="pretty"
-            style={{ fontSize: 14.5, color: "var(--muted)", marginTop: 6, maxWidth: 560 }}
-          >
-            Cada processo é um contexto isolado de análise. O Prism aprende cada um
-            separadamente — e cruza tudo na visão geral.
+          <h1 className="text-2xl font-semibold text-slate-900">Sua operação</h1>
+          <p className="text-sm text-slate-500 mt-1 max-w-2xl">
+            Cada processo é um contexto <b>isolado</b> de análise. Abaixo, a visão
+            consolidada do Prism e seus processos.
           </p>
         </div>
-        <Btn icon="plus" onClick={() => setNovo(true)}>
-          Novo processo
-        </Btn>
+        <Button onClick={() => setOpen(true)}>+ Novo processo</Button>
       </div>
 
+      {/* Insights globais do Prism */}
       {processos.length > 0 && (
-        <InsightsGlobaisBloco
+        <InsightsGlobais
           insights={insights.data || []}
           carregando={insights.isLoading}
+          temVideo={algumComVideo}
         />
       )}
 
-      {processos.length > 0 && (padroes.data?.length ?? 0) > 0 && (
-        <PadroesGlobaisBloco padroes={padroes.data || []} />
+      {/* Padrões da operação (Camada C) */}
+      {processos.length > 0 && (padroesGlobais.data?.length ?? 0) > 0 && (
+        <PadroesGlobaisBloco padroes={padroesGlobais.data || []} />
       )}
 
+      {/* Grid de processos */}
       <div>
-        <div
-          className="row"
-          style={{ justifyContent: "space-between", marginBottom: 14 }}
-        >
-          <h2 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>
-            Meus processos{" "}
-            <span style={{ color: "var(--faint)", fontWeight: 500 }}>
-              · {processos.length}
-            </span>
-          </h2>
-        </div>
+        <h2 className="text-lg font-semibold text-slate-900 mb-3">Meus processos</h2>
         {processos.length === 0 ? (
-          <Card style={{ padding: 6 }}>
-            <Empty
-              icon="layout-grid"
+          <Card className="p-2">
+            <EmptyState
               title="Você ainda não tem nenhum processo"
-              desc="Crie seu primeiro processo para começar a analisar vídeos. O Prism aprende a cada vídeo enviado."
-              action={<Btn icon="plus" onClick={() => setNovo(true)}>Criar primeiro processo</Btn>}
+              description="Crie seu primeiro processo para começar a analisar vídeos de operação. O Prism vai aprender sua operação a cada vídeo."
+              action={<Button onClick={() => setOpen(true)}>Criar o primeiro processo</Button>}
             />
           </Card>
         ) : (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))",
-              gap: 16,
-            }}
-          >
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {processos.map((p) => (
               <ProcessoCard
                 key={p.id}
@@ -119,7 +86,6 @@ export default function Processos() {
                 onExcluido={() => {
                   qc.invalidateQueries({ queryKey: ["processos"] });
                   qc.invalidateQueries({ queryKey: ["insights-globais"] });
-                  qc.invalidateQueries({ queryKey: ["padroes-globais"] });
                 }}
               />
             ))}
@@ -127,9 +93,9 @@ export default function Processos() {
         )}
       </div>
 
-      {novo && (
+      {open && (
         <NovoProcessoModal
-          onClose={() => setNovo(false)}
+          onClose={() => setOpen(false)}
           onCreated={() => qc.invalidateQueries({ queryKey: ["processos"] })}
         />
       )}
@@ -140,84 +106,43 @@ export default function Processos() {
 // ════════════════════════════════════════════════════════════════════════
 // Insights globais
 // ════════════════════════════════════════════════════════════════════════
-function InsightsGlobaisBloco({
+function InsightsGlobais({
   insights,
   carregando,
+  temVideo,
 }: {
   insights: InsightGlobal[];
   carregando: boolean;
+  temVideo: boolean;
 }) {
   return (
-    <Card style={{ padding: 22 }}>
-      <div className="row gap2" style={{ marginBottom: 4 }}>
-        <PrismAvatar size={28} ring />
-        <h2 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>
-          Visão geral do Prism
-        </h2>
-        <Help text="O Prism olha todos os processos juntos: qual priorizar, onde está a maior oportunidade e padrões entre processos." />
+    <Card className="p-6 bg-gradient-to-br from-kv-purple-50 via-white to-kv-indigo-bg/40 border-kv-purple-200">
+      <div className="flex items-center gap-2.5 mb-4">
+        <PrismAvatar size={36} />
+        <div>
+          <h2 className="font-semibold text-slate-900 leading-tight">
+            Visão geral da sua operação
+          </h2>
+          <p className="text-xs text-slate-500 leading-tight">
+            O Prism olhando todos os processos juntos.
+          </p>
+        </div>
       </div>
-      <p style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16 }}>
-        Insights consolidados de toda a sua operação.
-      </p>
 
       {carregando ? (
-        <div className="row gap2" style={{ color: "var(--muted)", fontSize: 13 }}>
-          <Spinner size={16} /> carregando insights…
+        <div className="flex items-center gap-2 text-sm text-slate-500 py-4">
+          <Spinner className="h-4 w-4" /> carregando insights…
         </div>
-      ) : insights.length === 0 ? (
-        <div
-          className="soft"
-          style={{
-            border: "1px solid var(--line)",
-            borderRadius: 12,
-            padding: 16,
-            fontSize: 13.5,
-            color: "var(--muted)",
-          }}
-        >
-          Processe vídeos em seus processos para o Prism gerar uma visão consolidada
-          (qual priorizar, padrões e a maior oportunidade do portfólio).
+      ) : !temVideo || insights.length === 0 ? (
+        <div className="text-sm text-slate-500 bg-white/60 rounded-xl p-4 border border-kv-purple-100">
+          {!temVideo
+            ? "Processe vídeos em seus processos para o Prism gerar uma visão consolidada (qual priorizar, onde está a maior oportunidade e padrões entre processos)."
+            : "Ainda não há insights consolidados. Eles são gerados automaticamente após o processamento de novos vídeos."}
         </div>
       ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-            gap: 12,
-          }}
-        >
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {insights.map((it) => (
-            <div
-              key={it.id}
-              style={{
-                border: "1px solid var(--line)",
-                borderRadius: 14,
-                padding: 16,
-                background: "#fff",
-              }}
-            >
-              <div className="row gap2 wrap" style={{ marginBottom: 6 }}>
-                <Badge tone={badgePrioridade(it.prioridade)}>
-                  {(it.prioridade || "info").toUpperCase()}
-                </Badge>
-              </div>
-              <h4 style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>{it.titulo}</h4>
-              <p
-                className="pretty"
-                style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginTop: 6 }}
-              >
-                {it.descricao}
-              </p>
-              {it.processos_relacionados && it.processos_relacionados.length > 0 && (
-                <div className="row gap1 wrap" style={{ marginTop: 10 }}>
-                  {it.processos_relacionados.map((n) => (
-                    <span key={n} className="badge badge-purple" style={{ fontSize: 10.5 }}>
-                      {n}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
+            <InsightCard key={it.id} it={it} />
           ))}
         </div>
       )}
@@ -225,185 +150,86 @@ function InsightsGlobaisBloco({
   );
 }
 
-function badgePrioridade(p: string): "high" | "warn" | "info" | "neutral" {
-  const x = (p || "").toLowerCase();
-  if (x === "alta") return "high";
-  if (x === "media") return "warn";
-  if (x === "info") return "info";
-  return "neutral";
-}
-
-// ════════════════════════════════════════════════════════════════════════
-// Padrões globais (Camada C)
-// ════════════════════════════════════════════════════════════════════════
-const TIPO_PADRAO_GLOBAL: Record<string, string> = {
-  compartilhado: "Compartilhado",
-  benchmarking: "Benchmarking",
-  sistemico: "Sistêmico",
-};
-
-function PadroesGlobaisBloco({ padroes }: { padroes: PadraoGlobal[] }) {
+function InsightCard({ it }: { it: InsightGlobal }) {
+  const tone = (it.prioridade as "alta" | "media" | "info") || "info";
   return (
-    <div>
-      <div className="row gap2" style={{ marginBottom: 12 }}>
-        <Icon name="git-compare" size={18} color="var(--accent)" />
-        <h2 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>
-          Padrões entre as linhas
-        </h2>
-        <Help text="O que se repete entre processos: comportamentos compartilhados, benchmarking e problemas sistêmicos." />
+    <div className="bg-white rounded-xl border border-slate-200 p-4">
+      <div className="flex items-center gap-2 mb-1.5">
+        <Badge tone={tone}>{(it.prioridade || "info").toUpperCase()}</Badge>
+        <span className="text-sm font-semibold text-slate-900">{it.titulo}</span>
       </div>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
-          gap: 14,
-        }}
-      >
-        {padroes.map((p) => (
-          <Card key={p.id} style={{ padding: 18 }}>
-            <div className="row gap2 wrap" style={{ marginBottom: 8 }}>
-              <span className="badge badge-purple">
-                {TIPO_PADRAO_GLOBAL[p.tipo] || p.tipo}
-              </span>
-              <Badge tone={p.confianca === "alta" ? "ok" : p.confianca === "media" ? "warn" : "neutral"}>
-                confiança {p.confianca}
-              </Badge>
-            </div>
-            <h4 style={{ fontSize: 15, fontWeight: 700 }}>{p.titulo}</h4>
-            <p
-              className="pretty"
-              style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginTop: 6 }}
+      <p className="text-sm text-slate-600 leading-relaxed">{it.descricao}</p>
+      {it.processos_relacionados && it.processos_relacionados.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-2">
+          {it.processos_relacionados.map((nome) => (
+            <span
+              key={nome}
+              className="text-[11px] bg-kv-purple-50 text-kv-purple-dark px-2 py-0.5 rounded-full border border-kv-purple-200"
             >
-              {p.descricao}
-            </p>
-            {p.recomendacao && (
-              <div
-                className="soft"
-                style={{
-                  borderRadius: 10,
-                  padding: "10px 12px",
-                  marginTop: 10,
-                  fontSize: 12.5,
-                  color: "var(--text)",
-                  border: "1px solid var(--line)",
-                }}
-              >
-                <b style={{ color: "var(--ink)" }}>Recomendação. </b>
-                {p.recomendacao}
-              </div>
-            )}
-            {p.processos_relacionados && p.processos_relacionados.length > 0 && (
-              <div className="row gap1 wrap" style={{ marginTop: 10 }}>
-                {p.processos_relacionados.map((n) => (
-                  <span key={n} className="badge badge-purple" style={{ fontSize: 10.5 }}>
-                    {n}
-                  </span>
-                ))}
-              </div>
-            )}
-          </Card>
-        ))}
-      </div>
+              {nome}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Card de processo
+// Card de processo enriquecido
 // ════════════════════════════════════════════════════════════════════════
 function ProcessoCard({ p, onExcluido }: { p: Processo; onExcluido: () => void }) {
-  const nav = useNavigate();
-  const [menu, setMenu] = useState(false);
+  const [menuAberto, setMenuAberto] = useState(false);
   const [confirmar, setConfirmar] = useState(false);
-  const mat = p.maturidade ?? 0;
-  const nivel = nivelDe(mat);
-  const cv = p.composicao_valor;
+  const nav = useNavigate();
+
+  const temDados = (p.n_videos ?? 0) > 0;
+  const va = p.composicao_valor?.valor_agregado_pct;
 
   return (
-    <Card
-      className="hoverlift click"
-      style={{ padding: 18, position: "relative" }}
-      onClick={() => nav(`/processos/${p.id}/dashboard`)}
-    >
-      <div className="row gap3" style={{ alignItems: "flex-start", marginBottom: 12 }}>
-        <RingMaturidade pct={mat} size={56} />
-        <div className="grow col" style={{ minWidth: 0, gap: 4 }}>
-          <div className="row gap2 wrap">
-            {p.area && (
-              <span className="badge badge-purple" style={{ fontSize: 10.5 }}>
-                {p.area}
-              </span>
-            )}
-            <span style={{ fontSize: 11, color: nivel.cor, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase" }}>
-              {nivel.rotulo}
-            </span>
-          </div>
-          <h3 className="truncate" style={{ fontSize: 16, fontWeight: 700, color: "var(--ink)" }} title={p.processo}>
-            {p.processo}
-          </h3>
-        </div>
+    <Card className="p-5 hover:border-kv-purple-300 hover:shadow-md transition h-full flex flex-col relative">
+      {/* menu de ações */}
+      <div className="absolute top-3 right-3">
         <button
           onClick={(e) => {
-            e.stopPropagation();
-            setMenu((v) => !v);
+            e.preventDefault();
+            setMenuAberto((v) => !v);
           }}
-          onBlur={() => setTimeout(() => setMenu(false), 150)}
-          style={{
-            background: "transparent",
-            border: "1px solid var(--line)",
-            color: "var(--muted)",
-            borderRadius: 8,
-            width: 28,
-            height: 28,
-            display: "grid",
-            placeItems: "center",
-          }}
-          title="Mais"
+          onBlur={() => setTimeout(() => setMenuAberto(false), 150)}
+          className="h-7 w-7 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center"
+          title="Ações"
         >
-          <Icon name="more-horizontal" size={14} />
+          ⋮
         </button>
-        {menu && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              position: "absolute",
-              top: 44,
-              right: 14,
-              background: "#fff",
-              border: "1px solid var(--line)",
-              borderRadius: 10,
-              boxShadow: "var(--glow-lg)",
-              padding: 4,
-              zIndex: 5,
-              minWidth: 180,
-            }}
-          >
-            <MenuItem icon="layout-dashboard" label="Abrir" onClick={() => nav(`/processos/${p.id}/dashboard`)} />
-            <MenuItem icon="upload" label="Novo vídeo" onClick={() => nav(`/processos/${p.id}/upload`)} />
-            <MenuItem icon="file-text" label="Descrição" onClick={() => nav(`/processos/${p.id}/descricao`)} />
-            <div style={{ height: 1, background: "var(--line)", margin: "4px 0" }} />
-            <MenuItem icon="trash-2" label="Excluir processo" danger onClick={() => setConfirmar(true)} />
+        {menuAberto && (
+          <div className="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-slate-200 py-1 z-10">
+            <button
+              onMouseDown={() => nav(`/processos/${p.id}/dashboard`)}
+              className="w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+            >
+              Abrir
+            </button>
+            <button
+              onMouseDown={() => setConfirmar(true)}
+              className="w-full text-left px-3 py-1.5 text-sm text-red-600 hover:bg-red-50"
+            >
+              Excluir processo
+            </button>
           </div>
         )}
       </div>
 
-      {p.descricao && (
-        <p className="clamp2 pretty" style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, minHeight: 40 }}>
-          {p.descricao}
+      <Link to={`/processos/${p.id}/dashboard`} className="block group flex-1">
+        <h3 className="font-semibold text-slate-900 group-hover:text-kv-purple-dark pr-8">
+          {p.processo}
+        </h3>
+        <p className="text-sm text-slate-500 mt-1.5 line-clamp-2 min-h-[2.5rem]">
+          {p.descricao || "Sem descrição. Adicione uma para melhorar a análise."}
         </p>
-      )}
 
-      {(p.n_videos ?? 0) > 0 ? (
-        <>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 8,
-              marginTop: 14,
-              fontSize: 12,
-            }}
-          >
+        {/* mini-estatísticas */}
+        {temDados ? (
+          <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
             <Stat label="Vídeos" valor={String(p.n_videos)} />
             <Stat label="Validado" valor={`${p.pct_validado ?? 0}%`} />
             <Stat
@@ -413,41 +239,33 @@ function ProcessoCard({ p, onExcluido }: { p: Processo; onExcluido: () => void }
             />
             <Stat label="Pendências" valor={String(p.eventos_pendentes ?? 0)} />
           </div>
+        ) : (
+          <div className="mt-3 text-xs text-slate-400 italic">
+            Nenhum vídeo processado ainda.
+          </div>
+        )}
 
-          {cv && (
-            <div style={{ marginTop: 12 }}>
-              <div className="row" style={{ justifyContent: "space-between", marginBottom: 4 }}>
-                <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600 }}>
-                  Valor agregado
-                </span>
-                <span style={{ fontSize: 11.5, color: "var(--va)", fontWeight: 700 }}>
-                  {cv.valor_agregado_pct}%
-                </span>
-              </div>
-              <LeanBar
-                va={cv.valor_agregado_pct}
-                apoio={cv.apoio_pct}
-                desp={cv.desperdicio_pct}
-                none={cv.nao_classificado_pct}
-              />
+        {/* mini barra de valor agregado */}
+        {temDados && p.composicao_valor && (
+          <div className="mt-3">
+            <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+              <span>Valor agregado</span>
+              <span>{va}%</span>
             </div>
-          )}
-        </>
-      ) : (
-        <p style={{ fontSize: 12, color: "var(--faint)", marginTop: 14, fontStyle: "italic" }}>
-          Nenhum vídeo processado ainda.
-        </p>
-      )}
+            <div className="flex h-1.5 rounded-full overflow-hidden bg-slate-100">
+              <Seg pct={p.composicao_valor.valor_agregado_pct} cor="#10b981" />
+              <Seg pct={p.composicao_valor.apoio_pct} cor="#f59e0b" />
+              <Seg pct={p.composicao_valor.desperdicio_pct} cor="#ef4444" />
+              <Seg pct={p.composicao_valor.nao_classificado_pct} cor="#cbd5e1" />
+            </div>
+          </div>
+        )}
+      </Link>
 
-      <div className="row" style={{ marginTop: 14, justifyContent: "space-between", fontSize: 11, color: "var(--faint)" }}>
-        <span>
-          {p.ultimo_video_em
-            ? `Último vídeo ${tempoRelativo(p.ultimo_video_em)}`
-            : `Atualizado em ${tempoRelativo(p.atualizado_em)}`}
-        </span>
-        <span className="row gap1" style={{ color: "var(--accent)" }}>
-          <Icon name="arrow-right" size={12} color="var(--accent)" />
-        </span>
+      <div className="mt-4 text-[11px] text-slate-400">
+        {p.ultimo_video_em
+          ? `Último vídeo em ${new Date(p.ultimo_video_em).toLocaleDateString("pt-BR")}`
+          : `Atualizado em ${new Date(p.atualizado_em).toLocaleDateString("pt-BR")}`}
       </div>
 
       {confirmar && (
@@ -461,61 +279,24 @@ function ProcessoCard({ p, onExcluido }: { p: Processo; onExcluido: () => void }
   );
 }
 
-function MenuItem({
-  icon,
-  label,
-  onClick,
-  danger,
-}: {
-  icon: string;
-  label: string;
-  onClick: () => void;
-  danger?: boolean;
-}) {
-  return (
-    <button
-      onMouseDown={onClick}
-      className="row gap2 click"
-      style={{
-        width: "100%",
-        textAlign: "left",
-        padding: "8px 10px",
-        background: "transparent",
-        border: 0,
-        borderRadius: 8,
-        fontSize: 13,
-        color: danger ? "var(--desp)" : "var(--text)",
-      }}
-    >
-      <Icon name={icon} size={14} color={danger ? "var(--desp)" : "var(--muted)"} />
-      <span>{label}</span>
-    </button>
-  );
-}
-
 function Stat({ label, valor, destaque }: { label: string; valor: string; destaque?: boolean }) {
   return (
-    <div
-      style={{
-        padding: "8px 10px",
-        background: destaque ? "var(--apoio-bg)" : "var(--soft)",
-        borderRadius: 10,
-      }}
-    >
-      <div
-        style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 600 }}
-      >
-        {label}
-      </div>
-      <div style={{ fontWeight: 700, color: destaque ? "#b8740b" : "var(--ink)", fontSize: 14 }}>
+    <div className={`rounded-lg px-2 py-1.5 ${destaque ? "bg-amber-50" : "bg-slate-50"}`}>
+      <div className="text-slate-400 text-[10px] uppercase tracking-wide">{label}</div>
+      <div className={`font-semibold ${destaque ? "text-amber-700" : "text-slate-800"}`}>
         {valor}
       </div>
     </div>
   );
 }
 
+function Seg({ pct, cor }: { pct: number; cor: string }) {
+  if (!pct || pct <= 0) return null;
+  return <div style={{ width: `${pct}%`, background: cor }} title={`${pct}%`} />;
+}
+
 // ════════════════════════════════════════════════════════════════════════
-// Exclusão (confirmação forte)
+// Confirmação forte de exclusão (estilo GitHub: digite o nome)
 // ════════════════════════════════════════════════════════════════════════
 function ConfirmarExclusao({
   processo,
@@ -526,76 +307,131 @@ function ConfirmarExclusao({
   onClose: () => void;
   onExcluido: () => void;
 }) {
-  const [txt, setTxt] = useState("");
+  const [texto, setTexto] = useState("");
   const [erro, setErro] = useState<string | null>(null);
   const mut = useMutation({
     mutationFn: () => api.processos.excluir(processo.id),
     onSuccess: () => {
       onExcluido();
       onClose();
-      toast(`Processo "${processo.processo}" excluído.`, { icon: "trash-2", color: "#F8B4B6" });
     },
     onError: (e: Error) => setErro(e.message),
   });
-  const ok = txt.trim() === processo.processo;
+  const confere = texto.trim() === processo.processo;
+
   return (
-    <Modal open onClose={onClose}>
-      <h3 className="font-display" style={{ fontSize: 18, fontWeight: 700, color: "var(--desp)" }}>
-        Excluir processo
-      </h3>
-      <p style={{ fontSize: 13.5, color: "var(--text)", marginTop: 8 }}>
-        Esta ação é <b>irreversível</b>. Vai apagar <b>permanentemente</b> tudo deste processo:
-      </p>
-      <ul style={{ marginTop: 8, marginLeft: 20, fontSize: 13, color: "var(--text)", listStyle: "disc" }}>
-        <li>vídeos enviados (do armazenamento)</li>
-        <li>eventos e comportamentos aprendidos</li>
-        <li>sugestões, perguntas e padrões</li>
-        <li>conversas do Prism deste processo</li>
-      </ul>
-      <p style={{ marginTop: 12, fontSize: 13, color: "var(--text)" }}>
-        Para confirmar, digite o nome:{" "}
-        <code
-          style={{ background: "var(--line-2)", padding: "2px 6px", borderRadius: 6, fontFamily: "var(--mono)" }}
-        >
-          {processo.processo}
-        </code>
-      </p>
-      <input
-        className="field"
-        autoFocus
-        value={txt}
-        onChange={(e) => setTxt(e.target.value)}
-        style={{ marginTop: 10 }}
-      />
-      {erro && (
-        <div
-          style={{
-            marginTop: 10,
-            fontSize: 13,
-            color: "var(--desp)",
-            background: "var(--desp-bg)",
-            border: "1px solid rgba(229,72,77,.2)",
-            borderRadius: 10,
-            padding: "8px 11px",
-          }}
-        >
-          {erro}
+    <div
+      className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 px-4"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <Card className="w-full max-w-md p-6">
+        <h2 className="text-lg font-semibold text-red-700 mb-1">Excluir processo</h2>
+        <p className="text-sm text-slate-600 mb-3">
+          Esta ação é <b>irreversível</b>. Vai apagar <b>permanentemente</b> tudo
+          deste processo:
+        </p>
+        <ul className="text-sm text-slate-600 list-disc pl-5 mb-4 space-y-0.5">
+          <li>vídeos enviados (do armazenamento)</li>
+          <li>eventos e comportamentos aprendidos</li>
+          <li>sugestões de melhoria e perguntas</li>
+          <li>conversas do Prism deste processo</li>
+        </ul>
+        <p className="text-sm text-slate-600 mb-2">
+          Para confirmar, digite o nome do processo:{" "}
+          <code className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-800">
+            {processo.processo}
+          </code>
+        </p>
+        <Input
+          value={texto}
+          onChange={(e) => setTexto(e.target.value)}
+          autoFocus
+          placeholder={processo.processo}
+        />
+        {erro && (
+          <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+            {erro}
+          </div>
+        )}
+        <div className="flex gap-2 justify-end mt-5">
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button
+            type="button"
+            variant="danger"
+            disabled={!confere || mut.isPending}
+            onClick={() => mut.mutate()}
+          >
+            {mut.isPending ? "Excluindo..." : "Excluir definitivamente"}
+          </Button>
         </div>
-      )}
-      <div className="row gap2" style={{ marginTop: 18, justifyContent: "flex-end" }}>
-        <Btn variant="ghost" onClick={onClose}>
-          Cancelar
-        </Btn>
-        <Btn variant="danger" disabled={!ok || mut.isPending} onClick={() => mut.mutate()}>
-          {mut.isPending ? "Excluindo..." : "Excluir definitivamente"}
-        </Btn>
-      </div>
-    </Modal>
+      </Card>
+    </div>
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Modal de novo processo (com area)
+// Padrões globais (Camada C)
+// ════════════════════════════════════════════════════════════════════════
+const TIPO_PADRAO_GLOBAL: Record<string, string> = {
+  compartilhado: "Compartilhado",
+  benchmarking: "Benchmarking",
+  sistemico: "Sistêmico",
+};
+
+function PadroesGlobaisBloco({ padroes }: { padroes: PadraoGlobal[] }) {
+  return (
+    <Card className="p-6">
+      <div className="flex items-center gap-2.5 mb-1">
+        <PrismAvatar size={32} />
+        <h2 className="font-semibold text-slate-900">Padrões da sua operação</h2>
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        O que se <b>repete</b> entre suas linhas — padrões compartilhados,
+        benchmarking e problemas sistêmicos. Diferente dos insights acima, aqui
+        o eixo é a recorrência entre processos.
+      </p>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        {padroes.map((p) => (
+          <div key={p.id} className="bg-white rounded-xl border border-slate-200 p-4">
+            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+              <span className="text-xs font-medium text-kv-purple-dark bg-kv-purple-50 border border-kv-purple-200 rounded-full px-2 py-0.5">
+                {TIPO_PADRAO_GLOBAL[p.tipo] || p.tipo}
+              </span>
+              <Badge
+                tone={p.confianca === "alta" ? "success" : p.confianca === "media" ? "warning" : "neutral"}
+              >
+                confiança {p.confianca}
+              </Badge>
+            </div>
+            <h4 className="font-semibold text-slate-900 text-sm">{p.titulo}</h4>
+            <p className="text-sm text-slate-600 mt-1 leading-relaxed">{p.descricao}</p>
+            {p.recomendacao && (
+              <div className="mt-2 text-sm text-slate-700 bg-slate-50 rounded-lg p-2.5 border border-slate-100">
+                <span className="font-semibold text-slate-800">Recomendação. </span>
+                {p.recomendacao}
+              </div>
+            )}
+            {p.processos_relacionados && p.processos_relacionados.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                {p.processos_relacionados.map((nome) => (
+                  <span
+                    key={nome}
+                    className="text-[11px] bg-kv-purple-50 text-kv-purple-dark px-2 py-0.5 rounded-full border border-kv-purple-200"
+                  >
+                    {nome}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 // ════════════════════════════════════════════════════════════════════════
 function NovoProcessoModal({
   onClose,
@@ -604,87 +440,55 @@ function NovoProcessoModal({
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const nav = useNavigate();
   const [nome, setNome] = useState("");
-  const [area, setArea] = useState("");
   const [erro, setErro] = useState<string | null>(null);
   const mut = useMutation({
-    mutationFn: () => api.processos.create(nome.trim(), undefined, area.trim() || undefined),
+    mutationFn: (n: string) => api.processos.create(n),
     onSuccess: (proc) => {
       onCreated();
       onClose();
-      toast("Processo criado.", { icon: "check", color: "#3EE6AE" });
-      nav(`/processos/${proc.id}/descricao?novo=1`);
+      window.location.href = `/processos/${proc.id}/descricao?novo=1`;
     },
     onError: (e: Error) => setErro(e.message),
   });
+
   function submit(e: FormEvent) {
     e.preventDefault();
     if (!nome.trim()) return;
     setErro(null);
-    mut.mutate();
+    mut.mutate(nome.trim());
   }
+
   return (
-    <Modal open onClose={onClose} width={460}>
-      <h3 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>
-        Novo processo
-      </h3>
-      <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>
-        Dê um nome curto, como "Linha de Prensa 2" ou "Picking BCP 5".
-      </p>
-      <form onSubmit={submit} className="col gap3" style={{ marginTop: 16 }}>
-        <label className="col" style={{ gap: 6 }}>
-          <span className="label">Nome do processo</span>
-          <input
-            className="field"
-            autoFocus
+    <div className="fixed inset-0 bg-slate-900/30 flex items-center justify-center z-50 px-4">
+      <Card className="w-full max-w-md p-6">
+        <h2 className="text-lg font-semibold text-slate-900 mb-1">Novo processo</h2>
+        <p className="text-sm text-slate-500 mb-4">
+          Dê um nome curto, como "Linha de prensa 2" ou "Picking BCP 5".
+        </p>
+        <form onSubmit={submit} className="space-y-4">
+          <Input
+            label="Nome do processo"
             value={nome}
             onChange={(e) => setNome(e.target.value)}
+            autoFocus
             maxLength={120}
           />
-        </label>
-        <label className="col" style={{ gap: 6 }}>
-          <span className="label">Área (opcional)</span>
-          <input
-            className="field"
-            list="areas-list"
-            value={area}
-            onChange={(e) => setArea(e.target.value)}
-            placeholder="Ex.: Estamparia"
-            maxLength={60}
-          />
-          <datalist id="areas-list">
-            {AREAS_SUGERIDAS.map((a) => (
-              <option key={a} value={a} />
-            ))}
-          </datalist>
-        </label>
-        {erro && (
-          <div
-            style={{
-              fontSize: 13,
-              color: "var(--desp)",
-              background: "var(--desp-bg)",
-              border: "1px solid rgba(229,72,77,.2)",
-              borderRadius: 10,
-              padding: "8px 11px",
-            }}
-          >
-            {erro}
+          {erro && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+              {erro}
+            </div>
+          )}
+          <div className="flex gap-2 justify-end">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancelar
+            </Button>
+            <Button type="submit" disabled={mut.isPending || !nome.trim()}>
+              {mut.isPending ? "Criando..." : "Criar"}
+            </Button>
           </div>
-        )}
-        <div className="row gap2" style={{ justifyContent: "flex-end" }}>
-          <Btn type="button" variant="ghost" onClick={onClose}>
-            Cancelar
-          </Btn>
-          <Btn type="submit" disabled={mut.isPending || !nome.trim()}>
-            {mut.isPending ? "Criando..." : "Criar"}
-          </Btn>
-        </div>
-      </form>
-    </Modal>
+        </form>
+      </Card>
+    </div>
   );
 }
-
-// helper para os componentes
-export { iniciaisDe };

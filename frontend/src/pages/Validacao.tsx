@@ -1,516 +1,366 @@
-import { FormEvent, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
-import { api } from "../lib/api";
-import {
-  Badge,
-  Btn,
-  Card,
-  Empty,
-  Help,
-  Icon,
-  PanelHead,
-  RingMaturidade,
-  Spinner,
-  Track,
-  fmtSeg,
-  leanCor,
-  leanLabel,
-  leanShort,
-  toast,
-} from "../components/UIKit";
-import { PrismAvatar } from "../components/PrismAvatar";
+import { api, formatSeg } from "../lib/api";
+import { Badge, Button, Card, EmptyState, HelpBox, Input, Spinner } from "../components/UI";
 import type { EventoPendente, PerguntaProcesso } from "../lib/types";
 
 export default function Validacao() {
   const { id } = useParams<{ id: string }>();
   const qc = useQueryClient();
 
-  const pendentes = useQuery({
-    queryKey: ["eventos-pendentes", id],
-    queryFn: () => api.processos.eventosPendentes(id!),
-    enabled: !!id,
-  });
   const perguntas = useQuery({
     queryKey: ["perguntas-pendentes", id],
     queryFn: () => api.perguntas.listar(id!, "pendente"),
     enabled: !!id,
   });
-  const proc = useQuery({
-    queryKey: ["processo", id],
-    queryFn: () => api.processos.detalhe(id!),
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["eventos-pendentes", id],
+    queryFn: () => api.processos.eventosPendentes(id!),
     enabled: !!id,
   });
 
-  if (pendentes.isLoading || proc.isLoading)
-    return (
-      <div className="center" style={{ padding: 60 }}>
-        <Spinner size={26} />
-      </div>
-    );
+  const dashboard = useQuery({
+    queryKey: ["dashboard", id],
+    queryFn: () => api.processos.dashboard(id!),
+    enabled: !!id,
+  });
 
-  const fila = pendentes.data || [];
-  const totalInicial = fila.length;
-  const matBase = (proc.data as { maturidade?: number } | undefined)?.maturidade ?? 0;
-  // boost local visual conforme o usuário valida (rodada atual)
-  const [boost, setBoost] = useState(0);
-  const maturidade = Math.min(99, Math.round(matBase + Math.min(16, boost * 1.4)));
+  const [filtroLabel, setFiltroLabel] = useState<string>("(todos)");
+  const labels = useMemo(() => {
+    if (!data) return [];
+    return Array.from(new Set(data.map((e) => e.comportamento_label))).sort();
+  }, [data]);
 
-  function resolvido() {
-    setBoost((b) => b + 1);
-    qc.invalidateQueries({ queryKey: ["eventos-pendentes", id] });
-    qc.invalidateQueries({ queryKey: ["dashboard", id] });
-  }
+  const filtrados = useMemo(
+    () =>
+      (data || []).filter(
+        (e) => filtroLabel === "(todos)" || e.comportamento_label === filtroLabel
+      ),
+    [data, filtroLabel]
+  );
 
   return (
-    <div className="col" style={{ gap: 18, maxWidth: 1080, margin: "0 auto" }}>
-      <SessionHeader
-        nome={proc.data?.processo || ""}
-        maturidade={maturidade}
-        restantes={fila.length}
-        total={totalInicial}
-        feitos={boost}
-      />
-
+    <div>
       {perguntas.data && perguntas.data.length > 0 && (
-        <PerguntasConversa
+        <PerguntasSecao
           perguntas={perguntas.data}
-          processoId={id!}
-          onResolvido={() => {
+          onResolved={() => {
             qc.invalidateQueries({ queryKey: ["perguntas-pendentes", id] });
             qc.invalidateQueries({ queryKey: ["dashboard", id] });
           }}
         />
       )}
 
-      {fila.length === 0 ? (
-        <Card style={{ padding: 6 }}>
-          <Empty
-            icon="check-circle-2"
-            title={boost > 0 ? `Você zerou a fila — ${boost} validações nesta sessão` : "Nada a validar manualmente"}
-            desc={
-              boost > 0
-                ? "O Prism está mais inteligente agora. Veja o impacto nas próximas análises."
-                : "Todos os eventos já foram confirmados (auto ou por você). Envie mais vídeos para continuar treinando."
-            }
+      <div className="mb-4">
+        <HelpBox title="Por que validar?">
+          A IA descobre os comportamentos automaticamente, mas pode errar nos
+          primeiros vídeos. Quando você <b>confirma</b>, ela aprende que o label
+          está correto. Quando você <b>corrige</b>, ela aprende o mapeamento
+          certo. Quando você <b>descarta</b>, ela aprende que aquilo é falso
+          positivo. Depois de 2 confirmações do mesmo label, o sistema passa a
+          confirmar sozinho os eventos seguintes — sua carga de trabalho cai.
+        </HelpBox>
+      </div>
+
+      {dashboard.data && (
+        <Card className="p-4 mb-6 bg-gradient-to-r from-emerald-50 to-emerald-100/60 border-emerald-200">
+          <div className="flex items-baseline gap-2 text-sm text-emerald-900">
+            <span className="font-semibold">
+              {dashboard.data.eventos_pendentes} eventos aguardando você
+            </span>
+            <span className="text-emerald-700">·</span>
+            <span className="text-emerald-700">
+              o sistema já confirmou sozinho{" "}
+              <b>
+                {dashboard.data.snapshot.eventos_considerados -
+                  dashboard.data.eventos_pendentes}
+              </b>{" "}
+              de {dashboard.data.snapshot.eventos_considerados} eventos.
+            </span>
+          </div>
+        </Card>
+      )}
+
+      {isLoading && (
+        <div className="flex items-center justify-center py-20">
+          <Spinner className="h-8 w-8" />
+        </div>
+      )}
+      {error && (
+        <div className="text-red-700 bg-red-50 border border-red-200 rounded-lg p-4">
+          {(error as Error).message}
+        </div>
+      )}
+
+      {data && data.length === 0 && (
+        <Card className="p-2">
+          <EmptyState
+            title="Nada a validar manualmente"
+            description="Todos os eventos detectados já foram confirmados pelo conhecimento acumulado, ou ainda não há eventos. Envie mais vídeos para continuar treinando o sistema."
           />
         </Card>
-      ) : (
-        <FilaFoco
-          evento={fila[0]}
-          processoId={id!}
-          restantes={fila.length}
-          total={totalInicial}
-          onResolvido={resolvido}
-        />
+      )}
+
+      {data && data.length > 0 && (
+        <>
+          <div className="flex items-center gap-4 mb-4 flex-wrap">
+            <select
+              value={filtroLabel}
+              onChange={(e) => setFiltroLabel(e.target.value)}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-kv-purple focus:ring-2 focus:ring-kv-purple/20 outline-none"
+            >
+              <option>(todos)</option>
+              {labels.map((l) => (
+                <option key={l}>{l}</option>
+              ))}
+            </select>
+            <span className="text-sm text-slate-500">
+              {filtrados.length} evento(s)
+            </span>
+          </div>
+
+          <div className="space-y-4">
+            {filtrados.slice(0, 50).map((e) => (
+              <EventoCard key={e.id} evento={e} onResolved={() => qc.invalidateQueries({ queryKey: ["eventos-pendentes", id] })} />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// Cabeçalho da sessão (maturidade + progresso)
-// ════════════════════════════════════════════════════════════════════════
-function SessionHeader({
-  nome,
-  maturidade,
-  restantes,
-  total,
-  feitos,
-}: {
-  nome: string;
-  maturidade: number;
-  restantes: number;
-  total: number;
-  feitos: number;
-}) {
-  const progresso = total === 0 ? 100 : Math.round(((total - restantes) / total) * 100);
-  return (
-    <Card style={{ padding: 18 }}>
-      <div className="row gap3" style={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
-        <div className="row gap3">
-          <RingMaturidade pct={maturidade} size={64} />
-          <div>
-            <div style={{ fontSize: 11, color: "var(--accent-deep)", fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase" }}>
-              Maturidade do Prism
-            </div>
-            <div className="font-display" style={{ fontSize: 16, fontWeight: 700, color: "var(--ink)" }}>
-              {nome}
-            </div>
-            <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
-              {feitos > 0 ? `+${feitos} validações nesta sessão` : "cada validação aumenta a confiança"}
-            </div>
-          </div>
-        </div>
-        <div className="col" style={{ alignItems: "flex-end", minWidth: 200, gap: 6 }}>
-          <div className="row gap2" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-            <Icon name="git-pull-request-arrow" size={14} />
-            <span>
-              <b style={{ color: "var(--ink)" }}>{restantes}</b> restantes · {total} total
-            </span>
-          </div>
-          <div style={{ width: 200 }}>
-            <Track pct={progresso} color="var(--accent)" />
-          </div>
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════════════
-// Fila Foco Único — um evento por vez, click-único, animação satisfatória
-// ════════════════════════════════════════════════════════════════════════
-function FilaFoco({
+function EventoCard({
   evento,
-  processoId,
-  restantes,
-  total,
-  onResolvido,
+  onResolved,
 }: {
   evento: EventoPendente;
-  processoId: string;
-  restantes: number;
-  total: number;
-  onResolvido: () => void;
+  onResolved: () => void;
 }) {
-  const [editandoLabel, setEditandoLabel] = useState(false);
-  const [labelNovo, setLabelNovo] = useState(evento.comportamento_label);
-  const [deixando, setDeixando] = useState<null | "ok" | "ko">(null);
-  // labels canônicos (autocomplete) — vem do dashboard cacheado
-  const dash = useQuery({
-    queryKey: ["dashboard", processoId],
-    queryFn: () => api.processos.dashboard(processoId),
-    enabled: !!processoId,
-    staleTime: 30_000,
-  });
-  const labels = useMemo(
-    () =>
-      (dash.data?.snapshot.distribuicao_comportamentos || [])
-        .map((d) => d.comportamento)
-        .sort(),
-    [dash.data]
-  );
-
+  const [labelEdit, setLabelEdit] = useState(evento.comportamento_label);
+  const [resolved, setResolved] = useState<string | null>(null);
   const frames = useQuery({
     queryKey: ["frames", evento.id],
     queryFn: () => api.eventos.frames(evento.id),
     staleTime: 5 * 60 * 1000,
   });
 
-  const validar = useMutation({
-    mutationFn: ({ acao, label }: { acao: "confirmar" | "corrigir" | "descartar"; label?: string }) =>
-      api.eventos.validar(evento.id, acao, label),
+  const mut = useMutation({
+    mutationFn: (args: { acao: "confirmar" | "corrigir" | "descartar"; label?: string }) =>
+      api.eventos.validar(evento.id, args.acao, args.label),
     onSuccess: (_d, vars) => {
-      setDeixando(vars.acao === "descartar" ? "ko" : "ok");
-      toast(
-        vars.acao === "confirmar"
-          ? "Confirmado — o Prism aprendeu com você."
-          : vars.acao === "corrigir"
-            ? `Corrigido para "${vars.label}".`
-            : "Descartado — falso alarme registrado.",
-        { icon: vars.acao === "descartar" ? "x" : "check", color: vars.acao === "descartar" ? "#F8B4B6" : "#3EE6AE" }
+      setResolved(
+        vars.acao === "descartar"
+          ? "descartado"
+          : vars.label && vars.label !== evento.comportamento_label
+            ? `corrigido para "${vars.label}"`
+            : "confirmado"
       );
-      window.setTimeout(() => {
-        setDeixando(null);
-        onResolvido();
-      }, 360);
+      setTimeout(onResolved, 800);
     },
   });
 
-  // categoria Lean prevista (derivada do label)
-  const catPrev = leanShort(evento.categoria_lean_prevista);
-  const confPct = Math.round((evento.confianca || 0) * 100);
-
-  const animClass =
-    deixando === "ok" ? "leave-r" : deixando === "ko" ? "leave-l" : "anim-pop";
-
   return (
-    <Card key={evento.id} className={animClass} style={{ padding: 20 }}>
-      <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
-        <span
-          className="font-mono"
-          style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".08em" }}
-        >
-          Evento {total - restantes + 1} de {total}
-        </span>
-        <span className="row gap2 font-mono" style={{ fontSize: 11, color: "var(--muted)" }}>
-          <span className="live-dot on" /> ao vivo
-        </span>
+    <Card className="p-5">
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+        <div className="text-xs text-slate-500 uppercase tracking-wide">
+          Pessoa-{String(evento.pessoa_track_id).padStart(3, "0")} ·{" "}
+          {evento.tempo_inicio_s.toFixed(1)}s → {evento.tempo_fim_s.toFixed(1)}s ·{" "}
+          {formatSeg(evento.tempo_fim_s - evento.tempo_inicio_s)}
+        </div>
+        <Badge tone="info">{(evento.confianca * 100).toFixed(0)}% confiança</Badge>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 22, alignItems: "flex-start" }}>
-        <div>
-          {/* Frames */}
-          <div className="row gap2" style={{ overflowX: "auto", marginBottom: 14 }}>
-            {frames.isLoading && (
-              <div className="dotbg" style={{ height: 200, width: "100%", borderRadius: 12 }} />
-            )}
-            {frames.data?.frames.map((src, i) => (
-              <img
-                key={i}
-                src={src}
-                alt={`quadro ${i + 1}`}
-                style={{
-                  height: 200,
-                  borderRadius: 12,
-                  border: "1px solid var(--line)",
-                  background: "#000",
-                }}
-              />
-            ))}
-            {frames.error && (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "var(--apoio)",
-                  background: "var(--apoio-bg)",
-                  border: "1px solid rgba(229,149,14,.22)",
-                  borderRadius: 10,
-                  padding: "8px 11px",
-                  maxWidth: 360,
-                }}
-              >
-                {(frames.error as Error).message}
-              </div>
-            )}
-          </div>
-
-          <div className="row gap2 wrap" style={{ marginBottom: 6 }}>
-            <Badge tone="purple">
-              Pessoa #{String(evento.pessoa_track_id).padStart(3, "0")}
-            </Badge>
-            <Badge tone="neutral">
-              {evento.tempo_inicio_s.toFixed(0)}s → {evento.tempo_fim_s.toFixed(0)}s · {fmtSeg(evento.tempo_fim_s - evento.tempo_inicio_s)}
-            </Badge>
-            <Badge tone={confPct >= 80 ? "ok" : confPct >= 60 ? "warn" : "neutral"}>
-              {confPct}% confiança
-            </Badge>
-            {catPrev !== "none" && (
-              <span
-                className="badge"
-                style={{ background: "#fff", color: leanCor(catPrev), borderColor: leanCor(catPrev) }}
-              >
-                provável {leanLabel(catPrev)}
-              </span>
-            )}
-          </div>
-
-          {!editandoLabel ? (
-            <div className="row gap2" style={{ marginTop: 8 }}>
-              <h3 className="font-display" style={{ fontSize: 20, fontWeight: 700, color: "var(--ink)" }}>
-                {evento.comportamento_label}
-              </h3>
-              <button
-                onClick={() => setEditandoLabel(true)}
-                title="Editar label"
-                className="row gap1"
-                style={{ fontSize: 11, color: "var(--accent-deep)", background: "var(--accent-soft)", border: "1px solid var(--line)", borderRadius: 6, padding: "3px 8px", fontWeight: 600 }}
-              >
-                <Icon name="pencil" size={12} />
-                editar
-              </button>
-            </div>
-          ) : (
-            <div className="row gap2" style={{ marginTop: 8 }}>
-              <input
-                className="field"
-                style={{ maxWidth: 360 }}
-                autoFocus
-                value={labelNovo}
-                onChange={(e) => setLabelNovo(e.target.value)}
-                list={`labs-${evento.id}`}
-              />
-              <datalist id={`labs-${evento.id}`}>
-                {labels.map((l) => (
-                  <option key={l} value={l} />
-                ))}
-              </datalist>
-              <Btn
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  setEditandoLabel(false);
-                  setLabelNovo(evento.comportamento_label);
-                }}
-              >
-                cancelar
-              </Btn>
-            </div>
-          )}
-
-          <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 8 }}>
-            {evento.descricao_bruta}
-          </p>
+      <div className="mb-3">
+        <div className="text-sm">
+          Label proposto:{" "}
+          <code className="bg-slate-100 text-kv-purple-dark px-1.5 py-0.5 rounded">
+            {evento.comportamento_label}
+          </code>
         </div>
-
-        <div className="col gap3">
-          <PanelHead titulo="O que o Prism propõe está certo?" />
-          <div className="col gap2">
-            <button
-              onClick={() => validar.mutate({ acao: "confirmar" })}
-              disabled={validar.isPending}
-              className="btn btn-ok btn-lg"
-              style={{ justifyContent: "flex-start" }}
-            >
-              <Icon name="check" size={18} />
-              Sim, está certo
-              <span className="grow" />
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>confirmar</span>
-            </button>
-            <button
-              onClick={() => {
-                const lbl = labelNovo.trim();
-                if (!lbl) return toast("Edite o label primeiro.", { icon: "alert-triangle" });
-                validar.mutate({ acao: "corrigir", label: lbl });
-              }}
-              disabled={validar.isPending || !labelNovo.trim()}
-              className="btn btn-secondary btn-lg"
-              style={{ justifyContent: "flex-start" }}
-            >
-              <Icon name="pencil" size={16} />
-              {editandoLabel && labelNovo !== evento.comportamento_label
-                ? `Corrigir para "${labelNovo}"`
-                : "Corrigir label"}
-              <span className="grow" />
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>corrigir</span>
-            </button>
-            <button
-              onClick={() => validar.mutate({ acao: "descartar" })}
-              disabled={validar.isPending}
-              className="btn btn-danger btn-lg"
-              style={{ justifyContent: "flex-start" }}
-            >
-              <Icon name="x" size={18} />
-              Falso alarme
-              <span className="grow" />
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>descartar</span>
-            </button>
-          </div>
-          <p style={{ fontSize: 11.5, color: "var(--faint)", marginTop: 4 }}>
-            Cada validação reduz seu trabalho futuro: depois de 2 confirmações iguais, o Prism passa a confirmar sozinho.
-          </p>
-        </div>
+        <div className="text-xs text-slate-500 mt-1">{evento.descricao_bruta}</div>
       </div>
+
+      <div className="flex gap-2 mb-4 overflow-x-auto">
+        {frames.isLoading && (
+          <div className="h-32 w-48 bg-slate-100 rounded-lg flex items-center justify-center">
+            <Spinner />
+          </div>
+        )}
+        {frames.data?.frames.map((src, i) => (
+          // eslint-disable-next-line jsx-a11y/img-redundant-alt
+          <img
+            key={i}
+            src={src}
+            alt={`frame ${i}`}
+            className="h-44 rounded-lg border border-slate-200"
+          />
+        ))}
+        {frames.error && (
+          <div className="text-xs text-red-600">Falha ao carregar frames.</div>
+        )}
+      </div>
+
+      {resolved ? (
+        <div className="text-sm text-emerald-700 font-medium">✓ {resolved}</div>
+      ) : (
+        <div className="flex items-center gap-2 flex-wrap">
+          <Input
+            value={labelEdit}
+            onChange={(e) => setLabelEdit(e.target.value)}
+            className="max-w-xs"
+          />
+          <Button
+            variant="success"
+            onClick={() => mut.mutate({ acao: "confirmar" })}
+            disabled={mut.isPending}
+          >
+            ✓ Confirmar
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() =>
+              mut.mutate({ acao: "corrigir", label: labelEdit.trim() })
+            }
+            disabled={mut.isPending || !labelEdit.trim()}
+          >
+            ✎ Corrigir
+          </Button>
+          <Button
+            variant="danger"
+            onClick={() => mut.mutate({ acao: "descartar" })}
+            disabled={mut.isPending}
+          >
+            ✕ Descartar
+          </Button>
+        </div>
+      )}
     </Card>
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// Conversa guiada com o Prism (perguntas proativas)
-// ════════════════════════════════════════════════════════════════════════
-function PerguntasConversa({
+
+function PerguntasSecao({
   perguntas,
-  processoId,
-  onResolvido,
+  onResolved,
 }: {
   perguntas: PerguntaProcesso[];
-  processoId: string;
-  onResolvido: () => void;
+  onResolved: () => void;
 }) {
   return (
-    <Card style={{ padding: 20, background: "linear-gradient(135deg, var(--accent-soft), #fff 70%)", border: "1px solid var(--p-200)" }}>
-      <div className="row gap2" style={{ marginBottom: 12 }}>
-        <PrismAvatar size={28} ring />
-        <h3 className="font-display" style={{ fontSize: 16, fontWeight: 700 }}>
-          O Prism quer entender melhor
-        </h3>
-        <Help text="Respostas viram contexto de domínio nos próximos prompts. Responder é opcional, mas torna análises futuras muito mais precisas." />
-        <span className="grow" />
-        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{perguntas.length} pergunta(s)</span>
+    <Card className="mb-6 p-5 bg-gradient-to-br from-kv-purple-50 to-kv-indigo-bg border-kv-purple-200">
+      <div className="flex items-start gap-3 mb-4">
+        <div className="h-9 w-9 rounded-full bg-kv-purple text-white flex items-center justify-center font-bold flex-shrink-0">
+          ?
+        </div>
+        <div>
+          <h2 className="font-semibold text-slate-900">
+            O sistema tem {perguntas.length === 1 ? "uma pergunta" : `${perguntas.length} perguntas`}
+          </h2>
+          <p className="text-sm text-slate-600 mt-1 max-w-2xl">
+            Conforme analisa seus vídeos, a IA percebe pontos que ainda não
+            entende bem. Responder é <b>opcional</b>, mas <b>cada resposta vira
+            verdade do domínio</b> e é injetada nos próximos prompts — as
+            análises seguintes ficam mais precisas e suas sugestões mais
+            assertivas.
+          </p>
+        </div>
       </div>
-      <div className="col gap3">
-        {perguntas.map((q) => (
-          <PerguntaItem key={q.id} q={q} processoId={processoId} onResolvido={onResolvido} />
+      <div className="space-y-3">
+        {perguntas.map((p) => (
+          <PerguntaCard key={p.id} pergunta={p} onResolved={onResolved} />
         ))}
       </div>
     </Card>
   );
 }
 
-function PerguntaItem({
-  q,
-  onResolvido,
+function PerguntaCard({
+  pergunta,
+  onResolved,
 }: {
-  q: PerguntaProcesso;
-  processoId: string;
-  onResolvido: () => void;
+  pergunta: PerguntaProcesso;
+  onResolved: () => void;
 }) {
-  const [aberto, setAberto] = useState(false);
-  const [texto, setTexto] = useState("");
+  const [resposta, setResposta] = useState("");
+  const [mostrarMotivo, setMostrarMotivo] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+
   const responder = useMutation({
-    mutationFn: () => api.perguntas.responder(q.id, texto.trim()),
+    mutationFn: () => api.perguntas.responder(pergunta.id, resposta.trim()),
     onSuccess: () => {
-      setFeedback("Anotado · virou conhecimento do Prism.");
-      toast("Resposta virou conhecimento do Prism.", { icon: "sparkles" });
-      window.setTimeout(onResolvido, 700);
+      setFeedback("Obrigado! Isso ajuda o sistema a aprender seu processo.");
+      setTimeout(onResolved, 1100);
     },
   });
+
   const dispensar = useMutation({
-    mutationFn: () => api.perguntas.dispensar(q.id),
+    mutationFn: () => api.perguntas.dispensar(pergunta.id),
     onSuccess: () => {
-      setFeedback("Pergunta dispensada.");
-      window.setTimeout(onResolvido, 500);
+      setFeedback("Pergunta dispensada — não vai aparecer de novo.");
+      setTimeout(onResolved, 800);
     },
   });
-  if (feedback)
+
+  if (feedback) {
     return (
-      <div style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 12, padding: 12, fontSize: 13, color: "var(--ok)" }}>
+      <div className="bg-white rounded-xl p-4 border border-emerald-200 text-sm text-emerald-700">
         ✓ {feedback}
       </div>
     );
-
-  function enviar(e?: FormEvent) {
-    e?.preventDefault();
-    if (!texto.trim()) return;
-    responder.mutate();
   }
+
   const ocupado = responder.isPending || dispensar.isPending;
 
   return (
-    <div style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 12, padding: 14 }}>
-      <p style={{ fontSize: 13.5, color: "var(--ink)", fontWeight: 600 }}>{q.pergunta}</p>
-      {q.comportamentos_relacionados && q.comportamentos_relacionados.length > 0 && (
-        <div className="row gap1 wrap" style={{ marginTop: 6 }}>
-          {q.comportamentos_relacionados.slice(0, 6).map((c) => (
-            <code key={c} style={{ fontSize: 10.5, background: "var(--accent-soft)", color: "var(--accent-deep)", padding: "1px 6px", borderRadius: 5, border: "1px solid var(--p-100)" }}>
+    <div className="bg-white rounded-xl p-4 border border-slate-200">
+      <p className="text-sm text-slate-900 font-medium">{pergunta.pergunta}</p>
+      {pergunta.comportamentos_relacionados && pergunta.comportamentos_relacionados.length > 0 && (
+        <div className="flex gap-1 flex-wrap mt-2">
+          {pergunta.comportamentos_relacionados.slice(0, 6).map((c) => (
+            <code
+              key={c}
+              className="text-[10px] bg-kv-purple-50 text-kv-purple-dark px-1.5 py-0.5 rounded border border-kv-purple-200"
+            >
               {c}
             </code>
           ))}
         </div>
       )}
-      {q.motivo && (
+      {pergunta.motivo && (
         <button
-          onClick={() => setAberto((v) => !v)}
-          style={{ marginTop: 8, background: 0, border: 0, color: "var(--muted)", fontSize: 11.5 }}
+          type="button"
+          onClick={() => setMostrarMotivo((v) => !v)}
+          className="block text-xs text-slate-500 hover:text-kv-purple-dark mt-2"
         >
-          {aberto ? "ocultar" : "por que essa pergunta?"}
+          {mostrarMotivo ? "ocultar" : "por que essa pergunta?"}
         </button>
       )}
-      {aberto && q.motivo && (
-        <p style={{ marginTop: 4, fontSize: 12, color: "var(--muted)", fontStyle: "italic" }}>
-          {q.motivo}
-        </p>
+      {mostrarMotivo && pergunta.motivo && (
+        <p className="text-xs text-slate-500 mt-1 italic">{pergunta.motivo}</p>
       )}
-      <form onSubmit={enviar} className="row gap2" style={{ marginTop: 10, alignItems: "stretch" }}>
+      <div className="mt-3 flex flex-col sm:flex-row gap-2">
         <textarea
-          className="field"
+          value={resposta}
+          onChange={(e) => setResposta(e.target.value)}
+          placeholder="Responda em 1-2 frases..."
           rows={2}
-          value={texto}
-          onChange={(e) => setTexto(e.target.value)}
-          placeholder="Responda em 1-2 frases…"
-          style={{ flex: 1, resize: "vertical" }}
+          className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-kv-purple focus:ring-2 focus:ring-kv-purple/20 outline-none"
         />
-        <div className="col gap2" style={{ width: 120 }}>
-          <Btn type="submit" disabled={ocupado || !texto.trim()} size="sm">
+        <div className="flex sm:flex-col gap-2">
+          <Button
+            onClick={() => responder.mutate()}
+            disabled={ocupado || !resposta.trim()}
+          >
             Responder
-          </Btn>
-          <Btn type="button" variant="ghost" size="sm" disabled={ocupado} onClick={() => dispensar.mutate()}>
+          </Button>
+          <Button variant="ghost" onClick={() => dispensar.mutate()} disabled={ocupado}>
             Dispensar
-          </Btn>
+          </Button>
         </div>
-      </form>
+      </div>
     </div>
   );
 }

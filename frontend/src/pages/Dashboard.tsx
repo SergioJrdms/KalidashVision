@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useParams } from "react-router-dom";
 import {
   Bar,
   CartesianGrid,
@@ -14,25 +14,15 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { api } from "../lib/api";
+import { api, formatSeg } from "../lib/api";
 import {
   Badge,
-  Btn,
+  Button,
   Card,
-  Empty,
-  Help,
-  Icon,
-  LeanBar,
-  PanelHead,
+  EmptyState,
   Spinner,
-  Track,
-  fmtSeg,
-  leanCor,
-  leanLabel,
-  leanShort,
-  toast,
-} from "../components/UIKit";
-import { PrismAvatar } from "../components/PrismAvatar";
+  Tooltip,
+} from "../components/UI";
 import type {
   CategoriaLean,
   DashboardData,
@@ -41,413 +31,534 @@ import type {
   Sugestao,
 } from "../lib/types";
 
+// ════════════════════════════════════════════════════════════════════════
+// Constantes visuais
+// ════════════════════════════════════════════════════════════════════════
+const COR_VA = "#10b981"; // emerald
+const COR_APOIO = "#f59e0b"; // amber
+const COR_DESP = "#ef4444"; // red
+const COR_NAO_CLASS = "#cbd5e1"; // slate-300
+
+const COR_CAT: Record<string, string> = {
+  valor_agregado: COR_VA,
+  apoio: COR_APOIO,
+  desperdicio: COR_DESP,
+};
+
+const LABEL_CAT: Record<string, string> = {
+  valor_agregado: "Valor agregado",
+  apoio: "Apoio",
+  desperdicio: "Desperdício",
+};
+
+function corCategoria(cat: CategoriaLean | null | undefined): string {
+  if (!cat) return COR_NAO_CLASS;
+  return COR_CAT[cat] || COR_NAO_CLASS;
+}
+
+function labelCategoria(cat: CategoriaLean | null | undefined): string {
+  if (!cat) return "Não classificado";
+  return LABEL_CAT[cat] || cat;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Página
+// ════════════════════════════════════════════════════════════════════════
 export default function Dashboard() {
   const { id } = useParams<{ id: string }>();
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ["dashboard", id],
     queryFn: () => api.processos.dashboard(id!),
     enabled: !!id,
+    refetchOnWindowFocus: false,
   });
 
   if (isLoading)
     return (
-      <div className="center" style={{ padding: 60 }}>
-        <Spinner size={28} />
+      <div className="flex items-center justify-center py-20">
+        <Spinner className="h-8 w-8" />
       </div>
     );
-  if (!data) return null;
-  const s = data.snapshot;
 
-  if (s.eventos_considerados === 0)
+  if (error)
     return (
-      <Card style={{ padding: 6 }}>
-        <Empty
-          icon="video"
+      <div className="text-red-700 bg-red-50 border border-red-200 rounded-lg p-4">
+        {(error as Error).message}
+      </div>
+    );
+
+  if (!data) return null;
+
+  if (data.snapshot.eventos_considerados === 0) {
+    return (
+      <Card className="p-2">
+        <EmptyState
           title="Nenhum vídeo processado ainda"
-          desc="Envie seu primeiro vídeo. Em poucos minutos você verá comportamentos, distribuição do tempo e as primeiras sugestões."
+          description="Envie seu primeiro vídeo para gerar análises de produtividade. Em poucos minutos você verá comportamentos, distribuição do tempo e sugestões prontas."
           action={
             <Link to={`/processos/${id}/upload`}>
-              <Btn icon="upload">Enviar vídeo</Btn>
+              <Button>Enviar vídeo</Button>
             </Link>
           }
         />
       </Card>
     );
-
-  const topComp =
-    s.distribuicao_comportamentos[0] || { comportamento: "—", pct_tempo: 0 };
-  const sugAlta = data.sugestoes.filter(
-    (x) => (x.prioridade || "").toLowerCase() === "alta"
-  ).length;
+  }
 
   return (
-    <div className="col" style={{ gap: 18 }}>
-      <LearningStrip data={data} processoId={id!} />
+    <div className="space-y-6">
+      {/* A · KPIs */}
+      <KPIRow data={data} />
 
-      {/* KPIs */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
-          gap: 14,
-        }}
-      >
-        <KpiVA cv={data.composicao_valor} />
-        <Kpi
-          icon="clock"
-          label="Tempo observado"
-          valor={`${s.tempo_total_observado_min} min`}
-          sub={`${s.videos_analisados} vídeos`}
-          ajuda="Soma da duração dos vídeos analisados. Quanto maior, mais robusta a base."
-        />
-        <Kpi
-          icon="crosshair"
-          label="Onde o tempo se concentra"
-          valor={`${topComp.pct_tempo}%`}
-          sub={topComp.comportamento}
-          ajuda="Comportamento que mais consome tempo — melhor candidato a otimização."
-        />
-        <Kpi
-          icon="flame"
-          label="Oportunidades alta prioridade"
-          valor={String(sugAlta)}
-          sub="sugestões"
-          alert={sugAlta > 0}
-          ajuda="Sugestões marcadas como ALTA pela IA. Resolva por aqui primeiro."
-        />
-        <Kpi
-          icon="shield-check"
-          label="Confiança nos dados"
-          valor={`${s.pct_validado_por_humano}%`}
-          sub="validado por humano"
-          ajuda="Quanto da base já foi confirmado por uma pessoa."
-        />
-      </div>
+      {/* Banners de ação */}
+      <BannersContextuais data={data} processoId={id!} />
 
-      {/* Banners contextuais (pendências) */}
-      {(data.perguntas_pendentes > 0 || data.eventos_pendentes > 0) && (
-        <div
-          style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 12 }}
-        >
-          {data.perguntas_pendentes > 0 && (
-            <Banner
-              tone="purple"
-              icone="message-square-question"
-              titulo={`O Prism tem ${data.perguntas_pendentes} ${data.perguntas_pendentes === 1 ? "pergunta" : "perguntas"}`}
-              sub="Cada resposta vira contexto do seu domínio."
-              cta={
-                <Link to={`/processos/${id}/validacao`}>
-                  <Btn size="sm" variant="secondary">Responder</Btn>
-                </Link>
-              }
-            />
-          )}
-          {data.eventos_pendentes > 0 && (
-            <Banner
-              tone="info"
-              icone="git-pull-request-arrow"
-              titulo={`${data.eventos_pendentes} eventos esperando você`}
-              sub="A cada label confirmado 2× o Prism passa a confirmar sozinho."
-              cta={
-                <Link to={`/processos/${id}/validacao`}>
-                  <Btn size="sm" variant="secondary">Validar</Btn>
-                </Link>
-              }
-            />
-          )}
-        </div>
+      {data.padroes_resumo && data.padroes_resumo.length > 0 && (
+        <Card className="p-4 bg-gradient-to-r from-kv-purple-50 to-white border-kv-purple-200">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="min-w-[14rem] flex-1">
+              <p className="text-sm font-medium text-kv-purple-dark mb-1">
+                O Prism identificou padrões na sua operação
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {data.padroes_resumo.slice(0, 4).map((p) => (
+                  <span
+                    key={p.id}
+                    className="text-xs bg-white border border-kv-purple-200 text-slate-700 rounded-full px-2.5 py-0.5"
+                    title={`${p.camada} · confiança ${p.confianca}`}
+                  >
+                    {p.titulo}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <Link to={`/processos/${id}/padroes`}>
+              <Button variant="secondary">Ver padrões</Button>
+            </Link>
+          </div>
+        </Card>
       )}
 
-      {/* Sugestões + lateral (Aprendizado + Resumo) */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1.65fr 1fr",
-          gap: 16,
-          alignItems: "start",
-        }}
-      >
-        <Sugestoes lista={data.sugestoes} />
-        <div className="col" style={{ gap: 16 }}>
-          <AprendizadoPanel origens={data.origens} processoId={id!} />
-          <ResumoOportunidades sugestoes={data.sugestoes} />
-          {data.padroes_resumo && data.padroes_resumo.length > 0 && (
-            <PadroesResumoPanel padroes={data.padroes_resumo} processoId={id!} />
-          )}
-        </div>
-      </div>
+      {/* B · Sugestões + Resumo das oportunidades */}
+      <SugestoesBloco sugestoes={data.sugestoes} origens={data.origens} />
 
-      {/* Várias óticas */}
+      {/* C · Várias óticas */}
       <div>
-        <div className="row gap2" style={{ marginBottom: 8 }}>
-          <h2 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>
-            Sua operação em várias óticas
-          </h2>
-          <Help text="Painéis para entender como o tempo é gasto e como as atividades se sequenciam — derivado dos vídeos deste processo." />
-        </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(440px, 1fr))",
-            gap: 16,
-          }}
-        >
-          <ComposicaoValorPanel cv={data.composicao_valor} />
-          <ParetoPanel pareto={data.pareto} />
-          <TempoPorComportamentoPanel
-            distribuicao={data.snapshot.distribuicao_comportamentos}
-          />
-          <FluxoPanel transicoes={data.transicoes} />
-        </div>
+        <h2 className="text-lg font-semibold text-slate-900 mb-1 flex items-center gap-2">
+          Sua operação em várias óticas
+          <Tooltip text="Painéis para você entender como o tempo está sendo gasto e como as atividades se sequenciam. Tudo derivado dos vídeos processados deste processo." />
+        </h2>
+        <p className="text-sm text-slate-500 mb-4">
+          Visão consolidada de <b>todos os vídeos</b> deste processo. As
+          sugestões acima nascem dessa base.
+        </p>
+        <GraficosGrid data={data} />
       </div>
 
-      {/* Vídeos */}
-      <VideosPanel videos={data.videos} />
+      {/* D · Rodapé */}
+      <VideosRodape videos={data.videos} tempoTotalMin={data.snapshot.tempo_total_observado_min} />
     </div>
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Aprendizado strip (introduz o processo + maturidade fictícia desta tela)
+// BLOCO A · KPIs
 // ════════════════════════════════════════════════════════════════════════
-function LearningStrip({ data, processoId }: { data: DashboardData; processoId: string }) {
+function KPIRow({ data }: { data: DashboardData }) {
+  const s = data.snapshot;
+  const cv = data.composicao_valor;
+  const topComp = s.distribuicao_comportamentos[0];
+  const sugAlta = data.sugestoes.filter((x) => (x.prioridade || "").toLowerCase() === "alta").length;
+
   return (
-    <Card
-      style={{
-        padding: 16,
-        background: "linear-gradient(135deg, var(--accent-soft), #fff 70%)",
-        border: "1px solid var(--p-200)",
-      }}
-    >
-      <div className="row gap3" style={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
-        <div className="row gap3">
-          <PrismAvatar size={42} ring />
-          <div>
-            <div style={{ fontSize: 11, color: "var(--accent-deep)", fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase" }}>
-              O Prism aprendeu
-            </div>
-            <div style={{ fontSize: 14, color: "var(--text)", marginTop: 4 }}>
-              {data.snapshot.eventos_considerados.toLocaleString("pt-BR")} eventos · {data.snapshot.tempo_total_observado_min} min de vídeo · {data.snapshot.pct_validado_por_humano}% validado
-            </div>
-          </div>
-        </div>
-        <Link to={`/processos/${processoId}/upload`}>
-          <Btn size="sm" icon="upload">Novo vídeo</Btn>
-        </Link>
+    <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+      <KPIValorAgregado pct={cv.valor_agregado_pct} composicao={cv} />
+      <KPICard
+        label="Tempo observado"
+        valor={`${s.tempo_total_observado_min} min`}
+        sub={`${s.videos_analisados} vídeo(s)`}
+        ajuda="Soma da duração dos vídeos analisados. Quanto maior, mais robusta a base para as sugestões."
+      />
+      <KPICard
+        label="Onde o tempo se concentra"
+        valor={topComp ? `${topComp.pct_tempo}%` : "—"}
+        sub={topComp ? topComp.comportamento : "sem dados"}
+        ajuda="Comportamento que mais consome tempo no processo. Costuma ser o melhor candidato a otimização."
+      />
+      <KPICard
+        label="Oportunidades de alta prioridade"
+        valor={sugAlta.toString()}
+        sub={sugAlta === 0 ? "nenhuma — boa!" : "sugestões"}
+        ajuda="Número de sugestões marcadas como ALTA prioridade pela IA. Resolva por aqui primeiro."
+        destaque={sugAlta > 0}
+      />
+      <KPICard
+        label="Confiança nos dados"
+        valor={`${s.pct_validado_por_humano}%`}
+        sub="validado por humano"
+        ajuda="Quanto da base já foi confirmado por uma pessoa. Quanto mais alto, mais o sistema confia no que aprendeu."
+      />
+    </div>
+  );
+}
+
+function KPIValorAgregado({
+  pct,
+  composicao,
+}: {
+  pct: number;
+  composicao: DashboardData["composicao_valor"];
+}) {
+  const partes = [
+    { v: composicao.valor_agregado_pct, c: COR_VA, n: "VA" },
+    { v: composicao.apoio_pct, c: COR_APOIO, n: "Apoio" },
+    { v: composicao.desperdicio_pct, c: COR_DESP, n: "Desp" },
+    { v: composicao.nao_classificado_pct, c: COR_NAO_CLASS, n: "?" },
+  ];
+  return (
+    <Card className="p-4 col-span-2 lg:col-span-1 border-l-4 border-l-kv-purple">
+      <div className="text-xs uppercase tracking-wide text-slate-500 font-medium flex items-center gap-1.5">
+        Índice de Valor Agregado
+        <Tooltip text="% do tempo observado em comportamentos classificados como 'valor agregado' (Lean). É a métrica-rainha da análise de valor: comunica quanto da operação realmente entrega o que o cliente paga." />
+      </div>
+      <div className="text-3xl font-semibold text-slate-900 mt-1">
+        {pct}%
+      </div>
+      <div className="flex h-2 mt-3 rounded-full overflow-hidden bg-slate-100">
+        {partes.map((p, i) =>
+          p.v > 0 ? (
+            <div key={i} style={{ width: `${p.v}%`, background: p.c }} title={`${p.n}: ${p.v}%`} />
+          ) : null
+        )}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[10px] text-slate-500">
+        <span><span className="inline-block h-2 w-2 rounded-sm align-middle mr-1" style={{ background: COR_VA }} /> VA</span>
+        <span><span className="inline-block h-2 w-2 rounded-sm align-middle mr-1" style={{ background: COR_APOIO }} /> Apoio</span>
+        <span><span className="inline-block h-2 w-2 rounded-sm align-middle mr-1" style={{ background: COR_DESP }} /> Desp</span>
+        {composicao.nao_classificado_pct > 0 && (
+          <span><span className="inline-block h-2 w-2 rounded-sm align-middle mr-1" style={{ background: COR_NAO_CLASS }} /> ?</span>
+        )}
       </div>
     </Card>
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// KPIs
-// ════════════════════════════════════════════════════════════════════════
-function KpiVA({ cv }: { cv: DashboardData["composicao_valor"] }) {
-  return (
-    <Card style={{ padding: 16, borderLeft: "4px solid var(--accent)" }}>
-      <div className="row gap2" style={{ color: "var(--muted)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em" }}>
-        <Icon name="award" size={14} color="var(--accent)" />
-        Índice de valor agregado
-        <Help text="% do tempo em comportamentos classificados como 'valor agregado' (Lean). É a métrica-rainha da análise de valor: quanto da operação realmente entrega o que o cliente paga." />
-      </div>
-      <div className="font-display tnum" style={{ fontSize: 28, fontWeight: 800, color: "var(--ink)", marginTop: 8 }}>
-        {cv.valor_agregado_pct}%
-      </div>
-      <div style={{ marginTop: 10 }}>
-        <LeanBar
-          va={cv.valor_agregado_pct}
-          apoio={cv.apoio_pct}
-          desp={cv.desperdicio_pct}
-          none={cv.nao_classificado_pct}
-        />
-        <div className="row wrap" style={{ gap: 10, marginTop: 6, fontSize: 10.5, color: "var(--muted)" }}>
-          <LegItem cor="var(--va)" t={`VA ${cv.valor_agregado_pct}%`} />
-          <LegItem cor="var(--apoio)" t={`Apoio ${cv.apoio_pct}%`} />
-          <LegItem cor="var(--desp)" t={`Desp ${cv.desperdicio_pct}%`} />
-          {cv.nao_classificado_pct > 0 && <LegItem cor="var(--none)" t={`? ${cv.nao_classificado_pct}%`} />}
-        </div>
-      </div>
-    </Card>
-  );
-}
-function LegItem({ cor, t }: { cor: string; t: string }) {
-  return (
-    <span className="row gap1">
-      <span style={{ width: 8, height: 8, borderRadius: 2, background: cor, display: "inline-block" }} /> {t}
-    </span>
-  );
-}
-function Kpi({
-  icon, label, valor, sub, ajuda, alert,
+function KPICard({
+  label,
+  valor,
+  sub,
+  ajuda,
+  destaque,
 }: {
-  icon: string;
   label: string;
   valor: string;
   sub?: string;
   ajuda: string;
-  alert?: boolean;
+  destaque?: boolean;
 }) {
   return (
-    <Card style={{ padding: 16, borderLeft: alert ? "4px solid var(--apoio)" : undefined }}>
-      <div className="row gap2" style={{ color: "var(--muted)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em" }}>
-        <Icon name={icon} size={14} color={alert ? "var(--apoio)" : "var(--accent)"} />
-        <span className="truncate">{label}</span>
-        <Help text={ajuda} />
+    <Card className={`p-4 ${destaque ? "border-l-4 border-l-amber-400" : ""}`}>
+      <div className="text-xs uppercase tracking-wide text-slate-500 font-medium flex items-center gap-1.5">
+        {label}
+        <Tooltip text={ajuda} />
       </div>
-      <div className="font-display tnum truncate" style={{ fontSize: 24, fontWeight: 800, color: "var(--ink)", marginTop: 6 }}>
-        {valor}
-      </div>
-      {sub && (
-        <div className="truncate" style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
-          {sub}
-        </div>
-      )}
+      <div className="text-2xl font-semibold text-slate-900 mt-1 truncate">{valor}</div>
+      {sub && <div className="text-xs text-slate-500 mt-0.5 truncate">{sub}</div>}
     </Card>
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Banner pequeno
+// Banners
 // ════════════════════════════════════════════════════════════════════════
-function Banner({
-  tone, icone, titulo, sub, cta,
+function BannersContextuais({
+  data,
+  processoId,
 }: {
-  tone: "purple" | "info";
-  icone: string;
-  titulo: string;
-  sub: string;
-  cta: React.ReactNode;
+  data: DashboardData;
+  processoId: string;
 }) {
-  const bg = tone === "purple" ? "var(--accent-soft)" : "var(--info-bg)";
-  const fg = tone === "purple" ? "var(--accent-deep)" : "var(--info)";
+  if (data.perguntas_pendentes === 0 && data.eventos_pendentes === 0) return null;
   return (
-    <Card style={{ padding: 14, background: bg, border: `1px solid ${tone === "purple" ? "var(--p-200)" : "rgba(47,107,216,.2)"}` }}>
-      <div className="row gap3" style={{ alignItems: "center" }}>
-        <span style={{ width: 34, height: 34, borderRadius: "50%", background: "#fff", display: "grid", placeItems: "center", flex: "none" }}>
-          <Icon name={icone} size={17} color={fg} />
-        </span>
-        <div className="grow col" style={{ gap: 2 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: fg }}>{titulo}</div>
-          <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{sub}</div>
-        </div>
-        {cta}
-      </div>
-    </Card>
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      {data.perguntas_pendentes > 0 && (
+        <Card className="p-4 bg-gradient-to-r from-kv-purple-50 to-kv-purple-100 border-kv-purple-300">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="h-9 w-9 rounded-full bg-kv-purple text-white flex items-center justify-center font-bold flex-shrink-0">
+              ?
+            </div>
+            <div className="flex-1 min-w-[10rem]">
+              <p className="text-sm font-medium text-kv-purple-dark">
+                A IA tem {data.perguntas_pendentes === 1 ? "1 pergunta" : `${data.perguntas_pendentes} perguntas`} sobre o seu processo
+              </p>
+              <p className="text-xs text-slate-600 mt-1">
+                Cada resposta vira contexto de domínio nos próximos prompts.
+              </p>
+            </div>
+            <Link to={`/processos/${processoId}/validacao`}>
+              <Button variant="secondary">Responder</Button>
+            </Link>
+          </div>
+        </Card>
+      )}
+      {data.eventos_pendentes > 0 && (
+        <Card className="p-4 bg-gradient-to-r from-kv-purple-50 to-kv-indigo-bg border-kv-purple-200">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="h-9 w-9 rounded-full bg-kv-purple-200 text-kv-purple-dark flex items-center justify-center font-bold flex-shrink-0">
+              ✓
+            </div>
+            <div className="flex-1 min-w-[10rem]">
+              <p className="text-sm font-medium text-kv-purple-dark">
+                {data.eventos_pendentes} eventos aguardando sua validação
+              </p>
+              <p className="text-xs text-slate-600 mt-1">
+                A cada label confirmado 2× o sistema passa a confirmar sozinho.
+              </p>
+            </div>
+            <Link to={`/processos/${processoId}/validacao`}>
+              <Button variant="secondary">Validar</Button>
+            </Link>
+          </div>
+        </Card>
+      )}
+    </div>
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Sugestões + filtros
+// BLOCO B · Sugestões + Resumo
 // ════════════════════════════════════════════════════════════════════════
-type Prio = "todas" | "alta" | "media" | "info";
-function Sugestoes({ lista }: { lista: Sugestao[] }) {
-  const [prio, setPrio] = useState<Prio>("todas");
-  const cont = { alta: 0, media: 0, info: 0 } as Record<"alta" | "media" | "info", number>;
-  lista.forEach((s) => {
-    const p = (s.prioridade || "").toLowerCase() as "alta" | "media" | "info";
-    if (p in cont) cont[p]++;
-  });
-  const ordem = { alta: 0, media: 1, info: 2 } as Record<string, number>;
-  const filtradas = lista
-    .filter((s) => prio === "todas" || (s.prioridade || "").toLowerCase() === prio)
-    .sort((a, b) => (ordem[(a.prioridade || "").toLowerCase()] ?? 3) - (ordem[(b.prioridade || "").toLowerCase()] ?? 3));
+type PrioFiltro = "todas" | "alta" | "media" | "info";
+
+function SugestoesBloco({
+  sugestoes,
+  origens,
+}: {
+  sugestoes: Sugestao[];
+  origens: DashboardData["origens"];
+}) {
+  const [prio, setPrio] = useState<PrioFiltro>("todas");
+  const [areaFiltro, setAreaFiltro] = useState<string | null>(null);
+  const [mostrarOutras, setMostrarOutras] = useState(false);
+
+  const contagemPrio = useMemo(() => {
+    const c = { alta: 0, media: 0, info: 0 };
+    for (const s of sugestoes) {
+      const p = (s.prioridade || "").toLowerCase() as keyof typeof c;
+      if (p in c) c[p] += 1;
+    }
+    return c;
+  }, [sugestoes]);
+
+  const contagemArea = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of sugestoes) {
+      const a = (s.area || "—").trim();
+      m.set(a, (m.get(a) || 0) + 1);
+    }
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  }, [sugestoes]);
+
+  const filtradas = useMemo(() => {
+    return sugestoes.filter((s) => {
+      const p = (s.prioridade || "").toLowerCase();
+      if (prio !== "todas" && p !== prio) return false;
+      if (areaFiltro && (s.area || "—").trim() !== areaFiltro) return false;
+      return true;
+    });
+  }, [sugestoes, prio, areaFiltro]);
+
+  const altasPrimeiro = useMemo(() => {
+    const ordem: Record<string, number> = { alta: 0, media: 1, info: 2 };
+    return [...filtradas].sort(
+      (a, b) =>
+        (ordem[(a.prioridade || "").toLowerCase()] ?? 3) -
+        (ordem[(b.prioridade || "").toLowerCase()] ?? 3)
+    );
+  }, [filtradas]);
+
+  const podem_colapsar = altasPrimeiro.length > 5;
+  const visiveis = mostrarOutras ? altasPrimeiro : altasPrimeiro.slice(0, 5);
 
   return (
-    <Card style={{ padding: 20 }}>
-      <PanelHead
-        titulo="Sugestões de produtividade"
-        ajuda="Geradas pela IA combinando seus dados agregados com os 7 desperdícios do Lean. Mais vídeos e validações = mais precisão."
-        leitura="As de ALTA são as que mais consomem tempo sem agregar valor."
-      />
-      <div className="row gap1 wrap" style={{ marginBottom: 14, fontSize: 12 }}>
-        {(["todas", "alta", "media", "info"] as Prio[]).map((p) => (
-          <button
-            key={p}
-            onClick={() => setPrio(p)}
-            style={{
-              padding: "4px 11px",
-              borderRadius: 999,
-              border: `1px solid ${prio === p ? "var(--accent)" : "var(--line)"}`,
-              background: prio === p ? "var(--accent)" : "#fff",
-              color: prio === p ? "#fff" : "var(--text)",
-              fontWeight: 600,
-            }}
-          >
-            {p === "todas"
-              ? `Todas · ${lista.length}`
-              : `${p[0].toUpperCase()}${p.slice(1)} · ${cont[p]}`}
-          </button>
-        ))}
-      </div>
-      {filtradas.length === 0 && (
-        <p style={{ fontSize: 13, color: "var(--muted)", padding: 14, textAlign: "center" }}>
-          Nenhuma sugestão para o filtro.
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <Card className="lg:col-span-2 p-6">
+        <div className="flex items-baseline justify-between gap-3 flex-wrap mb-2">
+          <h2 className="font-semibold text-slate-900 flex items-center gap-2">
+            Sugestões de produtividade
+            <Tooltip text="Geradas pela IA combinando seus dados agregados com os 7 desperdícios do Lean. Quanto mais vídeos e validações, mais precisas elas ficam." />
+          </h2>
+          <span className="text-xs text-slate-500">
+            {altasPrimeiro.length} de {sugestoes.length}
+          </span>
+        </div>
+        <p className="text-xs text-slate-500 mb-3">
+          Estes são os pontos de maior impacto detectados em toda a base. As de{" "}
+          <b>ALTA</b> são as que mais consomem tempo sem agregar valor.
         </p>
-      )}
-      <div className="col gap2">
-        {filtradas.map((s) => (
-          <SugestaoCard key={s.id} s={s} />
-        ))}
+
+        {/* Filtros */}
+        <div className="flex items-center gap-1.5 flex-wrap mb-2 text-xs">
+          {(["todas", "alta", "media", "info"] as PrioFiltro[]).map((p) => (
+            <button
+              key={p}
+              onClick={() => setPrio(p)}
+              className={`px-2.5 py-1 rounded-full border transition ${
+                prio === p
+                  ? "bg-kv-purple text-white border-kv-purple"
+                  : "bg-white text-slate-600 border-slate-200 hover:border-kv-purple-200"
+              }`}
+            >
+              {p === "todas"
+                ? `Todas · ${sugestoes.length}`
+                : `${p[0].toUpperCase()}${p.slice(1)} · ${contagemPrio[p as keyof typeof contagemPrio]}`}
+            </button>
+          ))}
+        </div>
+        {contagemArea.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap mb-4 text-xs">
+            <span className="text-slate-400 mr-1">Áreas:</span>
+            <button
+              onClick={() => setAreaFiltro(null)}
+              className={`px-2 py-0.5 rounded-full border ${
+                !areaFiltro
+                  ? "bg-slate-700 text-white border-slate-700"
+                  : "bg-white text-slate-500 border-slate-200 hover:border-slate-400"
+              }`}
+            >
+              Todas
+            </button>
+            {contagemArea.slice(0, 5).map(([a, n]) => (
+              <button
+                key={a}
+                onClick={() => setAreaFiltro(a === areaFiltro ? null : a)}
+                className={`px-2 py-0.5 rounded-full border ${
+                  areaFiltro === a
+                    ? "bg-slate-700 text-white border-slate-700"
+                    : "bg-white text-slate-500 border-slate-200 hover:border-slate-400"
+                }`}
+              >
+                {a} · {n}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {visiveis.length === 0 && (
+          <p className="text-sm text-slate-500 py-6 text-center">
+            Nenhuma sugestão para os filtros selecionados.
+          </p>
+        )}
+
+        <div className="space-y-2.5">
+          {visiveis.map((s) => (
+            <SugestaoCard key={s.id} s={s} />
+          ))}
+        </div>
+
+        {podem_colapsar && (
+          <button
+            onClick={() => setMostrarOutras((v) => !v)}
+            className="mt-3 w-full text-sm text-kv-purple-dark hover:underline"
+          >
+            {mostrarOutras
+              ? "▲ Mostrar só as 5 primeiras"
+              : `▼ Ver outras ${altasPrimeiro.length - 5} sugestões`}
+          </button>
+        )}
+      </Card>
+
+      {/* Coluna direita: Estado do aprendizado em cima, Resumo embaixo */}
+      <div className="space-y-6">
+      <AprendizadoPanel origens={origens} />
+      <Card className="p-6">
+        <h2 className="font-semibold text-slate-900 flex items-center gap-2">
+          Resumo das oportunidades
+          <Tooltip text="A dimensão do todo num relance, sem precisar rolar a lista de sugestões." />
+        </h2>
+        <p className="text-xs text-slate-500 mb-4">Por prioridade e por área.</p>
+
+        <div className="space-y-2">
+          {(["alta", "media", "info"] as const).map((p) => {
+            const n = contagemPrio[p];
+            const max = Math.max(1, ...Object.values(contagemPrio));
+            const cor =
+              p === "alta" ? "bg-red-400" : p === "media" ? "bg-amber-400" : "bg-sky-400";
+            return (
+              <div key={p} className="flex items-center gap-2 text-xs">
+                <span className="w-12 capitalize text-slate-600">{p}</span>
+                <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                  <div className={`h-full ${cor}`} style={{ width: `${(n / max) * 100}%` }} />
+                </div>
+                <span className="font-semibold text-slate-800 w-6 text-right">{n}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {contagemArea.length > 0 && (
+          <>
+            <div className="text-xs uppercase tracking-wide text-slate-400 mt-5 mb-2 font-medium">
+              Top áreas
+            </div>
+            <ul className="space-y-1.5 text-sm">
+              {contagemArea.slice(0, 6).map(([a, n]) => (
+                <li
+                  key={a}
+                  className="flex items-center justify-between py-1 border-b border-slate-100 last:border-0"
+                >
+                  <span className="text-slate-700 truncate" title={a}>
+                    {a}
+                  </span>
+                  <span className="text-xs text-slate-500 font-medium">{n}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </Card>
       </div>
-    </Card>
+    </div>
   );
 }
 
 function SugestaoCard({ s }: { s: Sugestao }) {
   const [aberto, setAberto] = useState(false);
-  const tone =
-    (s.prioridade || "").toLowerCase() === "alta"
-      ? "high"
-      : (s.prioridade || "").toLowerCase() === "media"
-        ? "warn"
-        : "info";
+  const tone = (s.prioridade as "alta" | "media" | "info") || "info";
   return (
-    <div
-      style={{
-        border: "1px solid var(--line)",
-        borderRadius: 12,
-        padding: 14,
-        background: "#fff",
-      }}
-    >
-      <div className="row gap2 wrap" style={{ marginBottom: 6 }}>
-        <Badge tone={tone as "high" | "warn" | "info"}>{(s.prioridade || "INFO").toUpperCase()}</Badge>
-        {s.area && <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{s.area}</span>}
+    <div className="border border-slate-200 rounded-xl p-3.5 hover:border-kv-purple-200 transition">
+      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+        <Badge tone={tone}>{s.prioridade?.toUpperCase()}</Badge>
+        <span className="text-xs font-semibold text-slate-700">{s.area}</span>
       </div>
-      <p style={{ fontSize: 14, color: "var(--ink)", lineHeight: 1.55 }}>{s.sugestao}</p>
-      <div className="row" style={{ justifyContent: "space-between", marginTop: 8, fontSize: 12, color: "var(--muted)" }}>
+      <p className="text-sm text-slate-800 leading-snug">{s.sugestao}</p>
+      <div className="flex items-center justify-between text-xs text-slate-500 mt-2 flex-wrap gap-2">
         <span>
-          <b style={{ color: "var(--text)" }}>Impacto:</b> {s.impacto_estimado || "—"}
+          <b className="text-slate-700">Impacto:</b> {s.impacto_estimado || "—"}
         </span>
-        {(s.situacao || s.causa_provavel) && (
-          <button
-            onClick={() => setAberto((v) => !v)}
-            style={{ background: "none", border: 0, color: "var(--accent-deep)", fontWeight: 600 }}
-          >
-            {aberto ? "▲ ocultar" : "▸ situação/causa"}
-          </button>
-        )}
+        <button
+          onClick={() => setAberto((v) => !v)}
+          className="text-kv-purple-dark hover:underline"
+        >
+          {aberto ? "▲ ocultar detalhes" : "▸ ver situação/causa"}
+        </button>
       </div>
       {aberto && (
-        <div className="col" style={{ gap: 6, marginTop: 8, borderTop: "1px solid var(--line-2)", paddingTop: 8, fontSize: 12.5, color: "var(--text)" }}>
-          {s.situacao && (
-            <p>
-              <b>Situação. </b>
-              {s.situacao}
-            </p>
-          )}
-          {s.causa_provavel && (
-            <p>
-              <b>Causa. </b>
-              {s.causa_provavel}
-            </p>
-          )}
+        <div className="mt-2 pt-2 border-t border-slate-100 space-y-1.5 text-xs text-slate-600">
+          <p>
+            <b className="text-slate-700">Situação. </b>
+            {s.situacao}
+          </p>
+          <p>
+            <b className="text-slate-700">Causa provável. </b>
+            {s.causa_provavel}
+          </p>
           {s.eventos_relacionados?.comportamentos && s.eventos_relacionados.comportamentos.length > 0 && (
-            <div className="row gap1 wrap">
+            <div className="flex flex-wrap gap-1 pt-1">
               {s.eventos_relacionados.comportamentos.slice(0, 6).map((c) => (
                 <code
                   key={c}
-                  style={{ fontSize: 10.5, background: "var(--line-2)", color: "var(--muted)", padding: "1px 5px", borderRadius: 4 }}
+                  className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded"
                 >
                   {c}
                 </code>
@@ -461,191 +572,85 @@ function SugestaoCard({ s }: { s: Sugestao }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Aprendizado (donut origens)
+// BLOCO C · Várias óticas
 // ════════════════════════════════════════════════════════════════════════
-function AprendizadoPanel({ origens, processoId }: { origens: DashboardData["origens"]; processoId: string }) {
-  const total = origens.auto + origens.humano + origens.pendente;
-  const dados = [
-    { name: "Auto-validados", v: origens.auto, c: "#A78BFA" },
-    { name: "Validados por você", v: origens.humano, c: "var(--accent-deep)" },
-    { name: "Pendentes", v: origens.pendente, c: "var(--none)" },
-  ];
-  const autoPct = total > 0 ? Math.round((origens.auto / total) * 100) : 0;
+function GraficosGrid({ data }: { data: DashboardData }) {
   return (
-    <Card style={{ padding: 18 }}>
-      <PanelHead
-        titulo="Estado do aprendizado"
-        ajuda="Como cada evento foi confirmado. O Prism confirma sozinho quando reconhece um label já validado 2× ou mais."
-        leitura={total === 0 ? "Sem dados ainda." : `${autoPct}% já validado sozinho.`}
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <ComposicaoValorPanel cv={data.composicao_valor} />
+      <ParetoPanel pareto={data.pareto} />
+      <TempoPorComportamentoPanel
+        distribuicao={data.snapshot.distribuicao_comportamentos}
       />
-      {total === 0 ? (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>Sem dados ainda.</p>
-      ) : (
-        <div className="row gap3 wrap" style={{ alignItems: "center" }}>
-          <div style={{ width: 130, height: 130 }}>
-            <ResponsiveContainer>
-              <PieChart>
-                <Pie data={dados} dataKey="v" innerRadius={36} outerRadius={58} paddingAngle={2}>
-                  {dados.map((d, i) => <Cell key={i} fill={d.c} />)}
-                </Pie>
-                <RTooltip formatter={(v: number, n: string) => [`${v} eventos`, n]} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <ul className="col gap1" style={{ flex: 1, minWidth: 140, fontSize: 12, listStyle: "none", padding: 0 }}>
-            {dados.map((d) => (
-              <li key={d.name} className="row gap2">
-                <span style={{ width: 9, height: 9, borderRadius: "50%", background: d.c, display: "inline-block" }} />
-                <span className="grow" style={{ color: "var(--muted)" }}>{d.name}</span>
-                <span className="font-mono tnum" style={{ fontWeight: 700, color: "var(--ink)" }}>{d.v}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {origens.pendente > 0 && (
-        <Link
-          to={`/processos/${processoId}/validacao`}
-          style={{ display: "block", textAlign: "center", marginTop: 10, fontSize: 13, color: "var(--accent-deep)", fontWeight: 600 }}
-        >
-          Validar pendentes →
-        </Link>
-      )}
-    </Card>
+      <FluxoPanel transicoes={data.transicoes} />
+    </div>
   );
 }
 
-function ResumoOportunidades({ sugestoes }: { sugestoes: Sugestao[] }) {
-  const cont = { alta: 0, media: 0, info: 0 } as Record<string, number>;
-  const areas = new Map<string, number>();
-  sugestoes.forEach((s) => {
-    const p = (s.prioridade || "").toLowerCase();
-    if (p in cont) cont[p]++;
-    const a = (s.area || "—").trim();
-    areas.set(a, (areas.get(a) || 0) + 1);
-  });
-  const maxP = Math.max(1, ...Object.values(cont));
-  const topAreas = Array.from(areas.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6);
-
+function PanelHeader({ titulo, ajuda, leitura }: { titulo: string; ajuda: string; leitura?: string }) {
   return (
-    <Card style={{ padding: 18 }}>
-      <PanelHead
-        titulo="Resumo das oportunidades"
-        ajuda="A dimensão do todo num relance, sem rolar a lista de sugestões."
-      />
-      <div className="col gap2">
-        {(["alta", "media", "info"] as const).map((p) => (
-          <div key={p} className="row gap2" style={{ fontSize: 12 }}>
-            <span style={{ width: 48, textTransform: "capitalize", color: "var(--muted)" }}>{p}</span>
-            <Track pct={(cont[p] / maxP) * 100} color={p === "alta" ? "var(--desp)" : p === "media" ? "var(--apoio)" : "var(--info)"} />
-            <span className="font-mono tnum" style={{ width: 26, textAlign: "right", color: "var(--ink)", fontWeight: 700 }}>
-              {cont[p]}
-            </span>
-          </div>
-        ))}
-      </div>
-      {topAreas.length > 0 && (
-        <>
-          <div
-            style={{
-              fontSize: 10.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em",
-              marginTop: 14, marginBottom: 4, fontWeight: 700,
-            }}
-          >
-            Top áreas
-          </div>
-          <ul className="col" style={{ gap: 0, listStyle: "none", padding: 0, fontSize: 13 }}>
-            {topAreas.map(([a, n]) => (
-              <li
-                key={a}
-                className="row"
-                style={{ justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid var(--line-2)" }}
-              >
-                <span className="truncate" style={{ color: "var(--text)" }}>{a}</span>
-                <span className="font-mono tnum" style={{ color: "var(--muted)", fontWeight: 600 }}>{n}</span>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-    </Card>
+    <>
+      <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+        {titulo}
+        <Tooltip text={ajuda} />
+      </h3>
+      {leitura && <p className="text-xs text-slate-500 mb-3">{leitura}</p>}
+    </>
   );
 }
 
-function PadroesResumoPanel({ padroes, processoId }: { padroes: DashboardData["padroes_resumo"]; processoId: string }) {
-  return (
-    <Card style={{ padding: 18 }}>
-      <PanelHead
-        titulo="Padrões detectados"
-        ajuda="Padrões de recorrência e evolução no tempo. Veja a aba Padrões para detalhes."
-      />
-      <ul className="col gap2" style={{ listStyle: "none", padding: 0 }}>
-        {padroes.slice(0, 4).map((p) => (
-          <li
-            key={p.id}
-            style={{
-              border: "1px solid var(--line)",
-              borderRadius: 10,
-              padding: "8px 10px",
-              fontSize: 12.5,
-              color: "var(--text)",
-            }}
-          >
-            <span style={{ fontWeight: 600, color: "var(--ink)" }}>{p.titulo}</span>
-            <div className="row gap1" style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
-              <span className="badge badge-purple" style={{ fontSize: 10 }}>{p.camada}</span>
-              <span>confiança {p.confianca}</span>
-            </div>
-          </li>
-        ))}
-      </ul>
-      <Link
-        to={`/processos/${processoId}/padroes`}
-        style={{ display: "block", textAlign: "center", marginTop: 10, fontSize: 13, color: "var(--accent-deep)", fontWeight: 600 }}
-      >
-        Ver todos os padrões →
-      </Link>
-    </Card>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════════════
-// Composição donut
-// ════════════════════════════════════════════════════════════════════════
+// ─── Composição de valor (donut) ─────────────────────────────────────────
 function ComposicaoValorPanel({ cv }: { cv: DashboardData["composicao_valor"] }) {
   const fatias = [
-    { name: "Valor agregado", v: cv.valor_agregado_pct, c: "var(--va)" },
-    { name: "Apoio", v: cv.apoio_pct, c: "var(--apoio)" },
-    { name: "Desperdício", v: cv.desperdicio_pct, c: "var(--desp)" },
-    { name: "Não classificado", v: cv.nao_classificado_pct, c: "var(--none)" },
+    { name: "Valor agregado", v: cv.valor_agregado_pct, c: COR_VA },
+    { name: "Apoio", v: cv.apoio_pct, c: COR_APOIO },
+    { name: "Desperdício", v: cv.desperdicio_pct, c: COR_DESP },
+    { name: "Não classificado", v: cv.nao_classificado_pct, c: COR_NAO_CLASS },
   ].filter((f) => f.v > 0);
+
   return (
-    <Card style={{ padding: 20 }}>
-      <PanelHead
+    <Card className="p-6">
+      <PanelHeader
         titulo="Composição de valor (Lean)"
-        ajuda="Como o tempo total se distribui entre atividades que agregam valor, que servem de apoio, ou que são desperdício."
-        leitura={cv.valor_agregado_pct > 30 ? "Bom índice de VA para a média industrial." : "Há espaço claro pra mover tempo de Apoio/Desperdício para Valor Agregado."}
+        ajuda="Como o tempo total se distribui entre atividades que agregam valor, que servem de apoio, ou que são desperdício. A categoria de cada comportamento vem da IA (você pode reclassificar no painel ao lado)."
+        leitura={
+          cv.valor_agregado_pct > 30
+            ? "Bom índice de valor agregado para a média industrial."
+            : "Há espaço claro pra mover tempo de Apoio/Desperdício para Valor Agregado."
+        }
       />
       {fatias.length === 0 ? (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>Sem dados ainda.</p>
+        <p className="text-sm text-slate-500">Sem dados ainda.</p>
       ) : (
         <>
           <div style={{ width: "100%", height: 220 }}>
             <ResponsiveContainer>
               <PieChart>
-                <Pie data={fatias} dataKey="v" nameKey="name" innerRadius={62} outerRadius={92} paddingAngle={2}>
-                  {fatias.map((f, i) => <Cell key={i} fill={f.c} />)}
+                <Pie
+                  data={fatias}
+                  dataKey="v"
+                  nameKey="name"
+                  innerRadius={60}
+                  outerRadius={92}
+                  paddingAngle={2}
+                >
+                  {fatias.map((f, i) => (
+                    <Cell key={i} fill={f.c} />
+                  ))}
                 </Pie>
                 <RTooltip formatter={(v: number, n: string) => [`${v}%`, n]} />
               </PieChart>
             </ResponsiveContainer>
           </div>
-          <ul className="row wrap" style={{ gap: 10, listStyle: "none", padding: 0, marginTop: 4, fontSize: 12 }}>
+          <ul className="grid grid-cols-2 gap-y-1 mt-2 text-xs">
             {fatias.map((f) => (
-              <li key={f.name} className="row gap1">
-                <span style={{ width: 9, height: 9, borderRadius: 2, background: f.c, display: "inline-block" }} />
-                <span style={{ color: "var(--muted)" }}>{f.name}</span>
-                <span className="font-mono tnum" style={{ fontWeight: 700, color: "var(--ink)" }}>{f.v}%</span>
+              <li key={f.name} className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-2.5 w-2.5 rounded-sm"
+                  style={{ background: f.c }}
+                />
+                <span className="text-slate-600 truncate">{f.name}</span>
+                <span className="ml-auto font-semibold text-slate-800">{f.v}%</span>
               </li>
             ))}
           </ul>
@@ -655,43 +660,65 @@ function ComposicaoValorPanel({ cv }: { cv: DashboardData["composicao_valor"] })
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// Pareto
-// ════════════════════════════════════════════════════════════════════════
+// ─── Pareto do tempo ─────────────────────────────────────────────────────
 function ParetoPanel({ pareto }: { pareto: ParetoItem[] }) {
   const dados = pareto.slice(0, 10).map((p) => ({
     nome: p.comportamento.length > 18 ? p.comportamento.slice(0, 16) + "…" : p.comportamento,
     pct_tempo: p.pct_tempo,
     pct_acumulado: p.pct_acumulado,
-    cat: leanShort(p.categoria_lean),
+    categoria_lean: p.categoria_lean ?? null,
   }));
-  const i80 = dados.findIndex((d) => d.pct_acumulado >= 80);
+  const indexA80 = dados.findIndex((d) => d.pct_acumulado >= 80);
   const leitura =
-    i80 >= 0
-      ? `80% do tempo está em ${i80 + 1} comportamento${i80 === 0 ? "" : "s"}.`
+    indexA80 >= 0
+      ? `80% do tempo está em ${indexA80 + 1} comportamento${indexA80 === 0 ? "" : "s"} (regra 80/20).`
       : "Tempo bem distribuído entre vários comportamentos.";
+
   return (
-    <Card style={{ padding: 20 }}>
-      <PanelHead
+    <Card className="p-6">
+      <PanelHeader
         titulo="Pareto do tempo"
-        ajuda="Comportamentos por tempo, com a curva de % acumulado. Mostra a regra 80/20: poucos comportamentos concentram a maior parte do tempo."
+        ajuda="Comportamentos ordenados por tempo, com a curva de % acumulado. Mostra a regra 80/20: poucos comportamentos costumam concentrar a maior parte do tempo."
         leitura={leitura}
       />
       {dados.length === 0 ? (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>Sem dados ainda.</p>
+        <p className="text-sm text-slate-500">Sem dados ainda.</p>
       ) : (
         <div style={{ width: "100%", height: 260 }}>
           <ResponsiveContainer>
             <ComposedChart data={dados} margin={{ left: 0, right: 16, top: 8, bottom: 0 }}>
-              <CartesianGrid stroke="var(--line-2)" />
+              <CartesianGrid stroke="#f1f5f9" />
               <XAxis dataKey="nome" fontSize={10} interval={0} angle={-15} dy={6} height={50} />
-              <YAxis yAxisId="left" tickFormatter={(v) => `${v}%`} fontSize={11} />
-              <YAxis yAxisId="right" orientation="right" tickFormatter={(v) => `${v}%`} fontSize={11} domain={[0, 100]} />
-              <RTooltip formatter={(v: number, n: string) => (n === "pct_acumulado" ? [`${v}%`, "Acumulado"] : [`${v}%`, "Tempo"])} />
+              <YAxis
+                yAxisId="left"
+                tickFormatter={(v) => `${v}%`}
+                fontSize={11}
+                label={{ value: "% tempo", angle: -90, position: "insideLeft", style: { fontSize: 10, fill: "#94a3b8" } }}
+              />
+              <YAxis
+                yAxisId="right"
+                orientation="right"
+                tickFormatter={(v) => `${v}%`}
+                fontSize={11}
+                domain={[0, 100]}
+              />
+              <RTooltip
+                formatter={(v: number, name: string) =>
+                  name === "pct_acumulado" ? [`${v}%`, "Acumulado"] : [`${v}%`, "Tempo"]
+                }
+              />
               <Bar yAxisId="left" dataKey="pct_tempo" radius={[6, 6, 0, 0]}>
-                {dados.map((d, i) => <Cell key={i} fill={leanCor(d.cat)} />)}
+                {dados.map((d, i) => (
+                  <Cell key={i} fill={corCategoria(d.categoria_lean as CategoriaLean | null)} />
+                ))}
               </Bar>
-              <Line yAxisId="right" dataKey="pct_acumulado" stroke="var(--accent-deep)" strokeWidth={2} dot={{ r: 3, fill: "var(--accent-deep)" }} />
+              <Line
+                yAxisId="right"
+                dataKey="pct_acumulado"
+                stroke="#7c3aed"
+                strokeWidth={2}
+                dot={{ r: 3, fill: "#7c3aed" }}
+              />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -700,78 +727,84 @@ function ParetoPanel({ pareto }: { pareto: ParetoItem[] }) {
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// Tempo por comportamento (com chip de categoria Lean clicável)
-// ════════════════════════════════════════════════════════════════════════
-function TempoPorComportamentoPanel({ distribuicao }: { distribuicao: DistribuicaoComportamento[] }) {
+// ─── Tempo por comportamento (barra h, color = cat Lean) ─────────────────
+function TempoPorComportamentoPanel({
+  distribuicao,
+}: {
+  distribuicao: DistribuicaoComportamento[];
+}) {
   const qc = useQueryClient();
   const [editId, setEditId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
+
   const setCat = useMutation({
     mutationFn: ({ id, cat }: { id: string; cat: CategoriaLean | null }) =>
       api.comportamentos.setCategoria(id, cat),
     onSuccess: (resp) => {
+      // Garante refresh dos KPIs, Pareto e composição em todas as telas.
       qc.invalidateQueries({ queryKey: ["dashboard"] });
       qc.invalidateQueries({ queryKey: ["processos"] });
       qc.invalidateQueries({ queryKey: ["insights-globais"] });
       setEditId(null);
       const extra =
-        (resp as { propagados?: number }).propagados
-          ? ` Aplicado em mais ${(resp as { propagados: number }).propagados} processo(s).`
+        resp && (resp as { propagados?: number }).propagados
+          ? ` Aplicado também em ${(resp as { propagados: number }).propagados} comportamento(s) com o mesmo nome em outros processos.`
           : "";
       setFeedback(`Anotado. O Prism vai usar isso para classificar comportamentos parecidos.${extra}`);
-      toast("Categoria atualizada", { icon: "check", color: "#3EE6AE" });
       window.setTimeout(() => setFeedback(null), 4500);
     },
   });
+
   const dados = distribuicao.slice(0, 10);
+
   return (
-    <Card style={{ padding: 20 }}>
-      <PanelHead
+    <Card className="p-6">
+      <PanelHeader
         titulo="Tempo por comportamento"
-        ajuda="Top comportamentos por tempo. As barras refletem a categoria Lean. Clique no chip pra reclassificar — sua decisão vira aprendizado e vale em outros processos. Marcas: ✓ definida por você · ↺ aprendida de você · ~ sugestão da IA."
+        ajuda="Os comportamentos que mais consomem tempo. Cores: verde = valor agregado, âmbar = apoio, vermelho = desperdício, cinza = não classificado. Clique no chip para reclassificar — sua decisão vale para comportamentos com o mesmo nome em outros processos. Marca ✓ = definida por você · ↺ = aprendida de você · ~ = sugestão da IA."
         leitura="A cor diz se aquele tempo está agregando valor ou não."
       />
       {feedback && (
-        <div
-          style={{
-            fontSize: 12.5, color: "var(--ok)", background: "var(--ok-bg)",
-            border: "1px solid rgba(21,168,107,.2)", borderRadius: 10, padding: "8px 11px", marginBottom: 10,
-          }}
-        >
+        <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">
           {feedback}
         </div>
       )}
       {dados.length === 0 ? (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>Sem dados ainda.</p>
+        <p className="text-sm text-slate-500">Sem dados ainda.</p>
       ) : (
-        <ul className="col gap2" style={{ listStyle: "none", padding: 0 }}>
+        <ul className="space-y-2.5">
           {dados.map((d) => {
-            const short = leanShort(d.categoria_lean);
-            const cor = leanCor(short);
+            const cor = corCategoria(d.categoria_lean);
             const editando = editId === d.comportamento_id;
             return (
-              <li key={d.comportamento} style={{ fontSize: 12 }}>
-                <div className="row gap2" style={{ marginBottom: 4 }}>
-                  <span className="truncate" style={{ fontWeight: 600, color: "var(--text)" }} title={d.comportamento}>
+              <li key={d.comportamento} className="text-xs">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-slate-700 font-medium truncate" title={d.comportamento}>
                     {d.comportamento}
                   </span>
                   <CategoriaChip
-                    cat={short}
+                    cat={d.categoria_lean}
                     origem={d.categoria_lean_origem || null}
                     editando={editando}
-                    onClick={() => setEditId(editando ? null : (d.comportamento_id ?? null))}
-                    onSet={(novo) =>
-                      d.comportamento_id && setCat.mutate({ id: d.comportamento_id, cat: novo })
+                    onClick={() =>
+                      setEditId(editando ? null : d.comportamento_id ?? null)
+                    }
+                    onSet={(novoCat) =>
+                      d.comportamento_id &&
+                      setCat.mutate({ id: d.comportamento_id, cat: novoCat })
                     }
                     pending={setCat.isPending}
                   />
-                  <span className="grow" />
-                  <span className="font-mono tnum" style={{ color: "var(--muted)" }}>
-                    {d.pct_tempo}% · {fmtSeg(d.tempo_total_s)}
+                  <span className="ml-auto text-slate-500 font-semibold">
+                    {d.pct_tempo}% · {formatSeg(d.tempo_total_s)}
                   </span>
                 </div>
-                <Track pct={d.pct_tempo} color={cor} />
+                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full"
+                    style={{ width: `${Math.max(2, d.pct_tempo)}%`, background: cor }}
+                  />
+                </div>
               </li>
             );
           })}
@@ -789,118 +822,122 @@ function CategoriaChip({
   onSet,
   pending,
 }: {
-  cat: "va" | "apoio" | "desp" | "none";
+  cat: CategoriaLean | null | undefined;
   origem: "ia" | "humano" | "aprendido" | null;
   editando: boolean;
   onClick: () => void;
   onSet: (c: CategoriaLean | null) => void;
   pending: boolean;
 }) {
-  const cor = leanCor(cat);
+  const cor = corCategoria(cat);
   if (editando) {
     return (
-      <div
-        className="row gap1"
-        style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 8, padding: "2px 4px" }}
-      >
-        {([
-          { c: "valor_agregado", color: "var(--va)" },
-          { c: "apoio", color: "var(--apoio)" },
-          { c: "desperdicio", color: "var(--desp)" },
-        ] as { c: CategoriaLean; color: string }[]).map((b) => (
+      <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-md px-1 py-0.5 shadow-sm">
+        {(["valor_agregado", "apoio", "desperdicio"] as CategoriaLean[]).map((c) => (
           <button
-            key={b.c}
+            key={c}
+            onClick={() => onSet(c)}
             disabled={pending}
-            onClick={() => onSet(b.c)}
-            title={leanLabel(leanShort(b.c))}
-            style={{ width: 16, height: 16, borderRadius: 4, background: b.color, border: 0 }}
+            title={LABEL_CAT[c]}
+            className={`h-4 w-4 rounded ${cat === c ? "ring-2 ring-offset-1 ring-kv-purple" : ""}`}
+            style={{ background: COR_CAT[c] }}
           />
         ))}
         <button
-          disabled={pending}
           onClick={() => onSet(null)}
-          title="Limpar"
-          style={{ width: 16, height: 16, borderRadius: 4, background: "var(--line-2)", color: "var(--muted)", border: 0, fontSize: 10 }}
+          disabled={pending}
+          title="Limpar (volta a ser candidato à IA)"
+          className="h-4 w-4 rounded text-[10px] flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200"
         >
           ×
         </button>
-        <button onClick={onClick} style={{ background: 0, border: 0, color: "var(--faint)", fontSize: 11 }}>
+        <button
+          onClick={onClick}
+          className="h-4 px-1 text-[10px] text-slate-400 hover:text-slate-600"
+          title="fechar"
+        >
           ✕
         </button>
       </div>
     );
   }
-  const marca =
+  const origemTexto =
+    origem === "humano"
+      ? "definida por você"
+      : origem === "aprendido"
+        ? "aprendida de uma decisão sua anterior — mesmo nome em outro processo"
+        : origem === "ia"
+          ? "sugerida pela IA (sem precedente seu ainda)"
+          : "ainda não classificada";
+  const origemMarca =
     origem === "humano" ? "✓" : origem === "aprendido" ? "↺" : origem === "ia" ? "~" : "";
-  const marcaCor =
-    origem === "humano" ? "var(--accent-deep)" : origem === "aprendido" ? "var(--va)" : "var(--faint)";
+  const origemClasse =
+    origem === "humano"
+      ? "text-kv-purple-dark"
+      : origem === "aprendido"
+        ? "text-emerald-600"
+        : origem === "ia"
+          ? "text-slate-400"
+          : "";
+
   return (
     <button
       onClick={onClick}
-      title={
-        cat === "none"
-          ? "Não classificado — clique para definir"
-          : `${leanLabel(cat)} (clique para mudar)`
-      }
-      className="row gap1"
-      style={{
-        fontSize: 10.5,
-        padding: "2px 7px",
-        borderRadius: 999,
-        border: "1px solid var(--line)",
-        background: "#fff",
-        color: "var(--text)",
-      }}
+      title={cat ? `${labelCategoria(cat)} · ${origemTexto} (clique para mudar)` : "Não classificado — clique para definir"}
+      className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border border-slate-200 hover:border-slate-400 transition"
     >
-      <span style={{ width: 8, height: 8, borderRadius: 2, background: cor }} />
-      <span>{leanLabel(cat)}</span>
-      {marca && <span style={{ color: marcaCor }}>{marca}</span>}
+      <span className="inline-block h-2 w-2 rounded-sm" style={{ background: cor }} />
+      <span className="text-slate-600">{labelCategoria(cat)}</span>
+      {origemMarca && (
+        <span className={origemClasse} aria-label={origemTexto}>
+          {origemMarca}
+        </span>
+      )}
     </button>
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// Fluxo (transições)
-// ════════════════════════════════════════════════════════════════════════
+// ─── Fluxo de atividades ─────────────────────────────────────────────────
 function FluxoPanel({ transicoes }: { transicoes: DashboardData["transicoes"] }) {
   const total = transicoes.reduce((s, t) => s + t.vezes, 0) || 1;
   const max = Math.max(1, ...transicoes.map((t) => t.vezes));
   return (
-    <Card style={{ padding: 20 }}>
-      <PanelHead
+    <Card className="p-6">
+      <PanelHeader
         titulo="Fluxo de atividades"
-        ajuda="Sequências A→B mais frequentes observadas (por pessoa, no mesmo vídeo)."
-        leitura="O fluxo real que o Prism observou no chão de fábrica."
+        ajuda="Sequências A→B mais frequentes observadas (por pessoa, no mesmo vídeo). Permite ver o fluxo real e compará-lo com o esperado."
+        leitura="O fluxo real que a IA observou no seu chão de fábrica."
       />
       {transicoes.length === 0 ? (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>
-          Ainda não há sequências suficientes (envie mais vídeos).
+        <p className="text-sm text-slate-500">
+          Ainda não há sequências suficientes (faça upload de mais vídeos).
         </p>
       ) : (
-        <div className="col gap2">
+        <div className="space-y-2.5">
           {transicoes.slice(0, 8).map((t, i) => {
             const pct = ((t.vezes / total) * 100).toFixed(0);
             return (
-              <div key={i} className="row gap2" style={{ fontSize: 12 }}>
+              <div key={i} className="flex items-center gap-2 text-xs">
                 <code
+                  className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded truncate min-w-0 flex-1 text-right"
                   title={t.de}
-                  style={{ background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 6, flex: 1, minWidth: 0, textAlign: "right" }}
-                  className="truncate"
                 >
                   {t.de}
                 </code>
-                <Icon name="arrow-right" size={12} color="var(--faint)" />
+                <span className="text-slate-400">→</span>
                 <code
+                  className="bg-kv-purple-50 text-kv-purple-dark px-2 py-0.5 rounded truncate min-w-0 flex-1"
                   title={t.para}
-                  style={{ background: "var(--accent-soft)", color: "var(--accent-deep)", padding: "2px 7px", borderRadius: 6, flex: 1, minWidth: 0 }}
-                  className="truncate"
                 >
                   {t.para}
                 </code>
-                <div style={{ width: 80 }}>
-                  <Track pct={(t.vezes / max) * 100} color="var(--accent)" />
+                <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden hidden sm:block">
+                  <div
+                    className="h-full bg-kv-purple"
+                    style={{ width: `${(t.vezes / max) * 100}%` }}
+                  />
                 </div>
-                <span className="font-mono tnum" style={{ color: "var(--muted)", width: 36, textAlign: "right" }}>
+                <span className="text-slate-500 font-medium w-12 text-right">
                   {pct}%
                 </span>
               </div>
@@ -912,49 +949,122 @@ function FluxoPanel({ transicoes }: { transicoes: DashboardData["transicoes"] })
   );
 }
 
+// ─── Estado do aprendizado ───────────────────────────────────────────────
+function AprendizadoPanel({ origens }: { origens: DashboardData["origens"] }) {
+  const total = origens.auto + origens.humano + origens.pendente;
+  const dados = [
+    { name: "Auto-validados", v: origens.auto, c: "#a78bfa" },
+    { name: "Validados por você", v: origens.humano, c: "#7c3aed" },
+    { name: "Pendentes", v: origens.pendente, c: "#e2e8f0" },
+  ];
+  const auto_pct = total > 0 ? Math.round((origens.auto / total) * 100) : 0;
+  return (
+    <Card className="p-6">
+      <PanelHeader
+        titulo="Estado do aprendizado"
+        ajuda="Como cada evento foi confirmado. O sistema confirma sozinho quando reconhece um label já validado 2× ou mais por humanos."
+        leitura={
+          total === 0
+            ? "Ainda sem dados."
+            : `O sistema já está confirmando ${auto_pct}% dos eventos sozinho.`
+        }
+      />
+      {total === 0 ? (
+        <p className="text-sm text-slate-500">Sem dados ainda.</p>
+      ) : (
+        <div className="flex items-center gap-4 flex-wrap">
+          <div style={{ width: 180, height: 160 }}>
+            <ResponsiveContainer>
+              <PieChart>
+                <Pie
+                  data={dados}
+                  dataKey="v"
+                  innerRadius={40}
+                  outerRadius={60}
+                  paddingAngle={2}
+                >
+                  {dados.map((d, i) => (
+                    <Cell key={i} fill={d.c} />
+                  ))}
+                </Pie>
+                <RTooltip formatter={(v: number, n: string) => [`${v} eventos`, n]} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+          <ul className="space-y-1.5 text-xs flex-1 min-w-[180px]">
+            {dados.map((d) => (
+              <li key={d.name} className="flex items-center gap-2">
+                <span
+                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  style={{ background: d.c }}
+                />
+                <span className="text-slate-600 flex-1">{d.name}</span>
+                <span className="font-semibold text-slate-900">{d.v}</span>
+                <span className="text-slate-400">
+                  ({total > 0 ? Math.round((d.v / total) * 100) : 0}%)
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // ════════════════════════════════════════════════════════════════════════
-// Vídeos processados (rodapé)
+// BLOCO D · Rodapé
 // ════════════════════════════════════════════════════════════════════════
-function VideosPanel({ videos }: { videos: DashboardData["videos"] }) {
+function VideosRodape({
+  videos,
+  tempoTotalMin,
+}: {
+  videos: DashboardData["videos"];
+  tempoTotalMin: number;
+}) {
   if (videos.length === 0) return null;
   return (
-    <Card style={{ padding: 20 }}>
-      <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
-        <h3 className="font-display row gap2" style={{ fontSize: 15, fontWeight: 700 }}>
+    <Card className="p-6">
+      <div className="flex items-baseline justify-between flex-wrap gap-2">
+        <h3 className="font-semibold text-slate-900 flex items-center gap-2">
           Vídeos processados
-          <Help text="Cada novo vídeo enriquece a base e melhora as sugestões." />
+          <Tooltip text="Cada novo vídeo enriquece a base e melhora as sugestões." />
         </h3>
-        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{videos.length} no total</span>
+        <span className="text-xs text-slate-500">
+          {videos.length} no total · {tempoTotalMin} min observados
+        </span>
       </div>
-      <ul
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))",
-          gap: 10,
-          listStyle: "none",
-          padding: 0,
-          fontSize: 12,
-        }}
-      >
+      <ul className="mt-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1 text-sm">
         {videos.slice(0, 12).map((v) => (
           <li
             key={v.id}
-            style={{ border: "1px solid var(--line)", borderRadius: 10, padding: "8px 10px" }}
+            className="flex items-center justify-between gap-2 py-1.5 border-b border-slate-100 last:border-0"
           >
-            <div className="truncate" title={v.nome} style={{ fontWeight: 600, color: "var(--ink)", fontSize: 12 }}>
-              {v.nome}
+            <div className="min-w-0 flex-1">
+              <div className="text-slate-800 truncate text-xs" title={v.nome}>
+                {v.nome}
+              </div>
+              <div className="text-[10px] text-slate-400">
+                {new Date(v.processado_em).toLocaleString("pt-BR", {
+                  day: "2-digit",
+                  month: "short",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </div>
             </div>
-            <div className="row" style={{ justifyContent: "space-between", marginTop: 4 }}>
-              <span style={{ color: "var(--muted)", fontSize: 11 }}>
-                {new Date(v.processado_em).toLocaleString("pt-BR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
-              </span>
-              <span className="font-mono tnum" style={{ color: "var(--faint)", fontSize: 11 }}>
-                {v.total_eventos} ev · {fmtSeg(v.duracao_s)}
-              </span>
+            <div className="text-right text-[10px] text-slate-500 flex-shrink-0">
+              <div>{v.total_eventos} eventos</div>
+              <div>{formatSeg(v.duracao_s)}</div>
             </div>
           </li>
         ))}
       </ul>
+      {videos.length > 12 && (
+        <p className="text-xs text-slate-400 mt-2 text-center">
+          + {videos.length - 12} vídeo(s) mais antigo(s)
+        </p>
+      )}
     </Card>
   );
 }
