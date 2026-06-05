@@ -242,6 +242,8 @@ export interface EventoTabela {
   status_efetivo: StatusEfetivo;
   criado_em: string;
   validado_em: string | null;
+  categoria_lean?: CategoriaLean | null;
+  comportamento_id?: string | null;
 }
 
 export interface EventosTabelaResposta {

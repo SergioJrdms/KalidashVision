@@ -751,10 +751,26 @@ def listar_eventos_tabela(
         )
         nomes = {v["id"]: v.get("nome", "") for v in (rv.data or [])}
 
+    # Categoria Lean + id do comportamento (mapa label → ...), para exibir a
+    # classificação e permitir reclassificar pela lista de eventos.
+    comps_full = (
+        sb.table("comportamentos")
+        .select("id, label, categoria_lean")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .execute()
+        .data
+    ) or []
+    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps_full}
+    comp_id_por_label = {c["label"]: c["id"] for c in comps_full}
+
     for ev in itens:
         ev["video_nome"] = nomes.get(ev.get("video_id"), "—")
-        ev["label_efetivo"] = ev.get("label_corrigido") or ev.get("comportamento_label")
+        label_ef = ev.get("label_corrigido") or ev.get("comportamento_label")
+        ev["label_efetivo"] = label_ef
         ev["status_efetivo"] = _status_efetivo(ev)
+        ev["categoria_lean"] = cat_por_label.get(label_ef)
+        ev["comportamento_id"] = comp_id_por_label.get(label_ef)
 
     return {
         "itens": itens,

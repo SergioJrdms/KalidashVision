@@ -5,10 +5,12 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapEventosTabela, type EvTabMock, type ProcHeaderMock } from "../lib/adapt";
-import { fmtSeg } from "../design/helpers";
-import { Btn, Card, Icon, Badge, Empty, toast } from "../design/ui";
+import { fmtSeg, leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
+import { Btn, Card, Icon, Badge, Empty, Modal, toast } from "../design/ui";
 import { FrameReal } from "../lib/frames";
 import type { AcaoEvento } from "../lib/types";
+
+const AVISO_VOCAB_KEY = "spectra_corrigir_vocab_aviso";
 
 const STATUS_LIST = ["pendente", "confirmado", "corrigido", "descartado", "auto"];
 const STATUS_META: Record<string, { tone: string; label: string }> = {
@@ -26,6 +28,9 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
   const [comp, setComp] = useState("");
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [expand, setExpand] = useState<string | null>(null);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [aviso, setAviso] = useState<EvTabMock | null>(null);
+  const [naoMostrar, setNaoMostrar] = useState(false);
 
   const q = useQuery({ queryKey: ["eventos-tabela", proc.id], queryFn: () => api.eventos.tabela(proc.id, { page: 1, page_size: 200, sort: "criado_em", order: "desc" }) });
   const rows: EvTabMock[] = useMemo(() => mapEventosTabela(q.data?.itens || []), [q.data]);
@@ -43,6 +48,30 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
     mutationFn: ({ id, acao, label }: { id: string; acao: AcaoEvento; label?: string }) => (acao === "reabrir" ? api.eventos.reabrir(id) : api.eventos.validar(id, acao, label)),
     onSuccess: invalidar,
   });
+  const setCatMut = useMutation({
+    mutationFn: ({ id, cat }: { id: string; cat: LeanShort }) => api.comportamentos.setCategoria(id, leanLong(cat)),
+    onSuccess: () => { invalidar(); qc.invalidateQueries({ queryKey: ["processos"] }); },
+  });
+
+  function pedirCorrigir(e: EvTabMock) {
+    setExpand(e.id);
+    if (localStorage.getItem(AVISO_VOCAB_KEY) === "1") setEditId(e.id);
+    else { setNaoMostrar(false); setAviso(e); }
+  }
+  function confirmarAviso() {
+    if (naoMostrar) localStorage.setItem(AVISO_VOCAB_KEY, "1");
+    if (aviso) setEditId(aviso.id);
+    setAviso(null);
+  }
+  function salvarCorrecao(e: EvTabMock, novoLabel: string, novaCat: LeanShort) {
+    const label = novoLabel.trim();
+    const labelMudou = !!label && label !== e.label;
+    const catMudou = novaCat !== e.cat;
+    if (labelMudou) acaoMut.mutate({ id: e.id, acao: "corrigir", label });
+    if (catMudou && e.comportamentoId) setCatMut.mutate({ id: e.comportamentoId, cat: novaCat });
+    if (labelMudou || catMudou) toast("Correção salva. O Prism aprendeu com você.", { icon: "check" });
+    setEditId(null);
+  }
 
   function toggle(id: string) { setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
   function toggleAll() { setSel((s) => (s.size === filtrados.length ? new Set() : new Set(filtrados.map((e) => e.id)))); }
@@ -102,6 +131,7 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
               <tr style={{ background: "var(--soft)", color: "var(--muted)", fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em" }}>
                 <th style={{ padding: "11px 12px", width: 34 }}><input type="checkbox" checked={filtrados.length > 0 && sel.size === filtrados.length} onChange={toggleAll} style={{ accentColor: "var(--accent)" }} /></th>
                 <th style={{ padding: "11px 12px", textAlign: "left" }}>Comportamento</th>
+                <th style={{ padding: "11px 12px", textAlign: "left" }}>Classificação</th>
                 <th style={{ padding: "11px 12px", textAlign: "left" }}>Vídeo · tempo</th>
                 <th style={{ padding: "11px 12px", textAlign: "center" }}>Pessoa</th>
                 <th style={{ padding: "11px 12px", textAlign: "center" }}>Conf.</th>
@@ -111,18 +141,38 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
             </thead>
             <tbody>
               {filtrados.map((e) => (
-                <LinhaEvento key={e.id} e={e} sel={sel.has(e.id)} onToggle={() => toggle(e.id)} expand={expand === e.id} onExpand={() => setExpand((c) => (c === e.id ? null : e.id))} onResolver={resolver} />
+                <LinhaEvento key={e.id} e={e} sel={sel.has(e.id)} onToggle={() => toggle(e.id)} expand={expand === e.id} onExpand={() => setExpand((c) => (c === e.id ? null : e.id))} onResolver={resolver} labels={comps} editing={editId === e.id} onPedirCorrigir={() => pedirCorrigir(e)} onSalvar={(label, cat) => salvarCorrecao(e, label, cat)} onCancelarEdicao={() => setEditId(null)} />
               ))}
             </tbody>
           </table>
         </div>
         {q.isLoading ? <Empty icon="loader" title="Carregando…" /> : filtrados.length === 0 && <Empty icon="search-x" title="Nenhum evento encontrado" desc="Ajuste os filtros para ver outros eventos." />}
       </Card>
+
+      {aviso && (
+        <Modal onClose={() => setAviso(null)} width={440}>
+          <div className="row gap2" style={{ marginBottom: 12 }}>
+            <span className="center" style={{ width: 38, height: 38, borderRadius: 11, background: "var(--accent-soft)", color: "var(--accent)", flex: "none" }}><Icon name="book-open" size={19} /></span>
+            <h3 className="font-display" style={{ fontSize: 17, fontWeight: 700, color: "var(--ink)" }}>Mantenha o vocabulário consistente</h3>
+          </div>
+          <p style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.55, marginBottom: 14 }}>
+            Antes de corrigir, prefira <b>reaproveitar um nome que já existe</b> em vez de criar variações (ex.: "empurrar carrinho" vs. "empurra o carrinho"). Um vocabulário enxuto deixa os relatórios e os padrões do Prism muito mais precisos — cada nome novo fragmenta a análise.
+          </p>
+          <label className="row gap2" style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, cursor: "pointer" }}>
+            <input type="checkbox" checked={naoMostrar} onChange={(e) => setNaoMostrar(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+            Não mostrar este aviso novamente
+          </label>
+          <div className="row gap2" style={{ justifyContent: "flex-end" }}>
+            <Btn variant="ghost" size="sm" onClick={() => setAviso(null)}>Cancelar</Btn>
+            <Btn variant="primary" size="sm" icon="check" onClick={confirmarAviso}>Entendi, corrigir</Btn>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
-function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver }: { e: EvTabMock; sel: boolean; onToggle: () => void; expand: boolean; onExpand: () => void; onResolver: (id: string, acao: AcaoEvento) => void }) {
+function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, editing, onPedirCorrigir, onSalvar, onCancelarEdicao }: { e: EvTabMock; sel: boolean; onToggle: () => void; expand: boolean; onExpand: () => void; onResolver: (id: string, acao: AcaoEvento) => void; labels: string[]; editing: boolean; onPedirCorrigir: () => void; onSalvar: (label: string, cat: LeanShort) => void; onCancelarEdicao: () => void }) {
   const m = STATUS_META[e.status] || STATUS_META.pendente;
   return (
     <>
@@ -134,6 +184,11 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver }: { e: Ev
           ) : (
             <code className="font-mono" style={{ background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 5, fontSize: 11.5 }}>{e.label}</code>
           )}
+        </td>
+        <td style={{ padding: "10px 12px" }}>
+          <span className="row gap1" style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", padding: "2px 8px", borderRadius: 7, border: "1px solid var(--line)", background: "#fff", display: "inline-flex", whiteSpace: "nowrap" }}>
+            <i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(e.cat), flex: "none" }} /> {leanLabel(e.cat)}
+          </span>
         </td>
         <td style={{ padding: "10px 12px", color: "var(--muted)", fontSize: 11.5 }}>
           <div className="truncate" style={{ maxWidth: 150 }}>{e.video}</div>
@@ -150,23 +205,59 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver }: { e: Ev
       </tr>
       {expand && (
         <tr style={{ background: "var(--soft)" }}>
-          <td colSpan={7} style={{ padding: 16 }}>
+          <td colSpan={8} style={{ padding: 16 }}>
             <div className="row gap3 wrap" style={{ alignItems: "flex-start" }}>
               <div style={{ width: 240, flex: "none" }}><FrameReal id={e.id} pessoa={e.pessoa} height={140} /></div>
               <div className="grow" style={{ minWidth: 220 }}>
                 <p style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginBottom: 12 }}>{e.descricao}</p>
-                <div className="row gap1 wrap">
-                  <Btn variant="ok" size="sm" icon="check" onClick={() => onResolver(e.id, "confirmar")}>Confirmar</Btn>
-                  <Btn variant="secondary" size="sm" icon="pencil" onClick={() => onResolver(e.id, "corrigir")}>Corrigir</Btn>
-                  <Btn variant="danger" size="sm" icon="x" onClick={() => onResolver(e.id, "descartar")}>Descartar</Btn>
-                  {e.status !== "pendente" && <Btn variant="ghost" size="sm" icon="rotate-ccw" onClick={() => onResolver(e.id, "reabrir")}>Reabrir</Btn>}
-                </div>
+                {editing ? (
+                  <CorrigirForm e={e} labels={labels} onSalvar={onSalvar} onCancelar={onCancelarEdicao} />
+                ) : (
+                  <div className="row gap1 wrap">
+                    <Btn variant="ok" size="sm" icon="check" onClick={() => onResolver(e.id, "confirmar")}>Confirmar</Btn>
+                    <Btn variant="secondary" size="sm" icon="pencil" onClick={onPedirCorrigir}>Corrigir</Btn>
+                    <Btn variant="danger" size="sm" icon="x" onClick={() => onResolver(e.id, "descartar")}>Descartar</Btn>
+                    {e.status !== "pendente" && <Btn variant="ghost" size="sm" icon="rotate-ccw" onClick={() => onResolver(e.id, "reabrir")}>Reabrir</Btn>}
+                  </div>
+                )}
               </div>
             </div>
           </td>
         </tr>
       )}
     </>
+  );
+}
+
+function CorrigirForm({ e, labels, onSalvar, onCancelar }: { e: EvTabMock; labels: string[]; onSalvar: (label: string, cat: LeanShort) => void; onCancelar: () => void }) {
+  const [label, setLabel] = useState(e.label);
+  const [cat, setCat] = useState<LeanShort>(e.cat);
+  const listId = `labels-ev-${e.id}`;
+  return (
+    <div className="col anim-fadeup" style={{ gap: 12, maxWidth: 460 }}>
+      <div className="col" style={{ gap: 5 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)" }}>Comportamento</span>
+        <input className="field" list={listId} autoFocus value={label} onChange={(ev) => setLabel(ev.target.value)} placeholder="nome do comportamento" style={{ maxWidth: 320 }}
+          onKeyDown={(ev) => { if (ev.key === "Enter" && label.trim()) onSalvar(label, cat); }} />
+        <datalist id={listId}>{labels.map((l) => <option key={l} value={l} />)}</datalist>
+        <span style={{ fontSize: 11, color: "var(--faint)" }}>Reaproveite um nome já existente para manter o vocabulário consistente.</span>
+      </div>
+      <div className="col" style={{ gap: 5 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)" }}>Classificação Lean</span>
+        <div className="row gap1 wrap">
+          {(["va", "apoio", "desp"] as LeanShort[]).map((c) => (
+            <button key={c} onClick={() => setCat(c)} className="row gap1" style={{ padding: "5px 11px", borderRadius: 8, fontSize: 12, fontWeight: 600, color: "var(--text)", background: "#fff", border: cat === c ? "2px solid var(--ink)" : "1px solid var(--line)" }}>
+              <i style={{ width: 9, height: 9, borderRadius: 2, background: leanCor(c) }} /> {leanLabel(c)}
+            </button>
+          ))}
+        </div>
+        {!e.comportamentoId && <span style={{ fontSize: 11, color: "var(--faint)" }}>A reclassificação será aplicada quando o comportamento existir no catálogo.</span>}
+      </div>
+      <div className="row gap1">
+        <Btn variant="primary" size="sm" icon="check" disabled={!label.trim()} onClick={() => onSalvar(label, cat)}>Salvar correção</Btn>
+        <Btn variant="ghost" size="sm" onClick={onCancelar}>Cancelar</Btn>
+      </div>
+    </div>
   );
 }
 

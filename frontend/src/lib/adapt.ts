@@ -57,7 +57,7 @@ export interface DetMock {
 
 export interface PendMock { id: string; label: string; descricao: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[] }
-export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort }
+export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null }
 export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; apoio: number; desp: number; none: number }[] }
 export interface PadProcMock { id: string; tipo: string; confianca: string; relevancia: string; titulo: string; descricao: string; recomendacao: string | null; comportamentos: string[] }
 export interface InsightMock { id: string; prioridade: string; titulo: string; descricao: string; processos: string[] }
@@ -197,7 +197,8 @@ export function mapEventosTabela(rows: EventoTabela[]): EvTabMock[] {
     pessoa: e.pessoa_track_id,
     conf: e.confianca || 0,
     status: e.status_efetivo,
-    cat: leanShort((e as { categoria_lean?: string | null }).categoria_lean),
+    cat: leanShort(e.categoria_lean),
+    comportamentoId: e.comportamento_id ?? null,
   }));
 }
 
