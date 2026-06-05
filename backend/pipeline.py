@@ -1935,25 +1935,50 @@ def gerar_perguntas_processo(
 # FRAMES PARA VALIDAÇÃO
 # ═════════════════════════════════════════════════════════════════════════
 def extrair_3_frames_evento(evento: dict, video_path: str) -> list[np.ndarray]:
-    fi, ff = evento["frame_inicio"], evento["frame_fim"]
-    fmid = (fi + ff) // 2
-    frames_alvo = [fi, fmid, ff] if fi != ff else [fi]
+    fi, ff = int(evento["frame_inicio"]), int(evento["frame_fim"])
 
     cap = cv2.VideoCapture(video_path)
-    crops: list[np.ndarray] = []
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if total > 0:
+        fi = max(0, min(fi, total - 1))
+        ff = max(0, min(ff, total - 1))
+    if ff < fi:
+        fi, ff = ff, fi
+    fmid = (fi + ff) // 2
+    alvos = [fi, fmid, ff]  # sempre 3 posições (podem coincidir em eventos curtos)
+
     bbox = evento["bbox_inicio"]
     if isinstance(bbox, dict):
         x1, y1, x2, y2 = int(bbox["x1"]), int(bbox["y1"]), int(bbox["x2"]), int(bbox["y2"])
     else:
         x1, y1, x2, y2 = (int(v) for v in bbox)
-    for f_idx in frames_alvo:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+
+    # Leitura SEQUENCIAL a partir do frame inicial: o seek por índice
+    # (cap.set(POS_FRAMES)) é instável em vários codecs e costuma falhar nos
+    # frames do meio/fim, deixando só o primeiro. Lendo em sequência e usando a
+    # posição real do decoder garantimos os 3 frames da ação.
+    cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+    restantes = sorted(set(alvos))
+    capturados: dict[int, np.ndarray] = {}
+    limite = (ff - fi) + 1500  # cap de segurança (distância até o keyframe + folga)
+    lidos = 0
+    while restantes and lidos <= limite:
+        pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
         ret, frame = cap.read()
-        if not ret:
-            continue
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 100), 4)
+        if not ret or frame is None:
+            break
+        lidos += 1
+        for alvo in list(restantes):
+            if pos >= alvo:
+                capturados[alvo] = frame
+                restantes.remove(alvo)
+    cap.release()
+
+    def _anota(frame: np.ndarray) -> np.ndarray:
+        a = frame.copy()  # copia: o mesmo frame pode servir a mais de um alvo
+        cv2.rectangle(a, (x1, y1), (x2, y2), (0, 255, 100), 4)
         cv2.putText(
-            frame,
+            a,
             f'P{evento["pessoa_track_id"]:03d}',
             (x1, max(20, y1 - 10)),
             cv2.FONT_HERSHEY_DUPLEX,
@@ -1961,11 +1986,21 @@ def extrair_3_frames_evento(evento: dict, video_path: str) -> list[np.ndarray]:
             (0, 255, 100),
             2,
         )
-        h, w = frame.shape[:2]
+        h, w = a.shape[:2]
         escala = 480 / max(h, w)
-        frame_small = cv2.resize(frame, (int(w * escala), int(h * escala)))
-        crops.append(frame_small)
-    cap.release()
+        return cv2.resize(a, (int(w * escala), int(h * escala)))
+
+    crops: list[np.ndarray] = []
+    ultimo: np.ndarray | None = None
+    for alvo in alvos:
+        frame = capturados.get(alvo, ultimo)
+        if frame is None:
+            continue
+        ultimo = frame
+        crops.append(_anota(frame))
+    # Garante 3 frames na faixa de validação, repetindo o último válido.
+    while crops and len(crops) < 3:
+        crops.append(crops[-1])
     return crops
 
 
