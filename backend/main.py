@@ -689,7 +689,8 @@ def listar_eventos_tabela(
     campos = (
         "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
         "descricao_bruta, tempo_inicio_s, tempo_fim_s, duracao_s, confianca, "
-        "validado_humano, validacao_correto, origem_validacao, criado_em, validado_em"
+        "validado_humano, validacao_correto, origem_validacao, criado_em, validado_em, "
+        "categoria_lean, categoria_lean_origem"
     )
     q = (
         sb.table("eventos")
@@ -769,7 +770,13 @@ def listar_eventos_tabela(
         label_ef = ev.get("label_corrigido") or ev.get("comportamento_label")
         ev["label_efetivo"] = label_ef
         ev["status_efetivo"] = _status_efetivo(ev)
-        ev["categoria_lean"] = cat_por_label.get(label_ef)
+        # Categoria efetiva: override individual do humano vence; senão usa a
+        # categoria viva do comportamento (memória). Mantém a lista coerente com
+        # o dashboard mesmo antes do backfill físico rodar.
+        if ev.get("categoria_lean_origem") == "humano" and ev.get("categoria_lean"):
+            ev["categoria_lean"] = ev["categoria_lean"]
+        else:
+            ev["categoria_lean"] = cat_por_label.get(label_ef)
         ev["comportamento_id"] = comp_id_por_label.get(label_ef)
 
     return {
@@ -1128,11 +1135,36 @@ def setar_categoria_lean(
         except Exception as e:
             log.warning(f"Lean: falha ao listar comportamentos para propagação: {e}")
 
+    # Despeja a categoria nos EVENTOS do comportamento (mesma empresa+label).
+    # Cada evento guarda a sua, mas NÃO sobrescrevemos overrides individuais de
+    # humano — assim a decisão de 'andar = apoio' vale como padrão, e um evento
+    # específico classificado à mão por alguém permanece intacto.
+    eventos_atualizados = 0
+    if alvo.get("label"):
+        try:
+            upd = (
+                sb.table("eventos")
+                .update(
+                    {
+                        "categoria_lean": cat,
+                        "categoria_lean_origem": "aprendido" if cat else None,
+                    }
+                )
+                .eq("empresa", user.empresa)
+                .eq("comportamento_label", alvo["label"])
+                .or_("categoria_lean_origem.is.null,categoria_lean_origem.neq.humano")
+                .execute()
+            )
+            eventos_atualizados = len(upd.data or [])
+        except Exception as e:
+            log.warning(f"Lean: falha ao despejar categoria nos eventos: {e}")
+
     return {
         "ok": True,
         "categoria_lean": cat,
         "origem": "humano" if cat else None,
         "propagados": propagados,
+        "eventos_atualizados": eventos_atualizados,
     }
 
 

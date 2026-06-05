@@ -60,8 +60,13 @@ create table if not exists eventos (
     label_corrigido text,
     validado_em timestamptz,
     origem_validacao text,
+    categoria_lean text,        -- Lean por evento: 'valor_agregado' | 'apoio' | 'desperdicio' | null
+    categoria_lean_origem text, -- 'herdado' (do comportamento) | 'aprendido' | 'humano' (override) | null
     criado_em timestamptz default now()
 );
+
+alter table eventos add column if not exists categoria_lean        text;
+alter table eventos add column if not exists categoria_lean_origem text;
 
 create table if not exists sugestoes_melhoria (
     id uuid primary key default gen_random_uuid(),

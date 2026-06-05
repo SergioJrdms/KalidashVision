@@ -222,6 +222,26 @@ alter table comportamentos    add column if not exists categoria_lean        tex
 alter table comportamentos    add column if not exists categoria_lean_origem text;
 alter table contexto_processo add column if not exists area text;
 
+-- Classificação Lean POR EVENTO. A categoria do comportamento (memória) é
+-- despejada aqui, mas cada evento guarda a sua: assim um caso específico pode
+-- divergir do padrão (origem 'humano' = override individual, nunca sobrescrito).
+alter table eventos add column if not exists categoria_lean        text;
+alter table eventos add column if not exists categoria_lean_origem text;
+
+-- Backfill: despeja a categoria do comportamento nos eventos ainda sem categoria,
+-- preservando qualquer override individual de humano.
+update eventos e
+   set categoria_lean        = c.categoria_lean,
+       categoria_lean_origem = 'herdado'
+  from comportamentos c
+ where c.empresa  = e.empresa
+   and c.processo = e.processo
+   and c.label    = coalesce(e.label_corrigido, e.comportamento_label)
+   and c.categoria_lean is not null
+   and e.categoria_lean is null;
+
+create index if not exists idx_eventos_categoria_lean on eventos(empresa, comportamento_label);
+
 -- Prism: suporte a conversas de escopo global (visão de toda a empresa).
 -- Conversas globais têm escopo='global' e processo = null.
 alter table prism_conversas add column if not exists escopo text not null default 'processo';
