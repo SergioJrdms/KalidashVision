@@ -17,6 +17,7 @@ import Dashboard from "./pages/Dashboard";
 import Validacao from "./pages/Validacao";
 import Eventos from "./pages/Eventos";
 import Padroes from "./pages/Padroes";
+import Ajuda from "./pages/Ajuda";
 import { Upload, Descricao } from "./pages/Extras";
 import { PrismPanel } from "./pages/PrismChat";
 
@@ -90,6 +91,7 @@ function AppShell() {
   // Conteúdo
   let content: ReactNode = null;
   if (route.screen === "processos") content = <Processos go={goTyped} />;
+  else if (route.screen === "ajuda") content = <Ajuda go={goTyped} />;
   else if (route.screen === "processo") {
     if (!proc) {
       content = (

@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
-export type Screen = "login" | "processos" | "processo";
+export type Screen = "login" | "processos" | "processo" | "ajuda";
 export type Tab = "dashboard" | "validacao" | "eventos" | "padroes" | "upload" | "descricao";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
@@ -107,6 +107,22 @@ export function Sidebar({
       )}
 
       <div className="grow" />
+
+      {(() => {
+        const ativo = route.screen === "ajuda";
+        return (
+          <button
+            onClick={() => go("ajuda")}
+            className="row gap2"
+            style={{ width: "100%", textAlign: "left", border: "none", borderRadius: 10, padding: "9px 11px", marginBottom: 6, background: ativo ? "var(--accent-soft)" : "transparent", color: ativo ? "var(--accent-deep)" : "var(--text)", fontWeight: ativo ? 700 : 500, fontSize: 14, transition: "background .15s" }}
+            onMouseEnter={(e) => { if (!ativo) (e.currentTarget as HTMLElement).style.background = "var(--line-2)"; }}
+            onMouseLeave={(e) => { if (!ativo) (e.currentTarget as HTMLElement).style.background = "transparent"; }}
+          >
+            <Icon name="help-circle" size={18} strokeWidth={ativo ? 2.2 : 1.9} color={ativo ? "var(--accent)" : "var(--muted)"} />
+            <span className="grow truncate">Como funciona</span>
+          </button>
+        );
+      })()}
 
       <button onClick={onOpenPrism} className="row gap2 click" style={{ width: "100%", textAlign: "left", border: "1px solid var(--line)", borderRadius: 12, padding: "10px 11px", background: "linear-gradient(135deg, var(--soft), #fff)", marginBottom: 10 }}>
         <Prism size={30} ring />
