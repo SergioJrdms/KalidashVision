@@ -992,7 +992,7 @@ def listar_perguntas(
     nome = _processo_nome(sb, user, processo_id)
     q = (
         sb.table("perguntas_processo")
-        .select("id, pergunta, motivo, comportamentos_relacionados, status, resposta, respondida_em, criada_em")
+        .select("id, pergunta, motivo, comportamentos_relacionados, respostas_rapidas, status, resposta, respondida_em, criada_em")
         .eq("empresa", user.empresa)
         .eq("processo", nome)
     )

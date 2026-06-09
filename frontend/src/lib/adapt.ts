@@ -175,13 +175,18 @@ export function mapPendentes(rows: EventoPendente[]): PendMock[] {
 
 const CHIPS_PADRAO = ["Sim", "Não", "Às vezes"];
 export function mapPerguntas(rows: PerguntaProcesso[]): PergMock[] {
-  return rows.map((q) => ({
-    id: q.id,
-    pergunta: q.pergunta,
-    motivo: q.motivo || "",
-    relacionados: q.comportamentos_relacionados || [],
-    chips: CHIPS_PADRAO,
-  }));
+  return rows.map((q) => {
+    const rapidas = Array.isArray(q.respostas_rapidas)
+      ? q.respostas_rapidas.map((s) => (typeof s === "string" ? s.trim() : "")).filter(Boolean).slice(0, 3)
+      : [];
+    return {
+      id: q.id,
+      pergunta: q.pergunta,
+      motivo: q.motivo || "",
+      relacionados: q.comportamentos_relacionados || [],
+      chips: rapidas.length >= 2 ? rapidas : CHIPS_PADRAO,
+    };
+  });
 }
 
 export function mapEventosTabela(rows: EventoTabela[]): EvTabMock[] {

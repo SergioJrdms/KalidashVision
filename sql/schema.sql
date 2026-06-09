@@ -104,11 +104,13 @@ create table if not exists perguntas_processo (
     pergunta text not null,
     motivo text,
     comportamentos_relacionados jsonb,
+    respostas_rapidas jsonb,                  -- 3 respostas curtas geradas pela LLM (chips)
     status text not null default 'pendente',  -- pendente | respondida | dispensada
     resposta text,
     respondida_em timestamptz,
     criada_em timestamptz default now()
 );
+alter table perguntas_processo add column if not exists respostas_rapidas jsonb;
 
 -- Prism · conversas e mensagens do chat lateral (persistência + tópicos)
 create table if not exists prism_conversas (

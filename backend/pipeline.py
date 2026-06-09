@@ -146,6 +146,7 @@ create table if not exists perguntas_processo (
     pergunta text not null,
     motivo text,
     comportamentos_relacionados jsonb,
+    respostas_rapidas jsonb,                -- 3 respostas curtas plausíveis geradas pela LLM
     status text not null default 'pendente',
     resposta text,
     respondida_em timestamptz,
@@ -221,6 +222,7 @@ alter table sugestoes_melhoria add column if not exists impacto_estimado text;
 alter table comportamentos    add column if not exists categoria_lean        text;
 alter table comportamentos    add column if not exists categoria_lean_origem text;
 alter table contexto_processo add column if not exists area text;
+alter table perguntas_processo add column if not exists respostas_rapidas jsonb;
 
 -- Classificação Lean POR EVENTO. A categoria do comportamento (memória) é
 -- despejada aqui, mas cada evento guarda a sua: assim um caso específico pode
@@ -1712,6 +1714,11 @@ REGRAS DURAS:
 - Gere NO MÁXIMO {max_perguntas} perguntas. Se não há lacuna genuína, devolva uma lista VAZIA. NÃO invente perguntas para preencher cota.
 - NÃO comente o desempenho de pessoas; foque no processo.
 
+PARA CADA PERGUNTA, gere também EXATAMENTE 3 "respostas_rapidas" — opções curtas (1 a 5 palavras) que o gestor da fábrica pode tocar para responder com 1 clique. Regras das respostas_rapidas:
+  - DEVEM ser plausíveis E adaptadas àquela pergunta específica e a esse processo. PROIBIDO devolver só {{"Sim","Não","Às vezes"}} como padrão — só use Sim/Não se a pergunta for genuinamente binária; caso contrário, use opções com conteúdo (ex.: "Sempre antes da embalagem" / "Depende do produto" / "Só quando há lote misto").
+  - Entre as 3 opções deve estar a resposta mais provável que o gestor daria, junto com as 2 alternativas razoáveis seguintes — cobrindo os cenários reais. Em conjunto, as 3 devem dar conta de >80% das respostas esperadas.
+  - Linguagem do chão de fábrica, sem jargão de IA/Lean. Cada opção é uma resposta CURTA E COMPLETA por si só (vai ser usada como texto da resposta do cliente).
+
 CONTEXTO QUE VOCÊ JÁ SABE DO PROCESSO:
 {bloco_dominio}
 
@@ -1725,7 +1732,8 @@ Responda APENAS um JSON estrito:
 {{"perguntas": [
   {{"pergunta": "...",
    "motivo": "1 frase explicando por que essa pergunta importa pra análise",
-   "comportamentos_relacionados": ["label_1", "label_2"]}},
+   "comportamentos_relacionados": ["label_1", "label_2"],
+   "respostas_rapidas": ["...", "...", "..."]}},
   ...
 ]}}
 """
@@ -1925,6 +1933,26 @@ def gerar_perguntas_processo(
         comp_rel = p.get("comportamentos_relacionados")
         if not isinstance(comp_rel, list):
             comp_rel = []
+        # Sanitiza as 3 respostas curtas geradas pela LLM (1-5 palavras, sem vazias,
+        # sem duplicatas). Se a LLM mandou bobagem, deixamos null e o frontend cai
+        # no fallback Sim/Não/Às vezes.
+        rapidas_raw = p.get("respostas_rapidas")
+        rapidas: list[str] = []
+        if isinstance(rapidas_raw, list):
+            vistas: set[str] = set()
+            for r in rapidas_raw:
+                if not isinstance(r, str):
+                    continue
+                r2 = " ".join(r.split())  # normaliza espaços
+                if not (2 <= len(r2) <= 60):
+                    continue
+                chave = r2.lower()
+                if chave in vistas:
+                    continue
+                vistas.add(chave)
+                rapidas.append(r2)
+                if len(rapidas) == 3:
+                    break
         novas_linhas.append(
             {
                 "empresa": empresa,
@@ -1932,6 +1960,7 @@ def gerar_perguntas_processo(
                 "pergunta": texto,
                 "motivo": (p.get("motivo") or "").strip() or None,
                 "comportamentos_relacionados": [str(c) for c in comp_rel][:8],
+                "respostas_rapidas": rapidas if len(rapidas) == 3 else None,
                 "status": "pendente",
             }
         )
@@ -2468,6 +2497,25 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
     except Exception:
         pass
 
+    # Perguntas proativas RESPONDIDAS — cada resposta é tratada como verdade do
+    # domínio nos prompts seguintes (construir_bloco_conhecimento_adquirido),
+    # então tem que pesar na maturidade do Prism sobre o processo.
+    n_respostas: dict[str, int] = defaultdict(int)
+    try:
+        perg = (
+            sb.table("perguntas_processo")
+            .select("processo, status")
+            .eq("empresa", empresa)
+            .eq("status", "respondida")
+            .limit(5000)
+            .execute()
+            .data
+        ) or []
+        for r in perg:
+            n_respostas[r.get("processo")] += 1
+    except Exception:
+        pass
+
     # Finaliza: top comportamentos + composição de valor + MATURIDADE
     saida: dict[str, dict] = {}
     for n, p in base.items():
@@ -2508,13 +2556,17 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
         pct_auto = n_auto / max(1, n_auto + n_humano + n_pend)
         cobertura_lean = 1 - (n_nao_classif / max(1, n_comp_local))
         n_pad = n_padroes_alta.get(n, 0)
+        n_resp = n_respostas.get(n, 0)
+        # Pesos somam 100. Respostas às perguntas proativas viram conhecimento
+        # explícito do domínio (peso máximo nos prompts), por isso entram aqui.
         maturidade = (
-            20 * min(1, n_videos / 10)
-            + 25 * min(1, ev_cons / 250)
-            + 30 * pct_val
-            + 15 * pct_auto
-            + 5 * cobertura_lean
-            + 5 * min(1, n_pad / 4)
+            20 * min(1, n_videos / 10)        # volume de vídeos
+            + 25 * min(1, ev_cons / 250)      # volume de eventos
+            + 27 * pct_val                    # % validado por humano
+            + 10 * pct_auto                   # % de auto-validação aprendida
+            + 5 * cobertura_lean              # % de comportamentos classificados
+            + 5 * min(1, n_pad / 4)           # padrões com confiança alta
+            + 8 * min(1, n_resp / 8)          # perguntas proativas respondidas
         )
         maturidade = max(0, min(100, round(maturidade)))
 

@@ -167,6 +167,7 @@ export interface PerguntaProcesso {
   pergunta: string;
   motivo: string | null;
   comportamentos_relacionados: string[] | null;
+  respostas_rapidas: string[] | null;
   status: "pendente" | "respondida" | "dispensada";
   resposta: string | null;
   respondida_em: string | null;
