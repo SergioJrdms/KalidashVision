@@ -5,11 +5,14 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { mapDashboard, type DetMock, type CompMock, type ProcHeaderMock } from "../lib/adapt";
+import { mapDashboard, type DetMock, type CompMock, type ProcHeaderMock, type SugMock } from "../lib/adapt";
 import { leanCor, leanLabel, leanLong, fmtSeg, type LeanShort } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, toast } from "../design/ui";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
+import type { AcaoSugestao } from "../lib/types";
+
+const SUG_VISIVEL_PADRAO = 3;
 
 export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: Go; t: Tweaks }) {
   const q = useQuery({ queryKey: ["dashboard", proc.id], queryFn: () => api.processos.dashboard(proc.id) });
@@ -40,7 +43,7 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: minimal ? "1fr" : "1.65fr 1fr", gap: 16, alignItems: "start" }}>
-        <Sugestoes det={det} minimal={minimal} />
+        <Sugestoes det={det} processoId={proc.id} />
         <div className="col" style={{ gap: 16 }}>
           <Aprendizado det={det} />
           {!minimal && <ResumoOportunidades det={det} />}
@@ -131,51 +134,92 @@ function Kpi({ label, valor, sub, icon, ajuda, alert }: { label: string; valor: 
   );
 }
 
-function Sugestoes({ det, minimal }: { det: DetMock; minimal: boolean }) {
+function Sugestoes({ det, processoId }: { det: DetMock; processoId: string }) {
+  const qc = useQueryClient();
   const [prio, setPrio] = useState("todas");
+  const [verTodas, setVerTodas] = useState(false);
+
   const lista = useMemo(() => det.sugestoes.filter((x) => prio === "todas" || x.prioridade === prio), [prio, det]);
-  const visiveis = minimal ? lista.slice(0, 3) : lista;
+  const visiveis = verTodas ? lista : lista.slice(0, SUG_VISIVEL_PADRAO);
   const counts: Record<string, number> = { todas: det.sugestoes.length, alta: 0, media: 0, info: 0 };
   det.sugestoes.forEach((x) => { counts[x.prioridade] = (counts[x.prioridade] || 0) + 1; });
+
+  const marcar = useMutation({
+    mutationFn: ({ id, acao }: { id: string; acao: AcaoSugestao }) => api.sugestoes.marcar(id, acao),
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ["dashboard", processoId] });
+      qc.invalidateQueries({ queryKey: ["processos"] });
+      toast(vars.acao === "realizada" ? "Marcada como realizada." : "Sugestão dispensada.", { icon: "check" });
+    },
+  });
+
   return (
-    <Card style={{ padding: 20 }}>
-      <PanelHead titulo="Sugestões de produtividade" ajuda="Geradas pela IA combinando seus dados agregados com os 7 desperdícios do Lean. Mais vídeos e validações = mais precisas." right={<span style={{ fontSize: 12, color: "var(--muted)" }}>{visiveis.length} de {det.sugestoes.length}</span>} />
-      <div className="row gap1 wrap" style={{ marginBottom: 14 }}>
+    <Card style={{ padding: 18 }}>
+      <PanelHead titulo="Sugestões de produtividade" ajuda="Geradas pela IA combinando seus dados agregados com os 7 desperdícios do Lean. Marque como realizada quando aplicar a ação — se ela voltar depois, o Prism avisa que não foi cumprida." right={<span style={{ fontSize: 12, color: "var(--muted)" }}>{visiveis.length} de {lista.length}</span>} />
+      <div className="row gap1 wrap" style={{ marginBottom: 12 }}>
         {["todas", "alta", "media", "info"].map((p) => (
-          <button key={p} onClick={() => setPrio(p)} style={{ padding: "4px 11px", borderRadius: 99, fontSize: 12, fontWeight: 600, border: "1px solid", borderColor: prio === p ? "var(--accent)" : "var(--line)", background: prio === p ? "var(--accent)" : "#fff", color: prio === p ? "#fff" : "var(--muted)" }}>
+          <button key={p} onClick={() => { setPrio(p); setVerTodas(false); }} style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11.5, fontWeight: 600, border: "1px solid", borderColor: prio === p ? "var(--accent)" : "var(--line)", background: prio === p ? "var(--accent)" : "#fff", color: prio === p ? "#fff" : "var(--muted)" }}>
             {p === "todas" ? "Todas" : p[0].toUpperCase() + p.slice(1)} · {counts[p] || 0}
           </button>
         ))}
       </div>
-      <div className="col" style={{ gap: 10 }}>
-        {visiveis.length === 0 ? <p style={{ fontSize: 13, color: "var(--muted)" }}>Nenhuma sugestão para o filtro.</p> : visiveis.map((sug) => <SugestaoCard key={sug.id} s={sug} />)}
+      <div className="col" style={{ gap: 8 }}>
+        {visiveis.length === 0
+          ? <p style={{ fontSize: 13, color: "var(--muted)" }}>Nenhuma sugestão pendente.</p>
+          : visiveis.map((sug) => (
+              <SugestaoCard key={sug.id} s={sug} pendente={marcar.isPending} onMarcar={(acao) => marcar.mutate({ id: sug.id, acao })} />
+            ))}
       </div>
+      {lista.length > SUG_VISIVEL_PADRAO && (
+        <div className="row" style={{ justifyContent: "center", marginTop: 10 }}>
+          <button onClick={() => setVerTodas((v) => !v)} className="row gap1" style={{ border: "1px solid var(--line)", background: "#fff", color: "var(--accent)", borderRadius: 99, padding: "6px 14px", fontSize: 12, fontWeight: 600 }}>
+            <Icon name={verTodas ? "chevron-up" : "chevron-down"} size={14} />
+            {verTodas ? "Mostrar menos" : `Ver todas (${lista.length})`}
+          </button>
+        </div>
+      )}
     </Card>
   );
 }
-function SugestaoCard({ s }: { s: DetMock["sugestoes"][number] }) {
+function SugestaoCard({ s, pendente, onMarcar }: { s: SugMock; pendente: boolean; onMarcar: (acao: AcaoSugestao) => void }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="card-flat hoverlift" style={{ padding: 14, borderColor: "var(--line)" }}>
-      <div className="row gap2 wrap" style={{ marginBottom: 6 }}>
+    <div className="card-flat hoverlift" style={{ padding: "10px 12px", borderColor: s.voltou ? "var(--desp)" : "var(--line)" }}>
+      <div className="row gap2 wrap" style={{ marginBottom: 4, alignItems: "center" }}>
         <PrioBadge p={s.prioridade} />
-        <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{s.area}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--text)" }}>{s.area}</span>
+        {s.voltou && (
+          <span className="row gap1" title="Esta sugestão foi marcada como realizada antes — voltou a aparecer, então a ação não foi cumprida ou perdeu efeito." style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 8px", borderRadius: 99, background: "var(--desp-bg)", color: "var(--desp)" }}>
+            <Icon name="alert-triangle" size={11} /> Voltou — não foi cumprida
+          </span>
+        )}
         <span className="grow" />
-        <span className="row gap1" style={{ fontSize: 11.5, color: "var(--muted)" }}><Icon name="zap" size={12} color="var(--accent)" /> impacto {s.impacto}</span>
+        <span className="row gap1" style={{ fontSize: 11, color: "var(--muted)" }}><Icon name="zap" size={11} color="var(--accent)" /> {s.impacto}</span>
       </div>
-      <p className="pretty" style={{ fontSize: 13.5, color: "var(--ink)", lineHeight: 1.5 }}>{s.sugestao}</p>
-      {(s.situacao || s.causa) && (
-        <button onClick={() => setOpen((v) => !v)} className="row gap1" style={{ border: "none", background: "none", color: "var(--accent)", fontSize: 12, fontWeight: 600, marginTop: 8, padding: 0 }}>
-          <Icon name={open ? "chevron-up" : "chevron-down"} size={13} /> {open ? "ocultar" : "ver situação e causa"}
+      <p className="pretty" style={{ fontSize: 13, color: "var(--ink)", lineHeight: 1.45, margin: 0 }}>{s.sugestao}</p>
+      <div className="row gap1 wrap" style={{ marginTop: 8, alignItems: "center" }}>
+        <button onClick={() => onMarcar("realizada")} disabled={pendente} className="row gap1 btn-ok btn-sm" style={{ fontSize: 11.5, padding: "4px 10px", borderRadius: 7 }}>
+          <Icon name="check" size={13} strokeWidth={2.6} /> Realizada
         </button>
-      )}
+        <button onClick={() => onMarcar("dispensada")} disabled={pendente} className="row gap1" style={{ fontSize: 11.5, padding: "4px 10px", borderRadius: 7, border: "1px solid var(--line)", background: "#fff", color: "var(--muted)" }}>
+          <Icon name="x" size={13} /> Dispensar
+        </button>
+        {(s.situacao || s.causa || s.comportamentos.length > 0) && (
+          <>
+            <span className="grow" />
+            <button onClick={() => setOpen((v) => !v)} className="row gap1" style={{ border: "none", background: "none", color: "var(--accent)", fontSize: 11.5, fontWeight: 600, padding: 0 }}>
+              <Icon name={open ? "chevron-up" : "chevron-down"} size={12} /> {open ? "ocultar" : "detalhes"}
+            </button>
+          </>
+        )}
+      </div>
       {open && (
-        <div className="col" style={{ gap: 6, marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--line-2)", fontSize: 12.5, color: "var(--text)" }}>
-          {s.situacao && <p><b style={{ color: "var(--ink)" }}>Situação. </b>{s.situacao}</p>}
-          {s.causa && <p><b style={{ color: "var(--ink)" }}>Causa provável. </b>{s.causa}</p>}
+        <div className="col" style={{ gap: 5, marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--line-2)", fontSize: 12, color: "var(--text)" }}>
+          {s.situacao && <p style={{ margin: 0 }}><b style={{ color: "var(--ink)" }}>Situação. </b>{s.situacao}</p>}
+          {s.causa && <p style={{ margin: 0 }}><b style={{ color: "var(--ink)" }}>Causa provável. </b>{s.causa}</p>}
           {s.comportamentos.length > 0 && (
-            <div className="row wrap" style={{ gap: 5, marginTop: 2 }}>
-              {s.comportamentos.map((c) => <code key={c} style={{ fontSize: 10.5, background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 6 }} className="font-mono">{c}</code>)}
+            <div className="row wrap" style={{ gap: 4, marginTop: 2 }}>
+              {s.comportamentos.map((c) => <code key={c} style={{ fontSize: 10, background: "var(--line-2)", color: "var(--text)", padding: "1px 6px", borderRadius: 5 }} className="font-mono">{c}</code>)}
             </div>
           )}
         </div>

@@ -135,6 +135,9 @@ export interface ParetoItem {
   pct_acumulado: number;
 }
 
+export type StatusSugestao = "pendente" | "realizada" | "dispensada";
+export type AcaoSugestao = "realizada" | "dispensada" | "reabrir";
+
 export interface Sugestao {
   id: string;
   prioridade: "alta" | "media" | "info" | string;
@@ -144,6 +147,9 @@ export interface Sugestao {
   sugestao: string;
   impacto_estimado: string;
   eventos_relacionados?: { comportamentos?: string[] };
+  status?: StatusSugestao;
+  voltou_apos_realizada?: boolean;
+  marcada_em?: string | null;
   criado_em: string;
 }
 

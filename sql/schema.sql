@@ -80,8 +80,14 @@ create table if not exists sugestoes_melhoria (
     sugestao text,
     impacto_estimado text,
     eventos_relacionados jsonb,
+    status text not null default 'pendente',     -- pendente | realizada | dispensada
+    marcada_em timestamptz,
+    voltou_apos_realizada boolean not null default false,
     criado_em timestamptz default now()
 );
+alter table sugestoes_melhoria add column if not exists status text not null default 'pendente';
+alter table sugestoes_melhoria add column if not exists marcada_em timestamptz;
+alter table sugestoes_melhoria add column if not exists voltou_apos_realizada boolean not null default false;
 
 create table if not exists contexto_processo (
     id uuid primary key default gen_random_uuid(),

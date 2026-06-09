@@ -127,6 +127,9 @@ create table if not exists sugestoes_melhoria (
     sugestao text,
     impacto_estimado text,
     eventos_relacionados jsonb,
+    status text not null default 'pendente',     -- pendente | realizada | dispensada
+    marcada_em timestamptz,                       -- quando o gestor marcou
+    voltou_apos_realizada boolean not null default false,  -- sinal: voltou depois de marcada como realizada
     criado_em timestamptz default now()
 );
 
@@ -219,6 +222,9 @@ create table if not exists padroes_globais (
 );
 
 alter table sugestoes_melhoria add column if not exists impacto_estimado text;
+alter table sugestoes_melhoria add column if not exists status text not null default 'pendente';
+alter table sugestoes_melhoria add column if not exists marcada_em timestamptz;
+alter table sugestoes_melhoria add column if not exists voltou_apos_realizada boolean not null default false;
 alter table comportamentos    add column if not exists categoria_lean        text;
 alter table comportamentos    add column if not exists categoria_lean_origem text;
 alter table contexto_processo add column if not exists area text;
@@ -1398,8 +1404,30 @@ def etapa_gerar_sugestoes(
     )
     sugestoes = json.loads(resposta)["sugestoes"]
 
+    # Para sinalizar reincidência: tokens das sugestões que o gestor já marcou
+    # como REALIZADA neste processo. Se uma nova sugestão tem texto parecido
+    # (Jaccard ≥ 0.5) com uma já realizada, é porque a ação não foi cumprida —
+    # marcamos voltou_apos_realizada=true e o painel destaca isso pro gestor.
+    realizadas_tokens: list[set[str]] = []
+    try:
+        rea = (
+            sb.table("sugestoes_melhoria")
+            .select("sugestao")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .eq("status", "realizada")
+            .limit(200)
+            .execute()
+            .data
+        ) or []
+        realizadas_tokens = [_normalizar_pergunta(r.get("sugestao") or "") for r in rea]
+    except Exception as e:
+        log.warning(f"Não foi possível checar sugestões já realizadas: {e}")
+
     linhas_sug = []
     for s in sugestoes:
+        texto = s.get("sugestao", "") or ""
+        voltou = bool(realizadas_tokens) and _eh_duplicada(texto, realizadas_tokens, limiar=0.5)
         linhas_sug.append(
             {
                 "video_id": video_id,
@@ -1409,11 +1437,12 @@ def etapa_gerar_sugestoes(
                 "area": s.get("area", ""),
                 "situacao": s.get("situacao", ""),
                 "causa_provavel": s.get("causa_provavel", ""),
-                "sugestao": s.get("sugestao", ""),
+                "sugestao": texto,
                 "impacto_estimado": s.get("impacto_estimado", ""),
                 "eventos_relacionados": {
                     "comportamentos": s.get("comportamentos_relacionados", [])
                 },
+                "voltou_apos_realizada": voltou,
             }
         )
     if linhas_sug:
@@ -2466,8 +2495,9 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
 
     sugs = (
         sb.table("sugestoes_melhoria")
-        .select("processo, prioridade")
+        .select("processo, prioridade, status")
         .eq("empresa", empresa)
+        .eq("status", "pendente")
         .limit(50000)
         .execute()
         .data

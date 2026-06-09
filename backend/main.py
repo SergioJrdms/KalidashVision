@@ -109,6 +109,10 @@ class CategoriaLeanBody(BaseModel):
     categoria_lean: str | None = None  # 'valor_agregado' | 'apoio' | 'desperdicio' | None
 
 
+class SugestaoAcaoBody(BaseModel):
+    acao: str  # 'realizada' | 'dispensada' | 'reabrir'
+
+
 class PrismMensagemBody(BaseModel):
     pergunta: str = Field(min_length=1, max_length=4000)
 
@@ -415,11 +419,12 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
 
     sugs = (
         sb.table("sugestoes_melhoria")
-        .select("id, prioridade, area, situacao, causa_provavel, sugestao, impacto_estimado, eventos_relacionados, criado_em")
+        .select("id, prioridade, area, situacao, causa_provavel, sugestao, impacto_estimado, eventos_relacionados, status, voltou_apos_realizada, criado_em")
         .eq("empresa", user.empresa)
         .eq("processo", nome)
+        .eq("status", "pendente")
         .order("criado_em", desc=True)
-        .limit(20)
+        .limit(60)
         .execute()
         .data
     ) or []
@@ -593,6 +598,47 @@ def sugestoes(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .execute()
     )
     return r.data or []
+
+
+@app.post("/sugestoes/{sugestao_id}/marcar")
+def marcar_sugestao(
+    sugestao_id: str,
+    body: SugestaoAcaoBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Gestor marca uma sugestão como realizada/dispensada (ou reabre).
+
+    Mantemos a linha em vez de apagar: assim, quando o pipeline gerar nova
+    sugestão parecida no futuro, dá pra detectar que ela já foi marcada como
+    realizada (e a ação não foi cumprida).
+    """
+    from datetime import datetime
+
+    acao = (body.acao or "").strip().lower()
+    if acao not in {"realizada", "dispensada", "reabrir"}:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "acao deve ser 'realizada', 'dispensada' ou 'reabrir'.",
+        )
+
+    sb = make_supabase_client()
+    r = (
+        sb.table("sugestoes_melhoria")
+        .select("id, empresa")
+        .eq("id", sugestao_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sugestão não encontrada")
+    if r.data[0]["empresa"] != user.empresa:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+
+    if acao == "reabrir":
+        update = {"status": "pendente", "marcada_em": None}
+    else:
+        update = {"status": acao, "marcada_em": datetime.utcnow().isoformat()}
+    sb.table("sugestoes_melhoria").update(update).eq("id", sugestao_id).execute()
+    return {"ok": True, "status": update["status"]}
 
 
 # ═════════════════════════════════════════════════════════════════════════

@@ -18,6 +18,7 @@ import type {
   Processo,
   ProcessoDetalhe,
   Sugestao,
+  AcaoSugestao,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -122,6 +123,13 @@ export const api = {
       }),
     dispensar: (id: string) =>
       req<{ ok: boolean }>(`/perguntas/${id}/dispensar`, { method: "POST" }),
+  },
+  sugestoes: {
+    marcar: (id: string, acao: AcaoSugestao) =>
+      req<{ ok: boolean; status: string }>(`/sugestoes/${id}/marcar`, {
+        method: "POST",
+        body: JSON.stringify({ acao }),
+      }),
   },
   comportamentos: {
     setCategoria: (comportamentoId: string, categoria_lean: CategoriaLean | null) =>

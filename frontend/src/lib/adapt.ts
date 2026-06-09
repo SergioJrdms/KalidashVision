@@ -43,7 +43,7 @@ export interface ProcHeaderMock {
 }
 
 export interface CompMock { id: string; nome: string; pct: number; seg: number; cat: LeanShort; origem: string | null }
-export interface SugMock { id: string; prioridade: string; area: string; sugestao: string; impacto: string; situacao: string; causa: string; comportamentos: string[] }
+export interface SugMock { id: string; prioridade: string; area: string; sugestao: string; impacto: string; situacao: string; causa: string; comportamentos: string[]; voltou: boolean }
 export interface DetMock {
   snapshot: { va: number; apoio: number; desp: number; none: number; tempoObservadoMin: number; videos: number; validadoPct: number; topComportamento: { nome: string; pct: number } };
   comportamentos: CompMock[];
@@ -138,6 +138,7 @@ export function mapDashboard(d: DashboardData): DetMock {
     situacao: x.situacao || "",
     causa: x.causa_provavel || "",
     comportamentos: x.eventos_relacionados?.comportamentos || [],
+    voltou: !!x.voltou_apos_realizada,
   }));
   return {
     snapshot: {
