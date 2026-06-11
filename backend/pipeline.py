@@ -1725,6 +1725,119 @@ def classificar_comportamentos_lean(
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# ONBOARDING — conversa adaptativa para colher a descrição inicial do
+# processo. O frontend chama /onboarding/proxima-pergunta a cada turno
+# mandando o histórico. Quando a IA julga ter cobertura suficiente,
+# devolve completo=true + descricao_consolidada (vai pra contexto_processo).
+# ═════════════════════════════════════════════════════════════════════════
+PROMPT_ONBOARDING = """Você está conduzindo o ONBOARDING de um novo processo industrial chamado "{processo}" para a empresa "{empresa}". Sua missão é COLHER a descrição do processo do gestor através de uma conversa curta, natural e adaptativa.
+
+Você precisa COBRIR durante a conversa, na ordem natural, TODOS estes pontos:
+  1. ÁREA / nicho da indústria (qual o setor: estamparia, embalagem, picking, logística, frigorífico, etc.).
+  2. INÍCIO do processo: como começa, o que dispara a operação, qual o INPUT (matéria-prima, peça, pacote, pedido).
+  3. PASSOS principais: o que precisa ser feito, em que ordem, em quais estações.
+  4. OUTPUT: o que sai pronto ao final, como o operador sabe que terminou.
+  5. PROBLEMAS RECORRENTES: o que costuma dar errado, onde trava.
+  6. EXCEÇÕES: situações fora do padrão que mudam o fluxo.
+
+REGRAS DURAS:
+- Faça UMA pergunta por vez. CURTA (1 frase), em linguagem de chão de fábrica, sem jargão técnico/Lean/IA.
+- ADAPTE a próxima pergunta ao que o gestor já respondeu. NÃO repita, NÃO crie variantes de perguntas já feitas.
+- Se ainda não sabe a ÁREA, comece perguntando por ela. Caso contrário siga a ordem natural.
+- Gere SEMPRE 3 "respostas_rapidas" (1 a 5 palavras cada), PLAUSÍVEIS e específicas a essa pergunta + a esse processo. PROIBIDO devolver Sim/Não/Às vezes como padrão, a menos que a pergunta seja genuinamente binária. As 3 devem cobrir os cenários mais prováveis que esse gestor responderia.
+- Quando já tiver informação suficiente para descrever bem o processo (cobriu razoavelmente os 6 pontos acima — ÁREA + INPUT + PASSOS + OUTPUT no mínimo; PROBLEMAS e EXCEÇÕES podem ter sido "não há"), marque "completo": true e devolva "descricao_consolidada": um texto profissional de 2 a 4 parágrafos em português do Brasil, sintetizando TUDO que o gestor contou, na voz neutra ("os operadores fazem X", "o processo começa com Y"). NUNCA invente o que não foi dito.
+
+CONTEXTO DA CONVERSA ATÉ AQUI:
+Empresa: {empresa}
+Processo: {processo}
+Área já informada pelo gestor: {area_inicial}
+
+Histórico (pergunta → resposta):
+{bloco_historico}
+
+Responda APENAS um JSON estrito. Dois formatos possíveis:
+- Se ainda precisa perguntar mais:
+  {{"completo": false, "pergunta": "...", "motivo": "1 frase curta — por que essa pergunta importa", "respostas_rapidas": ["...", "...", "..."]}}
+- Se já tem o suficiente para consolidar:
+  {{"completo": true, "descricao_consolidada": "..."}}
+"""
+
+
+def gerar_pergunta_onboarding(
+    groq_client: Groq,
+    empresa: str,
+    processo: str,
+    area_inicial: str | None,
+    historico: list[dict],
+) -> dict:
+    """Devolve a próxima pergunta do onboarding adaptativo ou a descrição
+    consolidada quando a IA julga ter cobertura suficiente."""
+    if historico:
+        bloco = "\n".join(
+            f"P: {(h.get('pergunta') or '').strip()}\nR: {(h.get('resposta') or '').strip()}\n"
+            for h in historico
+            if (h.get("pergunta") or "").strip() and (h.get("resposta") or "").strip()
+        ) or "(nenhuma resposta válida ainda)"
+    else:
+        bloco = "(nenhuma pergunta feita ainda — comece pela ÁREA do processo, se ainda não informada)"
+
+    prompt = PROMPT_ONBOARDING.format(
+        empresa=empresa,
+        processo=processo,
+        area_inicial=(area_inicial or "—"),
+        bloco_historico=bloco,
+    )
+    resposta = groq_text_call(
+        groq_client,
+        prompt,
+        model=GROQ_MODEL_ANALISE,
+        json_mode=True,
+        max_tokens=2200,
+        temperatura=0.4,
+    )
+    dados = json.loads(resposta)
+
+    if dados.get("completo"):
+        descricao = (dados.get("descricao_consolidada") or "").strip()
+        if not descricao:
+            # Salvaguarda: se a IA disse completo=true mas não mandou texto,
+            # devolvemos uma pergunta fallback ao invés de quebrar.
+            return {
+                "completo": False,
+                "pergunta": "Tem mais alguma coisa importante do processo que eu deveria saber?",
+                "motivo": "Última checagem antes de consolidar a descrição.",
+                "respostas_rapidas": ["Não, pode consolidar", "Sim, deixa eu contar", "Acho que cobrimos tudo"],
+            }
+        return {"completo": True, "descricao_consolidada": descricao}
+
+    # Sanitiza as 3 respostas rápidas (mesmo padrão de gerar_perguntas_processo).
+    rapidas_raw = dados.get("respostas_rapidas") or []
+    rapidas: list[str] = []
+    vistas: set[str] = set()
+    if isinstance(rapidas_raw, list):
+        for r in rapidas_raw:
+            if not isinstance(r, str):
+                continue
+            s = " ".join(r.split())
+            if not (2 <= len(s) <= 60):
+                continue
+            chave = s.lower()
+            if chave in vistas:
+                continue
+            vistas.add(chave)
+            rapidas.append(s)
+            if len(rapidas) == 3:
+                break
+
+    return {
+        "completo": False,
+        "pergunta": (dados.get("pergunta") or "").strip(),
+        "motivo": (dados.get("motivo") or "").strip(),
+        "respostas_rapidas": rapidas if len(rapidas) == 3 else None,
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # PERGUNTAS PROATIVAS — a IA pede esclarecimentos ao cliente, e cada
 # resposta vira contexto de domínio nos prompts seguintes.
 # ═════════════════════════════════════════════════════════════════════════

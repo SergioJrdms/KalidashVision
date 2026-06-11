@@ -159,19 +159,217 @@ function ProgressoJob({ job, proc, go, fileName }: { job: JobStatus; proc: ProcH
   );
 }
 
+type OnbTurn = { pergunta: string; resposta: string };
+
 export function Descricao({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const qc = useQueryClient();
   const det = useQuery({ queryKey: ["processo", proc.id], queryFn: () => api.processos.detalhe(proc.id) });
+  const [modoEdicao, setModoEdicao] = useState<"wizard" | "manual" | null>(null);
+
+  // Modo inicial é decidido pelo estado atual do processo: sem descrição → wizard.
+  const modo = modoEdicao ?? (det.data && (det.data.descricao || "").trim() ? "manual" : "wizard");
+
+  if (det.isLoading) {
+    return <div className="center" style={{ padding: 60 }}><span className="spin" style={{ width: 22, height: 22, border: "3px solid var(--p-100)", borderTopColor: "var(--accent)", borderRadius: "50%" }} /></div>;
+  }
+
+  if (modo === "wizard") {
+    return <OnboardingWizard proc={proc} go={go} areaInicial={det.data?.area || ""} onCancelar={() => setModoEdicao("manual")} />;
+  }
+  return <DescricaoManual proc={proc} go={go} descricaoAtual={det.data?.descricao || ""} areaAtual={det.data?.area || ""} onRefazerOnboarding={() => setModoEdicao("wizard")} onSalvar={() => {
+    qc.invalidateQueries({ queryKey: ["processo", proc.id] });
+    qc.invalidateQueries({ queryKey: ["processos"] });
+  }} />;
+}
+
+// ── Wizard adaptativo ──────────────────────────────────────
+function OnboardingWizard({ proc, go, areaInicial, onCancelar }: { proc: ProcHeaderMock; go: Go; areaInicial: string; onCancelar: () => void }) {
+  const qc = useQueryClient();
+  const [historico, setHistorico] = useState<OnbTurn[]>([]);
+  const [perguntaAtual, setPerguntaAtual] = useState<{ pergunta: string; motivo: string; chips: string[] } | null>(null);
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState<string | null>(null);
   const [texto, setTexto] = useState("");
-  const [area, setArea] = useState("");
+  const [consolidada, setConsolidada] = useState<string | null>(null);
+  const [salvando, setSalvando] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  async function pedirProxima(novoHistorico: OnbTurn[]) {
+    setCarregando(true);
+    setErro(null);
+    try {
+      const r = await api.processos.onboardingProxima(proc.id, novoHistorico, areaInicial || null);
+      if (r.completo) {
+        setConsolidada(r.descricao_consolidada);
+        setPerguntaAtual(null);
+      } else {
+        setPerguntaAtual({
+          pergunta: r.pergunta,
+          motivo: r.motivo || "",
+          chips: r.respostas_rapidas && r.respostas_rapidas.length >= 2 ? r.respostas_rapidas : [],
+        });
+      }
+    } catch (e) {
+      setErro((e as Error).message);
+    } finally {
+      setCarregando(false);
+    }
+  }
+
+  // Dispara a 1ª pergunta na montagem.
+  useEffect(() => { void pedirProxima([]); /* eslint-disable-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [historico, perguntaAtual, consolidada]);
+
+  function responder(resposta: string) {
+    if (!perguntaAtual || !resposta.trim()) return;
+    const novo: OnbTurn[] = [...historico, { pergunta: perguntaAtual.pergunta, resposta: resposta.trim() }];
+    setHistorico(novo);
+    setPerguntaAtual(null);
+    setTexto("");
+    void pedirProxima(novo);
+  }
+
+  async function salvarConsolidada(textoFinal: string) {
+    if (!textoFinal.trim()) return;
+    setSalvando(true);
+    try {
+      await api.processos.setDescricao(proc.id, textoFinal.trim());
+      qc.invalidateQueries({ queryKey: ["processo", proc.id] });
+      qc.invalidateQueries({ queryKey: ["processos"] });
+      toast("Descrição salva — o Prism vai usar no contexto.", { icon: "check" });
+      go("processo", proc.id, "upload");
+    } catch (e) {
+      setErro((e as Error).message);
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <div style={{ maxWidth: 760, margin: "0 auto" }}>
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        {/* cabeçalho */}
+        <div className="row gap2" style={{ padding: "16px 22px", borderBottom: "1px solid var(--line)", background: "var(--accent-soft)" }}>
+          <Prism size={32} ring />
+          <div className="grow">
+            <h1 className="font-display" style={{ fontSize: 17, fontWeight: 700, color: "var(--ink)" }}>Conhecendo o seu processo</h1>
+            <p style={{ fontSize: 12.5, color: "var(--accent-deep)", marginTop: 1 }}>
+              Conversa rápida — vou te perguntar o essencial para entender essa linha.
+            </p>
+          </div>
+          <span className="badge badge-purple">{historico.length} resposta{historico.length === 1 ? "" : "s"}</span>
+        </div>
+
+        {/* conversa */}
+        <div ref={scrollRef} className="col" style={{ padding: 20, gap: 14, maxHeight: 560, overflowY: "auto" }}>
+          {historico.map((h, i) => (
+            <div key={i} className="col" style={{ gap: 8 }}>
+              <Bolha who="prism" text={h.pergunta} />
+              <Bolha who="me" text={h.resposta} />
+            </div>
+          ))}
+
+          {erro && (
+            <div className="row gap2" style={{ background: "var(--desp-bg)", border: "1px solid var(--desp)", borderRadius: 10, padding: "9px 12px", fontSize: 12.5, color: "var(--desp)" }}>
+              <Icon name="alert-triangle" size={14} /> {erro}
+              <span className="grow" />
+              <button onClick={() => pedirProxima(historico)} className="row gap1" style={{ border: "none", background: "transparent", color: "var(--desp)", fontWeight: 700, fontSize: 12 }}>
+                <Icon name="rotate-ccw" size={13} /> Tentar de novo
+              </button>
+            </div>
+          )}
+
+          {carregando && (
+            <div className="row gap2" style={{ alignItems: "center", fontSize: 12.5, color: "var(--muted)" }}>
+              <Prism size={24} ring />
+              <span className="spin" style={{ width: 12, height: 12, border: "2px solid var(--p-100)", borderTopColor: "var(--accent)", borderRadius: "50%" }} />
+              {consolidada === null && historico.length === 0 ? "Pensando na primeira pergunta…" : carregando && perguntaAtual === null && consolidada === null ? "Pensando na próxima pergunta…" : "Consolidando o que você contou…"}
+            </div>
+          )}
+
+          {!carregando && perguntaAtual && (
+            <div className="col anim-fadeup" style={{ gap: 10 }}>
+              <Bolha who="prism" text={perguntaAtual.pergunta} />
+              {perguntaAtual.motivo && (
+                <span style={{ fontSize: 11.5, color: "var(--faint)", paddingLeft: 38, fontStyle: "italic" }}>{perguntaAtual.motivo}</span>
+              )}
+              {perguntaAtual.chips.length > 0 && (
+                <div className="row wrap gap2" style={{ paddingLeft: 38 }}>
+                  {perguntaAtual.chips.map((c) => (
+                    <button key={c} onClick={() => responder(c)} className="row gap1" style={{ padding: "7px 14px", borderRadius: 99, border: "1px solid var(--p-200)", background: "#fff", color: "var(--accent-deep)", fontSize: 13, fontWeight: 600, transition: "all .15s" }}
+                      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "var(--accent-soft)")} onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#fff")}>
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="row gap2" style={{ paddingLeft: 38, alignItems: "flex-end" }}>
+                <textarea className="field" rows={1} value={texto} onChange={(e) => setTexto(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && texto.trim()) { e.preventDefault(); responder(texto); } }}
+                  placeholder="…ou responda com suas palavras" style={{ resize: "none", maxHeight: 120, fontSize: 13.5 }} />
+                <Btn variant="primary" disabled={!texto.trim()} onClick={() => responder(texto)} icon="arrow-up">Enviar</Btn>
+              </div>
+            </div>
+          )}
+
+          {!carregando && consolidada !== null && (
+            <ConsolidacaoBox texto={consolidada} salvando={salvando} onSalvar={salvarConsolidada} />
+          )}
+        </div>
+
+        {/* rodapé */}
+        <div className="row" style={{ justifyContent: "space-between", padding: "10px 18px", borderTop: "1px solid var(--line-2)", background: "var(--soft)", fontSize: 11.5, color: "var(--muted)" }}>
+          <span className="row gap1"><Icon name="info" size={12} /> As respostas viram contexto permanente do Prism para essa linha.</span>
+          <button onClick={onCancelar} style={{ border: "none", background: "none", color: "var(--muted)", fontSize: 11.5, fontWeight: 600, padding: 0 }}>
+            prefiro escrever do zero
+          </button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function Bolha({ who, text }: { who: "me" | "prism"; text: string }) {
+  if (who === "me") {
+    return <div className="row" style={{ justifyContent: "flex-end" }}><div style={{ maxWidth: "78%", background: "var(--accent)", color: "#fff", padding: "8px 13px", borderRadius: "14px 14px 4px 14px", fontSize: 13.5, lineHeight: 1.45 }}>{text}</div></div>;
+  }
+  return (
+    <div className="row gap2" style={{ alignItems: "flex-start" }}>
+      <Prism size={26} ring />
+      <div style={{ maxWidth: "82%", background: "var(--soft)", border: "1px solid var(--line)", padding: "9px 13px", borderRadius: "14px 14px 14px 4px", fontSize: 13.5, color: "var(--ink)", lineHeight: 1.5 }}>{text}</div>
+    </div>
+  );
+}
+
+function ConsolidacaoBox({ texto, salvando, onSalvar }: { texto: string; salvando: boolean; onSalvar: (t: string) => void }) {
+  const [editado, setEditado] = useState(texto);
+  return (
+    <div className="col anim-fadeup" style={{ gap: 12 }}>
+      <div className="row gap2" style={{ alignItems: "flex-start" }}>
+        <span className="center" style={{ width: 28, height: 28, borderRadius: 9, background: "var(--va-bg)", color: "var(--va)", flex: "none" }}><Icon name="check" size={15} strokeWidth={2.6} /></span>
+        <div>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>Acho que entendi sua linha.</div>
+          <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>Veja se a descrição abaixo bate com a realidade. Você pode refinar antes de salvar.</p>
+        </div>
+      </div>
+      <textarea className="field" rows={10} value={editado} onChange={(e) => setEditado(e.target.value)} style={{ resize: "vertical", lineHeight: 1.55, fontSize: 13.5 }} />
+      <div className="row gap2" style={{ justifyContent: "flex-end" }}>
+        <Btn variant="primary" icon="save" disabled={!editado.trim() || salvando} onClick={() => onSalvar(editado)}>
+          {salvando ? "Salvando…" : "Salvar e ir para o upload"}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+// ── Edição manual (estado anterior preservado) ─────────────
+function DescricaoManual({ proc, go, descricaoAtual, areaAtual, onRefazerOnboarding, onSalvar }: { proc: ProcHeaderMock; go: Go; descricaoAtual: string; areaAtual: string; onRefazerOnboarding: () => void; onSalvar: () => void }) {
+  const [texto, setTexto] = useState(descricaoAtual);
+  const [area, setArea] = useState(areaAtual);
   const [saved, setSaved] = useState(false);
-  const [seed, setSeed] = useState(false);
-  useEffect(() => { if (det.data && !seed) { setTexto(det.data.descricao || ""); setArea(det.data.area || ""); setSeed(true); } }, [det.data, seed]);
 
   async function salvar() {
     await Promise.all([api.processos.setDescricao(proc.id, texto.trim()), api.processos.setArea(proc.id, area.trim() || null)]);
-    qc.invalidateQueries({ queryKey: ["processo", proc.id] });
-    qc.invalidateQueries({ queryKey: ["processos"] });
+    onSalvar();
     setSaved(true);
     toast("Descrição salva — o Prism vai usar no contexto.", { icon: "check" });
   }
@@ -179,7 +377,12 @@ export function Descricao({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   return (
     <div style={{ maxWidth: 760, margin: "0 auto" }}>
       <Card style={{ padding: 28 }}>
-        <h1 className="font-display" style={{ fontSize: 22, fontWeight: 700 }}>Descrição do processo</h1>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <h1 className="font-display" style={{ fontSize: 22, fontWeight: 700 }}>Descrição do processo</h1>
+          <button onClick={onRefazerOnboarding} className="row gap1" style={{ border: "1px solid var(--p-200)", background: "var(--accent-soft)", color: "var(--accent-deep)", borderRadius: 99, padding: "5px 12px", fontSize: 12, fontWeight: 600 }}>
+            <Icon name="sparkles" size={13} /> Refazer com o Prism
+          </button>
+        </div>
         <p className="pretty" style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 6 }}>
           Conte como o processo funciona: o que os operadores fazem, em que ordem, em quais estações. O Prism usa esse texto para reconhecer melhor os comportamentos esperados e sinalizar o que é incomum.
         </p>

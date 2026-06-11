@@ -64,6 +64,18 @@ export const api = {
         method: "PUT",
         body: JSON.stringify({ area }),
       }),
+    onboardingProxima: (
+      id: string,
+      historico: { pergunta: string; resposta: string }[],
+      area_inicial: string | null,
+    ) =>
+      req<
+        | { completo: false; pergunta: string; motivo: string; respostas_rapidas: string[] | null }
+        | { completo: true; descricao_consolidada: string }
+      >(`/processos/${id}/onboarding/proxima-pergunta`, {
+        method: "POST",
+        body: JSON.stringify({ historico, area_inicial }),
+      }),
     dashboard: (id: string) => req<DashboardData>(`/processos/${id}/dashboard`),
     sugestoes: (id: string) => req<Sugestao[]>(`/processos/${id}/sugestoes`),
     eventosPendentes: (id: string) =>

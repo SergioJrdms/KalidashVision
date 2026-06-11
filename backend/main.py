@@ -42,6 +42,7 @@ from .pipeline import (
     gerar_insights_globais,
     montar_serie_temporal,
     analisar_padroes_globais,
+    gerar_pergunta_onboarding,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -127,6 +128,16 @@ class CategoriaLeanBody(BaseModel):
 
 class SugestaoAcaoBody(BaseModel):
     acao: str  # 'realizada' | 'dispensada' | 'reabrir'
+
+
+class OnboardingTurno(BaseModel):
+    pergunta: str
+    resposta: str
+
+
+class OnboardingProximaBody(BaseModel):
+    historico: list[OnboardingTurno] = Field(default_factory=list)
+    area_inicial: str | None = None
 
 
 class PrismMensagemBody(BaseModel):
@@ -258,6 +269,38 @@ def atualizar_descricao(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Processo não encontrado")
     resolver_descricao_processo(sb, user.empresa, r.data[0]["processo"], body.descricao)
     return {"ok": True}
+
+
+@app.post("/processos/{processo_id}/onboarding/proxima-pergunta")
+def onboarding_proxima_pergunta(
+    processo_id: str,
+    body: OnboardingProximaBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Conversa adaptativa para colher a descrição inicial do processo.
+
+    Frontend envia o histórico (pergunta→resposta) acumulado e a área já
+    informada. Backend devolve a próxima pergunta (com 3 chips de resposta
+    rápida geradas pela LLM) ou, quando há cobertura suficiente, a
+    descricao_consolidada (frontend salva via PUT /descricao).
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    groq_client = make_groq_client()
+    try:
+        return gerar_pergunta_onboarding(
+            groq_client,
+            user.empresa,
+            nome,
+            body.area_inicial,
+            [t.model_dump() for t in body.historico],
+        )
+    except Exception as e:
+        log.warning(f"Falha no onboarding LLM ({user.empresa}/{nome}): {e}")
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Falha ao gerar próxima pergunta: {e}",
+        )
 
 
 @app.put("/processos/{processo_id}/area")
