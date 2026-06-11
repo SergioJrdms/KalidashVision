@@ -124,7 +124,10 @@ function PadroesGlobais({ padroes }: { padroes: ReturnType<typeof mapPadroesGlob
 
 function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
   const nivel = nivelDe(p.maturidade);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [excluir, setExcluir] = useState(false);
   return (
+    <>
     <Card className="hoverlift click anim-fadeup" style={{ padding: 18, animationDelay: `${i * 60}ms`, display: "flex", flexDirection: "column" }} onClick={() => go("processo", p.id, "dashboard")}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
         <div className="grow" style={{ minWidth: 0 }}>
@@ -134,7 +137,37 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
           </div>
           <h3 className="font-display truncate" style={{ fontSize: 17, fontWeight: 700 }}>{p.nome}</h3>
         </div>
-        <MaturityMeter pct={p.maturidade} size={46} compact />
+        <div className="row gap1" style={{ alignItems: "flex-start", flex: "none" }}>
+          <MaturityMeter pct={p.maturidade} size={46} compact />
+          <div style={{ position: "relative" }} onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              className="center"
+              title="Ações do processo"
+              style={{ width: 28, height: 28, borderRadius: 8, border: "none", background: menuOpen ? "var(--line-2)" : "transparent", color: "var(--muted)", cursor: "pointer" }}
+              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "var(--line-2)")}
+              onMouseLeave={(e) => { if (!menuOpen) (e.currentTarget as HTMLElement).style.background = "transparent"; }}
+            >
+              <Icon name="more-vertical" size={16} />
+            </button>
+            {menuOpen && (
+              <>
+                <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 50 }} />
+                <div style={{ position: "absolute", top: 32, right: 0, zIndex: 51, background: "#fff", border: "1px solid var(--line)", borderRadius: 10, padding: 4, boxShadow: "0 8px 28px -10px rgba(26,16,49,.22)", minWidth: 180 }}>
+                  <button
+                    onClick={() => { setMenuOpen(false); setExcluir(true); }}
+                    className="row gap2"
+                    style={{ width: "100%", padding: "9px 11px", border: "none", borderRadius: 7, background: "transparent", color: "var(--desp)", fontSize: 13, fontWeight: 600, textAlign: "left", cursor: "pointer" }}
+                    onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "var(--desp-bg)")}
+                    onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
+                  >
+                    <Icon name="trash-2" size={15} /> Excluir processo
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
       <p className="clamp2 pretty" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8, minHeight: 34, lineHeight: 1.45 }}>{p.descricao || "Sem descrição ainda."}</p>
 
@@ -155,6 +188,8 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
         <Icon name="clock" size={12} /> Último vídeo {p.ultimoVideo}
       </div>
     </Card>
+    {excluir && <ExcluirProcessoModal p={p} onClose={() => setExcluir(false)} />}
+    </>
   );
 }
 
@@ -203,6 +238,42 @@ function NovoProcessoModal({ onClose, go }: { onClose: () => void; go: Go }) {
       <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
         <Btn variant="ghost" onClick={onClose}>Cancelar</Btn>
         <Btn disabled={!nome.trim() || mut.isPending} onClick={() => mut.mutate()}>{mut.isPending ? "Criando…" : "Criar processo"}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function ExcluirProcessoModal({ p, onClose }: { p: ProcMock; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [confirma, setConfirma] = useState("");
+  const [erro, setErro] = useState<string | null>(null);
+  const mut = useMutation({
+    mutationFn: () => api.processos.excluir(p.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["processos"] });
+      qc.invalidateQueries({ queryKey: ["insights-globais"] });
+      qc.invalidateQueries({ queryKey: ["padroes-globais"] });
+      onClose();
+      toast(`Processo "${p.nome}" excluído.`, { icon: "check" });
+    },
+    onError: (e: Error) => setErro(e.message),
+  });
+  const podeExcluir = confirma.trim() === p.nome && !mut.isPending;
+  return (
+    <Modal onClose={mut.isPending ? () => {} : onClose}>
+      <div className="row gap2" style={{ marginBottom: 8 }}>
+        <span className="center" style={{ width: 34, height: 34, borderRadius: 10, background: "var(--desp-bg)", color: "var(--desp)" }}><Icon name="alert-triangle" size={18} /></span>
+        <h2 className="font-display" style={{ fontSize: 19, fontWeight: 700, color: "var(--ink)" }}>Excluir processo</h2>
+      </div>
+      <p style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.55, margin: "8px 0 14px" }}>
+        Esta ação apaga <b>{p.videos} vídeo{p.videos === 1 ? "" : "s"}</b>, todos os eventos, comportamentos aprendidos, sugestões, padrões, perguntas e conversas do Prism em <b style={{ color: "var(--ink)" }}>"{p.nome}"</b>. <b style={{ color: "var(--desp)" }}>Não é possível desfazer.</b>
+      </p>
+      <label className="label">Para confirmar, digite o nome do processo</label>
+      <input className="field" autoFocus value={confirma} onChange={(e) => setConfirma(e.target.value)} placeholder={p.nome} />
+      {erro && <p style={{ fontSize: 12.5, color: "var(--desp)", marginTop: 8 }}>{erro}</p>}
+      <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
+        <Btn variant="ghost" disabled={mut.isPending} onClick={onClose}>Cancelar</Btn>
+        <Btn variant="danger" disabled={!podeExcluir} onClick={() => mut.mutate()}>{mut.isPending ? "Excluindo…" : "Excluir definitivamente"}</Btn>
       </div>
     </Modal>
   );
