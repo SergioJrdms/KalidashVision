@@ -4,6 +4,8 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
+import unicodedata
 import uuid
 from typing import Any
 
@@ -66,6 +68,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ═════════════════════════════════════════════════════════════════════════
+def _slug_storage(texto: str, padrao: str = "x") -> str:
+    """Normaliza um segmento para chave válida do Supabase Storage.
+
+    Storage rejeita acentos e a maioria dos caracteres não-ASCII (InvalidKey).
+    Ex.: 'Linha de Produção - Queijos' → 'Linha_de_Producao_-_Queijos'.
+    """
+    s = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("._-")
+    return s or padrao
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -362,7 +378,15 @@ async def upload_video(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Arquivo vazio.")
 
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
-    storage_path = f"{user.empresa}/{processo_nome}/{uuid.uuid4()}_{file.filename}"
+    # Chave do Storage só aceita ASCII seguro — sanitiza empresa/processo/arquivo
+    # (o nome original do vídeo segue preservado na coluna `nome` da tabela videos).
+    nome_orig = file.filename or "video.mp4"
+    if "." in nome_orig:
+        base_nome, _, ext_nome = nome_orig.rpartition(".")
+    else:
+        base_nome, ext_nome = nome_orig, "mp4"
+    arquivo = f"{uuid.uuid4()}_{_slug_storage(base_nome, 'video')}.{_slug_storage(ext_nome, 'mp4')}"
+    storage_path = f"{_slug_storage(user.empresa, 'empresa')}/{_slug_storage(processo_nome, 'processo')}/{arquivo}"
     try:
         sb.storage.from_(bucket).upload(
             storage_path,
