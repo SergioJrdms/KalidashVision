@@ -801,57 +801,72 @@ def etapa_detectar_e_amostrar(
     h = info["altura"]
 
     rois = _build_rois(rois_contexto, w, h)
-    intervalo_frames = max(1, int(intervalo_s * fps))
     area_min_px = AREA_MIN_RATIO * (w * h)
+
+    # Aceleração da detecção (env-tunável, sem novo deploy):
+    #  - KV_TRACK_FPS: cadência efetiva do tracking (faixa útil 4–8). O YOLO roda 1 a
+    #    cada `track_stride` frames; os demais são pulados SEM decodificar (cap.grab) →
+    #    ~track_stride× menos inferência. BoT-SORT mantém os IDs estáveis nessa cadência.
+    #  - KV_IMGSZ: 640→416 reduz ~1.7× o custo por frame (o sub-stream já é pequeno).
+    track_fps = float(os.environ.get("KV_TRACK_FPS", "6"))
+    track_stride = max(1, round(fps / track_fps)) if track_fps > 0 else 1
+    imgsz = int(os.environ.get("KV_IMGSZ", "416"))
 
     amostras: list[Amostra] = []
     cap = cv2.VideoCapture(video_path)
     frame_idx = 0
+    prox_amostra_s = 0.0   # próxima marca de amostragem p/ o VLM (a cada intervalo_s)
     progress_cb("deteccao", 0, f"Detectando pessoas · {total_frames} frames")
 
     while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
+        if not cap.grab():                 # avança sem decodificar (barato)
             break
-        results = yolo.track(
-            frame,
-            persist=True,
-            classes=[0],
-            conf=YOLO_CONF_MIN,
-            tracker=TRACKER_CONFIG,
-            verbose=False,
-        )
-        if (
-            frame_idx % intervalo_frames == 0
-            and results[0].boxes is not None
-            and results[0].boxes.id is not None
-        ):
-            boxes = results[0].boxes.xyxy.cpu().numpy()
-            ids = results[0].boxes.id.cpu().numpy().astype(int)
-            areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-            mask = areas >= area_min_px
-            pessoas = []
-            for i, (box, tid) in enumerate(zip(boxes[mask], ids[mask])):
-                x1, y1, x2, y2 = box.astype(int)
-                cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                pessoas.append(
-                    {
-                        "track_id": int(tid),
-                        "bbox": (int(x1), int(y1), int(x2), int(y2)),
-                        "centro": (cx, cy),
-                        "zona": _zona_contexto(cx, cy, rois),
-                        "rotulo": f"P{i + 1}",
-                    }
-                )
-            if pessoas:
-                amostras.append(
-                    Amostra(
-                        frame_idx=frame_idx,
-                        tempo_s=frame_idx / fps,
-                        frame_bgr=frame.copy(),
-                        pessoas=pessoas,
-                    )
-                )
+        if frame_idx % track_stride == 0:
+            ret, frame = cap.retrieve()    # decodifica só os frames que vão pro YOLO
+            if not ret:
+                break
+            results = yolo.track(
+                frame,
+                persist=True,
+                classes=[0],
+                conf=YOLO_CONF_MIN,
+                tracker=TRACKER_CONFIG,
+                imgsz=imgsz,
+                verbose=False,
+            )
+            tempo_s = frame_idx / fps
+            if tempo_s >= prox_amostra_s:
+                prox_amostra_s += intervalo_s   # consome este slot (~1 amostra / intervalo_s)
+                if (
+                    results[0].boxes is not None
+                    and results[0].boxes.id is not None
+                ):
+                    boxes = results[0].boxes.xyxy.cpu().numpy()
+                    ids = results[0].boxes.id.cpu().numpy().astype(int)
+                    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+                    mask = areas >= area_min_px
+                    pessoas = []
+                    for i, (box, tid) in enumerate(zip(boxes[mask], ids[mask])):
+                        x1, y1, x2, y2 = box.astype(int)
+                        cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                        pessoas.append(
+                            {
+                                "track_id": int(tid),
+                                "bbox": (int(x1), int(y1), int(x2), int(y2)),
+                                "centro": (cx, cy),
+                                "zona": _zona_contexto(cx, cy, rois),
+                                "rotulo": f"P{i + 1}",
+                            }
+                        )
+                    if pessoas:
+                        amostras.append(
+                            Amostra(
+                                frame_idx=frame_idx,
+                                tempo_s=tempo_s,
+                                frame_bgr=frame.copy(),
+                                pessoas=pessoas,
+                            )
+                        )
         frame_idx += 1
         if frame_idx % 60 == 0:
             pct = int(frame_idx / max(1, total_frames) * 100)
