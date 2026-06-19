@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "./hooks/useAuth";
+import { useIsMobile } from "./hooks/useIsMobile";
 import { supabase } from "./lib/supabase";
 import { api } from "./lib/api";
 import { mapProcessos, mapHeader, type ProcHeaderMock } from "./lib/adapt";
@@ -51,21 +52,26 @@ export default function App() {
 
 function AppShell() {
   const { user, empresa } = useAuth();
+  const isMobile = useIsMobile();
   const [route, setRoute] = useState<Route>({ screen: "processos", processId: null, tab: "dashboard" });
   const [prism, setPrism] = useState<{ open: boolean; scope: "global" | "processo" }>({ open: false, scope: "global" });
+  const [navOpen, setNavOpen] = useState(false);
 
   function go(screen: Route["screen"], processId: string | null = null, tab: Route["tab"] = "dashboard") {
     setPrism((p) => ({ ...p, open: false }));
+    setNavOpen(false);
     setRoute({ screen, processId, tab });
     window.scrollTo(0, 0);
   }
   const goTyped: Go = go;
 
   function openPrism() {
+    setNavOpen(false);
     setPrism({ open: true, scope: route.screen === "processo" ? "processo" : "global" });
   }
 
   async function signOut() {
+    setNavOpen(false);
     await supabase.auth.signOut();
     setRoute({ screen: "processos", processId: null, tab: "dashboard" });
   }
@@ -110,15 +116,15 @@ function AppShell() {
 
   const topAction =
     route.screen === "processo" && proc && route.tab !== "upload" ? (
-      <Btn size="sm" icon="upload" onClick={() => go("processo", proc.id, "upload")}>Novo vídeo</Btn>
+      <Btn size="sm" icon="upload" onClick={() => go("processo", proc.id, "upload")}>{isMobile ? "" : "Novo vídeo"}</Btn>
     ) : null;
 
   return (
     <div className="row" style={{ alignItems: "stretch", minHeight: "100vh" }}>
-      <Sidebar route={route} go={goTyped} proc={proc} processos={processos} empresa={empresa} usuario={usuario} onOpenPrism={openPrism} onSignOut={signOut} />
+      <Sidebar route={route} go={goTyped} proc={proc} processos={processos} empresa={empresa} usuario={usuario} onOpenPrism={openPrism} onSignOut={signOut} isMobile={isMobile} open={navOpen} onClose={() => setNavOpen(false)} />
       <div className="grow col" style={{ minWidth: 0 }}>
-        <Topbar route={route} proc={proc} go={goTyped} onOpenPrism={openPrism} action={topAction} />
-        <main style={{ padding: "26px 28px 60px", flex: 1 }}>
+        <Topbar route={route} proc={proc} go={goTyped} onOpenPrism={openPrism} action={topAction} isMobile={isMobile} onMenu={() => setNavOpen(true)} />
+        <main style={{ padding: isMobile ? "16px 12px 48px" : "26px 28px 60px", flex: 1 }}>
           <div key={route.screen + route.processId + route.tab} className="anim-fadeup">
             {content}
           </div>

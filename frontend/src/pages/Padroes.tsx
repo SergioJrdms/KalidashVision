@@ -51,7 +51,7 @@ export default function Padroes({ proc, go }: { proc: ProcHeaderMock; go: Go }) 
       {padroes.length === 0 ? (
         <Card style={{ padding: 18 }}><p style={{ fontSize: 13.5, color: "var(--muted)" }}>Nenhum padrão forte detectado ainda. Conforme você envia mais turnos, as recorrências e tendências ficam mais nítidas.</p></Card>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(380px,1fr))", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 380px),1fr))", gap: 14 }}>
           {padroes.map((p) => <PadraoCard key={p.id} p={p} />)}
         </div>
       )}

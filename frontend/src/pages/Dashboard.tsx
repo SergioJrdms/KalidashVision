@@ -11,10 +11,12 @@ import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut,
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
 import type { AcaoSugestao } from "../lib/types";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
 
 export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: Go; t: Tweaks }) {
+  const isMobile = useIsMobile();
   const q = useQuery({ queryKey: ["dashboard", proc.id], queryFn: () => api.processos.dashboard(proc.id) });
   if (q.isLoading) return <Card><Empty icon="loader" title="Carregando dashboard…" /></Card>;
   if (!q.data) return <Card><Empty icon="alert-triangle" title="Não foi possível carregar" /></Card>;
@@ -29,6 +31,7 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
   const minimal = t.dashboard === "minimal";
   const denso = t.dashboard === "denso";
   const s = det.snapshot;
+  const duasColunas = isMobile || minimal ? "1fr" : "1.65fr 1fr";
   return (
     <div className="col" style={{ gap: 18 }}>
       <DashHeader proc={proc} det={det} go={go} />
@@ -42,7 +45,7 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
         <Kpi label="Confiança nos dados" valor={`${s.validadoPct}%`} sub="validado por humano" icon="shield-check" ajuda="Quanto da base já foi confirmado por uma pessoa." />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: minimal ? "1fr" : "1.65fr 1fr", gap: 16, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: duasColunas, gap: 16, alignItems: "start" }}>
         <Sugestoes det={det} processoId={proc.id} />
         <div className="col" style={{ gap: 16 }}>
           <Aprendizado det={det} />
@@ -57,7 +60,7 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
             <Help text="Painéis para entender como o tempo é gasto e como as atividades se sequenciam — tudo derivado dos vídeos deste processo." />
           </div>
           <p style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Visão consolidada de todos os vídeos. As sugestões acima nascem dessa base.</p>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(380px,1fr))", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 380px),1fr))", gap: 16 }}>
             <ComposicaoPanel det={det} />
             <ParetoPanel det={det} />
             <TempoPorComportamento det={det} denso={denso} processoId={proc.id} />

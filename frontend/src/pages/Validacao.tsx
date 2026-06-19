@@ -290,7 +290,7 @@ function FilaFoco({ evento, restantes, total, onResolver, labels }: { evento: Pe
 
 function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolver: (ev: PendMock, k: "confirmar" | "corrigir" | "descartar", l?: string) => void; labels: string[] }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 14 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(min(100%, 320px),1fr))", gap: 14 }}>
       {queue.map((ev) => <CardEvento key={ev.id} ev={ev} onResolver={onResolver} labels={labels} />)}
     </div>
   );

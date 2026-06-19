@@ -1,7 +1,7 @@
 // ============================================================
 // Shell: Sidebar (contextual) + Topbar. Porte fiel de shell.jsx.
 // ============================================================
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
@@ -19,6 +19,9 @@ export function Sidebar({
   usuario,
   onOpenPrism,
   onSignOut,
+  isMobile = false,
+  open = false,
+  onClose,
 }: {
   route: Route;
   go: Go;
@@ -28,8 +31,29 @@ export function Sidebar({
   usuario: { nome: string; cargo: string; iniciais: string };
   onOpenPrism: () => void;
   onSignOut: () => void;
+  isMobile?: boolean;
+  open?: boolean;
+  onClose?: () => void;
 }) {
   const inProc = route.screen === "processo";
+  // No mobile, a sidebar vira um drawer off-canvas; no desktop, coluna fixa.
+  const asideStyle: CSSProperties = isMobile
+    ? {
+        width: "min(280px, 86vw)",
+        background: "#fff",
+        borderRight: "1px solid var(--line)",
+        height: "100dvh",
+        position: "fixed",
+        top: 0,
+        left: 0,
+        zIndex: 95,
+        padding: "16px 14px",
+        transform: open ? "translateX(0)" : "translateX(-100%)",
+        transition: "transform .28s cubic-bezier(.3,.8,.3,1)",
+        boxShadow: open ? "12px 0 40px -12px rgba(26,16,49,.35)" : "none",
+        overflowY: "auto",
+      }
+    : { width: 256, flex: "none", background: "#fff", borderRight: "1px solid var(--line)", height: "100vh", position: "sticky", top: 0, padding: "16px 14px" };
   const portfolioNav = [
     { tab: "processos", label: "Processos", icon: "layout-grid" as const },
     { tab: "_prism", label: "Visão geral do Prism", icon: "sparkles" as const, onClick: onOpenPrism },
@@ -44,9 +68,21 @@ export function Sidebar({
   ];
 
   return (
-    <aside className="col" style={{ width: 256, flex: "none", background: "#fff", borderRight: "1px solid var(--line)", height: "100vh", position: "sticky", top: 0, padding: "16px 14px" }}>
-      <div style={{ padding: "2px 6px 14px" }}>
+    <>
+      {isMobile && (
+        <div
+          onClick={onClose}
+          style={{ position: "fixed", inset: 0, background: "rgba(26,16,49,.32)", backdropFilter: "blur(2px)", zIndex: 94, opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none", transition: "opacity .25s" }}
+        />
+      )}
+      <aside className="col" style={asideStyle}>
+      <div className="row" style={{ padding: "2px 6px 14px", justifyContent: "space-between" }}>
         <Wordmark size={18} empresa={empresa} />
+        {isMobile && (
+          <button onClick={onClose} title="Fechar" className="center" style={{ width: 32, height: 32, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flex: "none" }}>
+            <Icon name="x" size={18} />
+          </button>
+        )}
       </div>
 
       {inProc && proc && (
@@ -145,33 +181,47 @@ export function Sidebar({
           <Icon name="log-out" size={16} />
         </button>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }
 
-export function Topbar({ route, proc, go, onOpenPrism, action }: { route: Route; proc?: ProcHeaderMock | null; go: Go; onOpenPrism: () => void; action?: ReactNode }) {
+export function Topbar({ route, proc, go, onOpenPrism, action, isMobile = false, onMenu }: { route: Route; proc?: ProcHeaderMock | null; go: Go; onOpenPrism: () => void; action?: ReactNode; isMobile?: boolean; onMenu?: () => void }) {
   const inProc = route.screen === "processo";
   const tabLabels: Record<string, string> = { dashboard: "Dashboard", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", upload: "Novo vídeo", descricao: "Descrição" };
   return (
-    <header className="row" style={{ height: 60, padding: "0 26px", borderBottom: "1px solid var(--line)", background: "rgba(255,255,255,.82)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 30, justifyContent: "space-between", gap: 16 }}>
+    <header className="row" style={{ height: isMobile ? 54 : 60, padding: isMobile ? "0 12px" : "0 26px", borderBottom: "1px solid var(--line)", background: "rgba(255,255,255,.82)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 30, justifyContent: "space-between", gap: isMobile ? 8 : 16 }}>
       <div className="row gap2" style={{ fontSize: 13.5, color: "var(--muted)", minWidth: 0 }}>
-        <button onClick={() => go("processos")} className="click" style={{ border: "none", background: "none", color: inProc ? "var(--muted)" : "var(--ink)", fontWeight: inProc ? 500 : 700, fontSize: 13.5 }}>
-          Operação
-        </button>
-        {inProc && proc && (
+        {isMobile && (
+          <button onClick={onMenu} title="Menu" className="center" style={{ width: 36, height: 36, borderRadius: 9, border: "1px solid var(--line)", background: "#fff", color: "var(--ink)", flex: "none" }}>
+            <Icon name="menu" size={18} />
+          </button>
+        )}
+        {isMobile ? (
+          <span className="truncate" style={{ color: "var(--ink)", fontWeight: 700, fontSize: 14, minWidth: 0 }}>
+            {inProc && proc ? tabLabels[route.tab] : route.screen === "ajuda" ? "Como funciona" : "Operação"}
+          </span>
+        ) : (
           <>
-            <Icon name="chevron-right" size={14} color="var(--faint)" />
-            <button onClick={() => go("processo", proc.id, "dashboard")} className="truncate click" style={{ border: "none", background: "none", color: "var(--text)", fontWeight: 600, fontSize: 13.5, maxWidth: 200 }}>{proc.nome}</button>
-            <Icon name="chevron-right" size={14} color="var(--faint)" />
-            <span style={{ color: "var(--ink)", fontWeight: 700 }}>{tabLabels[route.tab]}</span>
+            <button onClick={() => go("processos")} className="click" style={{ border: "none", background: "none", color: inProc ? "var(--muted)" : "var(--ink)", fontWeight: inProc ? 500 : 700, fontSize: 13.5 }}>
+              Operação
+            </button>
+            {inProc && proc && (
+              <>
+                <Icon name="chevron-right" size={14} color="var(--faint)" />
+                <button onClick={() => go("processo", proc.id, "dashboard")} className="truncate click" style={{ border: "none", background: "none", color: "var(--text)", fontWeight: 600, fontSize: 13.5, maxWidth: 200 }}>{proc.nome}</button>
+                <Icon name="chevron-right" size={14} color="var(--faint)" />
+                <span style={{ color: "var(--ink)", fontWeight: 700 }}>{tabLabels[route.tab]}</span>
+              </>
+            )}
           </>
         )}
       </div>
-      <div className="row gap2">
+      <div className="row gap2" style={{ flex: "none" }}>
         {action}
         <button onClick={onOpenPrism} className="btn btn-secondary btn-sm row gap2" title="Perguntar ao Prism">
           <Prism size={20} />
-          <span>Prism</span>
+          {!isMobile && <span>Prism</span>}
         </button>
       </div>
     </header>

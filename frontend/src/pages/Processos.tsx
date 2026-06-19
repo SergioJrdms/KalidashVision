@@ -48,7 +48,7 @@ export default function Processos({ go }: { go: Go }) {
             <Empty icon="layout-grid" title="Você ainda não tem nenhum processo" desc="Crie seu primeiro processo para começar a analisar vídeos. O Prism aprende a cada vídeo." action={<Btn icon="plus" onClick={() => setNovo(true)}>Criar primeiro processo</Btn>} />
           </Card>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 330px), 1fr))", gap: 16 }}>
             {PROCESSOS.map((p, i) => <ProcessoCard key={p.id} p={p} go={go} i={i} />)}
           </div>
         )}
@@ -74,7 +74,7 @@ function InsightsGlobais({ insights, count, go }: { insights: ReturnType<typeof 
       {insights.length === 0 ? (
         <p style={{ fontSize: 13.5, color: "var(--muted)" }}>Processe vídeos em seus processos para o Prism gerar uma visão consolidada (qual priorizar, padrões e a maior oportunidade).</p>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px,1fr))", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px),1fr))", gap: 12 }}>
           {insights.map((it) => (
             <div key={it.id} className="card-flat hoverlift" style={{ padding: 16 }}>
               <div className="row gap2" style={{ marginBottom: 8 }}>
@@ -101,7 +101,7 @@ function PadroesGlobais({ padroes }: { padroes: ReturnType<typeof mapPadroesGlob
         <h2 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>Padrões entre as linhas</h2>
         <Help text="O que se repete entre processos diferentes: comportamentos compartilhados, benchmarking e problemas sistêmicos." />
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px,1fr))", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px),1fr))", gap: 14 }}>
         {padroes.map((p) => (
           <Card key={p.id} style={{ padding: 18 }}>
             <div className="row gap2 wrap" style={{ marginBottom: 8 }}>

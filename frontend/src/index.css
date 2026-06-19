@@ -278,3 +278,12 @@ a { color: inherit; text-decoration: none; }
   .login-grid { grid-template-columns: 1fr !important; }
   .login-brand { display: none !important; }
 }
+
+/* ---- Mobile: evita scroll horizontal acidental e suaviza tabelas ---- */
+@media (max-width: 768px) {
+  html, body { overflow-x: hidden; }
+  /* tabelas largas (ex.: Eventos) rolam dentro do próprio container */
+  table { font-size: 12px; }
+  /* respeita a área segura de notch em telas com recorte */
+  .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0); }
+}
