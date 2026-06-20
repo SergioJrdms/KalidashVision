@@ -30,7 +30,12 @@ import cv2
 import numpy as np
 from groq import Groq
 from supabase import Client, create_client
-from ultralytics import YOLO
+# NOTA: `from ultralytics import YOLO` foi removido do topo de propósito.
+# torch + ultralytics pesam centenas de MB no boot do uvicorn. Como o módulo
+# usa `from __future__ import annotations`, as anotações de tipo `YOLO` são
+# strings (não exigem o símbolo em runtime). O import real acontece de forma
+# lazy dentro de processar_video (e em worker.py::_get_yolo), então o processo
+# que serve navegação (validação, dashboard, /frames) não carrega torch.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -3633,7 +3638,11 @@ def processar_video(
     rois_contexto = rois_contexto or DEFAULT_ROIS_CONTEXTO
     sb = sb or make_supabase_client()
     groq_client = groq_client or make_groq_client()
-    yolo = yolo_model or YOLO(YOLO_MODEL)
+    if yolo_model is not None:
+        yolo = yolo_model
+    else:
+        from ultralytics import YOLO  # import lazy: só carrega torch quando há upload
+        yolo = YOLO(YOLO_MODEL)
 
     progress_cb("setup", 0, f"Iniciando · {empresa}/{processo}")
     memoria = carregar_memoria_do_negocio(sb, empresa, processo)

@@ -362,6 +362,29 @@ def excluir_processo_endpoint(
     except Exception as e:
         log.warning(f"Falha ao remover vídeos do storage (segue mesmo assim): {e}")
 
+    # 1b) Remove também os JPEGs de frames em cache (prefixo __frames ao lado
+    # de cada vídeo). NÃO-FATAL — não pode quebrar o delete.
+    try:
+        import posixpath
+
+        prefixos = {
+            posixpath.dirname(v["caminho"]) + "/__frames"
+            for v in (vids or [])
+            if v.get("caminho")
+            and not v["caminho"].startswith(("/", "\\"))
+            and not (len(v["caminho"]) > 1 and v["caminho"][1] == ":")
+        }
+        for prefixo in prefixos:
+            try:
+                itens = sb.storage.from_(bucket).list(prefixo) or []
+                chaves = [f"{prefixo}/{it['name']}" for it in itens if it.get("name")]
+                if chaves:
+                    sb.storage.from_(bucket).remove(chaves)
+            except Exception as e2:
+                log.warning(f"Falha ao limpar cache de frames {prefixo}: {e2}")
+    except Exception as e:
+        log.warning(f"Limpeza de cache de frames falhou (não-fatal): {e}")
+
     # 2) Apaga todas as linhas numa transação (RPC). Fallback: deletes em ordem.
     try:
         sb.rpc("excluir_processo", {"p_empresa": user.empresa, "p_processo": nome}).execute()
@@ -947,27 +970,83 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
         )
 
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    import base64
+    import posixpath
+
+    # Cache determinístico de frames já extraídos (JPEGs pequenos, ~30 KB cada),
+    # ao lado do vídeo no Storage. Evita rebaixar o vídeo inteiro a cada
+    # visualização (causa do OOM ao navegar na Validação).
+    frames_prefix = posixpath.dirname(caminho) + "/__frames"
+    frame_keys = [f"{frames_prefix}/{evento_id}_{k}.jpg" for k in (0, 1, 2)]
+
+    # 1) Tenta servir do cache. Para não fazer 3 round-trips num miss, sonda só
+    #    o primeiro; se existir, baixa os 3 (cache foi escrito atômico junto).
     try:
-        data = sb.storage.from_(bucket).download(caminho)
-    except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao baixar vídeo: {e}")
+        primeiro = sb.storage.from_(bucket).download(frame_keys[0])
+        if primeiro:
+            cached = [primeiro] + [
+                sb.storage.from_(bucket).download(k) for k in frame_keys[1:]
+            ]
+            if all(cached):
+                return {
+                    "frames": [
+                        "data:image/jpeg;base64," + base64.b64encode(j).decode("ascii")
+                        for j in cached
+                    ]
+                }
+    except Exception:
+        pass  # cache miss → extrai abaixo
+
+    # 2) Cache miss: baixa o vídeo via STREAMING pro disco (pico de RAM ≈ 1 chunk
+    #    de 64 KB), NUNCA com .download() (que carrega o arquivo todo na RAM).
+    import httpx
+    from urllib.parse import quote
+
     suffix = Path(caminho).suffix or ".mp4"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(data)
-    tmp.close()
+    try:
+        url = f"{os.environ['SUPABASE_URL']}/storage/v1/object/{bucket}/{quote(caminho, safe='/')}"
+        headers = {
+            "Authorization": f"Bearer {os.environ['SUPABASE_KEY']}",
+            "apikey": os.environ["SUPABASE_KEY"],
+        }
+        with httpx.stream("GET", url, headers=headers, timeout=120) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_bytes(1 << 16):
+                tmp.write(chunk)
+        tmp.close()
+    except Exception as e:
+        try:
+            Path(tmp.name).unlink()
+        except Exception:
+            pass
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao baixar vídeo: {e}")
+
+    # 3) Extração idêntica à de sempre + bytes JPEG idênticos (mesma seleção
+    #    [fi, mid, ff], mesma anotação/resize, frame_para_jpeg_bytes quality 80).
     try:
         crops = extrair_3_frames_evento(ev, tmp.name)
+        jpegs = [frame_para_jpeg_bytes(c) for c in crops]
     finally:
         try:
             Path(tmp.name).unlink()
         except Exception:
             pass
 
-    import base64
+    # 4) Grava no cache para as próximas visualizações (NÃO-FATAL).
+    for key, jpeg in zip(frame_keys, jpegs):
+        try:
+            sb.storage.from_(bucket).upload(
+                key, jpeg, {"content-type": "image/jpeg", "upsert": "true"}
+            )
+        except Exception as e:
+            log.warning(f"Cache de frame falhou (não-fatal) {key}: {e}")
+
+    # 5) Mesmos bytes da extração → saída byte-idêntica à resposta antiga.
     return {
         "frames": [
-            "data:image/jpeg;base64," + base64.b64encode(frame_para_jpeg_bytes(c)).decode("ascii")
-            for c in crops
+            "data:image/jpeg;base64," + base64.b64encode(j).decode("ascii")
+            for j in jpegs
         ]
     }
 
