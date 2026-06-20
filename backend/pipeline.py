@@ -766,7 +766,7 @@ def construir_bloco_memoria_cluster(
 class Amostra:
     frame_idx: int
     tempo_s: float
-    frame_bgr: np.ndarray
+    img_b64: str
     pessoas: list
 
 
@@ -859,11 +859,20 @@ def etapa_detectar_e_amostrar(
                             }
                         )
                     if pessoas:
+                        # Codifica imediatamente em base64 (mesma pipeline:
+                        # anotar→resize→JPEG, com defaults max_lado=1024 e
+                        # qualidade=85). Guardamos só a string e descartamos
+                        # o numpy do frame, evitando reter ~1–2 GB de RAM em
+                        # vídeos longos até a etapa VLM. anotar_frame_com_ids
+                        # já copia internamente, então não precisa frame.copy().
+                        img_b64 = frame_para_base64(
+                            anotar_frame_com_ids(frame, pessoas)
+                        )
                         amostras.append(
                             Amostra(
                                 frame_idx=frame_idx,
                                 tempo_s=tempo_s,
-                                frame_bgr=frame.copy(),
+                                img_b64=img_b64,
                                 pessoas=pessoas,
                             )
                         )
@@ -892,8 +901,9 @@ def _analisar_amostra_vlm(
     memoria: dict,
     conhecimento_adquirido: str = "",
 ) -> dict[int, str]:
-    frame_anotado = anotar_frame_com_ids(amostra.frame_bgr, amostra.pessoas)
-    img_b64 = frame_para_base64(frame_anotado)
+    # Frame já chega pré-codificado (mesma rotina anotar→resize→JPEG aplicada
+    # no momento da amostragem, em etapa_detectar_e_amostrar). Byte-idêntico.
+    img_b64 = amostra.img_b64
 
     contexto_partes = []
     for p in amostra.pessoas:
@@ -2219,39 +2229,59 @@ def frame_para_jpeg_bytes(frame_bgr: np.ndarray, qualidade: int = 80) -> bytes:
 # ═════════════════════════════════════════════════════════════════════════
 # CHAT
 # ═════════════════════════════════════════════════════════════════════════
-def montar_snapshot_chat(sb: Client, empresa: str, processo: str) -> dict:
-    evs = (
-        sb.table("eventos")
-        .select(
-            "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, validacao_correto, validado_humano"
-        )
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .limit(50000)
-        .execute()
-        .data
-    )
+def montar_snapshot_chat(
+    sb: Client,
+    empresa: str,
+    processo: str,
+    eventos: list | None = None,
+    videos: list | None = None,
+    comportamentos: list | None = None,
+) -> dict:
+    """Snapshot leve do processo. Aceita listas pré-buscadas (superset de
+    colunas é OK — a função lê só o que precisa) para que callers pesados
+    como /dashboard não busquem os mesmos dados duas vezes.
+    """
+    if eventos is None:
+        evs = (
+            sb.table("eventos")
+            .select(
+                "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
+                "tempo_fim_s, validacao_correto, validado_humano"
+            )
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .limit(50000)
+            .execute()
+            .data
+        ) or []
+    else:
+        evs = eventos
     base = [e for e in evs if e.get("validacao_correto") is not False]
 
-    vids = (
-        sb.table("videos")
-        .select("id, duracao_s")
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .execute()
-        .data
-    )
+    if videos is None:
+        vids = (
+            sb.table("videos")
+            .select("id, duracao_s")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .execute()
+            .data
+        ) or []
+    else:
+        vids = videos
     dur_total = sum((v.get("duracao_s") or 0) for v in vids)
 
-    comps = (
-        sb.table("comportamentos")
-        .select("label, descricao")
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .execute()
-        .data
-    )
+    if comportamentos is None:
+        comps = (
+            sb.table("comportamentos")
+            .select("label, descricao")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .execute()
+            .data
+        ) or []
+    else:
+        comps = comportamentos
     desc_por_label = {c["label"]: c.get("descricao", "") for c in comps}
 
     agg: dict = {}
@@ -2531,15 +2561,24 @@ def gerar_sugestoes_chat(
 # Usado pelo GET /processos enriquecido, pelo snapshot global e pelos
 # insights globais. Faz ~5 queries por empresa (não N× por processo).
 # ═════════════════════════════════════════════════════════════════════════
-def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
-    """Retorna { nome_processo: {stats...} } para todos os processos da empresa."""
-    processos = (
+def agregar_portfolio(
+    sb: Client, empresa: str, processo: str | None = None
+) -> dict[str, dict]:
+    """Retorna { nome_processo: {stats...} } para todos os processos da empresa.
+
+    Se `processo` for informado, escopa TODAS as queries a esse processo —
+    permite reaproveitar a função para o detalhe de um processo só sem
+    varrer a empresa inteira. A fórmula de maturidade já é por-processo, então
+    o número resultante é idêntico ao da versão sem filtro.
+    """
+    q_ctx = (
         sb.table("contexto_processo")
         .select("processo")
         .eq("empresa", empresa)
-        .execute()
-        .data
-    ) or []
+    )
+    if processo is not None:
+        q_ctx = q_ctx.eq("processo", processo)
+    processos = q_ctx.execute().data or []
     nomes = [p["processo"] for p in processos]
 
     base: dict[str, dict] = {
@@ -2557,14 +2596,14 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
         for n in nomes
     }
 
-    videos = (
+    q_vid = (
         sb.table("videos")
         .select("processo, duracao_s, processado_em")
         .eq("empresa", empresa)
-        .limit(50000)
-        .execute()
-        .data
-    ) or []
+    )
+    if processo is not None:
+        q_vid = q_vid.eq("processo", processo)
+    videos = q_vid.limit(50000).execute().data or []
     for v in videos:
         p = base.get(v.get("processo"))
         if not p:
@@ -2575,29 +2614,29 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
         if pe and (p["ultimo_video_em"] is None or pe > p["ultimo_video_em"]):
             p["ultimo_video_em"] = pe
 
-    comps = (
+    q_cmp = (
         sb.table("comportamentos")
         .select("processo, label, categoria_lean")
         .eq("empresa", empresa)
-        .limit(50000)
-        .execute()
-        .data
-    ) or []
+    )
+    if processo is not None:
+        q_cmp = q_cmp.eq("processo", processo)
+    comps = q_cmp.limit(50000).execute().data or []
     cat_por_pl: dict[tuple, str | None] = {}
     for c in comps:
         cat_por_pl[(c.get("processo"), c.get("label"))] = c.get("categoria_lean")
 
-    eventos = (
+    q_ev = (
         sb.table("eventos")
         .select(
             "processo, comportamento_label, label_corrigido, tempo_inicio_s, "
             "tempo_fim_s, validacao_correto, validado_humano, origem_validacao"
         )
         .eq("empresa", empresa)
-        .limit(100000)
-        .execute()
-        .data
-    ) or []
+    )
+    if processo is not None:
+        q_ev = q_ev.eq("processo", processo)
+    eventos = q_ev.limit(100000).execute().data or []
     for e in eventos:
         p = base.get(e.get("processo"))
         if not p:
@@ -2621,15 +2660,15 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
         a["dur"] += dur
         a["oc"] += 1
 
-    sugs = (
+    q_sug = (
         sb.table("sugestoes_melhoria")
         .select("processo, prioridade, status")
         .eq("empresa", empresa)
         .eq("status", "pendente")
-        .limit(50000)
-        .execute()
-        .data
-    ) or []
+    )
+    if processo is not None:
+        q_sug = q_sug.eq("processo", processo)
+    sugs = q_sug.limit(50000).execute().data or []
     for s in sugs:
         p = base.get(s.get("processo"))
         if not p:
@@ -2641,14 +2680,14 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
     # Padrões com confiança alta — entram na fórmula de maturidade
     n_padroes_alta: dict[str, int] = defaultdict(int)
     try:
-        pads = (
+        q_pad = (
             sb.table("padroes_processo")
             .select("processo, confianca")
             .eq("empresa", empresa)
-            .limit(5000)
-            .execute()
-            .data
-        ) or []
+        )
+        if processo is not None:
+            q_pad = q_pad.eq("processo", processo)
+        pads = q_pad.limit(5000).execute().data or []
         for r in pads:
             if (r.get("confianca") or "").lower() == "alta":
                 n_padroes_alta[r.get("processo")] += 1
@@ -2660,15 +2699,15 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
     # então tem que pesar na maturidade do Prism sobre o processo.
     n_respostas: dict[str, int] = defaultdict(int)
     try:
-        perg = (
+        q_perg = (
             sb.table("perguntas_processo")
             .select("processo, status")
             .eq("empresa", empresa)
             .eq("status", "respondida")
-            .limit(5000)
-            .execute()
-            .data
-        ) or []
+        )
+        if processo is not None:
+            q_perg = q_perg.eq("processo", processo)
+        perg = q_perg.limit(5000).execute().data or []
         for r in perg:
             n_respostas[r.get("processo")] += 1
     except Exception:
@@ -2745,9 +2784,16 @@ def agregar_portfolio(sb: Client, empresa: str) -> dict[str, dict]:
     return saida
 
 
-def montar_snapshot_global(sb: Client, empresa: str) -> dict:
-    """Panorama leve de TODOS os processos da empresa (visão de portfólio)."""
-    portfolio = agregar_portfolio(sb, empresa)
+def montar_snapshot_global(
+    sb: Client, empresa: str, portfolio: dict | None = None
+) -> dict:
+    """Panorama leve de TODOS os processos da empresa (visão de portfólio).
+
+    Aceita `portfolio` pré-computado para evitar refazer o scan caro de
+    eventos/comportamentos quando o caller já tem ele em mãos.
+    """
+    if portfolio is None:
+        portfolio = agregar_portfolio(sb, empresa)
     processos = []
     cons = {
         "videos_analisados": 0,
@@ -2943,15 +2989,25 @@ PANORAMA DE TODOS OS PROCESSOS (JSON):
 """
 
 
-def gerar_insights_globais(sb: Client, groq_client: Groq, empresa: str) -> int:
+def gerar_insights_globais(
+    sb: Client,
+    groq_client: Groq,
+    empresa: str,
+    snapshot_global: dict | None = None,
+) -> int:
     """Recalcula os insights de portfólio da empresa (substitui os anteriores).
     Não-fatal. Retorna quantos insights foram persistidos.
+
+    `snapshot_global` pode vir pré-computado para evitar refazer o portfólio.
     """
-    try:
-        snap = montar_snapshot_global(sb, empresa)
-    except Exception as e:
-        log.warning(f"Insights globais: snapshot indisponível: {e}")
-        return 0
+    if snapshot_global is not None:
+        snap = snapshot_global
+    else:
+        try:
+            snap = montar_snapshot_global(sb, empresa)
+        except Exception as e:
+            log.warning(f"Insights globais: snapshot indisponível: {e}")
+            return 0
 
     if snap["consolidado"]["videos_analisados"] == 0:
         # Sem dados — limpa insights antigos e não gera nada.
@@ -3226,9 +3282,17 @@ def calcular_sinais_padroes(serie: dict) -> dict:
     return sinais
 
 
-def calcular_sinais_globais(sb: Client, empresa: str) -> dict:
-    """Camada C — cruza os processos da empresa (em Python)."""
-    portfolio = agregar_portfolio(sb, empresa)
+def calcular_sinais_globais(
+    sb: Client, empresa: str, portfolio: dict | None = None
+) -> dict:
+    """Camada C — cruza os processos da empresa (em Python).
+
+    Lê apenas `top_comportamentos`, `composicao_valor` e `n_videos` do
+    portfólio (não usa `maturidade`/`n_padroes`), então um portfólio
+    pré-computado serve sem perda de fidelidade.
+    """
+    if portfolio is None:
+        portfolio = agregar_portfolio(sb, empresa)
     processos_com_dados = {n: st for n, st in portfolio.items() if st["n_videos"] > 0}
     n_proc = len(processos_com_dados)
 
@@ -3451,10 +3515,15 @@ def analisar_padroes_processo(
     return len(linhas)
 
 
-def analisar_padroes_globais(sb: Client, groq_client: Groq, empresa: str) -> int:
+def analisar_padroes_globais(
+    sb: Client,
+    groq_client: Groq,
+    empresa: str,
+    portfolio: dict | None = None,
+) -> int:
     """Calcula sinais globais (Python) + interpretação LLM. Substitui os
     vigentes da empresa. Não-fatal."""
-    sinais = calcular_sinais_globais(sb, empresa)
+    sinais = calcular_sinais_globais(sb, empresa, portfolio=portfolio)
     if sinais["n_processos_com_dados"] < MIN_PROCESSOS_GLOBAL:
         try:
             sb.table("padroes_globais").delete().eq("empresa", empresa).execute()
@@ -3685,9 +3754,18 @@ def processar_video(
     except Exception as e:
         log.warning(f"Geração de perguntas falhou (não-fatal): {e}")
 
+    # Computa o portfólio + snapshot global UMA vez para reaproveitar nos
+    # passos seguintes (gerar_insights_globais + analisar_padroes_globais).
+    # Cada chamada permanece NÃO-FATAL. Se o pré-cálculo falhar, as funções
+    # caem no fallback interno (computam por conta própria).
+    portfolio = None
+    snapshot_global = None
+
     # Recalcula insights de portfólio da empresa — NÃO-FATAL.
     try:
-        gerar_insights_globais(sb, groq_client, empresa)
+        portfolio = agregar_portfolio(sb, empresa)
+        snapshot_global = montar_snapshot_global(sb, empresa, portfolio=portfolio)
+        gerar_insights_globais(sb, groq_client, empresa, snapshot_global=snapshot_global)
     except Exception as e:
         log.warning(f"Insights globais falharam (não-fatal): {e}")
 
@@ -3701,7 +3779,7 @@ def processar_video(
     except Exception as e:
         log.warning(f"Padrões do processo falharam (não-fatal): {e}")
     try:
-        analisar_padroes_globais(sb, groq_client, empresa)
+        analisar_padroes_globais(sb, groq_client, empresa, portfolio=portfolio)
     except Exception as e:
         log.warning(f"Padrões globais falharam (não-fatal): {e}")
 

@@ -32,6 +32,7 @@ from .pipeline import (
     make_groq_client,
     make_supabase_client,
     montar_snapshot_chat,
+    montar_snapshot_global,
     resolver_descricao_processo,
     responder_chat,
     gerar_titulo_conversa,
@@ -237,9 +238,11 @@ def detalhe_processo(processo_id: str, user: CurrentUser = Depends(get_current_u
     ) or []
     p["videos"] = videos
     p["n_videos"] = len(videos)
-    # enriquecimento (maturidade, pendências, composição) para a sidebar/dashboard
+    # enriquecimento (maturidade, pendências, composição) para a sidebar/dashboard.
+    # Escopo de UM processo: a fórmula de maturidade já é por-processo, então
+    # o número é idêntico ao da versão sem filtro — só com scan muito menor.
     try:
-        st = agregar_portfolio(sb, user.empresa).get(p["processo"], {})
+        st = agregar_portfolio(sb, user.empresa, processo=p["processo"]).get(p["processo"], {})
         p["maturidade"] = st.get("maturidade", 0)
         p["eventos_pendentes"] = st.get("eventos_pendentes", 0)
         p["pendencias"] = st.get("eventos_pendentes", 0)
@@ -380,10 +383,14 @@ def excluir_processo_endpoint(
                 log.error(f"Falha ao limpar {tabela} de {user.empresa}/{nome}: {e2}")
 
     # 3) Recalcula insights e padrões globais — o portfólio mudou. Não-fatal.
+    # Portfólio + snapshot global são computados UMA vez e reaproveitados nos
+    # dois passos (cada um deles, internamente, faria o mesmo scan caro).
     try:
         gc = make_groq_client()
-        gerar_insights_globais(sb, gc, user.empresa)
-        analisar_padroes_globais(sb, gc, user.empresa)
+        portfolio = agregar_portfolio(sb, user.empresa)
+        snapshot_global = montar_snapshot_global(sb, user.empresa, portfolio=portfolio)
+        gerar_insights_globais(sb, gc, user.empresa, snapshot_global=snapshot_global)
+        analisar_padroes_globais(sb, gc, user.empresa, portfolio=portfolio)
     except Exception as e:
         log.warning(f"Recalcular insights/padrões após exclusão falhou: {e}")
 
@@ -482,7 +489,48 @@ def _processo_nome(sb, user: CurrentUser, processo_id: str) -> str:
 def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
-    snapshot = montar_snapshot_chat(sb, user.empresa, nome)
+
+    # Busca eventos / vídeos / comportamentos UMA vez com superset de colunas e
+    # reaproveita no snapshot e nos blocos abaixo. Antes, cada bloco refazia o
+    # próprio scan — dashboard fazia 3 buscas redundantes só por isso.
+    # Superset = união das colunas usadas pelo snapshot e pelo dashboard.
+    from collections import Counter
+
+    evs = (
+        sb.table("eventos")
+        .select(
+            "video_id, pessoa_track_id, comportamento_label, label_corrigido, "
+            "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
+            "origem_validacao"
+        )
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .limit(50000)
+        .execute()
+        .data
+    ) or []
+    videos = (
+        sb.table("videos")
+        .select("id, nome, duracao_s, total_eventos, total_pessoas, processado_em")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .order("processado_em", desc=True)
+        .execute()
+        .data
+    ) or []
+    comps_full = (
+        sb.table("comportamentos")
+        .select("id, label, descricao, categoria_lean, categoria_lean_origem")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .execute()
+        .data
+    ) or []
+
+    snapshot = montar_snapshot_chat(
+        sb, user.empresa, nome,
+        eventos=evs, videos=videos, comportamentos=comps_full,
+    )
 
     sugs = (
         sb.table("sugestoes_melhoria")
@@ -496,18 +544,6 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .data
     ) or []
 
-    # Transições agregadas (sequências por pessoa) — pra mostrar fluxo
-    from collections import Counter
-
-    evs = (
-        sb.table("eventos")
-        .select("video_id, pessoa_track_id, comportamento_label, label_corrigido, tempo_inicio_s, validacao_correto, validado_humano, origem_validacao")
-        .eq("empresa", user.empresa)
-        .eq("processo", nome)
-        .limit(50000)
-        .execute()
-        .data
-    ) or []
     base = [e for e in evs if e.get("validacao_correto") is not False]
     seqs: dict = {}
     for e in base:
@@ -536,17 +572,6 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         else:
             origens["pendente"] += 1
 
-    videos = (
-        sb.table("videos")
-        .select("id, nome, duracao_s, total_eventos, total_pessoas, processado_em")
-        .eq("empresa", user.empresa)
-        .eq("processo", nome)
-        .order("processado_em", desc=True)
-        .limit(50)
-        .execute()
-        .data
-    ) or []
-
     pendentes = (
         sb.table("eventos")
         .select("id", count="exact")
@@ -567,15 +592,8 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .execute()
     )
 
-    # Categoria Lean por comportamento (mapa label → categoria)
-    comps_full = (
-        sb.table("comportamentos")
-        .select("id, label, descricao, categoria_lean, categoria_lean_origem")
-        .eq("empresa", user.empresa)
-        .eq("processo", nome)
-        .execute()
-        .data
-    ) or []
+    # Categoria Lean por comportamento (mapa label → categoria).
+    # `comps_full` foi buscado uma vez no topo desta função.
     cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps_full}
     cat_origem_por_label = {c["label"]: c.get("categoria_lean_origem") for c in comps_full}
     comp_id_por_label = {c["label"]: c["id"] for c in comps_full}
@@ -637,7 +655,9 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         },
         "composicao_valor": composicao_valor,
         "pareto": pareto,
-        "videos": videos,
+        # mesma cap (50 mais recentes) que existia antes; videos foi buscado
+        # uma vez no topo, mas só os mais recentes vão para a resposta.
+        "videos": videos[:50],
         "padroes_resumo": (
             sb.table("padroes_processo")
             .select("id, tipo, camada, titulo, relevancia, confianca")
