@@ -141,6 +141,18 @@ class OnboardingProximaBody(BaseModel):
     area_inicial: str | None = None
 
 
+class IntervaloTurnoBody(BaseModel):
+    inicio: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")  # HH:MM 24h
+    fim: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+class TurnoBody(BaseModel):
+    nome: str = Field(min_length=1, max_length=80)
+    intervalos: list[IntervaloTurnoBody] = Field(default_factory=list)
+    dias_semana: list[int] = Field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7])
+    ativo: bool = True
+
+
 class PrismMensagemBody(BaseModel):
     pergunta: str = Field(min_length=1, max_length=4000)
 
@@ -401,6 +413,159 @@ def atualizar_area(
     val = (body.area or "").strip() or None
     sb.table("contexto_processo").update({"area": val}).eq("id", processo_id).execute()
     return {"ok": True, "area": val}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# TURNOS DE GRAVAÇÃO (configuração consumida pela borda Pi)
+# Cada processo pode ter N turnos. Cada turno tem dias_semana (ISO 1=seg..7=dom)
+# e uma lista de intervalos {inicio, fim} no formato "HH:MM". A pausa de
+# almoço é o GAP entre intervalos consecutivos. Datas e timezone ficam por
+# conta do runner da borda (que conhece o relógio local da fábrica).
+# ═════════════════════════════════════════════════════════════════════════
+_DIAS_VALIDOS = {1, 2, 3, 4, 5, 6, 7}
+
+
+def _hhmm_min(s: str) -> int:
+    """Converte 'HH:MM' em minutos desde 00:00 (já validado por regex no Body)."""
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _validar_intervalos(itens: list[dict]) -> list[dict]:
+    """Valida e normaliza a lista de intervalos:
+    - inicio < fim em cada intervalo (sem cruzar meia-noite — caso raro em
+      fábrica; se aparecer, divida em dois turnos);
+    - ordena por inicio;
+    - rejeita sobreposições.
+    Levanta 400 com mensagem amigável em caso de erro.
+    """
+    norm = []
+    for it in itens:
+        ini, fim = it["inicio"], it["fim"]
+        if _hhmm_min(ini) >= _hhmm_min(fim):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Intervalo {ini}–{fim}: o horário de início precisa ser menor que o de fim.",
+            )
+        norm.append({"inicio": ini, "fim": fim})
+    norm.sort(key=lambda x: _hhmm_min(x["inicio"]))
+    for a, b in zip(norm, norm[1:]):
+        if _hhmm_min(a["fim"]) > _hhmm_min(b["inicio"]):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Intervalos sobrepostos: {a['inicio']}–{a['fim']} e {b['inicio']}–{b['fim']}.",
+            )
+    return norm
+
+
+def _validar_dias(dias: list[int]) -> list[int]:
+    if not dias:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Escolha pelo menos um dia da semana para o turno.",
+        )
+    if any(d not in _DIAS_VALIDOS for d in dias):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "dias_semana deve conter inteiros entre 1 (seg) e 7 (dom).",
+        )
+    # remove duplicatas, ordena
+    return sorted(set(dias))
+
+
+@app.get("/processos/{processo_id}/turnos")
+def listar_turnos(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = (
+        sb.table("turnos_processo")
+        .select("id, nome, intervalos, dias_semana, ativo, criado_em, atualizado_em")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .order("criado_em", desc=False)
+        .execute()
+    )
+    return r.data or []
+
+
+@app.post("/processos/{processo_id}/turnos")
+def criar_turno(
+    processo_id: str,
+    body: TurnoBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    intervalos = _validar_intervalos([i.model_dump() for i in body.intervalos])
+    dias = _validar_dias(body.dias_semana)
+    r = (
+        sb.table("turnos_processo")
+        .insert(
+            {
+                "empresa": user.empresa,
+                "processo": nome,
+                "nome": body.nome.strip(),
+                "intervalos": intervalos,
+                "dias_semana": dias,
+                "ativo": bool(body.ativo),
+            }
+        )
+        .execute()
+    )
+    return r.data[0]
+
+
+def _carregar_turno_proprio(sb, user: CurrentUser, turno_id: str) -> dict:
+    """Carrega um turno garantindo que pertence à empresa do usuário (403)."""
+    r = (
+        sb.table("turnos_processo")
+        .select("id, empresa, processo")
+        .eq("id", turno_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Turno não encontrado")
+    t = r.data[0]
+    if t["empresa"] != user.empresa:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+    return t
+
+
+@app.put("/turnos/{turno_id}")
+def atualizar_turno(
+    turno_id: str,
+    body: TurnoBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    from datetime import datetime
+
+    sb = make_supabase_client()
+    _carregar_turno_proprio(sb, user, turno_id)
+    intervalos = _validar_intervalos([i.model_dump() for i in body.intervalos])
+    dias = _validar_dias(body.dias_semana)
+    r = (
+        sb.table("turnos_processo")
+        .update(
+            {
+                "nome": body.nome.strip(),
+                "intervalos": intervalos,
+                "dias_semana": dias,
+                "ativo": bool(body.ativo),
+                "atualizado_em": datetime.utcnow().isoformat(),
+            }
+        )
+        .eq("id", turno_id)
+        .execute()
+    )
+    return (r.data or [{}])[0]
+
+
+@app.delete("/turnos/{turno_id}")
+def excluir_turno(turno_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    _carregar_turno_proprio(sb, user, turno_id)
+    sb.table("turnos_processo").delete().eq("id", turno_id).execute()
+    return {"ok": True}
 
 
 @app.delete("/processos/{processo_id}")

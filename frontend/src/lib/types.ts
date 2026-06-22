@@ -297,3 +297,25 @@ export interface PrismEnvioResposta {
   titulo_auto: string | null;
   fora_de_escopo: boolean;
 }
+
+export interface IntervaloTurno {
+  inicio: string; // "HH:MM"
+  fim: string;    // "HH:MM"
+}
+
+export interface TurnoProcesso {
+  id: string;
+  nome: string;
+  intervalos: IntervaloTurno[];
+  dias_semana: number[]; // ISO: 1=seg .. 7=dom
+  ativo: boolean;
+  criado_em: string;
+  atualizado_em: string;
+}
+
+export interface TurnoBody {
+  nome: string;
+  intervalos: IntervaloTurno[];
+  dias_semana: number[];
+  ativo: boolean;
+}

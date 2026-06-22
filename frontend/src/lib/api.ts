@@ -19,6 +19,8 @@ import type {
   ProcessoDetalhe,
   Sugestao,
   AcaoSugestao,
+  TurnoProcesso,
+  TurnoBody,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -152,6 +154,22 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ acao }),
       }),
+  },
+  turnos: {
+    listar: (processoId: string) =>
+      req<TurnoProcesso[]>(`/processos/${processoId}/turnos`),
+    criar: (processoId: string, body: TurnoBody) =>
+      req<TurnoProcesso>(`/processos/${processoId}/turnos`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    atualizar: (turnoId: string, body: TurnoBody) =>
+      req<TurnoProcesso>(`/turnos/${turnoId}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    excluir: (turnoId: string) =>
+      req<{ ok: boolean }>(`/turnos/${turnoId}`, { method: "DELETE" }),
   },
   comportamentos: {
     setCategoria: (comportamentoId: string, categoria_lean: CategoriaLean | null) =>

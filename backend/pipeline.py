@@ -255,6 +255,25 @@ update eventos e
 
 create index if not exists idx_eventos_categoria_lean on eventos(empresa, comportamento_label);
 
+-- ════════════════════════════════════════════════════════════════════════
+-- Turnos de gravação por processo (configuração consumida pela borda Pi).
+-- Cada turno tem um nome, dias da semana (ISO: 1=seg..7=dom) e uma lista
+-- de intervalos de horário no formato {"inicio":"HH:MM","fim":"HH:MM"}.
+-- A pausa de almoço é, por definição, o GAP entre intervalos consecutivos.
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists turnos_processo (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    nome text not null,
+    intervalos jsonb not null default '[]'::jsonb,         -- [{inicio:"07:00",fim:"12:00"}, ...]
+    dias_semana int[] not null default array[1,2,3,4,5,6,7],
+    ativo boolean not null default true,
+    criado_em timestamptz default now(),
+    atualizado_em timestamptz default now()
+);
+create index if not exists idx_turnos_ctx on turnos_processo(empresa, processo);
+
 -- Prism: suporte a conversas de escopo global (visão de toda a empresa).
 -- Conversas globais têm escopo='global' e processo = null.
 alter table prism_conversas add column if not exists escopo text not null default 'processo';
@@ -300,6 +319,8 @@ begin
   delete from padroes_processo
     where empresa = p_empresa and processo = p_processo;
   delete from perguntas_processo
+    where empresa = p_empresa and processo = p_processo;
+  delete from turnos_processo
     where empresa = p_empresa and processo = p_processo;
   delete from videos
     where empresa = p_empresa and processo = p_processo;

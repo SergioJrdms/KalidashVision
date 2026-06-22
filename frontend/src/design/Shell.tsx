@@ -6,7 +6,7 @@ import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
 export type Screen = "login" | "processos" | "processo" | "ajuda";
-export type Tab = "dashboard" | "validacao" | "eventos" | "padroes" | "upload" | "descricao";
+export type Tab = "dashboard" | "validacao" | "eventos" | "padroes" | "upload" | "descricao" | "configuracoes";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
 
@@ -65,6 +65,7 @@ export function Sidebar({
     { tab: "padroes", label: "Padrões", icon: "activity" },
     { tab: "upload", label: "Novo vídeo", icon: "upload" },
     { tab: "descricao", label: "Descrição", icon: "file-text" },
+    { tab: "configuracoes", label: "Configurações", icon: "settings" },
   ];
 
   return (
@@ -188,7 +189,7 @@ export function Sidebar({
 
 export function Topbar({ route, proc, go, onOpenPrism, action, isMobile = false, onMenu }: { route: Route; proc?: ProcHeaderMock | null; go: Go; onOpenPrism: () => void; action?: ReactNode; isMobile?: boolean; onMenu?: () => void }) {
   const inProc = route.screen === "processo";
-  const tabLabels: Record<string, string> = { dashboard: "Dashboard", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", upload: "Novo vídeo", descricao: "Descrição" };
+  const tabLabels: Record<string, string> = { dashboard: "Dashboard", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
   return (
     <header className="row" style={{ height: isMobile ? 54 : 60, padding: isMobile ? "0 12px" : "0 26px", borderBottom: "1px solid var(--line)", background: "rgba(255,255,255,.82)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 30, justifyContent: "space-between", gap: isMobile ? 8 : 16 }}>
       <div className="row gap2" style={{ fontSize: 13.5, color: "var(--muted)", minWidth: 0 }}>

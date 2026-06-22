@@ -19,6 +19,7 @@ import Validacao from "./pages/Validacao";
 import Eventos from "./pages/Eventos";
 import Padroes from "./pages/Padroes";
 import Ajuda from "./pages/Ajuda";
+import Configuracoes from "./pages/Configuracoes";
 import { Upload, Descricao } from "./pages/Extras";
 import { PrismPanel } from "./pages/PrismChat";
 
@@ -111,6 +112,7 @@ function AppShell() {
     else if (route.tab === "padroes") content = <Padroes proc={proc} go={goTyped} />;
     else if (route.tab === "upload") content = <Upload proc={proc} go={goTyped} />;
     else if (route.tab === "descricao") content = <Descricao proc={proc} go={goTyped} />;
+    else if (route.tab === "configuracoes") content = <Configuracoes proc={proc} go={goTyped} />;
   }
   if (!content) content = <Processos go={goTyped} />;
 

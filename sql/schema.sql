@@ -118,6 +118,22 @@ create table if not exists perguntas_processo (
 );
 alter table perguntas_processo add column if not exists respostas_rapidas jsonb;
 
+-- Turnos de gravação por processo. Consumido pelo runner da borda (Pi)
+-- para abrir e fechar a captura RTSP nos horários definidos pelo gestor.
+-- intervalos: [{"inicio":"07:00","fim":"12:00"}, {"inicio":"13:00","fim":"17:00"}]
+-- dias_semana: ISO 8601 (1=seg .. 7=dom). Pausa = gap entre intervalos.
+create table if not exists turnos_processo (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    nome text not null,
+    intervalos jsonb not null default '[]'::jsonb,
+    dias_semana int[] not null default array[1,2,3,4,5,6,7],
+    ativo boolean not null default true,
+    criado_em timestamptz default now(),
+    atualizado_em timestamptz default now()
+);
+
 -- Prism · conversas e mensagens do chat lateral (persistência + tópicos)
 create table if not exists prism_conversas (
     id uuid primary key default gen_random_uuid(),
@@ -199,6 +215,7 @@ create index if not exists idx_eventos_origem    on eventos(origem_validacao);
 create index if not exists idx_sugestoes_ctx     on sugestoes_melhoria(empresa, processo);
 create index if not exists idx_contexto_proc     on contexto_processo(empresa, processo);
 create index if not exists idx_perguntas_ctx     on perguntas_processo(empresa, processo, status);
+create index if not exists idx_turnos_ctx        on turnos_processo(empresa, processo);
 create index if not exists idx_prism_conversas_ctx on prism_conversas(empresa, escopo, atualizada_em desc);
 create index if not exists idx_prism_mensagens_conv on prism_mensagens(conversa_id, criada_em);
 create index if not exists idx_insights_globais_emp on insights_globais(empresa, criado_em desc);
@@ -222,6 +239,7 @@ begin
   delete from comportamentos     where empresa = p_empresa and processo = p_processo;
   delete from padroes_processo   where empresa = p_empresa and processo = p_processo;
   delete from perguntas_processo where empresa = p_empresa and processo = p_processo;
+  delete from turnos_processo    where empresa = p_empresa and processo = p_processo;
   delete from videos             where empresa = p_empresa and processo = p_processo;
   delete from contexto_processo  where empresa = p_empresa and processo = p_processo;
 end;
@@ -241,6 +259,7 @@ alter table eventos             enable row level security;
 alter table sugestoes_melhoria  enable row level security;
 alter table contexto_processo   enable row level security;
 alter table perguntas_processo  enable row level security;
+alter table turnos_processo     enable row level security;
 alter table prism_conversas     enable row level security;
 alter table prism_mensagens     enable row level security;
 alter table insights_globais    enable row level security;
@@ -260,7 +279,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo','prism_conversas','prism_mensagens','insights_globais','padroes_processo','padroes_globais'] loop
+  foreach t in array array['videos','comportamentos','eventos','sugestoes_melhoria','contexto_processo','perguntas_processo','turnos_processo','prism_conversas','prism_mensagens','insights_globais','padroes_processo','padroes_globais'] loop
     execute format('drop policy if exists %1$s_select on %1$s', t);
     execute format('drop policy if exists %1$s_modify on %1$s', t);
     execute format($p$
