@@ -274,6 +274,82 @@ def atualizar_descricao(
     return {"ok": True}
 
 
+_MAX_DESC_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB — sobra de folga p/ PDFs grandes
+
+
+@app.post("/processos/{processo_id}/descricao/extrair")
+async def extrair_descricao_arquivo(
+    processo_id: str,
+    file: UploadFile = File(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Recebe um arquivo (PDF, DOCX, TXT, MD) enviado pelo gestor na tela de
+    descrição manual e devolve o texto extraído. O frontend cola/anexa esse
+    texto na textarea da descrição; nada é salvo aqui — a persistência segue
+    pelo PUT /descricao existente. Autenticado e escopado ao processo."""
+    # Auth + escopo de empresa (mesmo padrão dos outros endpoints).
+    sb = make_supabase_client()
+    _processo_nome(sb, user, processo_id)
+
+    conteudo = await file.read()
+    if not conteudo:
+        return {"texto": ""}
+    if len(conteudo) > _MAX_DESC_UPLOAD_BYTES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            "Arquivo muito grande (limite de 20 MB).",
+        )
+
+    nome = (file.filename or "").lower()
+    ext = nome.rsplit(".", 1)[-1] if "." in nome else ""
+
+    try:
+        if ext == "pdf" or (file.content_type or "").endswith("/pdf"):
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(conteudo))
+            partes = []
+            for page in reader.pages:
+                try:
+                    t = page.extract_text() or ""
+                except Exception:
+                    t = ""
+                if t.strip():
+                    partes.append(t)
+            texto = "\n\n".join(partes)
+        elif ext == "docx" or (file.content_type or "").endswith("wordprocessingml.document"):
+            from docx import Document
+
+            doc = Document(io.BytesIO(conteudo))
+            texto = "\n".join(p.text for p in doc.paragraphs if p.text and p.text.strip())
+        elif ext in {"txt", "md", "markdown"} or (file.content_type or "").startswith("text/"):
+            texto = conteudo.decode("utf-8", errors="replace")
+        elif ext == "doc":
+            raise HTTPException(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                "Formato .doc (Word 97) não suportado. Converta para .docx ou PDF.",
+            )
+        else:
+            raise HTTPException(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                "Formato não suportado. Use PDF, DOCX, TXT ou MD.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"Falha ao extrair descrição do arquivo {nome!r}: {e}")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Não foi possível ler este arquivo: {e}",
+        )
+
+    # Normalização leve (preserva quebras de parágrafo, remove espaços excessivos
+    # em cada linha) — não muda conteúdo, só evita ruído de OCR/PDF.
+    linhas = [" ".join(l.split()) for l in (texto or "").splitlines()]
+    texto = "\n".join(linhas).strip()
+    return {"texto": texto}
+
+
 @app.post("/processos/{processo_id}/onboarding/proxima-pergunta")
 def onboarding_proxima_pergunta(
     processo_id: str,

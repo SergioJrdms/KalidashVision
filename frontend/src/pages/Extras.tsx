@@ -366,6 +366,8 @@ function DescricaoManual({ proc, go, descricaoAtual, areaAtual, onRefazerOnboard
   const [texto, setTexto] = useState(descricaoAtual);
   const [area, setArea] = useState(areaAtual);
   const [saved, setSaved] = useState(false);
+  const [importando, setImportando] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   async function salvar() {
     await Promise.all([api.processos.setDescricao(proc.id, texto.trim()), api.processos.setArea(proc.id, area.trim() || null)]);
@@ -374,10 +376,35 @@ function DescricaoManual({ proc, go, descricaoAtual, areaAtual, onRefazerOnboard
     toast("Descrição salva — o Prism vai usar no contexto.", { icon: "check" });
   }
 
+  async function importarArquivo(file: File) {
+    setImportando(file.name);
+    try {
+      const r = await api.processos.extrairDescricaoArquivo(proc.id, file);
+      const extraido = (r.texto || "").trim();
+      if (!extraido) {
+        toast("Não consegui ler texto desse arquivo.", { icon: "alert-triangle", color: "#F8B4B6" });
+        return;
+      }
+      // Se já há conteúdo digitado, anexa preservando o que o gestor escreveu.
+      // Se está vazio, simplesmente preenche.
+      setTexto((prev) => {
+        const base = prev.trim();
+        return base ? `${base}\n\n${extraido}` : extraido;
+      });
+      setSaved(false);
+      toast(`Importado de "${file.name}".`, { icon: "check" });
+    } catch (e) {
+      toast(`Falha ao importar: ${(e as Error).message}`, { icon: "alert-triangle", color: "#F8B4B6", duration: 4000 });
+    } finally {
+      setImportando(null);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
   return (
     <div style={{ maxWidth: 760, margin: "0 auto" }}>
       <Card style={{ padding: 28 }}>
-        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8, flexWrap: "wrap" }}>
           <h1 className="font-display" style={{ fontSize: 22, fontWeight: 700 }}>Descrição do processo</h1>
           <button onClick={onRefazerOnboarding} className="row gap1" style={{ border: "1px solid var(--p-200)", background: "var(--accent-soft)", color: "var(--accent-deep)", borderRadius: 99, padding: "5px 12px", fontSize: 12, fontWeight: 600 }}>
             <Icon name="sparkles" size={13} /> Refazer com o Prism
@@ -395,8 +422,28 @@ function DescricaoManual({ proc, go, descricaoAtual, areaAtual, onRefazerOnboard
         <label className="label">Área (opcional)</label>
         <input className="field" value={area} onChange={(e) => { setArea(e.target.value); setSaved(false); }} placeholder="Ex.: Estamparia" list="areas-desc" style={{ maxWidth: 300, marginBottom: 14 }} />
         <datalist id="areas-desc">{["Estamparia", "Montagem", "Logística", "Soldagem", "Usinagem", "Embalagem", "Picking", "Pintura", "Qualidade"].map((a) => <option key={a} value={a} />)}</datalist>
-        <textarea className="field" rows={9} value={texto} onChange={(e) => { setTexto(e.target.value); setSaved(false); }} style={{ resize: "vertical", lineHeight: 1.55 }}
-          placeholder="Ex.: Os operadores retiram a bobina do estoque, levam até a prensa, posicionam o blank e acionam o ciclo. Depois conferem a peça e registram no terminal…" />
+
+        {/* Barra de ações da descrição: importar de arquivo + dica de "sem limite" */}
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+          <label className="label" style={{ margin: 0 }}>Descrição (sem limite de tamanho — pode escrever à vontade)</label>
+          <div className="row gap2">
+            <input ref={inputRef} type="file" accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" style={{ display: "none" }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) void importarArquivo(f); }} />
+            <Btn variant="secondary" size="sm" icon="upload" disabled={!!importando} onClick={() => inputRef.current?.click()}>
+              {importando ? "Importando…" : "Importar arquivo"}
+            </Btn>
+          </div>
+        </div>
+        <textarea className="field" rows={14} value={texto} onChange={(e) => { setTexto(e.target.value); setSaved(false); }} style={{ resize: "vertical", lineHeight: 1.55, minHeight: 280 }}
+          placeholder="Ex.: Os operadores retiram a bobina do estoque, levam até a prensa, posicionam o blank e acionam o ciclo. Depois conferem a peça e registram no terminal… (ou importe um PDF/DOCX/TXT acima — o texto entra aqui pra você revisar.)" />
+        <div className="row" style={{ justifyContent: "space-between", marginTop: 6, alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          <span style={{ fontSize: 11.5, color: "var(--faint)" }}>
+            {texto.length.toLocaleString("pt-BR")} caracteres · sem limite
+          </span>
+          <span className="row gap1" style={{ fontSize: 11.5, color: "var(--faint)" }}>
+            <Icon name="file-text" size={12} /> Aceita PDF, DOCX, TXT, MD (até 20 MB).
+          </span>
+        </div>
         <div className="row" style={{ justifyContent: "space-between", marginTop: 16, alignItems: "center" }}>
           <span className="row gap1" style={{ fontSize: 12.5, color: saved ? "var(--va)" : "var(--faint)" }}>{saved && <><Icon name="check" size={14} /> salvo</>}</span>
           <div className="row gap2">

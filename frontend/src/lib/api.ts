@@ -64,6 +64,16 @@ export const api = {
         method: "PUT",
         body: JSON.stringify({ area }),
       }),
+    extrairDescricaoArquivo: async (id: string, file: File): Promise<{ texto: string }> => {
+      const fd = new FormData();
+      fd.append("file", file);
+      const { data: sess } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {};
+      if (sess.session?.access_token) headers["Authorization"] = `Bearer ${sess.session.access_token}`;
+      const r = await fetch(`${API}/processos/${id}/descricao/extrair`, { method: "POST", body: fd, headers });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      return r.json();
+    },
     onboardingProxima: (
       id: string,
       historico: { pergunta: string; resposta: string }[],
