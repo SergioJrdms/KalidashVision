@@ -1,5 +1,10 @@
 // ============================================================
-// Validação — porte fiel de validacao.jsx (Foco Único), dados reais.
+// Validação — Foco Único com GERENCIAMENTO DE FILA POR LOTES:
+//  • mostra apenas TAMANHO_LOTE itens por vez (não despeja 60+ de cara);
+//  • o cliente pode PULAR (botão ou swipe horizontal) — o card volta pro
+//    FINAL do lote (loop dentro do lote, sem crescer infinito);
+//  • quando o lote termina, abre o próximo lote (mesma quantidade);
+//  • header sempre deixa explícito "lote N de M" e "X ainda na fila".
 // ============================================================
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -10,6 +15,8 @@ import { Btn, Card, Icon, Prism, Ring, toast } from "../design/ui";
 import { FrameStripReal, FrameReal } from "../lib/frames";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
+
+const TAMANHO_LOTE = 10;
 
 export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: Go; t: Tweaks }) {
   const qc = useQueryClient();
@@ -24,6 +31,8 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
   );
 
   const [queue, setQueue] = useState<PendMock[]>([]);
+  const [blocoIds, setBlocoIds] = useState<string[]>([]);   // ids do lote atual, na ordem (suporta rotação)
+  const [loteIdx, setLoteIdx] = useState(0);                // 1, 2, 3... (0 antes de abrir o 1º)
   const [perguntas, setPerguntas] = useState<(PergMock & { status: "open" | "answered" | "dismissed"; answer?: string | null })[]>([]);
   const [done, setDone] = useState(0);
   const [learned, setLearned] = useState(0);
@@ -31,14 +40,20 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
   const [seeded, setSeeded] = useState(false);
 
   useEffect(() => {
-    if (!seeded && pendQ.data) { setQueue(mapPendentes(pendQ.data)); setSeeded(true); }
+    if (!seeded && pendQ.data) {
+      const q = mapPendentes(pendQ.data);
+      setQueue(q);
+      setBlocoIds(q.slice(0, TAMANHO_LOTE).map((x) => x.id));
+      setLoteIdx(q.length > 0 ? 1 : 0);
+      setSeeded(true);
+    }
   }, [pendQ.data, seeded]);
   useEffect(() => {
     if (pergQ.data) setPerguntas((cur) => (cur.length ? cur : mapPerguntas(pergQ.data).map((q) => ({ ...q, status: "open" as const, answer: null }))));
   }, [pergQ.data]);
 
-  const totalInicial = (pendQ.data?.length ?? 0);
-  const restantes = queue.length;
+  const totalInicial = pendQ.data?.length ?? 0;
+  const totalLotes = Math.max(1, Math.ceil(totalInicial / TAMANHO_LOTE));
   const matBoost = Math.min(16, done * 1.4);
   const maturidade = Math.min(99, Math.round((proc.maturidade || 0) + matBoost));
   const respondidas = perguntas.filter((q) => q.status !== "open").length;
@@ -54,12 +69,27 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
   function resolver(ev: PendMock, acao: "confirmar" | "corrigir" | "descartar", novoLabel?: string) {
     validar.mutate({ id: ev.id, acao, label: novoLabel });
     setQueue((q) => q.filter((x) => x.id !== ev.id));
+    setBlocoIds((ids) => ids.filter((id) => id !== ev.id));
     setDone((d) => d + 1);
     if (acao !== "descartar") setLearned((l) => l + 1);
     setStreak((s) => (acao === "descartar" ? 0 : s + 1));
     const msg = acao === "confirmar" ? "Confirmado · o Prism aprendeu com você" : acao === "corrigir" ? `Corrigido para “${novoLabel}”` : "Descartado · falso alarme registrado";
     toast(msg, { icon: acao === "descartar" ? "x" : "check", color: acao === "descartar" ? "#F8B4B6" : "#3EE6AE" });
   }
+
+  function pular() {
+    // Empurra o item da frente pro fim do lote (loop dentro do lote).
+    setBlocoIds((ids) => (ids.length > 1 ? [...ids.slice(1), ids[0]] : ids));
+  }
+
+  function proximoLote() {
+    // Pega os próximos TAMANHO_LOTE da fila (excluindo o que já estava no bloco).
+    const idsNoBloco = new Set(blocoIds);
+    const restantes = queue.filter((q) => !idsNoBloco.has(q.id));
+    setBlocoIds(restantes.slice(0, TAMANHO_LOTE).map((x) => x.id));
+    setLoteIdx((l) => l + 1);
+  }
+
   function responder(q: PergMock, answer: string) {
     respMut.mutate({ id: q.id, resposta: answer });
     setPerguntas((arr) => arr.map((x) => (x.id === q.id ? { ...x, status: "answered", answer } : x)));
@@ -73,6 +103,14 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
 
   if (pendQ.isLoading) return <Card style={{ padding: 0 }}><div className="center" style={{ padding: 60 }}><span className="spin" style={{ width: 22, height: 22, border: "3px solid var(--p-100)", borderTopColor: "var(--accent)", borderRadius: "50%" }} /></div></Card>;
 
+  // Bloco visível na ordem dos ids (suporta rotação do pular).
+  const mapById = new Map(queue.map((q) => [q.id, q]));
+  const bloco = blocoIds.map((id) => mapById.get(id)).filter((x): x is PendMock => !!x);
+  const evento = bloco[0];
+  const restantesBloco = bloco.length;
+  const restantesFila = queue.length;
+  const naFilaAposBloco = Math.max(0, restantesFila - restantesBloco);
+
   return (
     <div className="col" style={{ gap: 18, maxWidth: 1080, margin: "0 auto" }}>
       <SessionHeader maturidade={maturidade} done={done} total={totalInicial} learned={learned} streak={streak} />
@@ -81,12 +119,24 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
         <PerguntasConversa perguntas={perguntas} onResponder={responder} onDispensar={dispensar} respondidas={respondidas} />
       )}
 
-      {restantes === 0 ? (
+      {restantesFila === 0 ? (
         <FilaLimpa done={done} learned={learned} go={go} proc={proc} />
+      ) : restantesBloco === 0 ? (
+        // Acabou o lote, mas ainda tem mais — transição amigável.
+        <LoteConcluido loteIdx={loteIdx} totalLotes={totalLotes} restantesFila={restantesFila} tamanhoLote={TAMANHO_LOTE} onProximo={proximoLote} />
       ) : fila ? (
-        <FilaFoco evento={queue[0]} restantes={restantes} total={totalInicial} onResolver={resolver} labels={labels} />
+        <FilaFoco
+          evento={evento!}
+          restantesBloco={restantesBloco}
+          loteIdx={loteIdx}
+          totalLotes={totalLotes}
+          naFilaAposBloco={naFilaAposBloco}
+          onResolver={resolver}
+          onPular={pular}
+          labels={labels}
+        />
       ) : (
-        <CardsGrid queue={queue} onResolver={resolver} labels={labels} />
+        <CardsGrid queue={bloco} onResolver={resolver} labels={labels} />
       )}
     </div>
   );
@@ -199,14 +249,37 @@ function PerguntaAtiva({ q, onResponder, onDispensar }: { q: PQ; onResponder: (q
   );
 }
 
-function FilaFoco({ evento, restantes, total, onResolver, labels }: { evento: PendMock; restantes: number; total: number; onResolver: (ev: PendMock, k: "confirmar" | "corrigir" | "descartar", l?: string) => void; labels: string[] }) {
+function FilaFoco({
+  evento,
+  restantesBloco,
+  loteIdx,
+  totalLotes,
+  naFilaAposBloco,
+  onResolver,
+  onPular,
+  labels,
+}: {
+  evento: PendMock;
+  restantesBloco: number;
+  loteIdx: number;
+  totalLotes: number;
+  naFilaAposBloco: number;
+  onResolver: (ev: PendMock, k: "confirmar" | "corrigir" | "descartar", l?: string) => void;
+  onPular: () => void;
+  labels: string[];
+}) {
   const [phase, setPhase] = useState<"idle" | "confirm" | "leaving">("idle");
   const [corrigir, setCorrigir] = useState(false);
   const [label, setLabel] = useState(evento.label);
   const [conf, setConf] = useState(Math.round(evento.conf * 100));
   const [resolvedKind, setResolvedKind] = useState<string | null>(null);
+  // Swipe horizontal (mouse + touch) — arraste pra qualquer lado pra pular.
+  const [drag, setDrag] = useState<{ startX: number; dx: number } | null>(null);
 
-  useEffect(() => { setPhase("idle"); setCorrigir(false); setLabel(evento.label); setConf(Math.round(evento.conf * 100)); setResolvedKind(null); }, [evento.id]);
+  useEffect(() => {
+    setPhase("idle"); setCorrigir(false); setLabel(evento.label);
+    setConf(Math.round(evento.conf * 100)); setResolvedKind(null); setDrag(null);
+  }, [evento.id]);
 
   function act(kind: "confirmar" | "corrigir" | "descartar", lbl?: string) {
     setResolvedKind(kind);
@@ -216,75 +289,192 @@ function FilaFoco({ evento, restantes, total, onResolver, labels }: { evento: Pe
     setTimeout(() => onResolver(evento, kind, lbl), 980);
   }
 
-  const animClass = phase === "leaving" ? (resolvedKind === "descartar" ? "leave-r" : "leave-l") : "anim-pop";
+  // ── Swipe ────────────────────────────────────────────────
+  const SWIPE_TH = 110; // px de deslocamento para confirmar o "pular"
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (phase !== "idle" || corrigir) return;
+    // não inicia drag em controles interativos
+    const t = e.target as HTMLElement;
+    if (t.closest("button, input, textarea, a, label, [data-no-drag]")) return;
+    setDrag({ startX: e.clientX, dx: 0 });
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
+  }
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!drag) return;
+    setDrag({ ...drag, dx: e.clientX - drag.startX });
+  }
+  function endDrag() {
+    if (!drag) return;
+    const dx = drag.dx;
+    setDrag(null);
+    if (Math.abs(dx) >= SWIPE_TH) {
+      // anima saída e troca evento (o useEffect do próximo evento reseta o estado)
+      setResolvedKind("pular");
+      setPhase("leaving");
+      setTimeout(() => onPular(), 320);
+    }
+  }
+
+  const swipeStyle: React.CSSProperties = drag
+    ? { transform: `translateX(${drag.dx}px) rotate(${drag.dx * 0.02}deg)`, transition: "none" }
+    : { transition: "transform .25s cubic-bezier(.2,.8,.2,1)" };
+
+  const animClass = phase === "leaving"
+    ? (resolvedKind === "descartar" || resolvedKind === "pular" ? "leave-r" : "leave-l")
+    : "anim-pop";
+
   return (
-    <div style={{ position: "relative" }}>
-      {restantes > 1 && <div className="card" style={{ position: "absolute", inset: "8px -8px -8px -8px", zIndex: 0, opacity: 0.5 }} />}
-      {restantes > 2 && <div className="card" style={{ position: "absolute", inset: "16px -16px -16px -16px", zIndex: -1, opacity: 0.25 }} />}
+    <div className="col" style={{ gap: 10 }}>
+      {/* Barra de lote — diz claramente "lote N de M, X ainda na fila" */}
+      <BarraLote
+        loteIdx={loteIdx}
+        totalLotes={totalLotes}
+        restantesBloco={restantesBloco}
+        naFilaAposBloco={naFilaAposBloco}
+      />
 
-      <div key={evento.id} className={`card ${animClass}`} style={{ position: "relative", zIndex: 1, padding: 0, overflow: "hidden" }}>
-        <div className="row" style={{ justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--line-2)" }}>
-          <span className="row gap2" style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)" }}>
-            <Icon name="user" size={13} /> PESSOA-{String(evento.pessoa).padStart(3, "0")} · {evento.ini.toFixed(1)}s→{evento.fim.toFixed(1)}s · {fmtSeg(evento.fim - evento.ini)}
-          </span>
-          <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{restantes} na fila</span>
-        </div>
+      <div style={{ position: "relative" }}>
+        {restantesBloco > 1 && <div className="card" style={{ position: "absolute", inset: "8px -8px -8px -8px", zIndex: 0, opacity: 0.5 }} />}
+        {restantesBloco > 2 && <div className="card" style={{ position: "absolute", inset: "16px -16px -16px -16px", zIndex: -1, opacity: 0.25 }} />}
 
-        <FrameStripReal ativo={evento} />
-
-        <div style={{ padding: "16px 20px 20px" }}>
-          <div className="row gap2" style={{ marginBottom: 4 }}>
-            <Prism size={24} ring />
-            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>O Prism interpretou como</span>
+        <div
+          key={evento.id}
+          className={`card ${animClass}`}
+          style={{ position: "relative", zIndex: 1, padding: 0, overflow: "hidden", touchAction: "pan-y", userSelect: "none", ...swipeStyle }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
+          <div className="row gap2" style={{ justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--line-2)" }}>
+            <span className="row gap2" style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+              <Icon name="user" size={13} /> PESSOA-{String(evento.pessoa).padStart(3, "0")} · {evento.ini.toFixed(1)}s→{evento.fim.toFixed(1)}s · {fmtSeg(evento.fim - evento.ini)}
+            </span>
+            <button
+              data-no-drag
+              onClick={() => { setResolvedKind("pular"); setPhase("leaving"); setTimeout(() => onPular(), 320); }}
+              title="Pular este por enquanto — volta no fim do lote"
+              disabled={phase !== "idle" || restantesBloco <= 1}
+              className="row gap1"
+              style={{ fontSize: 11.5, fontWeight: 700, border: "1px solid var(--line)", background: "#fff", color: "var(--muted)", borderRadius: 99, padding: "3px 10px", cursor: restantesBloco > 1 ? "pointer" : "not-allowed", opacity: restantesBloco > 1 ? 1 : 0.5 }}
+            >
+              <Icon name="rotate-cw" size={12} /> Pular
+            </button>
           </div>
-          <div className="row gap2 wrap" style={{ alignItems: "center", marginBottom: 10 }}>
-            {!corrigir ? (
-              <span className="font-display" style={{ fontSize: 22, fontWeight: 700, color: "var(--ink)" }}>“{label}”</span>
-            ) : (
-              <div className="row gap2" style={{ width: "100%" }}>
-                <input className="field" list="labels-fila" autoFocus value={label} onChange={(e) => setLabel(e.target.value)} style={{ maxWidth: 360, fontSize: 16 }} />
-                <datalist id="labels-fila">{labels.map((l) => <option key={l} value={l} />)}</datalist>
+
+          <FrameStripReal ativo={evento} />
+
+          <div style={{ padding: "16px 20px 20px" }}>
+            <div className="row gap2" style={{ marginBottom: 4 }}>
+              <Prism size={24} ring />
+              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>O Prism interpretou como</span>
+            </div>
+            <div className="row gap2 wrap" style={{ alignItems: "center", marginBottom: 10 }}>
+              {!corrigir ? (
+                <span className="font-display" style={{ fontSize: 22, fontWeight: 700, color: "var(--ink)" }}>“{label}”</span>
+              ) : (
+                <div className="row gap2" style={{ width: "100%" }}>
+                  <input className="field" list="labels-fila" autoFocus value={label} onChange={(e) => setLabel(e.target.value)} style={{ maxWidth: 360, fontSize: 16 }} />
+                  <datalist id="labels-fila">{labels.map((l) => <option key={l} value={l} />)}</datalist>
+                </div>
+              )}
+              {evento.sugestao !== "none" && (
+                <span className="badge badge-purple"><i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(evento.sugestao) }} /> {leanLabel(evento.sugestao)}</span>
+              )}
+            </div>
+            <p className="pretty" style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.5, marginBottom: 14, maxWidth: 620 }}>{evento.descricao}</p>
+
+            <div className="row gap2" style={{ marginBottom: 18, maxWidth: 420 }}>
+              <span style={{ fontSize: 11.5, color: "var(--muted)", width: 84 }}>confiança</span>
+              <div className="grow track" style={{ height: 8 }}>
+                <i style={{ width: `${conf}%`, background: resolvedKind && resolvedKind !== "descartar" && resolvedKind !== "pular" ? "linear-gradient(90deg,#34D399,#10B981)" : "var(--grad-cta)", transition: "width .6s cubic-bezier(.2,.8,.2,1)" }} />
+              </div>
+              <span className="tnum font-mono" style={{ fontSize: 12, color: resolvedKind && resolvedKind !== "descartar" && resolvedKind !== "pular" ? "var(--va)" : "var(--accent)", width: 38, textAlign: "right" }}>{conf}%</span>
+            </div>
+
+            {phase === "idle" && !corrigir && (
+              <div className="row gap2 wrap">
+                <button onClick={() => act("confirmar")} className="btn btn-ok btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={19} strokeWidth={2.6} /> Confirmar</button>
+                <button onClick={() => setCorrigir(true)} className="btn btn-secondary btn-lg" style={{ flex: "1 1 140px" }}><Icon name="pencil" size={17} /> Corrigir</button>
+                <button onClick={() => act("descartar")} className="btn btn-danger btn-lg" style={{ flex: "1 1 140px" }}><Icon name="x" size={18} strokeWidth={2.4} /> Descartar</button>
               </div>
             )}
-            {evento.sugestao !== "none" && (
-              <span className="badge badge-purple"><i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(evento.sugestao) }} /> {leanLabel(evento.sugestao)}</span>
+            {phase === "idle" && corrigir && (
+              <div className="row gap2 wrap">
+                <button onClick={() => act("corrigir", label.trim())} disabled={!label.trim()} className="btn btn-primary btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={18} strokeWidth={2.5} /> Salvar correção</button>
+                <button onClick={() => { setCorrigir(false); setLabel(evento.label); }} className="btn btn-ghost btn-lg">Cancelar</button>
+              </div>
+            )}
+            {phase !== "idle" && (
+              <div className="row gap2 anim-pop" style={{ fontSize: 15, fontWeight: 700, color: resolvedKind === "descartar" ? "var(--desp)" : resolvedKind === "pular" ? "var(--muted)" : "var(--va)", padding: "10px 0" }}>
+                <Icon
+                  name={resolvedKind === "descartar" ? "x-circle" : resolvedKind === "pular" ? "rotate-cw" : "check-circle-2"}
+                  size={20}
+                  strokeWidth={2.4}
+                />
+                {resolvedKind === "confirmar"
+                  ? "Confirmado!"
+                  : resolvedKind === "corrigir"
+                  ? "Corrigido!"
+                  : resolvedKind === "pular"
+                  ? "Pulado — volta no fim do lote"
+                  : "Descartado"}
+                {resolvedKind === "confirmar" || resolvedKind === "corrigir" ? (
+                  <span style={{ color: "var(--accent)" }}>+1 padrão aprendido</span>
+                ) : null}
+              </div>
             )}
           </div>
-          <p className="pretty" style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.5, marginBottom: 14, maxWidth: 620 }}>{evento.descricao}</p>
-
-          <div className="row gap2" style={{ marginBottom: 18, maxWidth: 420 }}>
-            <span style={{ fontSize: 11.5, color: "var(--muted)", width: 84 }}>confiança</span>
-            <div className="grow track" style={{ height: 8 }}>
-              <i style={{ width: `${conf}%`, background: resolvedKind && resolvedKind !== "descartar" ? "linear-gradient(90deg,#34D399,#10B981)" : "var(--grad-cta)", transition: "width .6s cubic-bezier(.2,.8,.2,1)" }} />
-            </div>
-            <span className="tnum font-mono" style={{ fontSize: 12, color: resolvedKind && resolvedKind !== "descartar" ? "var(--va)" : "var(--accent)", width: 38, textAlign: "right" }}>{conf}%</span>
-          </div>
-
-          {phase === "idle" && !corrigir && (
-            <div className="row gap2 wrap">
-              <button onClick={() => act("confirmar")} className="btn btn-ok btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={19} strokeWidth={2.6} /> Confirmar</button>
-              <button onClick={() => setCorrigir(true)} className="btn btn-secondary btn-lg" style={{ flex: "1 1 140px" }}><Icon name="pencil" size={17} /> Corrigir</button>
-              <button onClick={() => act("descartar")} className="btn btn-danger btn-lg" style={{ flex: "1 1 140px" }}><Icon name="x" size={18} strokeWidth={2.4} /> Descartar</button>
-            </div>
-          )}
-          {phase === "idle" && corrigir && (
-            <div className="row gap2 wrap">
-              <button onClick={() => act("corrigir", label.trim())} disabled={!label.trim()} className="btn btn-primary btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={18} strokeWidth={2.5} /> Salvar correção</button>
-              <button onClick={() => { setCorrigir(false); setLabel(evento.label); }} className="btn btn-ghost btn-lg">Cancelar</button>
-            </div>
-          )}
-          {phase !== "idle" && (
-            <div className="row gap2 anim-pop" style={{ fontSize: 15, fontWeight: 700, color: resolvedKind === "descartar" ? "var(--desp)" : "var(--va)", padding: "10px 0" }}>
-              <Icon name={resolvedKind === "descartar" ? "x-circle" : "check-circle-2"} size={20} strokeWidth={2.4} />
-              {resolvedKind === "confirmar" ? "Confirmado!" : resolvedKind === "corrigir" ? "Corrigido!" : "Descartado"} {resolvedKind !== "descartar" && <span style={{ color: "var(--accent)" }}>+1 padrão aprendido</span>}
-            </div>
-          )}
         </div>
       </div>
-      <p className="row gap2" style={{ justifyContent: "center", fontSize: 11.5, color: "var(--faint)", marginTop: 14 }}>
-        <Icon name="mouse-pointer-click" size={13} /> Um clique resolve. Quanto mais você ensina, menos eventos chegam aqui.
+      <p className="row gap2" style={{ justifyContent: "center", fontSize: 11.5, color: "var(--faint)", marginTop: 4, flexWrap: "wrap", textAlign: "center" }}>
+        <Icon name="mouse-pointer-click" size={13} /> Um clique resolve. Arraste o card pro lado, ou toque <b style={{ color: "var(--muted)" }}>Pular</b>, pra adiar e voltar ao fim do lote.
       </p>
     </div>
+  );
+}
+
+function BarraLote({ loteIdx, totalLotes, restantesBloco, naFilaAposBloco }: { loteIdx: number; totalLotes: number; restantesBloco: number; naFilaAposBloco: number }) {
+  return (
+    <Card style={{ padding: "10px 14px", background: "var(--soft)" }}>
+      <div className="row gap2" style={{ alignItems: "center", flexWrap: "wrap" }}>
+        <span className="row gap1" style={{ fontSize: 11.5, fontWeight: 700, color: "var(--accent-deep)", background: "var(--accent-soft)", border: "1px solid var(--p-200)", borderRadius: 99, padding: "3px 10px" }}>
+          <Icon name="layers" size={12} /> Lote {loteIdx} de {totalLotes}
+        </span>
+        <span style={{ fontSize: 12.5, color: "var(--text)" }}>
+          <b className="tnum" style={{ color: "var(--ink)" }}>{restantesBloco}</b> {restantesBloco === 1 ? "item neste lote" : "itens neste lote"}
+        </span>
+        <span className="grow" />
+        <span className="row gap1" style={{ fontSize: 12, color: "var(--muted)" }}>
+          <Icon name="inbox" size={12} />
+          {naFilaAposBloco > 0
+            ? <>+{naFilaAposBloco} aguardando próximo lote</>
+            : <>último lote</>}
+        </span>
+      </div>
+    </Card>
+  );
+}
+
+function LoteConcluido({ loteIdx, totalLotes, restantesFila, tamanhoLote, onProximo }: { loteIdx: number; totalLotes: number; restantesFila: number; tamanhoLote: number; onProximo: () => void }) {
+  const prox = Math.min(tamanhoLote, restantesFila);
+  return (
+    <Card style={{ padding: 0, overflow: "hidden" }} className="anim-fadeup">
+      <div style={{ background: "linear-gradient(120deg, var(--accent-soft), #fff 80%)", padding: "26px 24px", position: "relative" }}>
+        <div className="row gap3" style={{ alignItems: "center" }}>
+          <span className="center" style={{ width: 48, height: 48, borderRadius: 14, background: "#fff", color: "var(--accent)", boxShadow: "var(--glow)" }}><Icon name="check-check" size={24} strokeWidth={2.4} /></span>
+          <div className="grow">
+            <h2 className="font-display" style={{ fontSize: 20, fontWeight: 700, color: "var(--ink)" }}>Lote {loteIdx} concluído</h2>
+            <p style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 3 }}>
+              Faltam <b className="tnum" style={{ color: "var(--ink)" }}>{restantesFila}</b> {restantesFila === 1 ? "item" : "itens"} na fila — mais {loteIdx >= totalLotes - 1 ? "este último lote" : `${totalLotes - loteIdx} ${totalLotes - loteIdx === 1 ? "lote" : "lotes"}`} pra terminar.
+            </p>
+          </div>
+          <Btn icon="arrow-right" onClick={onProximo}>
+            Continuar com mais {prox}
+          </Btn>
+        </div>
+      </div>
+    </Card>
   );
 }
 
