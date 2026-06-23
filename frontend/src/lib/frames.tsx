@@ -18,7 +18,9 @@ function useEventFrames(id: string, enabled = true) {
   });
 }
 
-const imgBase: React.CSSProperties = { display: "block", width: "100%", objectFit: "cover", background: "#0d0820", borderRadius: "var(--r-md)" };
+// objectFit "contain": mostra o ROI COMPLETO (sem corte/zoom). O fundo escuro
+// preenche a letterbox quando o aspecto do frame difere do card.
+const imgBase: React.CSSProperties = { display: "block", width: "100%", objectFit: "contain", background: "#0d0820", borderRadius: "var(--r-md)" };
 
 // Faixa de 3 frames (Validação · Foco Único) — fundo escuro + selo de tempo.
 export function FrameStripReal({ ativo }: { ativo: { id: string; pessoa: number; label: string; ini: number; fim: number } }) {

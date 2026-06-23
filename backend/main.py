@@ -1214,11 +1214,15 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
     import base64
     import posixpath
 
-    # Cache determinístico de frames já extraídos (JPEGs pequenos, ~30 KB cada),
-    # ao lado do vídeo no Storage. Evita rebaixar o vídeo inteiro a cada
-    # visualização (causa do OOM ao navegar na Validação).
+    # Cache determinístico de frames já extraídos (JPEGs pequenos), ao lado do
+    # vídeo no Storage. Evita rebaixar o vídeo inteiro a cada visualização
+    # (causa do OOM ao navegar na Validação).
+    # O sufixo de VERSÃO (_v2) invalida caches antigos quando mudamos os
+    # parâmetros de extração (resolução/qualidade). Bump aqui sempre que o
+    # formato do frame mudar.
+    _FRAMES_VER = "v2"
     frames_prefix = posixpath.dirname(caminho) + "/__frames"
-    frame_keys = [f"{frames_prefix}/{evento_id}_{k}.jpg" for k in (0, 1, 2)]
+    frame_keys = [f"{frames_prefix}/{evento_id}_{_FRAMES_VER}_{k}.jpg" for k in (0, 1, 2)]
 
     # 1) Tenta servir do cache. Para não fazer 3 round-trips num miss, sonda só
     #    o primeiro; se existir, baixa os 3 (cache foi escrito atômico junto).
@@ -1263,8 +1267,9 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
             pass
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao baixar vídeo: {e}")
 
-    # 3) Extração idêntica à de sempre + bytes JPEG idênticos (mesma seleção
-    #    [fi, mid, ff], mesma anotação/resize, frame_para_jpeg_bytes quality 80).
+    # 3) Extrai os 3 frames da ação (seleção [fi, mid, ff], anotação
+    #    proporcional, normaliza p/ ≤720px) e codifica em JPEG (quality 85).
+    #    Os MESMOS bytes vão para a resposta e para o cache em Storage.
     try:
         crops = extrair_3_frames_evento(ev, tmp.name)
         jpegs = [frame_para_jpeg_bytes(c) for c in crops]

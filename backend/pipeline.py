@@ -2218,19 +2218,30 @@ def extrair_3_frames_evento(evento: dict, video_path: str) -> list[np.ndarray]:
 
     def _anota(frame: np.ndarray) -> np.ndarray:
         a = frame.copy()  # copia: o mesmo frame pode servir a mais de um alvo
-        cv2.rectangle(a, (x1, y1), (x2, y2), (0, 255, 100), 4)
+        h, w = a.shape[:2]
+        m = max(h, w)
+        # Anotação PROPORCIONAL ao tamanho do frame — assim a caixa não vira um
+        # "blob" verde em frames pequenos nem some em frames grandes.
+        esp = max(2, round(m / 360))
+        fsc = max(0.5, min(1.2, m / 900))
+        fth = max(1, round(m / 600))
+        cv2.rectangle(a, (x1, y1), (x2, y2), (0, 255, 100), esp)
         cv2.putText(
             a,
             f'P{evento["pessoa_track_id"]:03d}',
             (x1, max(20, y1 - 10)),
             cv2.FONT_HERSHEY_DUPLEX,
-            1.0,
+            fsc,
             (0, 255, 100),
-            2,
+            fth,
         )
-        h, w = a.shape[:2]
-        escala = 480 / max(h, w)
-        return cv2.resize(a, (int(w * escala), int(h * escala)))
+        # Frame de validação: normaliza para no máx. 720px no maior lado (meio
+        # termo entre nitidez e peso). NÃO faz upscale — preserva a resolução
+        # nativa quando menor, deixando o navegador escalar no display.
+        if m > 720:
+            escala = 720 / m
+            a = cv2.resize(a, (int(w * escala), int(h * escala)), interpolation=cv2.INTER_AREA)
+        return a
 
     crops: list[np.ndarray] = []
     ultimo: np.ndarray | None = None
@@ -2246,7 +2257,7 @@ def extrair_3_frames_evento(evento: dict, video_path: str) -> list[np.ndarray]:
     return crops
 
 
-def frame_para_jpeg_bytes(frame_bgr: np.ndarray, qualidade: int = 80) -> bytes:
+def frame_para_jpeg_bytes(frame_bgr: np.ndarray, qualidade: int = 85) -> bytes:
     ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, qualidade])
     assert ok
     return buf.tobytes()
