@@ -2781,9 +2781,23 @@ def agregar_portfolio(
         }
 
         # ── Maturidade do Prism (0-100, derivada, saturada) ──
+        # Critérios de calibração:
+        #  • Volume = TEMPO OBSERVADO (min), não contagem de arquivos. 12 vídeos
+        #    de 1 min ≠ 12 vídeos de 30 min — só contagem inflava maturidade
+        #    em testes curtos.
+        #  • Pontos por VALIDAÇÃO ABSOLUTA do humano: hoje 100% validado de 5
+        #    eventos valia o mesmo que 100% de 5000. Agora a *quantidade*
+        #    importa, com saturação alta.
+        #  • Cobertura Lean é "puxada" pela IA automaticamente — antes dava
+        #    ~5pts grátis. Agora multiplica por um GATE de validação humana,
+        #    então só conta se houve trabalho real do gestor.
+        #  • Limites de saturação maiores em geral: as faixas
+        #    Aprendendo / Confiante / Especialista passam a exigir uso real.
         n_videos = p["n_videos"]
         ev_cons = p["eventos_considerados"]
-        pct_val = p["n_validados"] / max(1, ev_cons)
+        tempo_min = (p["tempo_total_s"] or 0) / 60.0
+        n_validados = p["n_validados"]
+        pct_val = n_validados / max(1, ev_cons)
         n_auto = p.get("n_origem_auto", 0)
         n_humano = p.get("n_origem_humano", 0)
         n_pend = p.get("n_origem_pendente", 0)
@@ -2791,16 +2805,22 @@ def agregar_portfolio(
         cobertura_lean = 1 - (n_nao_classif / max(1, n_comp_local))
         n_pad = n_padroes_alta.get(n, 0)
         n_resp = n_respostas.get(n, 0)
-        # Pesos somam 100. Respostas às perguntas proativas viram conhecimento
-        # explícito do domínio (peso máximo nos prompts), por isso entram aqui.
+
+        # Gate de validação: a cobertura Lean (que a IA "preenche sozinha")
+        # só passa a contar à medida que o humano valida — evita 4-5 pontos
+        # grátis logo no primeiro vídeo. Satura em 10 validações.
+        gate_validacao = min(1, n_validados / 10)
+
+        # Pesos somam 100: 18+12+10+25+6+5+8+16=100.
         maturidade = (
-            20 * min(1, n_videos / 10)        # volume de vídeos
-            + 25 * min(1, ev_cons / 250)      # volume de eventos
-            + 27 * pct_val                    # % validado por humano
-            + 10 * pct_auto                   # % de auto-validação aprendida
-            + 5 * cobertura_lean              # % de comportamentos classificados
-            + 5 * min(1, n_pad / 4)           # padrões com confiança alta
-            + 8 * min(1, n_resp / 8)          # perguntas proativas respondidas
+            18 * min(1, tempo_min / 720)            # tempo observado (sat. em 12h)
+            + 12 * min(1, ev_cons / 3000)           # volume de eventos (sat. em 3k)
+            + 10 * pct_val                          # % validado por humano (fração)
+            + 25 * min(1, n_validados / 300)        # validações ABSOLUTAS (sat. em 300)
+            + 6 * pct_auto                          # % auto-validação aprendida
+            + 5 * cobertura_lean * gate_validacao   # cobertura Lean, gated pelo humano
+            + 8 * min(1, n_pad / 10)                # padrões com confiança alta (sat. em 10)
+            + 16 * min(1, n_resp / 20)              # perguntas proativas respondidas (sat. em 20)
         )
         maturidade = max(0, min(100, round(maturidade)))
 
