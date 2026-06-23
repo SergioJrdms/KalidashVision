@@ -62,6 +62,21 @@ def _checar_segredos() -> None:
             ", ".join(faltando),
         )
 
+
+@app.on_event("startup")
+def _iniciar_infra_jobs() -> None:
+    """Sobe a fila in-process serial e o debouncer dos blocos globais.
+    Ambos sobrevivem a restart via persistência em /tmp."""
+    try:
+        from . import debouncer, job_queue
+        from .pipeline import make_groq_client, make_supabase_client
+
+        debouncer.bootstrap(make_supabase_client, make_groq_client)
+        job_queue.bootstrap()
+        job_queue.start_worker_thread()
+    except Exception as e:
+        log.warning("Falha ao iniciar fila/debouncer: %s", e)
+
 # CORS — em produção, restrinja a origem.
 app.add_middleware(
     CORSMiddleware,
@@ -711,8 +726,12 @@ async def upload_video(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao enviar para o storage: {e}")
 
     job = JOBS.create(processo_id=processo_id, user_id=user.id)
-    background_tasks.add_task(
-        executar_job,
+    # Antes era background_tasks.add_task(executar_job, ...) — disparava todos
+    # os uploads em "paralelo" e estourava o TPM do Groq Free Tier no primeiro
+    # lote do edge_runner --processar. Agora: fila in-process serial (1 vídeo
+    # por vez) — ver backend/job_queue.py.
+    from . import job_queue
+    job_queue.enqueue(
         job.id,
         user.empresa,
         processo_nome,

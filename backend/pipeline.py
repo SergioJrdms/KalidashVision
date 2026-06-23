@@ -602,8 +602,62 @@ def _zona_contexto(cx: int, cy: int, rois: dict) -> str | None:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# GROQ CALLS COM RETRY
+# GROQ CALLS COM RETRY (Retry-After + backoff exponencial + jitter)
 # ═════════════════════════════════════════════════════════════════════════
+def _extrair_retry_after_s(exc: BaseException) -> float | None:
+    """Tenta extrair Retry-After (segundos) da resposta HTTP anexada à
+    exceção do SDK Groq. Devolve None se não houver."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    try:
+        headers = getattr(resp, "headers", None) or {}
+        v = headers.get("retry-after") or headers.get("Retry-After")
+        if not v:
+            return None
+        s = float(v)
+        if s >= 0:
+            return s
+    except Exception:
+        return None
+    return None
+
+
+def _eh_rate_limit(exc: BaseException) -> bool:
+    """Heurística leve: 429 ou 503 (overloaded) — retry vale a pena."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        sc = getattr(resp, "status_code", None)
+        if sc in (429, 503):
+            return True
+    nome = exc.__class__.__name__.lower()
+    if "ratelimit" in nome or "overload" in nome:
+        return True
+    return False
+
+
+def _eh_4xx_definitivo(exc: BaseException) -> bool:
+    """Outros 4xx (≠ 429) — retry só atrasa o erro real."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return False
+    sc = getattr(resp, "status_code", None)
+    if isinstance(sc, int) and 400 <= sc < 500 and sc != 429:
+        return True
+    return False
+
+
+def _espera_retry(tentativa: int, exc: BaseException) -> float:
+    """Retry-After se vier (cap 90s); senão exponencial com jitter ±25% (cap 60s)."""
+    import random
+    ra = _extrair_retry_after_s(exc)
+    if ra is not None:
+        return min(ra, 90.0)
+    base = min(2.0 ** tentativa, 60.0)
+    jitter = base * (0.75 + 0.5 * random.random())
+    return jitter
+
+
 def groq_vision_call(
     groq_client: Groq,
     image_b64: str,
@@ -611,7 +665,7 @@ def groq_vision_call(
     json_mode: bool = True,
     max_tokens: int = 1024,
     temperatura: float = 0.2,
-    retries: int = 3,
+    retries: int = 5,
     model: str = GROQ_MODEL_VISION,
 ) -> str:
     messages = [
@@ -635,13 +689,29 @@ def groq_vision_call(
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
+    # Throttle TPM proativo: dorme antes da chamada se o orçamento do modelo
+    # estouraria. Sem isso, picos curtos disparam 429 do Groq Free Tier.
+    try:
+        from . import groq_throttle
+        groq_throttle.reserve(model, groq_throttle.estimar_tokens(prompt_texto, max_tokens))
+    except Exception:
+        pass
+
     for tentativa in range(retries):
         try:
             r = groq_client.chat.completions.create(**kwargs)
             return r.choices[0].message.content
         except Exception as e:
-            espera = 2**tentativa
-            log.warning(f"Groq vision falhou ({e}). Retry em {espera}s...")
+            if _eh_4xx_definitivo(e):
+                # 400/401/403/404 etc — retry só atrasa o erro real
+                raise
+            # 429/503: respeita Retry-After se vier. Outros: backoff exp + jitter.
+            espera = _espera_retry(tentativa, e)
+            ultima = tentativa == retries - 1
+            if ultima:
+                log.warning(f"Groq vision falhou após {retries} tentativas: {e}")
+                raise
+            log.warning(f"Groq vision falhou ({e}). Retry em {espera:.1f}s ({tentativa+1}/{retries})...")
             time.sleep(espera)
     raise RuntimeError("Groq vision falhou após retries")
 
@@ -654,7 +724,7 @@ def groq_text_call(
     json_mode: bool = False,
     max_tokens: int = 2048,
     temperatura: float = 0.3,
-    retries: int = 3,
+    retries: int = 5,
 ) -> str:
     model = model or GROQ_MODEL_ANALISE
     messages = []
@@ -671,13 +741,27 @@ def groq_text_call(
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
+    # Throttle TPM proativo (mesmo motivo de groq_vision_call).
+    try:
+        from . import groq_throttle
+        texto_p = (system or "") + (prompt or "")
+        groq_throttle.reserve(model, groq_throttle.estimar_tokens(texto_p, max_tokens))
+    except Exception:
+        pass
+
     for tentativa in range(retries):
         try:
             r = groq_client.chat.completions.create(**kwargs)
             return r.choices[0].message.content
         except Exception as e:
-            espera = 2**tentativa
-            log.warning(f"Groq text falhou ({e}). Retry em {espera}s...")
+            if _eh_4xx_definitivo(e):
+                raise
+            espera = _espera_retry(tentativa, e)
+            ultima = tentativa == retries - 1
+            if ultima:
+                log.warning(f"Groq text falhou após {retries} tentativas: {e}")
+                raise
+            log.warning(f"Groq text falhou ({e}). Retry em {espera:.1f}s ({tentativa+1}/{retries})...")
             time.sleep(espera)
     raise RuntimeError("Groq text falhou após retries")
 
@@ -3815,34 +3899,18 @@ def processar_video(
     except Exception as e:
         log.warning(f"Geração de perguntas falhou (não-fatal): {e}")
 
-    # Computa o portfólio + snapshot global UMA vez para reaproveitar nos
-    # passos seguintes (gerar_insights_globais + analisar_padroes_globais).
-    # Cada chamada permanece NÃO-FATAL. Se o pré-cálculo falhar, as funções
-    # caem no fallback interno (computam por conta própria).
-    portfolio = None
-    snapshot_global = None
-
-    # Recalcula insights de portfólio da empresa — NÃO-FATAL.
+    # Computa apenas o que o próprio processar_video precisou consumir; os
+    # blocos GLOBAIS (insights da empresa, padrões globais, padrões deste
+    # processo) NÃO rodam mais aqui — entram numa fila com debounce.
+    # Sem isso, uma rajada de 200 segmentos do edge_runner geraria ~600
+    # chamadas extras a gpt-oss-120b, estourando o TPM do Groq Free Tier.
+    # Veja backend/debouncer.py.
     try:
-        portfolio = agregar_portfolio(sb, empresa)
-        snapshot_global = montar_snapshot_global(sb, empresa, portfolio=portfolio)
-        gerar_insights_globais(sb, groq_client, empresa, snapshot_global=snapshot_global)
+        from . import debouncer
+        debouncer.marcar_dirty_empresa(empresa)
+        debouncer.marcar_dirty_processo(empresa, processo)
     except Exception as e:
-        log.warning(f"Insights globais falharam (não-fatal): {e}")
-
-    # Recalcula PADRÕES — do processo (A+B) e, em seguida, globais (C),
-    # pois a série deste processo mudou. NÃO-FATAL.
-    try:
-        analisar_padroes_processo(
-            sb, groq_client, empresa, processo,
-            descricao_processo=descricao, conhecimento_adquirido=conhecimento,
-        )
-    except Exception as e:
-        log.warning(f"Padrões do processo falharam (não-fatal): {e}")
-    try:
-        analisar_padroes_globais(sb, groq_client, empresa, portfolio=portfolio)
-    except Exception as e:
-        log.warning(f"Padrões globais falharam (não-fatal): {e}")
+        log.warning(f"Debouncer falhou (não-fatal): {e}")
 
     progress_cb("concluido", 100, "Processamento concluído")
     return {
