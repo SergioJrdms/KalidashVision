@@ -69,6 +69,8 @@ def executar_job(
     storage_path: str,
     descricao_processo: str | None,
     nome_original: str | None = None,
+    cam_id: str | None = None,
+    gravado_em: str | None = None,
 ) -> None:
     """Entrypoint do worker. Atualiza o job conforme avança."""
     JOBS.update(
@@ -121,6 +123,8 @@ def executar_job(
             yolo_model=_get_yolo(),
             nome_video=nome_original or Path(storage_path).name,
             caminho_storage=storage_path,
+            cam_id=cam_id,
+            gravado_em=gravado_em,
         )
 
         JOBS.update(

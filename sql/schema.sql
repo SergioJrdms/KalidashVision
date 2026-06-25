@@ -16,8 +16,14 @@ create table if not exists videos (
     altura int,
     total_pessoas int,
     total_eventos int,
+    cam_id text,
+    gravado_em timestamptz,
     processado_em timestamptz default now()
 );
+
+-- Migrações idempotentes p/ bases já existentes (Fase 1 multi-câmera)
+alter table videos add column if not exists cam_id text;
+alter table videos add column if not exists gravado_em timestamptz;
 
 create table if not exists comportamentos (
     id uuid primary key default gen_random_uuid(),

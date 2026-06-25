@@ -100,6 +100,8 @@ def _executar_um(payload: dict) -> None:
             payload["storage_path"],
             payload.get("descricao"),
             payload.get("nome_original"),
+            cam_id=payload.get("cam_id"),
+            gravado_em=payload.get("gravado_em"),
         )
     except Exception as e:
         log.exception(f"job_queue: job {job_id} falhou no executar_job: {e}")
@@ -144,9 +146,15 @@ def enqueue(
     storage_path: str,
     descricao: str | None,
     nome_original: str | None,
+    cam_id: str | None = None,
+    gravado_em: str | None = None,
 ) -> None:
     """Adiciona um job à fila. O upload retorna imediato; o worker daemon
-    processa em série."""
+    processa em série.
+
+    `cam_id`/`gravado_em` são metadados da Fase 1 multi-câmera (additive,
+    opcionais). Persistem no payload e chegam até o INSERT em `videos`.
+    """
     payload = {
         "job_id": job_id,
         "empresa": empresa,
@@ -154,6 +162,8 @@ def enqueue(
         "storage_path": storage_path,
         "descricao": descricao,
         "nome_original": nome_original,
+        "cam_id": cam_id,
+        "gravado_em": gravado_em,
         "enq_ts": time.time(),
     }
     _adicionar_disco(payload)

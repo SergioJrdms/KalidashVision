@@ -80,6 +80,8 @@ create table if not exists videos (
     altura int,
     total_pessoas int,
     total_eventos int,
+    cam_id text,                       -- id da câmera no edge (cam1, cam2…) — NULL p/ upload manual
+    gravado_em timestamptz,            -- instante REAL de início (relógio); base p/ cruzar câmeras
     processado_em timestamptz default now()
 );
 
@@ -227,6 +229,8 @@ create table if not exists padroes_globais (
 );
 
 alter table sugestoes_melhoria add column if not exists impacto_estimado text;
+alter table videos add column if not exists cam_id text;
+alter table videos add column if not exists gravado_em timestamptz;
 alter table sugestoes_melhoria add column if not exists status text not null default 'pendente';
 alter table sugestoes_melhoria add column if not exists marcada_em timestamptz;
 alter table sugestoes_melhoria add column if not exists voltou_apos_realizada boolean not null default false;
@@ -1255,6 +1259,8 @@ def etapa_persistir(
     origem_de: Callable[[str], str],
     nome_video: str | None = None,
     caminho_storage: str | None = None,
+    cam_id: str | None = None,
+    gravado_em: str | None = None,
 ) -> tuple[str, int]:
     """Persiste vídeo, comportamentos, eventos. Retorna (video_id, n_auto_validados).
 
@@ -1263,22 +1269,34 @@ def etapa_persistir(
     use o path do Supabase Storage aqui pra que o endpoint `/frames`
     consiga baixar o vídeo depois.
     """
+    # Fase 1 multi-câmera: cam_id e gravado_em são opcionais. Só vão pro INSERT
+    # se não-nulos, mantendo NULL na coluna em uploads manuais (sem edge).
+    linha_video: dict[str, Any] = {
+        "empresa": empresa,
+        "processo": processo,
+        "nome": nome_video or Path(video_path).name,
+        "caminho": caminho_storage or str(video_path),
+        "duracao_s": round(info_video["duracao_s"], 2),
+        "fps": round(info_video["fps"], 2),
+        "largura": info_video["largura"],
+        "altura": info_video["altura"],
+        "total_pessoas": len(ids_unicos),
+        "total_eventos": len(eventos),
+    }
+    if cam_id:
+        linha_video["cam_id"] = cam_id
+    if gravado_em:
+        # Validação leve do ISO 8601 — Supabase aceita string p/ timestamptz, mas
+        # gravar lixo aqui quebraria queries de cruzamento na Fase 2.
+        try:
+            from datetime import datetime as _dt
+            _dt.fromisoformat(gravado_em.replace("Z", "+00:00"))
+            linha_video["gravado_em"] = gravado_em
+        except Exception as e:
+            log.warning(f"gravado_em ignorado (não é ISO 8601: {gravado_em!r}, {e})")
     video_row = (
         sb.table("videos")
-        .insert(
-            {
-                "empresa": empresa,
-                "processo": processo,
-                "nome": nome_video or Path(video_path).name,
-                "caminho": caminho_storage or str(video_path),
-                "duracao_s": round(info_video["duracao_s"], 2),
-                "fps": round(info_video["fps"], 2),
-                "largura": info_video["largura"],
-                "altura": info_video["altura"],
-                "total_pessoas": len(ids_unicos),
-                "total_eventos": len(eventos),
-            }
-        )
+        .insert(linha_video)
         .execute()
     )
     video_id = video_row.data[0]["id"]
@@ -3766,6 +3784,8 @@ def processar_video(
     yolo_model: YOLO | None = None,
     nome_video: str | None = None,
     caminho_storage: str | None = None,
+    cam_id: str | None = None,
+    gravado_em: str | None = None,
 ) -> dict:
     """Roda o pipeline completo. Devolve dict com video_id, n_eventos,
     n_auto_validados, n_sugestoes.
@@ -3842,6 +3862,8 @@ def processar_video(
         origem_de,
         nome_video=nome_video,
         caminho_storage=caminho_storage,
+        cam_id=cam_id,
+        gravado_em=gravado_em,
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
 

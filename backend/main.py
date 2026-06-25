@@ -14,6 +14,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Form,
     HTTPException,
     Path as PathParam,
     Query,
@@ -684,6 +685,10 @@ async def upload_video(
     processo_id: str,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    # Fase 1 multi-câmera (additive, opcional): edge passa esses 2 campos.
+    # Upload manual (frontend) NÃO passa — fica NULL no banco.
+    cam_id: str | None = Form(default=None),
+    gravado_em: str | None = Form(default=None),
     user: CurrentUser = Depends(get_current_user),
 ):
     sb = make_supabase_client()
@@ -738,6 +743,8 @@ async def upload_video(
         storage_path,
         descricao,
         file.filename,
+        cam_id=(cam_id or None),
+        gravado_em=(gravado_em or None),
     )
     return {"job_id": job.id}
 
