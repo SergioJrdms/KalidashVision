@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { mapPendentes, mapPerguntas, type PendMock, type PergMock, type ProcHeaderMock } from "../lib/adapt";
+import { mapPendentes, mapPerguntas, type PendMock, type PendIrmaoMock, type PergMock, type ProcHeaderMock } from "../lib/adapt";
 import { nivelDe, leanCor, leanLabel, fmtSeg } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Ring, toast } from "../design/ui";
 import { FrameStripReal, FrameReal } from "../lib/frames";
@@ -18,10 +18,17 @@ import type { Tweaks } from "../App";
 
 const TAMANHO_LOTE = 10;
 
+// "cam1" → "Câmera 1"; fallback gracioso para ids fora do padrão.
+function camLabel(camId: string | null | undefined): string {
+  if (!camId) return "Câmera";
+  const m = /cam(\d+)/i.exec(camId);
+  return m ? `Câmera ${m[1]}` : camId;
+}
+
 export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: Go; t: Tweaks }) {
   const qc = useQueryClient();
   const fila = t.validacao !== "cards";
-  const pendQ = useQuery({ queryKey: ["pendentes", proc.id], queryFn: () => api.processos.eventosPendentes(proc.id) });
+  const pendQ = useQuery({ queryKey: ["pendentes", proc.id], queryFn: () => api.processos.eventosPendentes(proc.id, true) });
   const pergQ = useQuery({ queryKey: ["perguntas", proc.id], queryFn: () => api.perguntas.listar(proc.id, "pendente") });
   const dashQ = useQuery({ queryKey: ["dashboard", proc.id], queryFn: () => api.processos.dashboard(proc.id), staleTime: 30_000 });
 
@@ -59,15 +66,18 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
   const respondidas = perguntas.filter((q) => q.status !== "open").length;
 
   const validar = useMutation({
-    mutationFn: ({ id, acao, label }: { id: string; acao: "confirmar" | "corrigir" | "descartar"; label?: string }) =>
-      api.eventos.validar(id, acao, label),
+    // Resolve o grupo inteiro num lote atômico: o primário + todos os irmãos
+    // (câmeras diferentes da mesma ação). Com 1 id só, o lote age como validar.
+    mutationFn: ({ ids, acao, label }: { ids: string[]; acao: "confirmar" | "corrigir" | "descartar"; label?: string }) =>
+      api.eventos.lote(ids, acao, label),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["dashboard", proc.id] }); qc.invalidateQueries({ queryKey: ["processos"] }); },
   });
   const respMut = useMutation({ mutationFn: ({ id, resposta }: { id: string; resposta: string }) => api.perguntas.responder(id, resposta) });
   const dispMut = useMutation({ mutationFn: (id: string) => api.perguntas.dispensar(id) });
 
   function resolver(ev: PendMock, acao: "confirmar" | "corrigir" | "descartar", novoLabel?: string) {
-    validar.mutate({ id: ev.id, acao, label: novoLabel });
+    const ids = [ev.id, ...(ev.irmaos?.map((s) => s.id) ?? [])];
+    validar.mutate({ ids, acao, label: novoLabel });
     setQueue((q) => q.filter((x) => x.id !== ev.id));
     setBlocoIds((ids) => ids.filter((id) => id !== ev.id));
     setDone((d) => d + 1);
@@ -249,6 +259,43 @@ function PerguntaAtiva({ q, onResponder, onDispensar }: { q: PQ; onResponder: (q
   );
 }
 
+// Faixa rotulada de UMA câmera (usada dentro do empilhamento multi-câmera).
+function FaixaCamera({ camId, ativo, labelDivergente }: { camId: string | null; ativo: { id: string; pessoa: number; label: string; ini: number; fim: number }; labelDivergente?: string }) {
+  return (
+    <div className="col" style={{ gap: 0 }}>
+      <div className="row gap2" style={{ alignItems: "center", padding: "6px 10px", background: "#0d0820", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
+        <span className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, color: "#fff", background: "rgba(167,139,250,.25)", border: "1px solid rgba(167,139,250,.45)", borderRadius: 99, padding: "2px 9px" }}>
+          <Icon name="video" size={11} /> {camLabel(camId)}
+        </span>
+        {labelDivergente && (
+          <span style={{ fontSize: 11, color: "rgba(255,255,255,.62)" }}>
+            viu como <b style={{ color: "rgba(255,255,255,.85)" }}>“{labelDivergente}”</b>
+          </span>
+        )}
+      </div>
+      <FrameStripReal ativo={ativo} />
+    </div>
+  );
+}
+
+// Empilha as faixas das 2+ câmeras do grupo (primário no topo, irmãos abaixo).
+function FaixasMultiCamera({ evento }: { evento: PendMock }) {
+  const irmaos = evento.irmaos ?? [];
+  return (
+    <div className="col" style={{ gap: 6, padding: 6, background: "#0d0820" }}>
+      <FaixaCamera camId={evento.camId} ativo={evento} />
+      {irmaos.map((s: PendIrmaoMock) => (
+        <FaixaCamera
+          key={s.id}
+          camId={s.camId}
+          ativo={{ id: s.id, pessoa: s.pessoa, label: s.label, ini: s.ini, fim: s.fim }}
+          labelDivergente={s.label !== evento.label ? s.label : undefined}
+        />
+      ))}
+    </div>
+  );
+}
+
 function FilaFoco({
   evento,
   restantesBloco,
@@ -347,8 +394,13 @@ function FilaFoco({
           onPointerCancel={endDrag}
         >
           <div className="row gap2" style={{ justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--line-2)" }}>
-            <span className="row gap2" style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+            <span className="row gap2" style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)", flexWrap: "wrap" }}>
               <Icon name="user" size={13} /> PESSOA-{String(evento.pessoa).padStart(3, "0")} · {evento.ini.toFixed(1)}s→{evento.fim.toFixed(1)}s · {fmtSeg(evento.fim - evento.ini)}
+              {evento.irmaos && evento.irmaos.length > 0 && (
+                <span className="badge badge-purple" style={{ fontFamily: "var(--sans)" }}>
+                  <Icon name="video" size={11} /> {evento.irmaos.length + 1} ângulos
+                </span>
+              )}
             </span>
             <button
               data-no-drag
@@ -362,7 +414,11 @@ function FilaFoco({
             </button>
           </div>
 
-          <FrameStripReal ativo={evento} />
+          {evento.irmaos && evento.irmaos.length > 0 ? (
+            <FaixasMultiCamera evento={evento} />
+          ) : (
+            <FrameStripReal ativo={evento} />
+          )}
 
           <div style={{ padding: "16px 20px 20px" }}>
             <div className="row gap2" style={{ marginBottom: 4 }}>

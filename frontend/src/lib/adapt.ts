@@ -55,9 +55,10 @@ export interface DetMock {
   perguntasPendentes: number;
 }
 
-export interface PendMock { id: string; label: string; descricao: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
+export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
+export interface PendMock { id: string; label: string; descricao: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; irmaos: PendIrmaoMock[] }
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[] }
-export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null }
+export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null }
 export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; apoio: number; desp: number; none: number }[] }
 export interface PadProcMock { id: string; tipo: string; confianca: string; relevancia: string; titulo: string; descricao: string; recomendacao: string | null; comportamentos: string[] }
 export interface InsightMock { id: string; prioridade: string; titulo: string; descricao: string; processos: string[] }
@@ -171,6 +172,17 @@ export function mapPendentes(rows: EventoPendente[]): PendMock[] {
     fim: e.tempo_fim_s,
     conf: e.confianca || 0,
     sugestao: leanShort(e.categoria_lean_prevista),
+    camId: e.cam_id ?? null,
+    irmaos: (e.irmaos || []).map((s) => ({
+      id: s.id,
+      camId: s.cam_id ?? null,
+      label: s.label_corrigido || s.comportamento_label,
+      pessoa: s.pessoa_track_id,
+      ini: s.tempo_inicio_s,
+      fim: s.tempo_fim_s,
+      conf: s.confianca || 0,
+      sugestao: leanShort(s.categoria_lean_prevista),
+    })),
   }));
 }
 
@@ -205,6 +217,7 @@ export function mapEventosTabela(rows: EventoTabela[]): EvTabMock[] {
     status: e.status_efetivo,
     cat: leanShort(e.categoria_lean),
     comportamentoId: e.comportamento_id ?? null,
+    camId: e.cam_id ?? null,
   }));
 }
 

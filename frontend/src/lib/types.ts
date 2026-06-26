@@ -207,6 +207,18 @@ export interface DashboardData {
   }>;
 }
 
+export interface EventoIrmaoPendente {
+  id: string;
+  cam_id?: string | null;
+  comportamento_label: string;
+  label_corrigido: string | null;
+  confianca: number;
+  pessoa_track_id: number;
+  tempo_inicio_s: number;
+  tempo_fim_s: number;
+  categoria_lean_prevista?: string | null;
+}
+
 export interface EventoPendente {
   id: string;
   video_id: string;
@@ -221,6 +233,9 @@ export interface EventoPendente {
   origem_validacao: string | null;
   pessoa_track_id: number;
   categoria_lean_prevista?: string | null;
+  cam_id?: string | null;
+  gravado_em?: string | null;
+  irmaos?: EventoIrmaoPendente[];
 }
 
 export type StatusEfetivo =
@@ -251,6 +266,7 @@ export interface EventoTabela {
   validado_em: string | null;
   categoria_lean?: CategoriaLean | null;
   comportamento_id?: string | null;
+  cam_id?: string | null;
 }
 
 export interface EventosTabelaResposta {

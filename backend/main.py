@@ -45,6 +45,7 @@ from .pipeline import (
     montar_serie_temporal,
     analisar_padroes_globais,
     gerar_pergunta_onboarding,
+    agrupar_eventos_multicamera,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -1025,6 +1026,7 @@ def marcar_sugestao(
 def listar_eventos(
     processo_id: str,
     status_filter: str = Query("pendente", alias="status"),
+    agrupar: bool = Query(False),
     user: CurrentUser = Depends(get_current_user),
 ):
     sb = make_supabase_client()
@@ -1067,6 +1069,48 @@ def listar_eventos(
         for i in itens:
             lbl = i.get("label_corrigido") or i.get("comportamento_label")
             i["categoria_lean_prevista"] = cat_por_label.get(lbl)
+
+    # Fase 2 multi-câmera: agrupa eventos da MESMA ação vistos por câmeras
+    # diferentes (só pendentes). Back-compat: sem agrupar=true, shape inalterado.
+    if agrupar and status_filter == "pendente" and itens:
+        # Join leve eventos→videos p/ trazer cam_id + gravado_em (padrão de
+        # listar_eventos_tabela). Anexa em cada evento p/ display e agrupamento.
+        vids = {i["video_id"] for i in itens if i.get("video_id")}
+        meta_video: dict[str, dict] = {}
+        if vids:
+            rv = (
+                sb.table("videos")
+                .select("id, cam_id, gravado_em")
+                .in_("id", list(vids))
+                .execute()
+            )
+            meta_video = {v["id"]: v for v in (rv.data or [])}
+        for i in itens:
+            mv = meta_video.get(i.get("video_id"), {})
+            i["cam_id"] = mv.get("cam_id")
+            i["gravado_em"] = mv.get("gravado_em")
+
+        grupos, secundarios = agrupar_eventos_multicamera(itens)
+        # Anexa irmãos ao primário; eventos solo ficam com irmaos=[].
+        for i in itens:
+            irm = grupos.get(i["id"], [])
+            i["irmaos"] = [
+                {
+                    "id": s["id"],
+                    "cam_id": s.get("cam_id"),
+                    "comportamento_label": s.get("comportamento_label"),
+                    "label_corrigido": s.get("label_corrigido"),
+                    "confianca": s.get("confianca"),
+                    "pessoa_track_id": s.get("pessoa_track_id"),
+                    "tempo_inicio_s": s.get("tempo_inicio_s"),
+                    "tempo_fim_s": s.get("tempo_fim_s"),
+                    "categoria_lean_prevista": s.get("categoria_lean_prevista"),
+                }
+                for s in irm
+            ]
+        # Remove os secundários do topo (1 card por grupo).
+        itens = [i for i in itens if i["id"] not in secundarios]
+
     return itens
 
 
@@ -1166,14 +1210,16 @@ def listar_eventos_tabela(
     # "Join" leve com videos só para a página atual
     vids = {v["video_id"] for v in itens if v.get("video_id")}
     nomes: dict[str, str] = {}
+    cams: dict[str, str | None] = {}
     if vids:
         rv = (
             sb.table("videos")
-            .select("id, nome")
+            .select("id, nome, cam_id")
             .in_("id", list(vids))
             .execute()
         )
         nomes = {v["id"]: v.get("nome", "") for v in (rv.data or [])}
+        cams = {v["id"]: v.get("cam_id") for v in (rv.data or [])}
 
     # Categoria Lean + id do comportamento (mapa label → ...), para exibir a
     # classificação e permitir reclassificar pela lista de eventos.
@@ -1190,6 +1236,7 @@ def listar_eventos_tabela(
 
     for ev in itens:
         ev["video_nome"] = nomes.get(ev.get("video_id"), "—")
+        ev["cam_id"] = cams.get(ev.get("video_id"))
         label_ef = ev.get("label_corrigido") or ev.get("comportamento_label")
         ev["label_efetivo"] = label_ef
         ev["status_efetivo"] = _status_efetivo(ev)

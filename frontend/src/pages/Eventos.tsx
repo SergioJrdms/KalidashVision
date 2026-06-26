@@ -131,6 +131,7 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
               <tr style={{ background: "var(--soft)", color: "var(--muted)", fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em" }}>
                 <th style={{ padding: "11px 12px", width: 34 }}><input type="checkbox" checked={filtrados.length > 0 && sel.size === filtrados.length} onChange={toggleAll} style={{ accentColor: "var(--accent)" }} /></th>
                 <th style={{ padding: "11px 12px", textAlign: "left" }}>Comportamento</th>
+                <th style={{ padding: "11px 12px", textAlign: "center" }}>Câmera</th>
                 <th style={{ padding: "11px 12px", textAlign: "left" }}>Classificação</th>
                 <th style={{ padding: "11px 12px", textAlign: "left" }}>Vídeo · tempo</th>
                 <th style={{ padding: "11px 12px", textAlign: "center" }}>Pessoa</th>
@@ -185,6 +186,13 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
             <code className="font-mono" style={{ background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 5, fontSize: 11.5 }}>{e.label}</code>
           )}
         </td>
+        <td style={{ padding: "10px 12px", textAlign: "center" }}>
+          {e.camId ? (
+            <span className="badge badge-purple" style={{ fontSize: 10 }}>{e.camId.replace(/^cam/i, "Cam ")}</span>
+          ) : (
+            <span style={{ color: "var(--faint)", fontSize: 12 }}>—</span>
+          )}
+        </td>
         <td style={{ padding: "10px 12px" }}>
           <span className="row gap1" style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", padding: "2px 8px", borderRadius: 7, border: "1px solid var(--line)", background: "#fff", display: "inline-flex", whiteSpace: "nowrap" }}>
             <i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(e.cat), flex: "none" }} /> {leanLabel(e.cat)}
@@ -205,7 +213,7 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
       </tr>
       {expand && (
         <tr style={{ background: "var(--soft)" }}>
-          <td colSpan={8} style={{ padding: 16 }}>
+          <td colSpan={9} style={{ padding: 16 }}>
             <div className="row gap3 wrap" style={{ alignItems: "flex-start" }}>
               <div style={{ width: 240, flex: "none" }}><FrameReal id={e.id} pessoa={e.pessoa} height={140} /></div>
               <div className="grow" style={{ minWidth: 220 }}>

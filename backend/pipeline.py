@@ -1419,6 +1419,141 @@ def _label_efetivo(e: dict) -> str:
     return e.get("label_corrigido") or e.get("comportamento_label")
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# MULTI-CÂMERA (Fase 2) — agrupar eventos sobrepostos de câmeras diferentes
+# ═════════════════════════════════════════════════════════════════════════
+def _janela_abs_evento(ev: dict) -> tuple[float, float] | None:
+    """Janela absoluta (segundos epoch UTC) de um evento = gravado_em +
+    tempo_inicio_s .. gravado_em + tempo_fim_s. None se gravado_em ausente/ruim.
+
+    `ev` precisa ter `gravado_em` (ISO str), `tempo_inicio_s`, `tempo_fim_s`.
+    """
+    g = ev.get("gravado_em")
+    if not g:
+        return None
+    try:
+        from datetime import datetime
+        base = datetime.fromisoformat(str(g).replace("Z", "+00:00"))
+        t0 = float(ev.get("tempo_inicio_s") or 0)
+        t1 = float(ev.get("tempo_fim_s") or 0)
+        if t1 < t0:
+            t0, t1 = t1, t0
+        epoch = base.timestamp()
+        return (epoch + t0, epoch + t1)
+    except Exception:
+        return None
+
+
+def _iou_temporal(a: tuple[float, float], b: tuple[float, float], tol_s: float) -> float:
+    """Interseção-sobre-união de 2 janelas [ini,fim], com tolerância `tol_s`
+    que dilata ambas (absorve drift de relógio / fronteira do VLM). 0..1."""
+    a0, a1 = a[0] - tol_s, a[1] + tol_s
+    b0, b1 = b[0] - tol_s, b[1] + tol_s
+    inter = max(0.0, min(a1, b1) - max(a0, b0))
+    if inter <= 0:
+        return 0.0
+    union = (a1 - a0) + (b1 - b0) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def agrupar_eventos_multicamera(
+    eventos: list[dict],
+    tol_s: float = 2.0,
+    iou_min: float = 0.3,
+) -> tuple[dict[str, list[dict]], set[str]]:
+    """Agrupa eventos que são a MESMA ação vista por câmeras DIFERENTES.
+
+    Critério (par é irmão):
+      • cam_id presente e DIFERENTE entre os dois,
+      • janelas absolutas (gravado_em + tempos) com IoU temporal >= iou_min.
+    Pareamento GULOSO por melhor IoU, no máx. 1 par por câmera-alvo, depois
+    união transitiva (generaliza p/ N câmeras). Determinístico: primário do
+    grupo = menor cam_id, depois maior confiança, depois menor id.
+
+    Entrada: lista de dicts de evento, cada um com pelo menos `id`, `cam_id`,
+    `gravado_em`, `tempo_inicio_s`, `tempo_fim_s`, `confianca`.
+
+    Retorna:
+      (grupos, secundarios) onde
+        grupos     = { primario_id: [evento_irmao_dict, ...] }  (só p/ grupos >1)
+        secundarios = set de ids que NÃO são primário (a remover do topo da fila)
+    Eventos sem irmão NÃO aparecem em `grupos` nem em `secundarios` (são solo).
+    """
+    # Indexa janela por id; só participam os que têm cam_id E janela válida.
+    elegiveis: list[dict] = []
+    janela: dict[str, tuple[float, float]] = {}
+    for ev in eventos:
+        if not ev.get("cam_id"):
+            continue
+        w = _janela_abs_evento(ev)
+        if w is None:
+            continue
+        janela[ev["id"]] = w
+        elegiveis.append(ev)
+
+    by_id = {ev["id"]: ev for ev in elegiveis}
+
+    # Candidatos a par: (iou, idA, idB) entre câmeras diferentes, ordenados desc.
+    pares: list[tuple[float, str, str]] = []
+    n = len(elegiveis)
+    for i in range(n):
+        a = elegiveis[i]
+        for j in range(i + 1, n):
+            b = elegiveis[j]
+            if a.get("cam_id") == b.get("cam_id"):
+                continue  # mesma câmera = ações sequenciais, não irmãos
+            iou = _iou_temporal(janela[a["id"]], janela[b["id"]], tol_s)
+            if iou >= iou_min:
+                pares.append((iou, a["id"], b["id"]))
+    pares.sort(key=lambda p: p[0], reverse=True)
+
+    # Matching guloso: cada (evento, câmera-alvo) é casado no máx. 1 vez.
+    usado_para_cam: set[tuple[str, str]] = set()  # (id_evento, cam_alvo)
+    arestas: list[tuple[str, str]] = []
+    for iou, ia, ib in pares:
+        ca, cb = by_id[ia]["cam_id"], by_id[ib]["cam_id"]
+        if (ia, cb) in usado_para_cam or (ib, ca) in usado_para_cam:
+            continue
+        usado_para_cam.add((ia, cb))
+        usado_para_cam.add((ib, ca))
+        arestas.append((ia, ib))
+
+    # União transitiva (union-find leve) sobre as arestas casadas.
+    pai: dict[str, str] = {ev["id"]: ev["id"] for ev in elegiveis}
+
+    def _find(x: str) -> str:
+        while pai[x] != x:
+            pai[x] = pai[pai[x]]
+            x = pai[x]
+        return x
+
+    for ia, ib in arestas:
+        ra, rb = _find(ia), _find(ib)
+        if ra != rb:
+            pai[rb] = ra
+
+    componentes: dict[str, list[str]] = {}
+    for _id in pai:
+        componentes.setdefault(_find(_id), []).append(_id)
+
+    def _chave_primario(ev_id: str) -> tuple:
+        ev = by_id[ev_id]
+        # menor cam_id, depois maior confiança, depois menor id (determinístico)
+        return (str(ev.get("cam_id") or ""), -float(ev.get("confianca") or 0), str(ev_id))
+
+    grupos: dict[str, list[dict]] = {}
+    secundarios: set[str] = set()
+    for membros in componentes.values():
+        if len(membros) < 2:
+            continue  # solo
+        membros_ordenados = sorted(membros, key=_chave_primario)
+        primario = membros_ordenados[0]
+        irmaos = membros_ordenados[1:]
+        grupos[primario] = [by_id[m] for m in irmaos]
+        secundarios.update(irmaos)
+    return grupos, secundarios
+
+
 def montar_contexto_agregado(
     sb: Client,
     empresa: str,

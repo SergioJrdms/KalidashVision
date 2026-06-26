@@ -90,8 +90,10 @@ export const api = {
       }),
     dashboard: (id: string) => req<DashboardData>(`/processos/${id}/dashboard`),
     sugestoes: (id: string) => req<Sugestao[]>(`/processos/${id}/sugestoes`),
-    eventosPendentes: (id: string) =>
-      req<EventoPendente[]>(`/processos/${id}/eventos?status=pendente`),
+    eventosPendentes: (id: string, agrupar = false) =>
+      req<EventoPendente[]>(
+        `/processos/${id}/eventos?status=pendente${agrupar ? "&agrupar=true" : ""}`,
+      ),
     excluir: (id: string) =>
       req<{ ok: boolean }>(`/processos/${id}`, { method: "DELETE" }),
   },
