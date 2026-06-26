@@ -1554,6 +1554,117 @@ def agrupar_eventos_multicamera(
     return grupos, secundarios
 
 
+def consolidar_eventos_para_metricas(
+    eventos: list[dict],
+    tol_s: float = 2.0,
+    iou_min: float = 0.3,
+) -> list[dict]:
+    """Dedupa grupos multi-câmera para fins de agregação. NÃO persiste.
+
+    Pré-condição: cada evento idealmente tem `cam_id` e `gravado_em` (None
+    quando ausente). Eventos sem cam_id OU gravado_em ficam intocados (solo).
+
+    Para cada grupo retornado por `agrupar_eventos_multicamera`:
+      - mantém SÓ o primário (remove secundários do output)
+      - tempo_inicio_s/tempo_fim_s do primário viram a UNIÃO dos intervalos
+        absolutos do grupo, traduzida na linha do tempo local do primário
+        (preserva a referência ao vídeo do primário p/ display de frames)
+      - duracao_s do primário é atualizada (max(fim_abs) - min(ini_abs))
+      - se TODOS os irmãos têm o mesmo _label_efetivo do primário:
+        confianca = min(0.99, confianca + 0.05)  (sinal de concordância)
+
+    Os dicts originais NÃO são mutados — devolve cópias rasas dos primários
+    afetados (o resto é referência ao input).
+    """
+    grupos, secundarios = agrupar_eventos_multicamera(eventos, tol_s=tol_s, iou_min=iou_min)
+    if not secundarios:
+        return list(eventos)
+
+    saida: list[dict] = []
+    for ev in eventos:
+        if ev["id"] in secundarios:
+            continue
+        irmaos = grupos.get(ev["id"], [])
+        if not irmaos:
+            saida.append(ev)
+            continue
+
+        # Janela absoluta UNIÃO entre primário + irmãos
+        membros = [ev, *irmaos]
+        janelas_abs = [_janela_abs_evento(m) for m in membros]
+        janelas_validas = [w for w in janelas_abs if w is not None]
+        if not janelas_validas:
+            saida.append(ev)
+            continue
+        ini_abs = min(w[0] for w in janelas_validas)
+        fim_abs = max(w[1] for w in janelas_validas)
+        duracao_uniao = max(0.0, fim_abs - ini_abs)
+
+        # Traduz a janela absoluta de volta na linha local do primário
+        # (mantém o vídeo do primário como referência p/ frames).
+        w_prim = _janela_abs_evento(ev)
+        novo_ini, novo_fim = ev.get("tempo_inicio_s"), ev.get("tempo_fim_s")
+        if w_prim is not None:
+            delta_ini = ini_abs - w_prim[0]
+            delta_fim = fim_abs - w_prim[1]
+            base_ini = float(ev.get("tempo_inicio_s") or 0)
+            base_fim = float(ev.get("tempo_fim_s") or 0)
+            novo_ini = base_ini + delta_ini
+            novo_fim = base_fim + delta_fim
+
+        # Concordância de labels: todos os irmãos com mesmo _label_efetivo?
+        lbl_prim = _label_efetivo(ev)
+        concordam = all(_label_efetivo(s) == lbl_prim for s in irmaos)
+        conf_atual = float(ev.get("confianca") or 0.0)
+        nova_conf = min(0.99, conf_atual + 0.05) if concordam else conf_atual
+
+        novo = dict(ev)
+        novo["tempo_inicio_s"] = novo_ini
+        novo["tempo_fim_s"] = novo_fim
+        novo["duracao_s"] = round(duracao_uniao, 3)
+        novo["confianca"] = round(nova_conf, 3)
+        saida.append(novo)
+
+    return saida
+
+
+def _anexar_meta_video(eventos: list[dict], sb: Client) -> None:
+    """In-place: anexa cam_id e gravado_em a cada evento.
+
+    Faz UM único SELECT em `videos` por id ∈ {video_id dos eventos} e
+    enriquece cada evento. No-op quando os eventos já têm os 2 campos
+    preenchidos (idempotente). Defensivo: nunca levanta — falha vira logs
+    warning e mantém os eventos como estavam.
+    """
+    if not eventos:
+        return
+    faltando = [e for e in eventos if "cam_id" not in e or "gravado_em" not in e]
+    if not faltando:
+        return
+    vids = sorted({e.get("video_id") for e in faltando if e.get("video_id")})
+    if not vids:
+        for e in faltando:
+            e.setdefault("cam_id", None)
+            e.setdefault("gravado_em", None)
+        return
+    try:
+        rv = (
+            sb.table("videos")
+            .select("id, cam_id, gravado_em")
+            .in_("id", list(vids))
+            .execute()
+            .data
+        ) or []
+        meta = {v["id"]: v for v in rv}
+    except Exception as e:
+        log.warning(f"_anexar_meta_video: falha ao buscar videos ({e}) — segue sem dedup")
+        meta = {}
+    for ev in faltando:
+        mv = meta.get(ev.get("video_id"), {})
+        ev.setdefault("cam_id", mv.get("cam_id"))
+        ev.setdefault("gravado_em", mv.get("gravado_em"))
+
+
 def montar_contexto_agregado(
     sb: Client,
     empresa: str,
@@ -2268,6 +2379,138 @@ def _montar_bloco_lacunas(
     return "\n".join(linhas)
 
 
+def gerar_pergunta_divergencia_camera(
+    sb: Client,
+    empresa: str,
+    processo: str,
+    *,
+    janela_horas: int = 24,
+    max_perguntas: int = 2,
+) -> int:
+    """Detecta grupos multi-câmera com label DIVERGENTE e enfileira UMA
+    pergunta determinística por par de labels (A, B). Zero custo Groq.
+
+    Varredura: eventos pendentes (validado_humano is null) das últimas
+    `janela_horas` do processo, com cam_id e gravado_em não-nulos. Roda
+    `agrupar_eventos_multicamera`; para cada grupo cujos labels efetivos
+    divergem entre os irmãos, monta UMA pergunta — texto template fixo,
+    `respostas_rapidas=[A, B, 'ambos descrevem ações diferentes']`.
+
+    Dedup idempotente: prefixo estável `[multicam:A↔B]` no campo
+    `pergunta` (signatura = sorted([A,B])). Checa em qualquer status
+    (pendente/respondida/dispensada) antes de inserir. Limita a
+    `max_perguntas` por execução.
+
+    Retorna o número de perguntas enfileiradas. Defensivo: nunca
+    levanta — falhas viram log.warning e devolve 0.
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        corte = (datetime.now(timezone.utc) - timedelta(hours=janela_horas)).isoformat()
+        evs = (
+            sb.table("eventos")
+            .select(
+                "id, video_id, comportamento_label, label_corrigido, "
+                "tempo_inicio_s, tempo_fim_s, confianca, validado_humano, "
+                "validacao_correto, criado_em"
+            )
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .is_("validado_humano", "null")
+            .gte("criado_em", corte)
+            .limit(2000)
+            .execute()
+            .data
+        ) or []
+        if not evs:
+            return 0
+
+        _anexar_meta_video(evs, sb)
+        grupos, _ = agrupar_eventos_multicamera(evs)
+        if not grupos:
+            return 0
+
+        # Coleta pares (A↔B) divergentes — uma signatura por par único.
+        existentes = (
+            sb.table("perguntas_processo")
+            .select("pergunta")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .limit(2000)
+            .execute()
+            .data
+        ) or []
+        ja_feitas: set[str] = set()
+        for x in existentes:
+            t = x.get("pergunta") or ""
+            if t.startswith("[multicam:") and "]" in t:
+                ja_feitas.add(t[: t.index("]") + 1])  # ex.: '[multicam:A↔B]'
+
+        candidatos: list[tuple[str, str, dict, dict]] = []
+        vistos_par: set[tuple[str, str]] = set()
+        for primario_id, irmaos in grupos.items():
+            primario = next((e for e in evs if e["id"] == primario_id), None)
+            if not primario:
+                continue
+            lbl_p = _label_efetivo(primario)
+            for irmao in irmaos:
+                lbl_i = _label_efetivo(irmao)
+                if lbl_i == lbl_p:
+                    continue  # concordam — não é divergência
+                par = tuple(sorted([lbl_p, lbl_i]))
+                if par in vistos_par:
+                    continue
+                vistos_par.add(par)
+                sig = f"[multicam:{par[0]}↔{par[1]}]"
+                if sig in ja_feitas:
+                    continue
+                candidatos.append((par[0], par[1], primario, irmao))
+                if len(candidatos) >= max_perguntas:
+                    break
+            if len(candidatos) >= max_perguntas:
+                break
+
+        if not candidatos:
+            return 0
+
+        agora = datetime.now(timezone.utc).isoformat()
+        novas: list[dict] = []
+        for A, B, _prim, _irm in candidatos:
+            pergunta_texto = (
+                f'[multicam:{A}↔{B}] Em uma mesma ação, uma câmera viu como '
+                f'"{A}" e a outra como "{B}". Qual descreve melhor essa operação?'
+            )
+            motivo = (
+                "Quando duas câmeras divergem no rótulo, costuma ser ângulo "
+                "desfavorável ou vocabulário com nomes próximos pro mesmo "
+                "movimento — sua resposta vira treino direto pro Prism."
+            )
+            novas.append({
+                "empresa": empresa,
+                "processo": processo,
+                "pergunta": pergunta_texto,
+                "motivo": motivo,
+                "comportamentos_relacionados": [A, B],
+                "respostas_rapidas": [A, B, "ambos descrevem ações diferentes"],
+                "status": "pendente",
+                "criada_em": agora,
+            })
+        try:
+            sb.table("perguntas_processo").insert(novas).execute()
+            log.info(
+                f"[multicam-divergencia] {len(novas)} pergunta(s) enfileirada(s) "
+                f"em {empresa}/{processo}"
+            )
+            return len(novas)
+        except Exception as e:
+            log.warning(f"[multicam-divergencia] insert falhou: {e}")
+            return 0
+    except Exception as e:
+        log.warning(f"gerar_pergunta_divergencia_camera falhou: {e}")
+        return 0
+
+
 def gerar_perguntas_processo(
     sb: Client,
     groq_client: Groq,
@@ -2519,8 +2762,9 @@ def montar_snapshot_chat(
         evs = (
             sb.table("eventos")
             .select(
-                "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
-                "tempo_fim_s, validacao_correto, validado_humano"
+                "id, video_id, comportamento_label, label_corrigido, "
+                "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
+                "confianca"
             )
             .eq("empresa", empresa)
             .eq("processo", processo)
@@ -2531,6 +2775,10 @@ def montar_snapshot_chat(
     else:
         evs = eventos
     base = [e for e in evs if e.get("validacao_correto") is not False]
+    # Dedup multi-câmera (Fase 3): mesma ação física vista por 2+ câmeras
+    # vira 1 evento efetivo. Eventos sem cam_id/gravado_em ficam intocados.
+    _anexar_meta_video(base, sb)
+    base = consolidar_eventos_para_metricas(base)
 
     if videos is None:
         vids = (
@@ -2903,14 +3151,18 @@ def agregar_portfolio(
     q_ev = (
         sb.table("eventos")
         .select(
-            "processo, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, validacao_correto, validado_humano, origem_validacao"
+            "id, video_id, processo, comportamento_label, label_corrigido, "
+            "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
+            "origem_validacao, confianca"
         )
         .eq("empresa", empresa)
     )
     if processo is not None:
         q_ev = q_ev.eq("processo", processo)
     eventos = q_ev.limit(100000).execute().data or []
+
+    # Loop 1: contadores de validação (origem, pendentes, considerados, validados)
+    # — usam o stream BRUTO (sem dedup), pra refletir o trabalho real do humano.
     for e in eventos:
         p = base.get(e.get("processo"))
         if not p:
@@ -2924,15 +3176,29 @@ def agregar_portfolio(
         else:
             p["n_origem_humano"] = p.get("n_origem_humano", 0) + 1
         if e.get("validacao_correto") is False:
-            continue  # falso positivo não conta na base
+            continue
         p["eventos_considerados"] += 1
         if e.get("validado_humano"):
             p["n_validados"] += 1
-        lbl = _label_efetivo(e)
-        dur = max(0, (e.get("tempo_fim_s") or 0) - (e.get("tempo_inicio_s") or 0))
-        a = p["_agg"][lbl]
-        a["dur"] += dur
-        a["oc"] += 1
+
+    # Loop 2: agregação de DURAÇÃO por categoria Lean — usa stream DEDUPLICADO
+    # (Fase 3: cam1+cam2 da mesma ação contam 1 vez só).
+    _anexar_meta_video(eventos, sb)
+    por_proc: dict[str, list[dict]] = {}
+    for e in eventos:
+        if e.get("validacao_correto") is False:
+            continue
+        por_proc.setdefault(e.get("processo"), []).append(e)
+    for nome_proc, evs_p in por_proc.items():
+        p = base.get(nome_proc)
+        if not p:
+            continue
+        for e in consolidar_eventos_para_metricas(evs_p):
+            lbl = _label_efetivo(e)
+            dur = max(0, (e.get("tempo_fim_s") or 0) - (e.get("tempo_inicio_s") or 0))
+            a = p["_agg"][lbl]
+            a["dur"] += dur
+            a["oc"] += 1
 
     q_sug = (
         sb.table("sugestoes_melhoria")
@@ -4040,6 +4306,12 @@ def processar_video(
     n_perguntas = 0
     try:
         progress_cb("perguntas", 0, "Identificando lacunas pra perguntar ao cliente")
+        # Fase 3: pergunta determinística por divergência de rótulo entre
+        # câmeras (zero custo Groq, idempotente por signatura de par).
+        try:
+            gerar_pergunta_divergencia_camera(sb, empresa, processo)
+        except Exception as e:
+            log.warning(f"Pergunta de divergência multi-câmera falhou (não-fatal): {e}")
         novas_perguntas = gerar_perguntas_processo(
             sb,
             groq_client,

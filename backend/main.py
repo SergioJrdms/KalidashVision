@@ -790,9 +790,9 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     evs = (
         sb.table("eventos")
         .select(
-            "video_id, pessoa_track_id, comportamento_label, label_corrigido, "
+            "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
             "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-            "origem_validacao"
+            "origem_validacao, confianca"
         )
         .eq("empresa", user.empresa)
         .eq("processo", nome)
