@@ -46,6 +46,7 @@ from .pipeline import (
     analisar_padroes_globais,
     gerar_pergunta_onboarding,
     agrupar_eventos_multicamera,
+    evento_relevante_para_validacao,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -1027,6 +1028,7 @@ def listar_eventos(
     processo_id: str,
     status_filter: str = Query("pendente", alias="status"),
     agrupar: bool = Query(False),
+    gate: bool = Query(True),
     user: CurrentUser = Depends(get_current_user),
 ):
     sb = make_supabase_client()
@@ -1035,7 +1037,7 @@ def listar_eventos(
         sb.table("eventos")
         .select(
             "id, video_id, comportamento_label, descricao_bruta, tempo_inicio_s, "
-            "tempo_fim_s, confianca, validado_humano, validacao_correto, "
+            "tempo_fim_s, confianca, validado_humano, validacao_correto, n_amostras, "
             "label_corrigido, origem_validacao, frame_inicio, frame_fim, bbox_inicio, pessoa_track_id"
         )
         .eq("empresa", user.empresa)
@@ -1049,14 +1051,18 @@ def listar_eventos(
     r = q.order("tempo_inicio_s").limit(500).execute()
     itens = r.data or []
 
-    # Categoria Lean PREVISTA por evento (derivada do label) — sem cálculo pesado.
+    # Categoria Lean PREVISTA + total_ocorrencias por label (join leve). A
+    # categoria alimenta o display E o gate de relevância (Fase 5); o
+    # total_ocorrencias alimenta o sinal de "raridade" do gate.
     labels_distintos = list({(i.get("label_corrigido") or i.get("comportamento_label")) for i in itens})
     labels_distintos = [l for l in labels_distintos if l]
+    cat_por_label: dict[str, str | None] = {}
+    ocorr_por_label: dict[str, int] = {}
     if labels_distintos:
         try:
             comp = (
                 sb.table("comportamentos")
-                .select("label, categoria_lean")
+                .select("label, categoria_lean, total_ocorrencias")
                 .eq("empresa", user.empresa)
                 .eq("processo", nome)
                 .in_("label", labels_distintos)
@@ -1064,8 +1070,10 @@ def listar_eventos(
                 .data
             ) or []
             cat_por_label = {c["label"]: c.get("categoria_lean") for c in comp}
+            ocorr_por_label = {c["label"]: (c.get("total_ocorrencias") or 0) for c in comp}
         except Exception:
             cat_por_label = {}
+            ocorr_por_label = {}
         for i in itens:
             lbl = i.get("label_corrigido") or i.get("comportamento_label")
             i["categoria_lean_prevista"] = cat_por_label.get(lbl)
@@ -1110,6 +1118,42 @@ def listar_eventos(
             ]
         # Remove os secundários do topo (1 card por grupo).
         itens = [i for i in itens if i["id"] not in secundarios]
+
+    # Fase 5: gate de relevância — esconde micro-ações da FILA de validação
+    # (não-destrutivo: continuam no banco, nas métricas e na tabela de Eventos).
+    # Roda sobre a lista final (após agrupamento). Permissivo enquanto o
+    # processo é imaturo; aperta conforme a maturidade sobe. Opt-out: ?gate=false
+    # ou KV_VALIDACAO_GATE=off. Fail-open: qualquer erro mantém a fila completa.
+    if (
+        gate
+        and status_filter == "pendente"
+        and itens
+        and os.environ.get("KV_VALIDACAO_GATE", "on").lower() not in ("off", "0", "false")
+    ):
+        try:
+            portfolio = agregar_portfolio(sb, user.empresa, processo=nome)
+            maturidade = float((portfolio.get(nome) or {}).get("maturidade", 0) or 0)
+        except Exception as e:
+            log.warning("gate: falha ao calcular maturidade (%s) — fila completa", e)
+            maturidade = 0.0
+
+        relevantes: list[dict] = []
+        motivos: dict[str, int] = {}
+        for i in itens:
+            lbl = i.get("label_corrigido") or i.get("comportamento_label")
+            ocorr = ocorr_por_label.get(lbl, 0)
+            ok, motivo = evento_relevante_para_validacao(i, ocorr, maturidade)
+            if ok:
+                relevantes.append(i)
+            else:
+                motivos[motivo] = motivos.get(motivo, 0) + 1
+        ocultados = len(itens) - len(relevantes)
+        if ocultados:
+            log.info(
+                "gate: %s/%s eventos ocultados da validação (maturidade=%.0f, motivos=%s)",
+                ocultados, len(itens), maturidade, motivos,
+            )
+        itens = relevantes
 
     return itens
 

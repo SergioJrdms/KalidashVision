@@ -1426,6 +1426,85 @@ def _label_efetivo(e: dict) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# RELEVÂNCIA (Fase 5) — gate que decide se um evento PENDENTE vai pra fila de
+# validação humana. Não-destrutivo: False só ESCONDE da fila (o evento segue no
+# banco, nas métricas e na tabela de Eventos). Aperta com a maturidade.
+# ═════════════════════════════════════════════════════════════════════════
+def _envi(nome: str, padrao: int) -> int:
+    try:
+        return int(float(os.environ.get(nome, str(padrao))))
+    except Exception:
+        return padrao
+
+
+# Knobs (env, com defaults). Maturidade 0–100.
+REL_MAT_APRENDIZADO = _envi("KV_REL_MAT_APRENDIZADO", 25)   # < isto: sem gate
+REL_MAT_MADURO = _envi("KV_REL_MAT_MADURO", 60)            # >= isto: gate rígido
+REL_MIN_AMOSTRAS = _envi("KV_REL_MIN_AMOSTRAS", 2)         # persistência mínima
+REL_MIN_DUR_S = _envi("KV_REL_MIN_DUR_S", 6)              # duração mínima (foco)
+REL_MIN_DUR_MADURO_S = _envi("KV_REL_MIN_DUR_MADURO_S", 12)  # duração mínima (maduro)
+REL_RARO_MAX = _envi("KV_REL_RARO_MAX", 1)               # total_ocorrencias <= isto = raro
+
+
+def _eh_ruido_label(label: str | None, descricao: str | None) -> bool:
+    """True para o ruído que o próprio VLM emite quando não tem certeza."""
+    alvo = f"{label or ''} {descricao or ''}".lower()
+    return ("não identificad" in alvo) or ("nao identificad" in alvo) or ("ação não" in alvo)
+
+
+def evento_relevante_para_validacao(
+    ev: dict,
+    total_ocorrencias: int,
+    maturidade: float,
+) -> tuple[bool, str]:
+    """Decide se um evento PENDENTE merece a fila de validação humana.
+
+    Sinais (todos via campos já presentes + total_ocorrencias do label):
+      - ruído ("ação não identificada") → nunca relevante;
+      - persistência (n_amostras >= MIN ou duração >= MIN_DUR);
+      - raridade (total_ocorrencias <= RARO_MAX = label quase novo);
+      - impacto Lean (desperdicio/valor_agregado = foco do negócio).
+
+    Gate por maturidade:
+      - Aprendizado (< REL_MAT_APRENDIZADO): sem gate (só corta ruído).
+      - Foco (até REL_MAT_MADURO): persistente OU Lean OU raro (vale aprender).
+      - Maduro (>=): tira a leniência de raro e sobe o piso de duração.
+
+    Retorna (relevante, motivo). Não-destrutivo: False só esconde da fila.
+    """
+    label = ev.get("label_corrigido") or ev.get("comportamento_label")
+    descricao = ev.get("descricao_bruta")
+    if _eh_ruido_label(label, descricao):
+        return (False, "ruido")
+
+    n_amostras = int(ev.get("n_amostras") or 1)
+    try:
+        dur = float(ev.get("tempo_fim_s") or 0) - float(ev.get("tempo_inicio_s") or 0)
+    except Exception:
+        dur = 0.0
+    cat = ev.get("categoria_lean_prevista")
+    lean_relevante = cat in ("desperdicio", "valor_agregado")
+    raro = (total_ocorrencias or 0) <= REL_RARO_MAX
+
+    # Aprendizado: microgerencia pra aprender o todo (só ruído é cortado).
+    if maturidade < REL_MAT_APRENDIZADO:
+        return (True, "aprendizado")
+
+    maduro = maturidade >= REL_MAT_MADURO
+    piso_dur = REL_MIN_DUR_MADURO_S if maduro else REL_MIN_DUR_S
+    persistente = (n_amostras >= REL_MIN_AMOSTRAS) or (dur >= piso_dur)
+
+    if persistente:
+        return (True, "persistente")
+    if lean_relevante:
+        return (True, "lean")
+    if (not maduro) and raro:
+        # Ainda vale aprender labels novos enquanto o vocabulário não decantou.
+        return (True, "raro_aprendendo")
+    return (False, "micro")
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # MULTI-CÂMERA (Fase 2) — agrupar eventos sobrepostos de câmeras diferentes
 # ═════════════════════════════════════════════════════════════════════════
 def _janela_abs_evento(ev: dict) -> tuple[float, float] | None:
