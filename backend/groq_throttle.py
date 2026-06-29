@@ -42,6 +42,16 @@ _LIMITES_TPM: dict[str, float] = {
     "llama-3.3-70b-versatile":           _envf("KV_TPM_LLAMA3", 11000),
 }
 
+# RPM = requests por MINUTO. O Free Tier do Groq limita 30 RPM POR MODELO; a
+# etapa VLM dispara ~20 chamadas ao scout quase sem espaçamento (o TPM do scout
+# é folgado e não segura a cadência), e somando chat/debouncer concorrentes os
+# bursts passam de 30 → 429. Limites efetivos com folga (default 25 < 30):
+_LIMITES_RPM: dict[str, float] = {
+    "openai/gpt-oss-120b":               _envf("KV_RPM_GPT_OSS", 25),
+    "meta-llama/llama-4-scout-17b-16e-instruct": _envf("KV_RPM_SCOUT", 25),
+    "llama-3.3-70b-versatile":           _envf("KV_RPM_LLAMA3", 25),
+}
+
 # Janela do bucket (60s = 1 min) — TPM = tokens por MINUTO
 _JANELA_S = 60.0
 
@@ -73,21 +83,27 @@ def estimar_tokens(prompt: str, max_completion_tokens: int) -> int:
 
 
 def reserve(model: str, estimated_tokens: int) -> None:
-    """Bloqueia até caber a chamada dentro do TPM efetivo do modelo.
+    """Bloqueia até caber a chamada dentro do TPM **e do RPM** efetivos.
+
+    Reusa o mesmo bucket deque[(ts, tokens)]: TPM = soma dos tokens na janela
+    de 60s; RPM = número de entradas na janela (1 entrada = 1 request). Só
+    reserva quando AMBOS cabem; caso contrário dorme até a entrada mais antiga
+    sair da janela (o que libera simultaneamente um slot de RPM e tokens de TPM).
 
     Sem-op para modelos sem limite definido. Não-fatal: qualquer exceção
-    interna dorme 0.1s e retorna (para não derrubar o pipeline em caso de
-    bug do throttle).
+    interna loga e retorna (para não derrubar o pipeline em caso de bug do
+    throttle).
     """
-    limite = _LIMITES_TPM.get(model)
-    if not limite or limite <= 0:
+    limite_tpm = _LIMITES_TPM.get(model)
+    limite_rpm = _LIMITES_RPM.get(model)
+    if (not limite_tpm or limite_tpm <= 0) and (not limite_rpm or limite_rpm <= 0):
         return
     if estimated_tokens <= 0:
-        return
+        estimated_tokens = 1  # toda chamada conta ao menos como 1 req no RPM
 
     bucket, lock = _bucket(model)
 
-    # Loop de espera. A cada iteração: poda janela, soma, dorme ou reserva.
+    # Loop de espera. A cada iteração: poda janela, mede TPM+RPM, dorme ou reserva.
     while True:
         try:
             with lock:
@@ -96,39 +112,49 @@ def reserve(model: str, estimated_tokens: int) -> None:
                 limite_minimo = agora - _JANELA_S
                 while bucket and bucket[0][0] < limite_minimo:
                     bucket.popleft()
-                # 2) Soma o que está vivo
-                em_uso = sum(t for _, t in bucket)
-                if em_uso + estimated_tokens <= limite:
-                    # Cabe — reserva já
+                # 2) Mede o que está vivo: tokens (TPM) e nº de requests (RPM)
+                em_uso_tpm = sum(t for _, t in bucket)
+                em_uso_rpm = len(bucket)
+                cabe_tpm = (not limite_tpm) or (em_uso_tpm + estimated_tokens <= limite_tpm)
+                cabe_rpm = (not limite_rpm) or (em_uso_rpm + 1 <= limite_rpm)
+                if cabe_tpm and cabe_rpm:
+                    # Cabe nos dois — reserva já
                     bucket.append((agora, estimated_tokens))
                     return
-                # 3) Não cabe. Calcula sleep até a entrada mais antiga sair.
-                #    Garante mínimo de 0.5s para não tight-loop sob carga.
-                idade_mais_antiga = agora - bucket[0][0]
+                # 3) Não cabe. Dorme até a entrada mais antiga sair da janela.
+                #    Mínimo de 0.5s para não tight-loop sob carga.
+                idade_mais_antiga = agora - bucket[0][0] if bucket else 0.0
                 sleep_for = max(0.5, _JANELA_S - idade_mais_antiga + 0.1)
+                motivo = "RPM" if not cabe_rpm else "TPM"
         except Exception as e:
             log.warning(f"throttle.reserve falhou ({e}) — segue sem dormir")
             return
 
-        log.info(
-            f"[throttle] {model} cheio ({em_uso}+{estimated_tokens}>{limite:.0f} TPM) "
-            f"dormindo {sleep_for:.1f}s"
-        )
+        if motivo == "RPM":
+            log.info(
+                f"[throttle] {model} cheio (RPM {em_uso_rpm}+1>{limite_rpm:.0f}) "
+                f"dormindo {sleep_for:.1f}s"
+            )
+        else:
+            log.info(
+                f"[throttle] {model} cheio (TPM {em_uso_tpm}+{estimated_tokens}>{limite_tpm:.0f}) "
+                f"dormindo {sleep_for:.1f}s"
+            )
         time.sleep(sleep_for)
 
 
 def snapshot(model: str) -> dict:
     """Para debug / endpoint de healthcheck."""
-    limite = _LIMITES_TPM.get(model)
-    if not limite:
-        return {"model": model, "tpm_limite": None, "em_uso_60s": 0, "n_entradas": 0}
+    limite_tpm = _LIMITES_TPM.get(model)
+    limite_rpm = _LIMITES_RPM.get(model)
     bucket, lock = _bucket(model)
     with lock:
         agora = time.monotonic()
-        em_uso = sum(t for ts, t in bucket if ts >= agora - _JANELA_S)
+        vivos = [(ts, t) for ts, t in bucket if ts >= agora - _JANELA_S]
         return {
             "model": model,
-            "tpm_limite": limite,
-            "em_uso_60s": em_uso,
-            "n_entradas": len(bucket),
+            "tpm_limite": limite_tpm,
+            "tpm_em_uso_60s": sum(t for _, t in vivos),
+            "rpm_limite": limite_rpm,
+            "rpm_em_uso_60s": len(vivos),
         }

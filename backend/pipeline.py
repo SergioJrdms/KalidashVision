@@ -57,7 +57,9 @@ YOLO_CONF_MIN = 0.45
 AREA_MIN_RATIO = 0.005
 TRACKER_CONFIG = "botsort.yaml"
 
-DEFAULT_INTERVALO_AMOSTRAGEM_S = 3.0
+# 5s (não 3s): ~40% menos chamadas ao VLM por vídeo → menos pressão de RPM/TPM
+# no Groq Free Tier e fila drena mais rápido. Configurável via env.
+DEFAULT_INTERVALO_AMOSTRAGEM_S = float(os.environ.get("KV_INTERVALO_AMOSTRAGEM_S", "5.0"))
 DEFAULT_LIMIAR_AUTO_VALIDACAO = 2
 
 DEFAULT_ROIS_CONTEXTO: dict[str, dict] = {}
@@ -346,7 +348,11 @@ def make_supabase_client(url: str | None = None, key: str | None = None) -> Clie
 
 def make_groq_client(api_key: str | None = None) -> Groq:
     api_key = api_key or os.environ["GROQ_API_KEY"]
-    return Groq(api_key=api_key)
+    # max_retries=0: NÓS somos a única autoridade de retry/cadência (groq_throttle
+    # + o loop com Retry-After em groq_text_call/groq_vision_call). Sem isso o SDK
+    # faz retry interno próprio (default 2) FORA do throttle e amplifica a rajada
+    # de 429 numa janela já saturada do Free Tier.
+    return Groq(api_key=api_key, max_retries=0, timeout=60.0)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -693,15 +699,15 @@ def groq_vision_call(
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
-    # Throttle TPM proativo: dorme antes da chamada se o orçamento do modelo
-    # estouraria. Sem isso, picos curtos disparam 429 do Groq Free Tier.
-    try:
-        from . import groq_throttle
-        groq_throttle.reserve(model, groq_throttle.estimar_tokens(prompt_texto, max_tokens))
-    except Exception:
-        pass
-
     for tentativa in range(retries):
+        # Throttle TPM+RPM proativo ANTES de CADA tentativa (com max_retries=0 no
+        # cliente, todo retry nosso é um request HTTP real que precisa ser pago no
+        # bucket). Sem isso, picos curtos disparam 429 do Groq Free Tier.
+        try:
+            from . import groq_throttle
+            groq_throttle.reserve(model, groq_throttle.estimar_tokens(prompt_texto, max_tokens))
+        except Exception:
+            pass
         try:
             r = groq_client.chat.completions.create(**kwargs)
             return r.choices[0].message.content
@@ -745,15 +751,15 @@ def groq_text_call(
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
-    # Throttle TPM proativo (mesmo motivo de groq_vision_call).
-    try:
-        from . import groq_throttle
-        texto_p = (system or "") + (prompt or "")
-        groq_throttle.reserve(model, groq_throttle.estimar_tokens(texto_p, max_tokens))
-    except Exception:
-        pass
-
+    texto_p = (system or "") + (prompt or "")
     for tentativa in range(retries):
+        # Throttle TPM+RPM proativo ANTES de CADA tentativa (mesmo motivo de
+        # groq_vision_call: com max_retries=0 no cliente, todo retry é request real).
+        try:
+            from . import groq_throttle
+            groq_throttle.reserve(model, groq_throttle.estimar_tokens(texto_p, max_tokens))
+        except Exception:
+            pass
         try:
             r = groq_client.chat.completions.create(**kwargs)
             return r.choices[0].message.content
