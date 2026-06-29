@@ -14,6 +14,7 @@ import type { AcaoSugestao } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
+const COMP_VISIVEL_PADRAO = 7;
 
 export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: Go; t: Tweaks }) {
   const isMobile = useIsMobile();
@@ -327,15 +328,23 @@ function ParetoPanel({ det }: { det: DetMock }) {
 function TempoPorComportamento({ det, denso, processoId }: { det: DetMock; denso: boolean; processoId: string }) {
   const qc = useQueryClient();
   const [edit, setEdit] = useState<string | null>(null);
+  const [verTodos, setVerTodos] = useState(false);
   const setCat = useMutation({
     mutationFn: ({ id, cat }: { id: string; cat: LeanShort }) => api.comportamentos.setCategoria(id, leanLong(cat)),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["dashboard", processoId] }); qc.invalidateQueries({ queryKey: ["processos"] }); setEdit(null); toast("Anotado. O Prism vai classificar parecidos sozinho.", { icon: "check" }); },
   });
-  const lista: CompMock[] = denso ? det.comportamentos : det.comportamentos.slice(0, 7);
+  const total = det.comportamentos.length;
+  const expandido = denso || verTodos;
+  const lista: CompMock[] = expandido ? det.comportamentos : det.comportamentos.slice(0, COMP_VISIVEL_PADRAO);
   const marca: Record<string, { m: string; c: string }> = { humano: { m: "check", c: "var(--accent-deep)" }, aprendido: { m: "rotate-ccw", c: "var(--va)" }, ia: { m: "sparkles", c: "var(--faint)" } };
   return (
     <Card style={{ padding: 20 }}>
-      <PanelHead titulo="Tempo por comportamento" ajuda="Os comportamentos que mais consomem tempo. Clique no chip de categoria para reclassificar — sua decisão vale para comportamentos de mesmo nome em outros processos." leitura="A cor diz se aquele tempo está agregando valor ou não." />
+      <PanelHead
+        titulo="Tempo por comportamento"
+        ajuda="Os comportamentos que mais consomem tempo. Clique no chip de categoria para reclassificar — sua decisão vale para comportamentos de mesmo nome em outros processos."
+        leitura="A cor diz se aquele tempo está agregando valor ou não."
+        right={!denso ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{lista.length} de {total}</span> : undefined}
+      />
       <ul className="col" style={{ gap: 11, listStyle: "none", padding: 0, margin: 0 }}>
         {lista.map((d) => {
           const editing = edit === d.id;
@@ -362,6 +371,14 @@ function TempoPorComportamento({ det, denso, processoId }: { det: DetMock; denso
           );
         })}
       </ul>
+      {!denso && total > COMP_VISIVEL_PADRAO && (
+        <div className="row" style={{ justifyContent: "center", marginTop: 10 }}>
+          <button onClick={() => setVerTodos((v) => !v)} className="row gap1" style={{ border: "1px solid var(--line)", background: "#fff", color: "var(--accent)", borderRadius: 99, padding: "6px 14px", fontSize: 12, fontWeight: 600 }}>
+            <Icon name={verTodos ? "chevron-up" : "chevron-down"} size={14} />
+            {verTodos ? "Mostrar menos" : `Ver todos (${total})`}
+          </button>
+        </div>
+      )}
     </Card>
   );
 }
