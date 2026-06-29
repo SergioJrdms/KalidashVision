@@ -14,7 +14,7 @@ import type { AcaoSugestao } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
-const COMP_VISIVEL_PADRAO = 7;
+const COMP_VISIVEL_PADRAO = 5;
 
 export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: Go; t: Tweaks }) {
   const isMobile = useIsMobile();
@@ -334,8 +334,7 @@ function TempoPorComportamento({ det, denso, processoId }: { det: DetMock; denso
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["dashboard", processoId] }); qc.invalidateQueries({ queryKey: ["processos"] }); setEdit(null); toast("Anotado. O Prism vai classificar parecidos sozinho.", { icon: "check" }); },
   });
   const total = det.comportamentos.length;
-  const expandido = denso || verTodos;
-  const lista: CompMock[] = expandido ? det.comportamentos : det.comportamentos.slice(0, COMP_VISIVEL_PADRAO);
+  const lista: CompMock[] = verTodos ? det.comportamentos : det.comportamentos.slice(0, COMP_VISIVEL_PADRAO);
   const marca: Record<string, { m: string; c: string }> = { humano: { m: "check", c: "var(--accent-deep)" }, aprendido: { m: "rotate-ccw", c: "var(--va)" }, ia: { m: "sparkles", c: "var(--faint)" } };
   return (
     <Card style={{ padding: 20 }}>
@@ -343,7 +342,7 @@ function TempoPorComportamento({ det, denso, processoId }: { det: DetMock; denso
         titulo="Tempo por comportamento"
         ajuda="Os comportamentos que mais consomem tempo. Clique no chip de categoria para reclassificar — sua decisão vale para comportamentos de mesmo nome em outros processos."
         leitura="A cor diz se aquele tempo está agregando valor ou não."
-        right={!denso ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{lista.length} de {total}</span> : undefined}
+        right={total > COMP_VISIVEL_PADRAO ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{lista.length} de {total}</span> : undefined}
       />
       <ul className="col" style={{ gap: 11, listStyle: "none", padding: 0, margin: 0 }}>
         {lista.map((d) => {
@@ -371,7 +370,7 @@ function TempoPorComportamento({ det, denso, processoId }: { det: DetMock; denso
           );
         })}
       </ul>
-      {!denso && total > COMP_VISIVEL_PADRAO && (
+      {total > COMP_VISIVEL_PADRAO && (
         <div className="row" style={{ justifyContent: "center", marginTop: 10 }}>
           <button onClick={() => setVerTodos((v) => !v)} className="row gap1" style={{ border: "1px solid var(--line)", background: "#fff", color: "var(--accent)", borderRadius: 99, padding: "6px 14px", fontSize: 12, fontWeight: 600 }}>
             <Icon name={verTodos ? "chevron-up" : "chevron-down"} size={14} />
