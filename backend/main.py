@@ -717,6 +717,28 @@ async def upload_video(
     if not conteudo:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Arquivo vazio.")
 
+    # Fase 9: idempotência da inbox do edge. Se o edge re-enviar o MESMO segmento
+    # (mesmo cam_id + nome — determinístico por instante real: seg_AAAAMMDD_HHMMSS),
+    # NÃO duplica nem re-sobe ao storage. Devolve sucesso e o edge apaga o arquivo
+    # local. Cobre o retry causado pelo bug do job_id (sem limpeza manual).
+    if cam_id:
+        try:
+            ja = (
+                sb.table("segmentos")
+                .select("id")
+                .eq("empresa", user.empresa)
+                .eq("processo", processo_nome)
+                .eq("cam_id", cam_id)
+                .eq("nome", file.filename or "")
+                .limit(1)
+                .execute()
+                .data
+            ) or []
+        except Exception:
+            ja = []
+        if ja:
+            return {"ok": True, "modo": "lote", "status": "duplicado"}
+
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
     # Chave do Storage só aceita ASCII seguro — sanitiza empresa/processo/arquivo
     # (o nome original do vídeo segue preservado na coluna `nome` da tabela videos).

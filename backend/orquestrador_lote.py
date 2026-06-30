@@ -88,44 +88,52 @@ def processar_lote(sb, empresa: str, processo: str) -> dict:
         n_pares = n_solo = 0
         # Ordem determinística/cronológica pela chave (timestamp no token).
         for tok in sorted(grupos.keys()):
-            membros = sorted(grupos[tok], key=lambda x: str(x.get("cam_id") or ""))
-            primario = membros[0]
-            secundario = membros[1] if len(membros) >= 2 else None
+            # CONSOME todos os membros do token: cada item = primário + (1º membro
+            # de câmera DIFERENTE como secundário). Nunca pareia cam1+cam1 como
+            # "dual-angle"; duplicatas da MESMA câmera viram solos (nada órfão).
+            restantes = sorted(grupos[tok], key=lambda x: str(x.get("cam_id") or ""))
+            while restantes:
+                primario = restantes.pop(0)
+                secundario = None
+                for idx, m in enumerate(restantes):
+                    if m.get("cam_id") and m.get("cam_id") != primario.get("cam_id"):
+                        secundario = restantes.pop(idx)
+                        break
 
-            job = JOBS.create(processo_id=processo, user_id="edge-lote")
-            job_queue.enqueue(
-                job.id,
-                empresa,
-                processo,
-                primario["storage_path"],
-                None,                              # descrição é resolvida no pipeline
-                primario.get("nome"),
-                cam_id=primario.get("cam_id"),
-                gravado_em=primario.get("gravado_em"),
-                storage_path_secundario=(secundario or {}).get("storage_path"),
-                cam_id_secundario=(secundario or {}).get("cam_id"),
-                nome_secundario=(secundario or {}).get("nome"),
-                segmento_id=primario["id"],
-                segmento_id_secundario=(secundario or {}).get("id"),
-            )
-            ids = [primario["id"]] + ([secundario["id"]] if secundario else [])
-            for sid in ids:
-                try:
-                    sb.table("segmentos").update({"status": "enfileirado"}).eq("id", sid).execute()
-                except Exception as e:
-                    log.warning(f"[lote] falha ao marcar enfileirado {sid}: {e}")
-            if secundario:
-                n_pares += 1
-                log.info(
-                    f"[lote] {empresa}/{processo}: enfileirando seg {tok} "
-                    f"{primario.get('cam_id')}+{secundario.get('cam_id')} (par)"
+                job = JOBS.create(processo_id=processo, user_id="edge-lote")
+                job_queue.enqueue(
+                    job.id,
+                    empresa,
+                    processo,
+                    primario["storage_path"],
+                    None,                              # descrição é resolvida no pipeline
+                    primario.get("nome"),
+                    cam_id=primario.get("cam_id"),
+                    gravado_em=primario.get("gravado_em"),
+                    storage_path_secundario=(secundario or {}).get("storage_path"),
+                    cam_id_secundario=(secundario or {}).get("cam_id"),
+                    nome_secundario=(secundario or {}).get("nome"),
+                    segmento_id=primario["id"],
+                    segmento_id_secundario=(secundario or {}).get("id"),
                 )
-            else:
-                n_solo += 1
-                log.info(
-                    f"[lote] {empresa}/{processo}: enfileirando seg {tok} "
-                    f"{primario.get('cam_id')} (solo)"
-                )
+                ids = [primario["id"]] + ([secundario["id"]] if secundario else [])
+                for sid in ids:
+                    try:
+                        sb.table("segmentos").update({"status": "enfileirado"}).eq("id", sid).execute()
+                    except Exception as e:
+                        log.warning(f"[lote] falha ao marcar enfileirado {sid}: {e}")
+                if secundario:
+                    n_pares += 1
+                    log.info(
+                        f"[lote] {empresa}/{processo}: enfileirando seg {tok} "
+                        f"{primario.get('cam_id')}+{secundario.get('cam_id')} (par)"
+                    )
+                else:
+                    n_solo += 1
+                    log.info(
+                        f"[lote] {empresa}/{processo}: enfileirando seg {tok} "
+                        f"{primario.get('cam_id')} (solo)"
+                    )
 
         total = n_pares + n_solo
         log.info(
