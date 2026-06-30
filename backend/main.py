@@ -29,6 +29,7 @@ from .auth import CurrentUser, get_current_user
 from .jobs import JOBS
 from .pipeline import (
     extrair_3_frames_evento,
+    extrair_3_frames_tempo,
     frame_para_jpeg_bytes,
     make_groq_client,
     make_supabase_client,
@@ -868,6 +869,60 @@ def reprocessar_erros(processo_id: str, user: CurrentUser = Depends(get_current_
     return {"ok": True, "reset": len(alvo), **resumo}
 
 
+@app.get("/fila/global")
+def fila_global(user: CurrentUser = Depends(get_current_user)):
+    """Visão GLOBAL da fila (Fase 8): agrega a inbox `segmentos` de TODOS os
+    processos da empresa, com contagens por status por processo + totais."""
+    sb = make_supabase_client()
+    # Mapa nome do processo → id (p/ o frontend abrir a fila de cada um).
+    try:
+        ctx = (
+            sb.table("contexto_processo")
+            .select("id, processo")
+            .eq("empresa", user.empresa)
+            .execute()
+            .data
+        ) or []
+    except Exception:
+        ctx = []
+    id_por_nome = {c["processo"]: c["id"] for c in ctx}
+
+    # Puxa só (processo, status) de todos os segmentos da empresa e agrega em Python.
+    try:
+        rows = (
+            sb.table("segmentos")
+            .select("processo, status")
+            .eq("empresa", user.empresa)
+            .limit(100000)
+            .execute()
+            .data
+        ) or []
+    except Exception as e:
+        log.warning("fila_global: falha ao ler segmentos (%s)", e)
+        rows = []
+
+    por_proc: dict[str, dict[str, int]] = {}
+    totais = {s: 0 for s in _FILA_STATUS}
+    for r in rows:
+        proc = r.get("processo") or "—"
+        st = r.get("status") or "pendente"
+        if st not in _FILA_STATUS:
+            st = "pendente"
+        d = por_proc.setdefault(proc, {s: 0 for s in _FILA_STATUS})
+        d[st] += 1
+        totais[st] += 1
+
+    processos = []
+    for nome, c in sorted(por_proc.items(), key=lambda kv: kv[0].lower()):
+        processos.append({
+            "processo": nome,
+            "processo_id": id_por_nome.get(nome),
+            "contagens": c,
+            "total": sum(c.values()),
+        })
+    return {"contagens": totais, "total": sum(totais.values()), "processos": processos}
+
+
 @app.get("/jobs/{job_id}")
 def status_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
     job = JOBS.get(job_id)
@@ -1233,6 +1288,37 @@ def listar_eventos(
                 }
                 for s in irm
             ]
+        # Fase 6 (dual-angle): eventos processados com os 2 ângulos juntos têm
+        # UMA trilha só (na cam1) — sem irmão-evento. Para mostrar o 2º ângulo
+        # no card, achamos o SEGMENTO par (mesmo video_id, outra câmera) na inbox
+        # e anexamos `segundo_angulo` {segmento_id, cam_id}. Só p/ eventos sem
+        # irmãos pós-hoc (senão duplicaria).
+        try:
+            if vids:
+                rs = (
+                    sb.table("segmentos")
+                    .select("id, video_id, cam_id")
+                    .eq("empresa", user.empresa)
+                    .in_("video_id", list(vids))
+                    .eq("status", "concluido")
+                    .execute()
+                    .data
+                ) or []
+                segs_por_video: dict[str, list[dict]] = {}
+                for s in rs:
+                    segs_por_video.setdefault(s.get("video_id"), []).append(s)
+                for i in itens:
+                    if i.get("irmaos"):
+                        continue
+                    pares = [
+                        s for s in segs_por_video.get(i.get("video_id"), [])
+                        if s.get("cam_id") and s.get("cam_id") != i.get("cam_id")
+                    ]
+                    if pares:
+                        i["segundo_angulo"] = {"segmento_id": pares[0]["id"], "cam_id": pares[0].get("cam_id")}
+        except Exception as e:
+            log.warning("segundo_angulo: lookup falhou (%s)", e)
+
         # Remove os secundários do topo (1 card por grupo).
         itens = [i for i in itens if i["id"] not in secundarios]
 
@@ -1529,6 +1615,98 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
             for j in jpegs
         ]
     }
+
+
+@app.get("/segmentos/{segmento_id}/frames")
+def frames_segmento(
+    segmento_id: str,
+    ini: float = Query(0.0),
+    fim: float = Query(0.0),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """3 frames (por TEMPO) do 2º ângulo (cam2) na validação dual-câmera (Fase 6).
+
+    O segmento da cam2 não tem evento próprio; pegamos 3 frames pela janela de
+    tempo [ini, fim] (clock-aligned com a cam1). Mesma resposta de /eventos/.../frames.
+    """
+    sb = make_supabase_client()
+    r = (
+        sb.table("segmentos")
+        .select("empresa, storage_path")
+        .eq("id", segmento_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Segmento não encontrado")
+    seg = r.data[0]
+    if seg.get("empresa") != user.empresa:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+    caminho = seg.get("storage_path")
+    if not caminho:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Segmento sem caminho no storage")
+
+    import base64
+    import posixpath
+    import tempfile
+    from pathlib import Path
+
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    # Cache determinístico (JPEGs pequenos) ao lado do segmento no Storage.
+    chave_t = f"{int(round(ini))}_{int(round(fim))}"
+    frames_prefix = posixpath.dirname(caminho) + "/__frames"
+    frame_keys = [f"{frames_prefix}/seg_{segmento_id}_{chave_t}_{k}.jpg" for k in (0, 1, 2)]
+    try:
+        primeiro = sb.storage.from_(bucket).download(frame_keys[0])
+        if primeiro:
+            cached = [primeiro] + [sb.storage.from_(bucket).download(k) for k in frame_keys[1:]]
+            if all(cached):
+                return {"frames": ["data:image/jpeg;base64," + base64.b64encode(j).decode("ascii") for j in cached]}
+    except Exception:
+        pass
+
+    # Cache miss: streaming download → extrai por tempo.
+    import httpx
+    from urllib.parse import quote
+
+    suffix = Path(caminho).suffix or ".mp4"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        url = f"{os.environ['SUPABASE_URL']}/storage/v1/object/{bucket}/{quote(caminho, safe='/')}"
+        headers = {
+            "Authorization": f"Bearer {os.environ['SUPABASE_KEY']}",
+            "apikey": os.environ["SUPABASE_KEY"],
+        }
+        with httpx.stream("GET", url, headers=headers, timeout=120) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_bytes(1 << 16):
+                tmp.write(chunk)
+        tmp.close()
+    except Exception as e:
+        try:
+            Path(tmp.name).unlink()
+        except Exception:
+            pass
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao baixar segmento: {e}")
+
+    try:
+        crops = extrair_3_frames_tempo(tmp.name, ini, fim)
+        jpegs = [frame_para_jpeg_bytes(c) for c in crops]
+    finally:
+        try:
+            Path(tmp.name).unlink()
+        except Exception:
+            pass
+
+    if not jpegs:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Não foi possível extrair frames do segmento")
+
+    for key, jpeg in zip(frame_keys, jpegs):
+        try:
+            sb.storage.from_(bucket).upload(key, jpeg, {"content-type": "image/jpeg", "upsert": "true"})
+        except Exception as e:
+            log.warning(f"Cache de frame (segmento) falhou (não-fatal) {key}: {e}")
+
+    return {"frames": ["data:image/jpeg;base64," + base64.b64encode(j).decode("ascii") for j in jpegs]}
 
 
 def _montar_update_validacao(acao: str, label_original: str, label_corrigido: str | None) -> dict[str, Any]:

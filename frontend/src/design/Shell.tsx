@@ -5,7 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
-export type Screen = "login" | "processos" | "processo" | "ajuda";
+export type Screen = "login" | "processos" | "processo" | "ajuda" | "fila-global";
 export type Tab = "dashboard" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
@@ -56,6 +56,7 @@ export function Sidebar({
     : { width: 256, flex: "none", background: "#fff", borderRight: "1px solid var(--line)", height: "100vh", position: "sticky", top: 0, padding: "16px 14px" };
   const portfolioNav = [
     { tab: "processos", label: "Processos", icon: "layout-grid" as const },
+    { tab: "fila-global", label: "Fila de processamento", icon: "list-checks" as const, onClick: () => go("fila-global") },
     { tab: "_prism", label: "Visão geral do Prism", icon: "sparkles" as const, onClick: onOpenPrism },
   ];
   const procNav = [
@@ -100,7 +101,7 @@ export function Sidebar({
 
       <nav className="col" style={{ gap: 2 }}>
         {(inProc ? procNav : portfolioNav).map((it) => {
-          const active = inProc ? route.tab === it.tab : it.tab === "processos" && route.screen === "processos";
+          const active = inProc ? route.tab === it.tab : route.screen === it.tab;
           return (
             <button
               key={it.tab}

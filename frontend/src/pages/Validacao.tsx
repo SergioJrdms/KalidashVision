@@ -12,7 +12,7 @@ import { api } from "../lib/api";
 import { mapPendentes, mapPerguntas, type PendMock, type PendIrmaoMock, type PergMock, type ProcHeaderMock } from "../lib/adapt";
 import { nivelDe, leanCor, leanLabel, fmtSeg } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Ring, toast } from "../design/ui";
-import { FrameStripReal, FrameReal } from "../lib/frames";
+import { FrameStripReal, FrameStripSegmento, FrameReal } from "../lib/frames";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
 
@@ -278,6 +278,22 @@ function FaixaCamera({ camId, ativo, labelDivergente }: { camId: string | null; 
   );
 }
 
+// 2º ângulo (Fase 6 dual-angle): faixa rotulada que busca os frames do SEGMENTO
+// par (cam2) por janela de tempo — não há evento-irmão, só o segmento.
+function FaixaSegundoAngulo({ camId, segmentoId, ini, fim }: { camId: string | null; segmentoId: string; ini: number; fim: number }) {
+  return (
+    <div className="col" style={{ gap: 0 }}>
+      <div className="row gap2" style={{ alignItems: "center", padding: "6px 10px", background: "#0d0820", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
+        <span className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, color: "#fff", background: "rgba(167,139,250,.25)", border: "1px solid rgba(167,139,250,.45)", borderRadius: 99, padding: "2px 9px" }}>
+          <Icon name="video" size={11} /> {camLabel(camId)}
+        </span>
+        <span style={{ fontSize: 11, color: "rgba(255,255,255,.62)" }}>2º ângulo (mesma ação)</span>
+      </div>
+      <FrameStripSegmento segmentoId={segmentoId} ini={ini} fim={fim} />
+    </div>
+  );
+}
+
 // Empilha as faixas das 2+ câmeras do grupo (primário no topo, irmãos abaixo).
 function FaixasMultiCamera({ evento }: { evento: PendMock }) {
   const irmaos = evento.irmaos ?? [];
@@ -292,6 +308,15 @@ function FaixasMultiCamera({ evento }: { evento: PendMock }) {
           labelDivergente={s.label !== evento.label ? s.label : undefined}
         />
       ))}
+      {/* Dual-angle (Fase 6): sem irmão-evento, mas há o segmento da cam2. */}
+      {irmaos.length === 0 && evento.segundoAngulo && (
+        <FaixaSegundoAngulo
+          camId={evento.segundoAngulo.camId}
+          segmentoId={evento.segundoAngulo.segmentoId}
+          ini={evento.ini}
+          fim={evento.fim}
+        />
+      )}
     </div>
   );
 }
@@ -396,9 +421,9 @@ function FilaFoco({
           <div className="row gap2" style={{ justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--line-2)" }}>
             <span className="row gap2" style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)", flexWrap: "wrap" }}>
               <Icon name="user" size={13} /> PESSOA-{String(evento.pessoa).padStart(3, "0")} · {evento.ini.toFixed(1)}s→{evento.fim.toFixed(1)}s · {fmtSeg(evento.fim - evento.ini)}
-              {evento.irmaos && evento.irmaos.length > 0 && (
+              {((evento.irmaos && evento.irmaos.length > 0) || evento.segundoAngulo) && (
                 <span className="badge badge-purple" style={{ fontFamily: "var(--sans)" }}>
-                  <Icon name="video" size={11} /> {evento.irmaos.length + 1} ângulos
+                  <Icon name="video" size={11} /> {(evento.irmaos?.length ?? 0) + (evento.segundoAngulo ? 1 : 0) + 1} ângulos
                 </span>
               )}
             </span>
@@ -414,7 +439,7 @@ function FilaFoco({
             </button>
           </div>
 
-          {evento.irmaos && evento.irmaos.length > 0 ? (
+          {(evento.irmaos && evento.irmaos.length > 0) || evento.segundoAngulo ? (
             <FaixasMultiCamera evento={evento} />
           ) : (
             <FrameStripReal ativo={evento} />

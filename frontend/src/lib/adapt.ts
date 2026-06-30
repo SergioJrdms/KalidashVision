@@ -56,7 +56,7 @@ export interface DetMock {
 }
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
-export interface PendMock { id: string; label: string; descricao: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; irmaos: PendIrmaoMock[] }
+export interface PendMock { id: string; label: string; descricao: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null } | null }
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[] }
 export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null }
 export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; apoio: number; desp: number; none: number }[] }
@@ -183,6 +183,9 @@ export function mapPendentes(rows: EventoPendente[]): PendMock[] {
       conf: s.confianca || 0,
       sugestao: leanShort(s.categoria_lean_prevista),
     })),
+    segundoAngulo: e.segundo_angulo
+      ? { segmentoId: e.segundo_angulo.segmento_id, camId: e.segundo_angulo.cam_id ?? null }
+      : null,
   }));
 }
 

@@ -7,6 +7,7 @@ import type {
   EventosTabelaParams,
   EventosTabelaResposta,
   FilaResposta,
+  FilaGlobalResposta,
   JobStatus,
   InsightGlobal,
   PadraoGlobal,
@@ -112,6 +113,7 @@ export const api = {
         `/processos/${id}/fila/reprocessar-erros`,
         { method: "POST" },
       ),
+    filaGlobal: () => req<FilaGlobalResposta>(`/fila/global`),
   },
   videos: {
     upload: async (processoId: string, file: File): Promise<{ job_id: string }> => {
@@ -129,6 +131,11 @@ export const api = {
   },
   jobs: {
     status: (id: string) => req<JobStatus>(`/jobs/${id}`),
+  },
+  segmentos: {
+    // 2º ângulo (cam2) por janela de tempo — validação dual-câmera (Fase 6).
+    frames: (id: string, ini: number, fim: number) =>
+      req<{ frames: string[] }>(`/segmentos/${id}/frames?ini=${ini}&fim=${fim}`),
   },
   eventos: {
     frames: (id: string) => req<{ frames: string[] }>(`/eventos/${id}/frames`),

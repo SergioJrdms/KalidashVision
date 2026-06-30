@@ -236,6 +236,9 @@ export interface EventoPendente {
   cam_id?: string | null;
   gravado_em?: string | null;
   irmaos?: EventoIrmaoPendente[];
+  // Fase 6 (dual-angle): 2º ângulo (segmento da cam2) p/ mostrar no card de
+  // validação quando o evento foi processado com os 2 ângulos juntos (sem irmão).
+  segundo_angulo?: { segmento_id: string; cam_id: string | null } | null;
 }
 
 export type StatusEfetivo =
@@ -300,6 +303,19 @@ export interface FilaResposta {
   contagens: Record<StatusSegmento, number>;
   total: number;
   itens: SegmentoFila[];
+}
+
+export interface FilaProcessoResumo {
+  processo: string;
+  processo_id: string | null;
+  contagens: Record<StatusSegmento, number>;
+  total: number;
+}
+
+export interface FilaGlobalResposta {
+  contagens: Record<StatusSegmento, number>;
+  total: number;
+  processos: FilaProcessoResumo[];
 }
 
 export interface EventosTabelaParams {

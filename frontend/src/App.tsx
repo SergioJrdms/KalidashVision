@@ -19,6 +19,7 @@ import Validacao from "./pages/Validacao";
 import Eventos from "./pages/Eventos";
 import Padroes from "./pages/Padroes";
 import Fila from "./pages/Fila";
+import FilaGlobal from "./pages/FilaGlobal";
 import Ajuda from "./pages/Ajuda";
 import Configuracoes from "./pages/Configuracoes";
 import { Upload, Descricao } from "./pages/Extras";
@@ -99,6 +100,7 @@ function AppShell() {
   // Conteúdo
   let content: ReactNode = null;
   if (route.screen === "processos") content = <Processos go={goTyped} />;
+  else if (route.screen === "fila-global") content = <FilaGlobal go={goTyped} />;
   else if (route.screen === "ajuda") content = <Ajuda go={goTyped} />;
   else if (route.screen === "processo") {
     if (!proc) {

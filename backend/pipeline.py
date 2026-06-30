@@ -2943,6 +2943,49 @@ def frame_para_jpeg_bytes(frame_bgr: np.ndarray, qualidade: int = 85) -> bytes:
     return buf.tobytes()
 
 
+def extrair_3_frames_tempo(video_path: str, ini_s: float, fim_s: float) -> list[np.ndarray]:
+    """3 frames (início, meio, fim) por TEMPO — sem bbox/anotação.
+
+    Usado pelo 2º ângulo (cam2) na validação dual-câmera (Fase 6): a cam2 não é
+    rastreada, então não há frame_idx/bbox; pegamos pelo relógio (clock-aligned →
+    mesmo instante da cam1). Normaliza p/ ≤720px. Defensivo: nunca levanta;
+    devolve [] se não conseguir abrir/ler.
+    """
+    if fim_s < ini_s:
+        ini_s, fim_s = fim_s, ini_s
+    mid_s = (ini_s + fim_s) / 2.0
+    crops: list[np.ndarray] = []
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return []
+        dur_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / (cap.get(cv2.CAP_PROP_FPS) or 30.0) * 1000.0
+        ultimo: np.ndarray | None = None
+        for t in (ini_s, mid_s, fim_s):
+            alvo_ms = t * 1000.0
+            if dur_ms and alvo_ms > dur_ms:
+                alvo_ms = max(0.0, dur_ms - 1.0)
+            cap.set(cv2.CAP_PROP_POS_MSEC, alvo_ms)
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                ultimo = frame
+            if ultimo is None:
+                continue
+            f = ultimo
+            h, w = f.shape[:2]
+            m = max(h, w)
+            if m > 720:
+                escala = 720 / m
+                f = cv2.resize(f, (int(w * escala), int(h * escala)), interpolation=cv2.INTER_AREA)
+            crops.append(f)
+        cap.release()
+    except Exception:
+        return crops
+    while crops and len(crops) < 3:
+        crops.append(crops[-1])
+    return crops
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # CHAT
 # ═════════════════════════════════════════════════════════════════════════

@@ -48,6 +48,35 @@ export function FrameStripReal({ ativo }: { ativo: { id: string; pessoa: number;
   );
 }
 
+// Faixa de 3 frames do 2º ÂNGULO (segmento da cam2) por janela de tempo —
+// validação dual-câmera (Fase 6). Sem bbox (a cam2 não é rastreada).
+export function FrameStripSegmento({ segmentoId, ini, fim }: { segmentoId: string; ini: number; fim: number }) {
+  const { data } = useQuery({
+    queryKey: ["frames-seg", segmentoId, Math.round(ini), Math.round(fim)],
+    queryFn: () => api.segmentos.frames(segmentoId, ini, fim),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const raw = data?.frames || [];
+  const frames = raw.length ? [0, 1, 2].map((i) => raw[i] ?? raw[raw.length - 1]) : [];
+  return (
+    <div className="row" style={{ gap: 2, padding: 2, background: "#0d0820" }}>
+      {[0, 1, 2].map((i) => (
+        <div key={i} style={{ flex: 1, position: "relative" }}>
+          {frames[i] ? (
+            <img src={frames[i]} alt="" style={{ ...imgBase, height: 180 }} />
+          ) : (
+            <CameraScene height={180} hud={i === 1} boxes={[]} />
+          )}
+          <span style={{ position: "absolute", bottom: 6, left: 6, fontSize: 9.5, fontFamily: "var(--mono)", color: "rgba(255,255,255,.7)", background: "rgba(0,0,0,.5)", padding: "1px 6px", borderRadius: 5 }}>
+            {(ini + (i * (fim - ini)) / 2).toFixed(1)}s
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Frame único (cabeçalho de card / linha expandida). `enabled` permite carga lazy.
 export function FrameReal({ id, pessoa, height, enabled = true }: { id: string; pessoa: number; height: number; enabled?: boolean }) {
   const { data } = useEventFrames(id, enabled);
