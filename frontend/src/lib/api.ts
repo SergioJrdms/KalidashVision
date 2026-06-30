@@ -6,6 +6,7 @@ import type {
   EventoPendente,
   EventosTabelaParams,
   EventosTabelaResposta,
+  FilaResposta,
   JobStatus,
   InsightGlobal,
   PadraoGlobal,
@@ -96,6 +97,21 @@ export const api = {
       ),
     excluir: (id: string) =>
       req<{ ok: boolean }>(`/processos/${id}`, { method: "DELETE" }),
+    // Fase 7 — painel da fila (inbox de segmentos)
+    fila: (id: string, status?: string) =>
+      req<FilaResposta>(
+        `/processos/${id}/fila${status && status !== "todos" ? `?status=${status}` : ""}`,
+      ),
+    processarLote: (id: string) =>
+      req<{ ok: boolean; pares: number; solo: number; itens: number }>(
+        `/processos/${id}/lote/concluido`,
+        { method: "POST" },
+      ),
+    reprocessarErros: (id: string) =>
+      req<{ ok: boolean; reset: number; itens: number }>(
+        `/processos/${id}/fila/reprocessar-erros`,
+        { method: "POST" },
+      ),
   },
   videos: {
     upload: async (processoId: string, file: File): Promise<{ job_id: string }> => {

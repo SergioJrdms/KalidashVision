@@ -276,6 +276,32 @@ export interface EventosTabelaResposta {
   page_size: number;
 }
 
+export type StatusSegmento =
+  | "pendente"
+  | "enfileirado"
+  | "processando"
+  | "concluido"
+  | "erro";
+
+export interface SegmentoFila {
+  id: string;
+  nome: string | null;
+  seg_token: string | null;
+  cam_id: string | null;
+  gravado_em: string | null;
+  status: StatusSegmento;
+  erro: string | null;
+  recebido_em: string | null;
+  processado_em: string | null;
+  video_id: string | null;
+}
+
+export interface FilaResposta {
+  contagens: Record<StatusSegmento, number>;
+  total: number;
+  itens: SegmentoFila[];
+}
+
 export interface EventosTabelaParams {
   page?: number;
   page_size?: number;

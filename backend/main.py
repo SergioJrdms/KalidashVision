@@ -48,6 +48,7 @@ from .pipeline import (
     agrupar_eventos_multicamera,
     evento_relevante_para_validacao,
     _parse_gravado_em_nome,
+    _seg_token_nome,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -792,6 +793,79 @@ def lote_concluido(processo_id: str, user: CurrentUser = Depends(get_current_use
     from . import orquestrador_lote
     resumo = orquestrador_lote.processar_lote(sb, user.empresa, nome)
     return {"ok": True, **resumo}
+
+
+_FILA_STATUS = ["pendente", "enfileirado", "processando", "concluido", "erro"]
+
+
+@app.get("/processos/{processo_id}/fila")
+def listar_fila(
+    processo_id: str,
+    status_filter: str = Query("todos", alias="status"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Estado da inbox `segmentos` deste processo (painel da fila, Fase 7)."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+
+    # Contagens por status — baratas (count exato, sem puxar linhas).
+    contagens: dict[str, int] = {}
+    for st in _FILA_STATUS:
+        try:
+            r = (
+                sb.table("segmentos")
+                .select("id", count="exact")
+                .eq("empresa", user.empresa)
+                .eq("processo", nome)
+                .eq("status", st)
+                .limit(1)
+                .execute()
+            )
+            contagens[st] = r.count or 0
+        except Exception:
+            contagens[st] = 0
+    total = sum(contagens.values())
+
+    # Lista p/ exibição (cap 500, mais recentes primeiro).
+    q = (
+        sb.table("segmentos")
+        .select("id, nome, cam_id, gravado_em, status, erro, recebido_em, processado_em, video_id")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+    )
+    if status_filter in _FILA_STATUS:
+        q = q.eq("status", status_filter)
+    itens = (q.order("recebido_em", desc=True).limit(500).execute().data) or []
+    for s in itens:
+        s["seg_token"] = _seg_token_nome(s.get("nome"))
+
+    return {"contagens": contagens, "total": total, "itens": itens}
+
+
+@app.post("/processos/{processo_id}/fila/reprocessar-erros")
+def reprocessar_erros(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Volta os segmentos em `erro` para `pendente` e re-enfileira o lote."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    try:
+        alvo = (
+            sb.table("segmentos")
+            .select("id")
+            .eq("empresa", user.empresa)
+            .eq("processo", nome)
+            .eq("status", "erro")
+            .limit(20000)
+            .execute()
+            .data
+        ) or []
+        for s in alvo:
+            sb.table("segmentos").update({"status": "pendente", "erro": None}).eq("id", s["id"]).execute()
+    except Exception as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao reprocessar erros: {e}")
+
+    from . import orquestrador_lote
+    resumo = orquestrador_lote.processar_lote(sb, user.empresa, nome)
+    return {"ok": True, "reset": len(alvo), **resumo}
 
 
 @app.get("/jobs/{job_id}")
