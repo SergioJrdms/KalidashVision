@@ -102,6 +102,12 @@ def _executar_um(payload: dict) -> None:
             payload.get("nome_original"),
             cam_id=payload.get("cam_id"),
             gravado_em=payload.get("gravado_em"),
+            # Fase 6 (dual-angle / inbox de segmentos):
+            storage_path_secundario=payload.get("storage_path_secundario"),
+            cam_id_secundario=payload.get("cam_id_secundario"),
+            nome_secundario=payload.get("nome_secundario"),
+            segmento_id=payload.get("segmento_id"),
+            segmento_id_secundario=payload.get("segmento_id_secundario"),
         )
     except Exception as e:
         log.exception(f"job_queue: job {job_id} falhou no executar_job: {e}")
@@ -148,12 +154,19 @@ def enqueue(
     nome_original: str | None,
     cam_id: str | None = None,
     gravado_em: str | None = None,
+    *,
+    storage_path_secundario: str | None = None,
+    cam_id_secundario: str | None = None,
+    nome_secundario: str | None = None,
+    segmento_id: str | None = None,
+    segmento_id_secundario: str | None = None,
 ) -> None:
     """Adiciona um job à fila. O upload retorna imediato; o worker daemon
     processa em série.
 
-    `cam_id`/`gravado_em` são metadados da Fase 1 multi-câmera (additive,
-    opcionais). Persistem no payload e chegam até o INSERT em `videos`.
+    `cam_id`/`gravado_em` são metadados multi-câmera (Fase 1). Os campos
+    `*_secundario` + `segmento_id*` (Fase 6) carregam o PAR (cam2) e os ids da
+    inbox `segmentos` para o dual-angle e a marcação de status pós-processo.
     """
     payload = {
         "job_id": job_id,
@@ -164,6 +177,11 @@ def enqueue(
         "nome_original": nome_original,
         "cam_id": cam_id,
         "gravado_em": gravado_em,
+        "storage_path_secundario": storage_path_secundario,
+        "cam_id_secundario": cam_id_secundario,
+        "nome_secundario": nome_secundario,
+        "segmento_id": segmento_id,
+        "segmento_id_secundario": segmento_id_secundario,
         "enq_ts": time.time(),
     }
     _adicionar_disco(payload)

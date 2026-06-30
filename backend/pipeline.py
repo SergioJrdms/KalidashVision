@@ -87,6 +87,25 @@ create table if not exists videos (
     processado_em timestamptz default now()
 );
 
+-- Inbox de segmentos do edge (Fase 6). O edge sobe TUDO no storage (1-3h) antes
+-- de a plataforma processar. Cada upload do edge vira uma linha aqui (pendente);
+-- o orquestrador pareia cam1/cam2 pelo gravado_em (= seg_TIMESTAMP do nome) e
+-- processa 1 por 1. `videos` continua sendo só o que JÁ foi processado.
+create table if not exists segmentos (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    storage_path text not null,
+    nome text,
+    cam_id text,
+    gravado_em timestamptz,
+    status text default 'pendente',    -- pendente|enfileirado|processando|concluido|erro
+    video_id uuid,                     -- preenchido após processar (vídeo do primário)
+    erro text,
+    recebido_em timestamptz default now(),
+    processado_em timestamptz
+);
+
 create table if not exists comportamentos (
     id uuid primary key default gen_random_uuid(),
     empresa text not null,
@@ -287,6 +306,8 @@ alter table prism_conversas alter column processo drop not null;
 alter table prism_mensagens alter column processo drop not null;
 
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
+create index if not exists idx_segmentos_par     on segmentos(empresa, processo, gravado_em);
+create index if not exists idx_segmentos_status  on segmentos(empresa, processo, status);
 create index if not exists idx_comportamentos_ctx on comportamentos(empresa, processo);
 create index if not exists idx_eventos_ctx       on eventos(empresa, processo);
 create index if not exists idx_eventos_video     on eventos(video_id);
@@ -590,6 +611,34 @@ def frame_para_base64(frame_bgr: np.ndarray, max_lado: int = 1024, qualidade: in
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+def _anexar_segundo_angulo(amostras: list, video_path_secundario: str) -> int:
+    """Fase 6: para cada Amostra (da cam1), pega o frame da cam2 no MESMO tempo
+    relativo (clock-aligned → mesmo instante real) e guarda em
+    `img_b64_secundario`. Não roda YOLO na cam2 (é só contexto p/ o VLM).
+    Retorna quantas amostras receberam o 2º ângulo. Defensivo: nunca levanta.
+    """
+    n = 0
+    try:
+        cap = cv2.VideoCapture(video_path_secundario)
+        if not cap.isOpened():
+            log.warning(f"2º ângulo: não abriu {video_path_secundario}")
+            return 0
+        dur_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / (cap.get(cv2.CAP_PROP_FPS) or 30.0) * 1000.0
+        for am in amostras:
+            alvo_ms = am.tempo_s * 1000.0
+            if dur_ms and alvo_ms > dur_ms:  # cam2 mais curta — usa o último frame
+                alvo_ms = max(0.0, dur_ms - 1.0)
+            cap.set(cv2.CAP_PROP_POS_MSEC, alvo_ms)
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                am.img_b64_secundario = frame_para_base64(frame)
+                n += 1
+        cap.release()
+    except Exception as e:
+        log.warning(f"2º ângulo falhou ({e}) — segue só com a cam1")
+    return n
+
+
 def _ponto_em_roi(cx: float, cy: float, polygon: np.ndarray) -> bool:
     return cv2.pointPolygonTest(polygon, (float(cx), float(cy)), False) >= 0
 
@@ -677,19 +726,20 @@ def groq_vision_call(
     temperatura: float = 0.2,
     retries: int = 5,
     model: str = GROQ_MODEL_VISION,
+    imagens_extra: list[str] | None = None,
 ) -> str:
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt_texto},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
-                },
-            ],
-        }
+    # `imagens_extra` = ângulos adicionais (ex.: cam2) na MESMA chamada (Fase 6).
+    # O content aceita várias image_url; o llama-4-scout é multi-imagem.
+    conteudo: list[dict[str, Any]] = [
+        {"type": "text", "text": prompt_texto},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
     ]
+    for extra in (imagens_extra or []):
+        if extra:
+            conteudo.append(
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{extra}"}}
+            )
+    messages = [{"role": "user", "content": conteudo}]
     kwargs: dict[str, Any] = dict(
         model=model,
         messages=messages,
@@ -795,6 +845,29 @@ Responda APENAS um JSON no formato:
 {{"acoes": {{"P1": "...", "P2": "...", ...}}}}"""
 
 
+# Fase 6 — dual-angle: 2 imagens do MESMO posto, no MESMO instante, de câmeras
+# diferentes. A 1ª tem as pessoas marcadas (P1, P2…); a 2ª é só outro ângulo.
+PROMPT_VLM_DUAL = """Você é um analista de processos industriais observando uma operação.
+Você recebe DUAS IMAGENS do MESMO local e MESMO instante, de CÂMERAS DIFERENTES (ângulos distintos):
+- IMAGEM 1 (câmera principal): tem as pessoas marcadas com rótulos P1, P2, ...
+- IMAGEM 2 (segundo ângulo): a MESMA cena de outro ponto de vista, SEM rótulos.
+
+Para cada pessoa marcada (P1, P2, ...) na IMAGEM 1, descreva em UMA FRASE CURTA (até 10 palavras) o que ela está fazendo.
+Use OS DOIS ângulos juntos para decidir — um ângulo pode revelar o que o outro esconde, exatamente como um humano que olha as duas câmeras antes de concluir.
+
+{bloco_processo}{bloco_vocabulario}REGRAS:
+- Foque na AÇÃO (verbo + objeto), não na aparência.
+- Use linguagem operacional clara em português ("manipulando peça", "digitando no computador", "andando pelo corredor").
+- Os rótulos P1, P2 referem-se SEMPRE às pessoas marcadas na IMAGEM 1.
+- Se mesmo com os dois ângulos a ação não estiver clara, escreva "ação não identificada".
+- NÃO invente ações que não estão visíveis em nenhum dos ângulos.
+
+CONTEXTO: {contexto_zonas}
+
+Responda APENAS um JSON no formato:
+{{"acoes": {{"P1": "...", "P2": "...", ...}}}}"""
+
+
 PROMPT_CLUSTER = """Você é um analista de processos industriais.
 Abaixo está uma lista de descrições de ações observadas num vídeo de operação.
 Várias descrições se referem ao MESMO comportamento, mas com palavras diferentes.
@@ -888,6 +961,7 @@ class Amostra:
     tempo_s: float
     img_b64: str
     pessoas: list
+    img_b64_secundario: str | None = None   # 2º ângulo (cam2) no mesmo instante (Fase 6)
 
 
 def inspecionar_video(video_path: str) -> dict:
@@ -1024,6 +1098,7 @@ def _analisar_amostra_vlm(
     # Frame já chega pré-codificado (mesma rotina anotar→resize→JPEG aplicada
     # no momento da amostragem, em etapa_detectar_e_amostrar). Byte-idêntico.
     img_b64 = amostra.img_b64
+    img_sec = amostra.img_b64_secundario   # 2º ângulo (cam2), se houver (Fase 6)
 
     contexto_partes = []
     for p in amostra.pessoas:
@@ -1031,7 +1106,8 @@ def _analisar_amostra_vlm(
             contexto_partes.append(f"{p['rotulo']} está em {p['zona']}")
     contexto = ". ".join(contexto_partes) if contexto_partes else "sem zonas pré-definidas"
 
-    prompt = PROMPT_VLM.format(
+    template = PROMPT_VLM_DUAL if img_sec else PROMPT_VLM
+    prompt = template.format(
         bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
         contexto_zonas=contexto,
@@ -1039,7 +1115,8 @@ def _analisar_amostra_vlm(
 
     try:
         resposta = groq_vision_call(
-            groq_client, img_b64, prompt, json_mode=True, max_tokens=600
+            groq_client, img_b64, prompt, json_mode=True, max_tokens=600,
+            imagens_extra=([img_sec] if img_sec else None),
         )
         dados = json.loads(resposta)
         acoes = dados.get("acoes", {})
@@ -1505,8 +1582,46 @@ def evento_relevante_para_validacao(
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# MULTI-CÂMERA (Fase 2) — agrupar eventos sobrepostos de câmeras diferentes
+# MULTI-CÂMERA — pareamento por nome do segmento (Fase 6) e por evento (Fase 2)
 # ═════════════════════════════════════════════════════════════════════════
+def _seg_token_nome(nome: str | None) -> str | None:
+    """Token de relógio do nome do segmento: 'seg_20260626_155058_roi.mp4'
+    → '20260626_155058'. É a CHAVE de pareamento cam1/cam2 ("pelo nome",
+    imune a fuso): cam1 e cam2 do mesmo instante têm o mesmo token. None se
+    o padrão não casar."""
+    if not nome:
+        return None
+    import re
+
+    m = re.search(r"seg_(\d{8})_(\d{6})", nome)
+    return f"{m.group(1)}_{m.group(2)}" if m else None
+
+
+def _parse_gravado_em_nome(nome: str | None) -> str | None:
+    """Extrai o relógio do nome do segmento → ISO 8601 (com TZ local do server).
+
+    Nome típico: '<uuid>_seg_20260626_155058_roi.mp4' → '2026-06-26T15:50:58-03:00'.
+    Usado como fallback de `gravado_em` quando o edge não envia explícito (para
+    Fases 1/2/3 e display). O PAREAMENTO em si usa `_seg_token_nome` (sem fuso).
+    None se o padrão não casar.
+    """
+    tok = _seg_token_nome(nome)
+    if not tok:
+        return None
+    data, hora = tok.split("_")
+    try:
+        dt = datetime(
+            int(data[0:4]), int(data[4:6]), int(data[6:8]),
+            int(hora[0:2]), int(hora[2:4]), int(hora[4:6]),
+        )
+        # Carimba a TZ local do servidor (mesma origem do edge clock); o
+        # importante é que cam1 e cam2 com o mesmo seg_TIMESTAMP gerem o MESMO
+        # valor — e geram, pois o parse é idêntico.
+        return dt.astimezone().isoformat()
+    except Exception:
+        return None
+
+
 def _janela_abs_evento(ev: dict) -> tuple[float, float] | None:
     """Janela absoluta (segundos epoch UTC) de um evento = gravado_em +
     tempo_inicio_s .. gravado_em + tempo_fim_s. None se gravado_em ausente/ruim.
@@ -4272,9 +4387,15 @@ def processar_video(
     caminho_storage: str | None = None,
     cam_id: str | None = None,
     gravado_em: str | None = None,
+    video_path_secundario: str | None = None,
+    cam_id_secundario: str | None = None,
 ) -> dict:
     """Roda o pipeline completo. Devolve dict com video_id, n_eventos,
     n_auto_validados, n_sugestoes.
+
+    Fase 6 (dual-angle): se `video_path_secundario` for dado, a cam2 entra como
+    2º ângulo na MESMA chamada ao VLM (a cam1 dirige detecção/segmentação). Gera
+    UMA trilha de eventos (na cam1) — sem duplicidade na validação/métricas.
     """
     progress_cb = progress_cb or _noop_progress
     rois_contexto = rois_contexto or DEFAULT_ROIS_CONTEXTO
@@ -4310,6 +4431,15 @@ def processar_video(
             "n_sugestoes": 0,
             "n_perguntas": 0,
         }
+
+    # Fase 6: 2º ângulo (cam2) anexado a cada amostra para o VLM concluir com os
+    # dois pontos de vista. cam1 já dirigiu detecção/tracking acima.
+    if video_path_secundario:
+        n_sec = _anexar_segundo_angulo(amostras, video_path_secundario)
+        log.info(
+            f"[dual-angle] {cam_id or 'cam1'} + {cam_id_secundario or 'cam2'}: "
+            f"2º ângulo em {n_sec}/{len(amostras)} amostras"
+        )
 
     observacoes = etapa_analise_vlm(
         groq_client, amostras, descricao, memoria, progress_cb,

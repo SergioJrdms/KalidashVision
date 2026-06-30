@@ -62,6 +62,15 @@ def _baixar_video(sb: Client, storage_path: str) -> str:
     return tmp.name
 
 
+def _marcar_segmentos(sb, ids: list[str | None], **campos) -> None:
+    """Atualiza linhas da inbox `segmentos` (Fase 6). Não-fatal."""
+    for sid in [i for i in ids if i]:
+        try:
+            sb.table("segmentos").update(campos).eq("id", sid).execute()
+        except Exception as e:
+            log.warning(f"falha ao marcar segmento {sid}: {e}")
+
+
 def executar_job(
     job_id: str,
     empresa: str,
@@ -71,8 +80,17 @@ def executar_job(
     nome_original: str | None = None,
     cam_id: str | None = None,
     gravado_em: str | None = None,
+    storage_path_secundario: str | None = None,
+    cam_id_secundario: str | None = None,
+    nome_secundario: str | None = None,
+    segmento_id: str | None = None,
+    segmento_id_secundario: str | None = None,
 ) -> None:
-    """Entrypoint do worker. Atualiza o job conforme avança."""
+    """Entrypoint do worker. Atualiza o job conforme avança.
+
+    Fase 6: se `storage_path_secundario` vier, baixa também a cam2 e processa o
+    PAR junto (dual-angle); marca os `segmentos` (primário+secundário) ao fim.
+    """
     JOBS.update(
         job_id,
         status="processando",
@@ -84,9 +102,17 @@ def executar_job(
     sb = make_supabase_client()
     groq_client = make_groq_client()
     local_path: str | None = None
+    local_path_sec: str | None = None
+    _marcar_segmentos(sb, [segmento_id, segmento_id_secundario], status="processando")
 
     try:
         local_path = _baixar_video(sb, storage_path)
+        if storage_path_secundario:
+            try:
+                local_path_sec = _baixar_video(sb, storage_path_secundario)
+            except Exception as e:
+                log.warning(f"2º ângulo não baixou ({e}) — processa só a cam1")
+                local_path_sec = None
 
         # Pesos de cada etapa para mapear em progresso global 0-100
         pesos = {
@@ -125,6 +151,8 @@ def executar_job(
             caminho_storage=storage_path,
             cam_id=cam_id,
             gravado_em=gravado_em,
+            video_path_secundario=local_path_sec,
+            cam_id_secundario=cam_id_secundario,
         )
 
         JOBS.update(
@@ -136,6 +164,14 @@ def executar_job(
             video_id=resultado.get("video_id"),
             resultado=resultado,
         )
+        # Inbox: marca o par como concluído (ligado ao vídeo do primário).
+        from datetime import datetime as _dt
+        _marcar_segmentos(
+            sb, [segmento_id, segmento_id_secundario],
+            status="concluido",
+            video_id=resultado.get("video_id"),
+            processado_em=_dt.utcnow().isoformat(),
+        )
     except Exception as e:
         log.exception(f"Job {job_id} falhou")
         JOBS.update(
@@ -145,9 +181,14 @@ def executar_job(
             mensagem="Falha no processamento",
             resultado={"traceback": traceback.format_exc()},
         )
+        _marcar_segmentos(
+            sb, [segmento_id, segmento_id_secundario],
+            status="erro", erro=f"{type(e).__name__}: {e}",
+        )
     finally:
-        if local_path and Path(local_path).exists():
-            try:
-                Path(local_path).unlink()
-            except Exception:
-                pass
+        for p in (local_path, local_path_sec):
+            if p and Path(p).exists():
+                try:
+                    Path(p).unlink()
+                except Exception:
+                    pass

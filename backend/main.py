@@ -47,6 +47,7 @@ from .pipeline import (
     gerar_pergunta_onboarding,
     agrupar_eventos_multicamera,
     evento_relevante_para_validacao,
+    _parse_gravado_em_nome,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -71,12 +72,13 @@ def _iniciar_infra_jobs() -> None:
     """Sobe a fila in-process serial e o debouncer dos blocos globais.
     Ambos sobrevivem a restart via persistência em /tmp."""
     try:
-        from . import debouncer, job_queue
+        from . import debouncer, job_queue, orquestrador_lote
         from .pipeline import make_groq_client, make_supabase_client
 
         debouncer.bootstrap(make_supabase_client, make_groq_client)
         job_queue.bootstrap()
         job_queue.start_worker_thread()
+        orquestrador_lote.start_sweep_thread()   # Fase 6: pega lotes esquecidos
     except Exception as e:
         log.warning("Falha ao iniciar fila/debouncer: %s", e)
 
@@ -732,11 +734,37 @@ async def upload_video(
     except Exception as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao enviar para o storage: {e}")
 
+    # Fase 6: DESACOPLA upload de processamento para o edge.
+    #  • Edge (cam_id presente): o edge sobe TODA a cam1 e depois TODA a cam2
+    #    ao longo de horas. NÃO processamos na hora (o par da outra câmera ainda
+    #    nem chegou). Registramos o segmento na inbox `segmentos` (pendente); o
+    #    orquestrador pareia cam1/cam2 pelo nome e processa 1 por 1 quando o lote
+    #    termina (sinal /lote/concluido ou varredura por inatividade).
+    #  • Manual (frontend, sem cam_id): processa na hora (fila serial), como hoje.
+    gravado_em_efetivo = (gravado_em or None) or _parse_gravado_em_nome(file.filename)
+
+    if cam_id:
+        linha_seg: dict = {
+            "empresa": user.empresa,
+            "processo": processo_nome,
+            "storage_path": storage_path,
+            "nome": file.filename,
+            "cam_id": cam_id,
+            "status": "pendente",
+        }
+        if gravado_em_efetivo:
+            linha_seg["gravado_em"] = gravado_em_efetivo
+        try:
+            sb.table("segmentos").insert(linha_seg).execute()
+        except Exception as e:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"Falha ao registrar segmento na inbox: {e}",
+            )
+        return {"ok": True, "modo": "lote", "status": "pendente"}
+
+    # Upload manual: fila serial imediata (1 vídeo por vez) — ver job_queue.
     job = JOBS.create(processo_id=processo_id, user_id=user.id)
-    # Antes era background_tasks.add_task(executar_job, ...) — disparava todos
-    # os uploads em "paralelo" e estourava o TPM do Groq Free Tier no primeiro
-    # lote do edge_runner --processar. Agora: fila in-process serial (1 vídeo
-    # por vez) — ver backend/job_queue.py.
     from . import job_queue
     job_queue.enqueue(
         job.id,
@@ -745,10 +773,25 @@ async def upload_video(
         storage_path,
         descricao,
         file.filename,
-        cam_id=(cam_id or None),
-        gravado_em=(gravado_em or None),
+        cam_id=None,
+        gravado_em=gravado_em_efetivo,
     )
     return {"job_id": job.id}
+
+
+@app.post("/processos/{processo_id}/lote/concluido")
+def lote_concluido(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Sinal do edge: terminei de enviar o lote deste processo — pode processar.
+
+    Pareia os segmentos pendentes (cam1+cam2 pelo nome) e os enfileira na fila
+    serial. Idempotente: a varredura periódica também dispara isso sozinha caso
+    o sinal se perca.
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    from . import orquestrador_lote
+    resumo = orquestrador_lote.processar_lote(sb, user.empresa, nome)
+    return {"ok": True, **resumo}
 
 
 @app.get("/jobs/{job_id}")

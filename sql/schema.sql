@@ -21,6 +21,24 @@ create table if not exists videos (
     processado_em timestamptz default now()
 );
 
+-- Inbox de segmentos do edge (Fase 6): o edge sobe tudo no storage antes de a
+-- plataforma processar; o orquestrador pareia cam1/cam2 por gravado_em e
+-- processa 1 por 1. `videos` continua sendo só o que já foi processado.
+create table if not exists segmentos (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    storage_path text not null,
+    nome text,
+    cam_id text,
+    gravado_em timestamptz,
+    status text default 'pendente',    -- pendente|enfileirado|processando|concluido|erro
+    video_id uuid,
+    erro text,
+    recebido_em timestamptz default now(),
+    processado_em timestamptz
+);
+
 -- Migrações idempotentes p/ bases já existentes (Fase 1 multi-câmera)
 alter table videos add column if not exists cam_id text;
 alter table videos add column if not exists gravado_em timestamptz;
@@ -212,6 +230,8 @@ alter table prism_conversas alter column processo drop not null;
 alter table prism_mensagens alter column processo drop not null;
 
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
+create index if not exists idx_segmentos_par     on segmentos(empresa, processo, gravado_em);
+create index if not exists idx_segmentos_status  on segmentos(empresa, processo, status);
 create index if not exists idx_comportamentos_ctx on comportamentos(empresa, processo);
 create index if not exists idx_eventos_ctx       on eventos(empresa, processo);
 create index if not exists idx_eventos_video     on eventos(video_id);
