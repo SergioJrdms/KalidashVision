@@ -57,6 +57,38 @@ _JANELA_S = 60.0
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# Cooldown de LIMITE DIÁRIO (TPD) por modelo (Fase 12)
+# ═════════════════════════════════════════════════════════════════════════
+# O Free Tier do Groq tem teto DIÁRIO (ex.: scout = 500k tokens/dia). Quando
+# estoura, retentar no mesmo dia é inútil (o reset é em horas). Ao detectar o
+# erro, marcamos um cooldown por modelo: durante ele, as chamadas falham RÁPIDO
+# (sem retry, sem "moer") e o worker marca o segmento como erro com mensagem
+# clara. Some sozinho quando o tempo passa.
+_LIMITE_DIARIO: dict[str, float] = {}   # model -> time.monotonic() até quando pausar
+_COOLDOWN_LOCK = threading.Lock()
+
+
+def marcar_limite_diario(model: str, segundos: float) -> None:
+    seg = max(60.0, min(float(segundos or 0), 12 * 3600.0))
+    with _COOLDOWN_LOCK:
+        _LIMITE_DIARIO[model] = time.monotonic() + seg
+    log.warning(
+        f"[throttle] {model}: LIMITE DIÁRIO (TPD) atingido — pausando chamadas "
+        f"por ~{seg / 60:.0f}min (o Groq reseta o teto do dia)."
+    )
+
+
+def em_limite_diario(model: str) -> float:
+    """Segundos restantes de cooldown do limite diário (0.0 = livre)."""
+    with _COOLDOWN_LOCK:
+        ate = _LIMITE_DIARIO.get(model)
+    if not ate:
+        return 0.0
+    resta = ate - time.monotonic()
+    return resta if resta > 0 else 0.0
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # Buckets
 # ═════════════════════════════════════════════════════════════════════════
 # Cada modelo tem seu deque[(ts, tokens)] e seu lock. Lock por modelo evita

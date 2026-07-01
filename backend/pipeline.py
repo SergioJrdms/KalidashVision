@@ -601,7 +601,14 @@ def anotar_frame_com_ids(frame_bgr: np.ndarray, pessoas: list[dict]) -> np.ndarr
     return f
 
 
-def frame_para_base64(frame_bgr: np.ndarray, max_lado: int = 1024, qualidade: int = 85) -> str:
+def frame_para_base64(frame_bgr: np.ndarray, max_lado: int | None = None, qualidade: int | None = None) -> str:
+    # Fase 12: imagem menor = MENOS tokens/frame no VLM → mais vídeos/dia dentro
+    # do teto diário do Groq Free Tier. Vale p/ a amostragem e p/ o 2º ângulo.
+    # Tunável por env (suba de volta a 1024/85 se migrar p/ o Dev Tier).
+    if max_lado is None:
+        max_lado = int(os.environ.get("KV_VLM_MAX_LADO", "768"))
+    if qualidade is None:
+        qualidade = int(os.environ.get("KV_VLM_QUALIDADE", "72"))
     h, w = frame_bgr.shape[:2]
     if max(h, w) > max_lado:
         escala = max_lado / max(h, w)
@@ -717,6 +724,32 @@ def _espera_retry(tentativa: int, exc: BaseException) -> float:
     return jitter
 
 
+def _eh_limite_diario(exc: BaseException) -> bool:
+    """True se o 429 for do teto DIÁRIO (TPD) do Groq — retentar no mesmo dia é
+    inútil (reset em horas). Ex.: 'tokens per day (TPD): Limit 500000...'."""
+    msg = str(exc).lower()
+    return ("per day" in msg) or ("(tpd)" in msg) or ("tokens per day" in msg)
+
+
+def _segundos_ate_reset(exc: BaseException) -> float:
+    """Extrai quanto falta pro reset do limite: Retry-After, senão o 'try again
+    in Xm Ys' da mensagem; fallback 1h."""
+    ra = _extrair_retry_after_s(exc)
+    if ra is not None:
+        return ra
+    import re
+    m = re.search(r"try again in\s+(?:(\d+)m)?([\d.]+)s", str(exc))
+    if m:
+        return int(m.group(1) or 0) * 60 + float(m.group(2) or 0)
+    return 3600.0
+
+
+def _eh_json_invalido(exc: BaseException) -> bool:
+    """400 de JSON inválido (json_mode) — vale UM retry (o modelo às vezes
+    devolve JSON vazio sob carga), em vez de falhar de vez como outros 4xx."""
+    return "json_validate_failed" in str(exc).lower()
+
+
 def groq_vision_call(
     groq_client: Groq,
     image_b64: str,
@@ -749,12 +782,19 @@ def groq_vision_call(
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
+    from . import groq_throttle
     for tentativa in range(retries):
+        # Fail-fast se o modelo está em cooldown de LIMITE DIÁRIO (Fase 12):
+        # não adianta nem tentar até o Groq resetar o teto do dia.
+        resta = groq_throttle.em_limite_diario(model)
+        if resta > 0:
+            raise RuntimeError(
+                f"Groq: limite diário do modelo {model} atingido — retoma em ~{resta/60:.0f}min."
+            )
         # Throttle TPM+RPM proativo ANTES de CADA tentativa (com max_retries=0 no
         # cliente, todo retry nosso é um request HTTP real que precisa ser pago no
         # bucket). Sem isso, picos curtos disparam 429 do Groq Free Tier.
         try:
-            from . import groq_throttle
             groq_throttle.reserve(model, groq_throttle.estimar_tokens(prompt_texto, max_tokens))
         except Exception:
             pass
@@ -762,10 +802,14 @@ def groq_vision_call(
             r = groq_client.chat.completions.create(**kwargs)
             return r.choices[0].message.content
         except Exception as e:
-            if _eh_4xx_definitivo(e):
-                # 400/401/403/404 etc — retry só atrasa o erro real
+            if _eh_limite_diario(e):
+                # Teto DIÁRIO: marca cooldown e falha JÁ (retry no mesmo dia é inútil).
+                groq_throttle.marcar_limite_diario(model, _segundos_ate_reset(e))
                 raise
-            # 429/503: respeita Retry-After se vier. Outros: backoff exp + jitter.
+            if _eh_4xx_definitivo(e) and not _eh_json_invalido(e):
+                # 400/401/403/404/413 etc — retry só atrasa o erro real
+                # (exceto json_validate 400, que vale 1 retry).
+                raise
             espera = _espera_retry(tentativa, e)
             ultima = tentativa == retries - 1
             if ultima:
@@ -802,11 +846,16 @@ def groq_text_call(
         kwargs["response_format"] = {"type": "json_object"}
 
     texto_p = (system or "") + (prompt or "")
+    from . import groq_throttle
     for tentativa in range(retries):
+        resta = groq_throttle.em_limite_diario(model)
+        if resta > 0:
+            raise RuntimeError(
+                f"Groq: limite diário do modelo {model} atingido — retoma em ~{resta/60:.0f}min."
+            )
         # Throttle TPM+RPM proativo ANTES de CADA tentativa (mesmo motivo de
         # groq_vision_call: com max_retries=0 no cliente, todo retry é request real).
         try:
-            from . import groq_throttle
             groq_throttle.reserve(model, groq_throttle.estimar_tokens(texto_p, max_tokens))
         except Exception:
             pass
@@ -814,7 +863,10 @@ def groq_text_call(
             r = groq_client.chat.completions.create(**kwargs)
             return r.choices[0].message.content
         except Exception as e:
-            if _eh_4xx_definitivo(e):
+            if _eh_limite_diario(e):
+                groq_throttle.marcar_limite_diario(model, _segundos_ate_reset(e))
+                raise
+            if _eh_4xx_definitivo(e) and not _eh_json_invalido(e):
                 raise
             espera = _espera_retry(tentativa, e)
             ultima = tentativa == retries - 1
@@ -1195,6 +1247,18 @@ def etapa_clusterizar(
         else:
             descricoes_novas.append(d)
 
+    # Fase 12: capa a lista enviada ao gpt-oss. Sem isso, um vídeo com MUITAS
+    # descrições únicas monta um prompt gigante e a chamada estoura os 8K TPM/req
+    # do Free Tier (erro 413 "Request too large"). 120 já cobre vídeos reais; o
+    # excedente (raro) só não recebe rótulo canônico (cai no fallback).
+    _max_desc = int(os.environ.get("KV_CLUSTER_MAX_DESC", "120"))
+    if len(descricoes_novas) > _max_desc:
+        log.warning(
+            "cluster: %d descrições novas > %d — truncando p/ caber no limite do Groq.",
+            len(descricoes_novas), _max_desc,
+        )
+        descricoes_novas = descricoes_novas[:_max_desc]
+
     mapa_descricao_label: dict[str, str] = {}
     catalogo: dict[str, str] = {}
 
@@ -1219,7 +1283,7 @@ def etapa_clusterizar(
             prompt_completo + lista_formatada,
             model=GROQ_MODEL_ANALISE,
             json_mode=True,
-            max_tokens=4000,
+            max_tokens=2500,   # Fase 12: <4000 p/ o request caber nos 8K TPM/req (Free Tier)
             temperatura=0.1,
         )
         dados = json.loads(resposta)
@@ -1998,7 +2062,7 @@ def etapa_gerar_sugestoes(
         prompt + json.dumps(contexto_analise, indent=2, ensure_ascii=False),
         model=GROQ_MODEL_ANALISE,
         json_mode=True,
-        max_tokens=4000,
+        max_tokens=2500,   # Fase 12: <4000 p/ o request caber nos 8K TPM/req (Free Tier)
         temperatura=0.3,
     )
     sugestoes = json.loads(resposta)["sugestoes"]
