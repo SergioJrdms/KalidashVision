@@ -308,6 +308,21 @@ alter table prism_mensagens alter column processo drop not null;
 create index if not exists idx_videos_ctx        on videos(empresa, processo);
 create index if not exists idx_segmentos_par     on segmentos(empresa, processo, gravado_em);
 create index if not exists idx_segmentos_status  on segmentos(empresa, processo, status);
+
+-- Fase 14: ledger de uso/custo de IA (GLOBAL — as chaves são do deploy inteiro,
+-- não por empresa). Alimenta a trava de orçamento por provedor + GET /ai/uso.
+create table if not exists ai_uso (
+    id uuid primary key default gen_random_uuid(),
+    ts timestamptz default now(),
+    periodo text not null,          -- 'YYYY-MM'
+    provedor text not null,         -- claude|gpt|groq|gemini
+    modelo text,
+    tier text,                      -- vision|analise|rapido
+    tokens_in bigint default 0,
+    tokens_out bigint default 0,
+    custo_usd numeric(12,6) default 0
+);
+create index if not exists idx_ai_uso_periodo on ai_uso(periodo, provedor);
 create index if not exists idx_comportamentos_ctx on comportamentos(empresa, processo);
 create index if not exists idx_eventos_ctx       on eventos(empresa, processo);
 create index if not exists idx_eventos_video     on eventos(video_id);
@@ -606,9 +621,9 @@ def frame_para_base64(frame_bgr: np.ndarray, max_lado: int | None = None, qualid
     # do teto diário do Groq Free Tier. Vale p/ a amostragem e p/ o 2º ângulo.
     # Tunável por env (suba de volta a 1024/85 se migrar p/ o Dev Tier).
     if max_lado is None:
-        max_lado = int(os.environ.get("KV_VLM_MAX_LADO", "768"))
+        max_lado = int(os.environ.get("KV_VLM_MAX_LADO", "1024"))
     if qualidade is None:
-        qualidade = int(os.environ.get("KV_VLM_QUALIDADE", "72"))
+        qualidade = int(os.environ.get("KV_VLM_QUALIDADE", "85"))
     h, w = frame_bgr.shape[:2]
     if max(h, w) > max_lado:
         escala = max_lado / max(h, w)
@@ -1180,7 +1195,7 @@ def etapa_clusterizar(
     # descrições únicas monta um prompt gigante e a chamada estoura os 8K TPM/req
     # do Free Tier (erro 413 "Request too large"). 120 já cobre vídeos reais; o
     # excedente (raro) só não recebe rótulo canônico (cai no fallback).
-    _max_desc = int(os.environ.get("KV_CLUSTER_MAX_DESC", "120"))
+    _max_desc = int(os.environ.get("KV_CLUSTER_MAX_DESC", "200"))
     if len(descricoes_novas) > _max_desc:
         log.warning(
             "cluster: %d descrições novas > %d — truncando p/ caber no limite do Groq.",
@@ -1212,7 +1227,7 @@ def etapa_clusterizar(
             prompt_completo + lista_formatada,
             model=GROQ_MODEL_ANALISE,
             json_mode=True,
-            max_tokens=2500,   # Fase 12: <4000 p/ o request caber nos 8K TPM/req (Free Tier)
+            max_tokens=4000,   # Fase 14: fora do Free Tier — mais espaço p/ qualidade
             temperatura=0.1,
         )
         dados = json.loads(resposta)
@@ -1991,7 +2006,7 @@ def etapa_gerar_sugestoes(
         prompt + json.dumps(contexto_analise, indent=2, ensure_ascii=False),
         model=GROQ_MODEL_ANALISE,
         json_mode=True,
-        max_tokens=2500,   # Fase 12: <4000 p/ o request caber nos 8K TPM/req (Free Tier)
+        max_tokens=4000,   # Fase 14: fora do Free Tier — mais espaço p/ qualidade
         temperatura=0.3,
     )
     sugestoes = json.loads(resposta)["sugestoes"]
@@ -3810,7 +3825,7 @@ def gerar_insights_globais(
             prompt + json.dumps(snap, ensure_ascii=False, indent=2),
             model=GROQ_MODEL_ANALISE,
             json_mode=True,
-            max_tokens=2500,
+            max_tokens=4000,
             temperatura=0.3,
         )
         insights = json.loads(resp).get("insights") or []
@@ -4259,7 +4274,7 @@ def analisar_padroes_processo(
     try:
         resp = groq_text_call(
             groq_client, prompt, model=GROQ_MODEL_ANALISE, json_mode=True,
-            max_tokens=2500, temperatura=0.3,
+            max_tokens=4000, temperatura=0.3,
         )
         padroes = json.loads(resp).get("padroes") or []
     except Exception as e:

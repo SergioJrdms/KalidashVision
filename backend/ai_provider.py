@@ -18,7 +18,12 @@ Configuração (tudo por env, backend-only):
   Ordem .......... KV_AI_FALLBACK_ORDER  (default "claude,gpt,groq,gemini")
   Forçar um só ... KV_AI_PROVIDER        (ex.: "claude")
   Modelos ........ KV_MODELO_<PROV>_<TIER>  (ex.: KV_MODELO_CLAUDE_ANALISE)
-  Claude thinking KV_CLAUDE_THINKING="1"   (default desligado p/ extração barata)
+  Claude thinking KV_CLAUDE_THINKING="0"   (Fase 14: default LIGADO; "0" desliga)
+  Teto mensal .... KV_AI_LIMITE_<PROV>_USD  (Fase 14; default claude=100/gpt=50/
+                   groq=30/gemini=30; 0=sem teto). Provedor no teto é pulado.
+  Preços ......... KV_AI_PRECOS_JSON  (JSON {"modelo":[usd_in_1M, usd_out_1M]})
+  Uso/gasto ...... resumo_uso() alimenta o endpoint GET /ai/uso; ledger na
+                   tabela Supabase `ai_uso` (sobrevive a restart).
 
 Um provedor só entra na cadeia se a chave dele existir; sem chave, é pulado em
 silêncio. As mensagens são sempre montadas no formato OpenAI (system/user/
@@ -320,7 +325,215 @@ def _para_gemini(mensagens: list[dict], types: Any) -> tuple[str | None, list]:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# Custo, ledger de uso e trava de orçamento por provedor (Fase 14)
+# ═════════════════════════════════════════════════════════════════════════
+# Preços em USD por 1M tokens (entrada, saída). Claude confirmados na ref
+# oficial; GPT/Gemini/Groq aproximados e sobrescrevíveis por KV_AI_PRECOS_JSON
+# (JSON {"modelo": [in, out]}). Modelo sem preço → custo 0 (+ warn 1x).
+_PRECOS_DEFAULT: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gemini-2.0-flash": (0.10, 0.40),
+    "meta-llama/llama-4-scout-17b-16e-instruct": (0.11, 0.34),
+    "openai/gpt-oss-120b": (0.15, 0.60),
+    "llama-3.3-70b-versatile": (0.59, 0.79),
+}
+
+# Teto MENSAL por provedor (USD). Soma dos defaults ≤ ~US$210 no pior caso —
+# longe de US$500. Override por env KV_AI_LIMITE_<PROV>_USD. 0/negativo = sem teto.
+_LIMITE_DEFAULT = {"claude": 100.0, "gpt": 50.0, "groq": 30.0, "gemini": 30.0}
+
+_precos_cache: dict[str, tuple[float, float]] | None = None
+_precos_avisados: set[str] = set()
+
+
+def _precos() -> dict[str, tuple[float, float]]:
+    global _precos_cache
+    if _precos_cache is not None:
+        return _precos_cache
+    tabela = dict(_PRECOS_DEFAULT)
+    raw = os.environ.get("KV_AI_PRECOS_JSON")
+    if raw:
+        try:
+            import json
+            for mod, par in (json.loads(raw) or {}).items():
+                tabela[mod] = (float(par[0]), float(par[1]))
+        except Exception as e:
+            log.warning(f"[ai] KV_AI_PRECOS_JSON inválido ({e}) — usando defaults")
+    _precos_cache = tabela
+    return tabela
+
+
+def _custo_usd(modelo: str, tin: int, tout: int) -> float:
+    preco = _precos().get(modelo)
+    if preco is None:
+        if modelo not in _precos_avisados:
+            _precos_avisados.add(modelo)
+            log.warning(
+                f"[ai] sem preço p/ '{modelo}' — custo contabilizado como 0. "
+                f"Defina em KV_AI_PRECOS_JSON."
+            )
+        return 0.0
+    return tin / 1e6 * preco[0] + tout / 1e6 * preco[1]
+
+
+def _limite(prov: str) -> float:
+    v = os.environ.get(f"KV_AI_LIMITE_{prov.upper()}_USD")
+    if v is not None:
+        try:
+            return float(v)
+        except Exception:
+            pass
+    return _LIMITE_DEFAULT.get(prov, 0.0)
+
+
+def _periodo() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+# ── Extração de uso (tokens) por SDK (defensivo, fallback 0) ──
+def _uso_claude(r) -> dict:
+    u = getattr(r, "usage", None)
+    return {"in": int(getattr(u, "input_tokens", 0) or 0),
+            "out": int(getattr(u, "output_tokens", 0) or 0)}
+
+
+def _uso_openai(r) -> dict:
+    u = getattr(r, "usage", None)
+    return {"in": int(getattr(u, "prompt_tokens", 0) or 0),
+            "out": int(getattr(u, "completion_tokens", 0) or 0)}
+
+
+def _uso_gemini(r) -> dict:
+    u = getattr(r, "usage_metadata", None)
+    return {"in": int(getattr(u, "prompt_token_count", 0) or 0),
+            "out": int(getattr(u, "candidates_token_count", 0) or 0)}
+
+
+# ── Acumulador em memória (semeado do Supabase) + ledger append-only ──
+_GASTO: dict[str, dict[str, dict]] = {}   # periodo -> provedor -> {custo,tin,tout,n}
+_GASTO_LOCK = threading.Lock()
+_SEED_OK: set[str] = set()
+
+
+def _sb_client():
+    """Cliente Supabase leve e próprio (não importa o pipeline pesado)."""
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not (url and key):
+        return None
+    from supabase import create_client
+    return create_client(url, key)
+
+
+def _semear(periodo: str) -> None:
+    """Semeia o acumulador do período a partir do ledger `ai_uso` (1x por período)
+    p/ o teto sobreviver a restart do Render. Best-effort."""
+    if periodo in _SEED_OK:
+        return
+    dados: dict[str, dict] = {}
+    try:
+        sb = _sb_client()
+        if sb is not None:
+            rows = (
+                sb.table("ai_uso")
+                .select("provedor, custo_usd, tokens_in, tokens_out")
+                .eq("periodo", periodo)
+                .limit(1000000)
+                .execute()
+                .data
+            ) or []
+            for row in rows:
+                prov = row.get("provedor") or "?"
+                d = dados.setdefault(prov, {"custo": 0.0, "tin": 0, "tout": 0, "n": 0})
+                d["custo"] += float(row.get("custo_usd") or 0)
+                d["tin"] += int(row.get("tokens_in") or 0)
+                d["tout"] += int(row.get("tokens_out") or 0)
+                d["n"] += 1
+    except Exception as e:
+        log.warning(f"[ai] seed do gasto de {periodo} falhou ({e}) — começando do zero")
+    with _GASTO_LOCK:
+        atual = _GASTO.setdefault(periodo, {})
+        for prov, d in dados.items():
+            a = atual.setdefault(prov, {"custo": 0.0, "tin": 0, "tout": 0, "n": 0})
+            if a["n"] == 0 and a["custo"] == 0.0:  # não sobrescreve incrementos concorrentes
+                atual[prov] = d
+        _SEED_OK.add(periodo)
+
+
+def _gasto_prov(prov: str) -> float:
+    periodo = _periodo()
+    _semear(periodo)
+    with _GASTO_LOCK:
+        return float(_GASTO.get(periodo, {}).get(prov, {}).get("custo", 0.0))
+
+
+def _acima_do_limite(prov: str) -> bool:
+    lim = _limite(prov)
+    if lim <= 0:
+        return False   # 0/negativo = sem teto p/ esse provedor
+    return _gasto_prov(prov) >= lim
+
+
+def registrar(prov: str, modelo: str, tier: str, uso: dict) -> None:
+    """Contabiliza UMA chamada: incrementa o acumulador em memória e grava 1 linha
+    no ledger `ai_uso` (best-effort)."""
+    tin = int((uso or {}).get("in", 0) or 0)
+    tout = int((uso or {}).get("out", 0) or 0)
+    custo = _custo_usd(modelo, tin, tout)
+    periodo = _periodo()
+    _semear(periodo)
+    with _GASTO_LOCK:
+        d = _GASTO.setdefault(periodo, {}).setdefault(prov, {"custo": 0.0, "tin": 0, "tout": 0, "n": 0})
+        d["custo"] += custo
+        d["tin"] += tin
+        d["tout"] += tout
+        d["n"] += 1
+    try:
+        sb = _sb_client()
+        if sb is not None:
+            sb.table("ai_uso").insert({
+                "periodo": periodo, "provedor": prov, "modelo": modelo, "tier": tier,
+                "tokens_in": tin, "tokens_out": tout, "custo_usd": round(custo, 6),
+            }).execute()
+    except Exception as e:
+        log.warning(f"[ai] falha ao gravar ai_uso ({prov}): {e}")
+
+
+def resumo_uso(periodo: str | None = None) -> dict:
+    """Resumo de gasto do mês por provedor — usado pelo endpoint GET /ai/uso.
+    Só números agregados; nunca expõe chaves."""
+    periodo = periodo or _periodo()
+    _semear(periodo)
+    with _GASTO_LOCK:
+        snap = {p: dict(d) for p, d in _GASTO.get(periodo, {}).items()}
+    provedores = []
+    total = 0.0
+    for prov in ("claude", "gpt", "groq", "gemini"):
+        d = snap.get(prov, {"custo": 0.0, "tin": 0, "tout": 0, "n": 0})
+        gasto = round(float(d.get("custo", 0.0)), 4)
+        total += gasto
+        lim = _limite(prov)
+        provedores.append({
+            "provedor": prov,
+            "gasto_usd": gasto,
+            "limite_usd": lim,
+            "pct": round(gasto / lim * 100, 1) if lim > 0 else 0.0,
+            "tokens_in": int(d.get("tin", 0)),
+            "tokens_out": int(d.get("tout", 0)),
+            "chamadas": int(d.get("n", 0)),
+            "bloqueado": bool(lim > 0 and gasto >= lim),
+        })
+    return {"periodo": periodo, "total_usd": round(total, 4), "provedores": provedores}
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # Adapters (um por provedor) — consomem mensagens no formato OpenAI
+# Retornam (texto, uso) onde uso = {"in": tokens_entrada, "out": tokens_saida}.
 # ═════════════════════════════════════════════════════════════════════════
 def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
     cli = _client("claude")
@@ -330,20 +543,24 @@ def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
     kwargs: dict[str, Any] = dict(model=modelo, max_tokens=max_tokens, messages=msgs)
     if system:
         kwargs["system"] = system
-    # Sonnet 5 / Opus rejeitam `temperature` (400). Haiku aceita.
     if "haiku" in modelo.lower():
+        # Haiku aceita `temperature` e não liga thinking por padrão.
         kwargs["temperature"] = temperatura
-    elif os.environ.get("KV_CLAUDE_THINKING", "0") not in ("1", "true", "True"):
-        # Extração barata/rápida: desliga o thinking nos modelos que o ligam
-        # por padrão (Sonnet 5). Ligue via KV_CLAUDE_THINKING=1.
-        kwargs["thinking"] = {"type": "disabled"}
+    else:
+        # Sonnet 5 / Opus rejeitam `temperature` (400). Fase 14: thinking
+        # adaptativo LIGADO por padrão (qualidade melhor); desligue c/ KV_CLAUDE_THINKING=0.
+        if os.environ.get("KV_CLAUDE_THINKING", "1") in ("0", "false", "False"):
+            kwargs["thinking"] = {"type": "disabled"}
+        else:
+            kwargs["thinking"] = {"type": "adaptive"}
     r = _retry(lambda: cli.messages.create(**kwargs), rotulo=f"claude:{modelo}")
     texto = ""
     for b in getattr(r, "content", []) or []:
         if getattr(b, "type", None) == "text":
             texto = b.text
             break
-    return _strip_json(texto) if json_mode else texto
+    txt = _strip_json(texto) if json_mode else texto
+    return txt, _uso_claude(r)
 
 
 def _adapter_openai_like(prov, modelo, mensagens, json_mode, max_tokens, temperatura):
@@ -352,7 +569,7 @@ def _adapter_openai_like(prov, modelo, mensagens, json_mode, max_tokens, tempera
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
     r = _retry(lambda: cli.chat.completions.create(**kwargs), rotulo=f"{prov}:{modelo}")
-    return r.choices[0].message.content
+    return r.choices[0].message.content, _uso_openai(r)
 
 
 def _adapter_gpt(modelo, mensagens, json_mode, max_tokens, temperatura):
@@ -388,7 +605,7 @@ def _adapter_groq(modelo, mensagens, json_mode, max_tokens, temperatura):
             pass
         try:
             r = cli.chat.completions.create(**kwargs)
-            return r.choices[0].message.content
+            return r.choices[0].message.content, _uso_openai(r)
         except Exception as e:  # noqa: BLE001
             if _groq_eh_limite_diario(e):
                 groq_throttle.marcar_limite_diario(modelo, _groq_segundos_ate_reset(e))
@@ -419,7 +636,7 @@ def _adapter_gemini(modelo, mensagens, json_mode, max_tokens, temperatura):
         )
 
     r = _retry(_chamar, rotulo=f"gemini:{modelo}")
-    return getattr(r, "text", "") or ""
+    return (getattr(r, "text", "") or ""), _uso_gemini(r)
 
 
 _ADAPTERS = {
@@ -441,14 +658,32 @@ def _chamar(tier: str, mensagens: list[dict], json_mode: bool, max_tokens: int, 
             "OPENAI_API_KEY, GROQ_API_KEY ou GEMINI_API_KEY."
         )
     ultimo: BaseException | None = None
+    bloqueados: list[str] = []
     for prov in provs:
         modelo = _modelo(prov, tier)
+        # Trava de orçamento (Fase 14): provedor no teto mensal é PULADO.
+        if _acima_do_limite(prov):
+            bloqueados.append(prov)
+            log.warning(
+                f"[ai] {prov} atingiu o teto mensal (US$ {_limite(prov):.2f}) — pulando"
+            )
+            continue
         try:
-            return _ADAPTERS[prov](modelo, mensagens, json_mode, max_tokens, temperatura)
+            texto, uso = _ADAPTERS[prov](modelo, mensagens, json_mode, max_tokens, temperatura)
+            try:
+                registrar(prov, modelo, tier, uso)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"[ai] falha ao registrar uso de {prov}: {e}")
+            return texto
         except Exception as e:  # noqa: BLE001
             ultimo = e
             log.warning(f"[ai] {prov} ({modelo}) falhou ({e}) — tentando próximo provedor")
             continue
+    if ultimo is None and bloqueados:
+        raise RuntimeError(
+            "[ai] todos os provedores atingiram o teto mensal de orçamento "
+            f"({', '.join(bloqueados)}) — suba KV_AI_LIMITE_*_USD ou aguarde o próximo mês."
+        )
     raise RuntimeError(f"[ai] todos os provedores falharam no tier '{tier}': {ultimo}")
 
 

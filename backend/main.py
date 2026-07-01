@@ -905,6 +905,15 @@ def reprocessar_erros(processo_id: str, user: CurrentUser = Depends(get_current_
     return {"ok": True, "reset": len(alvo), **resumo}
 
 
+@app.get("/ai/uso")
+def ai_uso(user: CurrentUser = Depends(get_current_user)):
+    """Gasto de IA do mês por provedor + tetos (Fase 14). Devolve só números
+    agregados (nunca chaves). O gasto é GLOBAL do deploy (as chaves de IA são
+    compartilhadas por todas as empresas), não por empresa."""
+    from . import ai_provider
+    return ai_provider.resumo_uso()
+
+
 @app.get("/fila/global")
 def fila_global(user: CurrentUser = Depends(get_current_user)):
     """Visão GLOBAL da fila (Fase 8): agrega a inbox `segmentos` de TODOS os
