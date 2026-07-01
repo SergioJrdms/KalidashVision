@@ -60,12 +60,26 @@ app = FastAPI(title="Kalidash Vision", version="0.1.0")
 
 @app.on_event("startup")
 def _checar_segredos() -> None:
-    faltando = [k for k in ("SUPABASE_URL", "SUPABASE_KEY", "GROQ_API_KEY") if not os.environ.get(k)]
+    faltando = [k for k in ("SUPABASE_URL", "SUPABASE_KEY") if not os.environ.get(k)]
     if faltando:
         log.error(
             "Variáveis de ambiente ausentes: %s. "
             "Copie backend/.env.example para backend/.env e preencha as chaves.",
             ", ".join(faltando),
+        )
+    # Fase 13: basta UMA chave de provedor de IA (Claude/GPT/Groq/Gemini). A
+    # cadeia de fallback pula os provedores sem chave. Sem NENHUMA, as chamadas
+    # de IA falham em runtime — avisa alto, mas não derruba o boot.
+    provedores = {
+        "ANTHROPIC_API_KEY (Claude)": os.environ.get("ANTHROPIC_API_KEY"),
+        "OPENAI_API_KEY (GPT)": os.environ.get("OPENAI_API_KEY"),
+        "GROQ_API_KEY (Groq)": os.environ.get("GROQ_API_KEY"),
+        "GEMINI_API_KEY (Gemini)": os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"),
+    }
+    if not any(provedores.values()):
+        log.error(
+            "Nenhuma chave de provedor de IA configurada. Defina ao menos uma: %s.",
+            ", ".join(provedores.keys()),
         )
 
 

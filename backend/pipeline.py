@@ -367,13 +367,13 @@ def make_supabase_client(url: str | None = None, key: str | None = None) -> Clie
     return create_client(url, key)
 
 
-def make_groq_client(api_key: str | None = None) -> Groq:
-    api_key = api_key or os.environ["GROQ_API_KEY"]
-    # max_retries=0: NÓS somos a única autoridade de retry/cadência (groq_throttle
-    # + o loop com Retry-After em groq_text_call/groq_vision_call). Sem isso o SDK
-    # faz retry interno próprio (default 2) FORA do throttle e amplifica a rajada
-    # de 429 numa janela já saturada do Free Tier.
-    return Groq(api_key=api_key, max_retries=0, timeout=60.0)
+def make_groq_client(api_key: str | None = None):
+    # Fase 13: o provedor de IA agora é resolvido pelo `ai_provider`
+    # (Claude → GPT → Groq → Gemini, com fallback). Este "cliente" virou um
+    # marcador vestigial: as etapas ainda recebem/repassam este handle, mas as
+    # chamadas reais vão por ai_provider.text_call/vision_call/chat_call. Não
+    # exige mais GROQ_API_KEY (pode rodar só com ANTHROPIC_API_KEY, por ex.).
+    return None
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -750,8 +750,22 @@ def _eh_json_invalido(exc: BaseException) -> bool:
     return "json_validate_failed" in str(exc).lower()
 
 
+# ── Fase 13: os wrappers viraram shims finos p/ o ai_provider ─────────────
+# As assinaturas são mantidas (os ~12 call sites não mudam). O 1º argumento
+# `groq_client` é vestigial (ignorado). O `model` (uma das constantes
+# GROQ_MODEL_*) é traduzido pro tier lógico; o ai_provider escolhe o modelo
+# concreto por provedor e faz o fallback Claude→GPT→Groq→Gemini.
+def _tier_de_modelo(model: str | None) -> str:
+    from . import ai_provider
+    if model == GROQ_MODEL_VISION:
+        return ai_provider.VISION
+    if model == GROQ_MODEL_RAPIDO:
+        return ai_provider.RAPIDO
+    return ai_provider.ANALISE
+
+
 def groq_vision_call(
-    groq_client: Groq,
+    groq_client,
     image_b64: str,
     prompt_texto: str,
     json_mode: bool = True,
@@ -761,67 +775,19 @@ def groq_vision_call(
     model: str = GROQ_MODEL_VISION,
     imagens_extra: list[str] | None = None,
 ) -> str:
-    # `imagens_extra` = ângulos adicionais (ex.: cam2) na MESMA chamada (Fase 6).
-    # O content aceita várias image_url; o llama-4-scout é multi-imagem.
-    conteudo: list[dict[str, Any]] = [
-        {"type": "text", "text": prompt_texto},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-    ]
-    for extra in (imagens_extra or []):
-        if extra:
-            conteudo.append(
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{extra}"}}
-            )
-    messages = [{"role": "user", "content": conteudo}]
-    kwargs: dict[str, Any] = dict(
-        model=model,
-        messages=messages,
-        temperature=temperatura,
-        max_completion_tokens=max_tokens,
+    from . import ai_provider
+    return ai_provider.vision_call(
+        image_b64,
+        prompt_texto,
+        imagens_extra=imagens_extra,
+        json_mode=json_mode,
+        max_tokens=max_tokens,
+        temperatura=temperatura,
     )
-    if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
-
-    from . import groq_throttle
-    for tentativa in range(retries):
-        # Fail-fast se o modelo está em cooldown de LIMITE DIÁRIO (Fase 12):
-        # não adianta nem tentar até o Groq resetar o teto do dia.
-        resta = groq_throttle.em_limite_diario(model)
-        if resta > 0:
-            raise RuntimeError(
-                f"Groq: limite diário do modelo {model} atingido — retoma em ~{resta/60:.0f}min."
-            )
-        # Throttle TPM+RPM proativo ANTES de CADA tentativa (com max_retries=0 no
-        # cliente, todo retry nosso é um request HTTP real que precisa ser pago no
-        # bucket). Sem isso, picos curtos disparam 429 do Groq Free Tier.
-        try:
-            groq_throttle.reserve(model, groq_throttle.estimar_tokens(prompt_texto, max_tokens))
-        except Exception:
-            pass
-        try:
-            r = groq_client.chat.completions.create(**kwargs)
-            return r.choices[0].message.content
-        except Exception as e:
-            if _eh_limite_diario(e):
-                # Teto DIÁRIO: marca cooldown e falha JÁ (retry no mesmo dia é inútil).
-                groq_throttle.marcar_limite_diario(model, _segundos_ate_reset(e))
-                raise
-            if _eh_4xx_definitivo(e) and not _eh_json_invalido(e):
-                # 400/401/403/404/413 etc — retry só atrasa o erro real
-                # (exceto json_validate 400, que vale 1 retry).
-                raise
-            espera = _espera_retry(tentativa, e)
-            ultima = tentativa == retries - 1
-            if ultima:
-                log.warning(f"Groq vision falhou após {retries} tentativas: {e}")
-                raise
-            log.warning(f"Groq vision falhou ({e}). Retry em {espera:.1f}s ({tentativa+1}/{retries})...")
-            time.sleep(espera)
-    raise RuntimeError("Groq vision falhou após retries")
 
 
 def groq_text_call(
-    groq_client: Groq,
+    groq_client,
     prompt: str,
     model: str | None = None,
     system: str | None = None,
@@ -830,52 +796,15 @@ def groq_text_call(
     temperatura: float = 0.3,
     retries: int = 5,
 ) -> str:
-    model = model or GROQ_MODEL_ANALISE
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
-    kwargs: dict[str, Any] = dict(
-        model=model,
-        messages=messages,
-        temperature=temperatura,
-        max_completion_tokens=max_tokens,
+    from . import ai_provider
+    return ai_provider.text_call(
+        prompt,
+        _tier_de_modelo(model),
+        system=system,
+        json_mode=json_mode,
+        max_tokens=max_tokens,
+        temperatura=temperatura,
     )
-    if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
-
-    texto_p = (system or "") + (prompt or "")
-    from . import groq_throttle
-    for tentativa in range(retries):
-        resta = groq_throttle.em_limite_diario(model)
-        if resta > 0:
-            raise RuntimeError(
-                f"Groq: limite diário do modelo {model} atingido — retoma em ~{resta/60:.0f}min."
-            )
-        # Throttle TPM+RPM proativo ANTES de CADA tentativa (mesmo motivo de
-        # groq_vision_call: com max_retries=0 no cliente, todo retry é request real).
-        try:
-            groq_throttle.reserve(model, groq_throttle.estimar_tokens(texto_p, max_tokens))
-        except Exception:
-            pass
-        try:
-            r = groq_client.chat.completions.create(**kwargs)
-            return r.choices[0].message.content
-        except Exception as e:
-            if _eh_limite_diario(e):
-                groq_throttle.marcar_limite_diario(model, _segundos_ate_reset(e))
-                raise
-            if _eh_4xx_definitivo(e) and not _eh_json_invalido(e):
-                raise
-            espera = _espera_retry(tentativa, e)
-            ultima = tentativa == retries - 1
-            if ultima:
-                log.warning(f"Groq text falhou após {retries} tentativas: {e}")
-                raise
-            log.warning(f"Groq text falhou ({e}). Retry em {espera:.1f}s ({tentativa+1}/{retries})...")
-            time.sleep(espera)
-    raise RuntimeError("Groq text falhou após retries")
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -3221,13 +3150,8 @@ def responder_chat(
     mensagens += historico[-max_trocas * 2 :]
     mensagens.append({"role": "user", "content": pergunta})
 
-    r = groq_client.chat.completions.create(
-        model=GROQ_MODEL_ANALISE,
-        messages=mensagens,
-        temperature=0.4,
-        max_completion_tokens=1500,
-    )
-    return r.choices[0].message.content
+    from . import ai_provider
+    return ai_provider.chat_call(mensagens, ai_provider.ANALISE, max_tokens=1500, temperatura=0.4)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -3752,13 +3676,8 @@ def responder_chat_global(
     mensagens = [{"role": "system", "content": system_prompt_chat_global(empresa, snapshot)}]
     mensagens += historico[-max_trocas * 2 :]
     mensagens.append({"role": "user", "content": pergunta})
-    r = groq_client.chat.completions.create(
-        model=GROQ_MODEL_ANALISE,
-        messages=mensagens,
-        temperature=0.4,
-        max_completion_tokens=1500,
-    )
-    return r.choices[0].message.content
+    from . import ai_provider
+    return ai_provider.chat_call(mensagens, ai_provider.ANALISE, max_tokens=1500, temperatura=0.4)
 
 
 def gerar_sugestoes_chat_global(

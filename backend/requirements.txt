@@ -5,7 +5,11 @@ python-dotenv>=1.0
 pydantic>=2.6
 httpx>=0.27
 supabase>=2.4
+# Provedores de IA (Fase 13 — fallback Claude→GPT→Groq→Gemini)
+anthropic>=0.40
+openai>=1.40
 groq>=0.11
+google-genai>=1.0
 ultralytics>=8.2
 opencv-python-headless>=4.9
 numpy>=1.26
