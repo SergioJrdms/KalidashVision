@@ -112,6 +112,19 @@ def reserve(model: str, estimated_tokens: int) -> None:
                 limite_minimo = agora - _JANELA_S
                 while bucket and bucket[0][0] < limite_minimo:
                     bucket.popleft()
+                # 1b) Janela VAZIA → libera SEMPRE. Dormir não reduz o uso abaixo
+                #     de zero, então esperar é inútil. Sem isto, UMA chamada cuja
+                #     estimativa (len(prompt)//4 + max_tokens) supera o limite
+                #     bloquearia o worker PARA SEMPRE (deadlock — trava a fila
+                #     serial inteira). É o que travou: TPM 0+7727>7200 em loop.
+                if not bucket:
+                    if limite_tpm and estimated_tokens > limite_tpm:
+                        log.warning(
+                            f"[throttle] {model}: chamada única ~{estimated_tokens} tok "
+                            f"> limite {limite_tpm:.0f} — liberando (janela vazia)"
+                        )
+                    bucket.append((agora, estimated_tokens))
+                    return
                 # 2) Mede o que está vivo: tokens (TPM) e nº de requests (RPM)
                 em_uso_tpm = sum(t for _, t in bucket)
                 em_uso_rpm = len(bucket)
