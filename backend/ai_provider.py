@@ -18,7 +18,9 @@ Configuração (tudo por env, backend-only):
   Ordem .......... KV_AI_FALLBACK_ORDER  (default "claude,gpt,groq,gemini")
   Forçar um só ... KV_AI_PROVIDER        (ex.: "claude")
   Modelos ........ KV_MODELO_<PROV>_<TIER>  (ex.: KV_MODELO_CLAUDE_ANALISE)
-  Claude thinking KV_CLAUDE_THINKING="0"   (Fase 14: default LIGADO; "0" desliga)
+  Claude thinking KV_CLAUDE_THINKING="1"   (default DESLIGADO; "1" liga o adaptive
+                   e soma KV_CLAUDE_THINKING_BUDGET=8000 ao max_tokens p/ não
+                   starvar a saída JSON)
   Teto mensal .... KV_AI_LIMITE_<PROV>_USD  (Fase 14; default claude=100/gpt=50/
                    groq=30/gemini=30; 0=sem teto). Provedor no teto é pulado.
   Preços ......... KV_AI_PRECOS_JSON  (JSON {"modelo":[usd_in_1M, usd_out_1M]})
@@ -547,12 +549,22 @@ def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
         # Haiku aceita `temperature` e não liga thinking por padrão.
         kwargs["temperature"] = temperatura
     else:
-        # Sonnet 5 / Opus rejeitam `temperature` (400). Fase 14: thinking
-        # adaptativo LIGADO por padrão (qualidade melhor); desligue c/ KV_CLAUDE_THINKING=0.
-        if os.environ.get("KV_CLAUDE_THINKING", "1") in ("0", "false", "False"):
-            kwargs["thinking"] = {"type": "disabled"}
-        else:
+        # Sonnet 5 / Opus rejeitam `temperature` (400). O thinking é OPT-IN
+        # (KV_CLAUDE_THINKING=1) e DESLIGADO por padrão: com adaptive, os tokens
+        # de "pensamento" saem do MESMO orçamento de max_tokens; nas etapas de
+        # extração JSON (cluster/sugestões) o pensamento pode consumir TODO o
+        # max_tokens e sobrar texto VAZIO → JSONDecodeError no pipeline. Quando
+        # ligado, damos folga extra de max_tokens (KV_CLAUDE_THINKING_BUDGET,
+        # default 8000) só p/ o pensamento, pra não starvar a saída.
+        if os.environ.get("KV_CLAUDE_THINKING", "0") in ("1", "true", "True"):
             kwargs["thinking"] = {"type": "adaptive"}
+            try:
+                folga = int(os.environ.get("KV_CLAUDE_THINKING_BUDGET", "8000"))
+            except Exception:
+                folga = 8000
+            kwargs["max_tokens"] = max_tokens + max(0, folga)
+        else:
+            kwargs["thinking"] = {"type": "disabled"}
     r = _retry(lambda: cli.messages.create(**kwargs), rotulo=f"claude:{modelo}")
     texto = ""
     for b in getattr(r, "content", []) or []:
@@ -671,9 +683,14 @@ def _chamar(tier: str, mensagens: list[dict], json_mode: bool, max_tokens: int, 
         try:
             texto, uso = _ADAPTERS[prov](modelo, mensagens, json_mode, max_tokens, temperatura)
             try:
-                registrar(prov, modelo, tier, uso)
+                registrar(prov, modelo, tier, uso)  # custo é real mesmo se vier vazio
             except Exception as e:  # noqa: BLE001
                 log.warning(f"[ai] falha ao registrar uso de {prov}: {e}")
+            # Rede de segurança: resposta VAZIA em json_mode quebraria o json.loads()
+            # do pipeline. Trata como falha do provedor → cai pro próximo (em vez de
+            # devolver "" e derrubar o vídeo inteiro).
+            if json_mode and not (texto or "").strip():
+                raise RuntimeError(f"{prov}:{modelo} devolveu resposta vazia em json_mode")
             return texto
         except Exception as e:  # noqa: BLE001
             ultimo = e
