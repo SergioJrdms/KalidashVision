@@ -266,6 +266,10 @@ alter table perguntas_processo add column if not exists respostas_rapidas jsonb;
 alter table eventos add column if not exists categoria_lean        text;
 alter table eventos add column if not exists categoria_lean_origem text;
 
+-- Fase 16: 1 evento PRINCIPAL por minuto. true = principal (vai p/ validação +
+-- métricas); false = cru/auditoria; null = vídeos antigos (tratados como antes).
+alter table eventos add column if not exists principal boolean;
+
 -- Backfill: despeja a categoria do comportamento nos eventos ainda sem categoria,
 -- preservando qualquer override individual de humano.
 update eventos e
@@ -426,7 +430,7 @@ def carregar_memoria_do_negocio(
     r = (
         sb.table("eventos")
         .select(
-            "comportamento_label, label_corrigido, descricao_bruta, validacao_correto"
+            "comportamento_label, label_corrigido, descricao_bruta, validacao_correto, principal"
         )
         .eq("empresa", empresa)
         .eq("processo", processo)
@@ -434,7 +438,9 @@ def carregar_memoria_do_negocio(
         .limit(limite_eventos)
         .execute()
     )
-    eventos = r.data or []
+    # Fase 16: crus de auditoria entram como validado_humano=True; remove-os do
+    # aprendizado (só principais/antigos contam).
+    eventos = [e for e in (r.data or []) if e.get("principal") is not False]
     memoria["total_eventos_validados"] = len(eventos)
 
     if not eventos:
@@ -1336,6 +1342,91 @@ def etapa_segmentar_eventos(
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# ETAPA 4b · Consolidação em 1 evento PRINCIPAL por minuto (Fase 16)
+# ═════════════════════════════════════════════════════════════════════════
+def _principal_por_ia(no_bucket: list[tuple[dict, float]], catalogo: dict[str, str]) -> str | None:
+    """1 chamada de IA p/ escolher a ação que RESUME um minuto fragmentado.
+    Devolve um rótulo presente no minuto (ou None se falhar). Não-fatal."""
+    try:
+        from . import ai_provider
+        import json as _json
+        rotulos = sorted({e["comportamento_label"] for e, _ in no_bucket})
+        descr = [f"- {e['descricao_bruta']} ({e['comportamento_label']})" for e, _ in no_bucket]
+        prompt = (
+            "Estas são as ações observadas durante UM minuto de uma operação "
+            "industrial (uma linha por amostra):\n" + "\n".join(descr[:60]) +
+            "\n\nQual foi a AÇÃO PRINCIPAL que melhor RESUME esse minuto? Escolha "
+            "EXATAMENTE um destes rótulos:\n" + ", ".join(rotulos) +
+            '\nResponda em JSON: {"label": "<um dos rótulos acima>"}'
+        )
+        resp = ai_provider.text_call(
+            prompt, ai_provider.RAPIDO, json_mode=True, max_tokens=120, temperatura=0.0
+        )
+        label = (_json.loads(resp) or {}).get("label")
+        return label if label in rotulos else None
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[principal] IA no empate falhou (não-fatal): {e}")
+        return None
+
+
+def etapa_consolidar_principais(
+    eventos_crus: list[dict],
+    catalogo: dict[str, str],
+    duracao_s: float,
+) -> list[dict]:
+    """Fase 16: reduz os ~100 eventos crus a ~1 evento PRINCIPAL por minuto — a
+    ação que RESUME o minuto. Por minuto, escolhe o rótulo DOMINANTE (o que mais
+    durou); se o minuto for fragmentado/empate, 1 chamada de IA decide. Cada
+    principal representa o minuto inteiro (tempo = a janela) p/ as métricas de
+    tempo baterem. Retorna eventos no MESMO shape com `principal=True`.
+    Não-fatal (o chamador cai no fluxo antigo se der []).
+    """
+    if not eventos_crus or duracao_s <= 0:
+        return []
+    import math
+    bucket_s = float(os.environ.get("KV_PRINCIPAL_BUCKET_S", "60") or 60)
+    dominancia = float(os.environ.get("KV_PRINCIPAL_DOMINANCIA", "0.5") or 0.5)
+    n_buckets = max(1, int(math.ceil(duracao_s / bucket_s)))
+
+    principais: list[dict] = []
+    for b in range(n_buckets):
+        ws, we = b * bucket_s, min((b + 1) * bucket_s, duracao_s)
+        no_bucket: list[tuple[dict, float]] = []
+        dur_por_label: dict[str, float] = defaultdict(float)
+        for e in eventos_crus:
+            ov = min(e["tempo_fim_s"], we) - max(e["tempo_inicio_s"], ws)
+            if ov > 0:
+                no_bucket.append((e, ov))
+                dur_por_label[e["comportamento_label"]] += ov
+        if not no_bucket:
+            continue  # minuto sem atividade → sem principal
+        total = sum(dur_por_label.values())
+        top_label, top_dur = max(dur_por_label.items(), key=lambda kv: kv[1])
+        share = (top_dur / total) if total > 0 else 1.0
+        escolhido = top_label
+        if share < dominancia and len(dur_por_label) > 1:
+            escolhido = _principal_por_ia(no_bucket, catalogo) or top_label
+        # Representante = evento do rótulo escolhido com MAIOR sobreposição no minuto.
+        reps = [(e, ov) for (e, ov) in no_bucket if e["comportamento_label"] == escolhido]
+        rep = (max(reps, key=lambda x: x[1]) if reps else max(no_bucket, key=lambda x: x[1]))[0]
+        principais.append({
+            "pessoa_track_id": rep["pessoa_track_id"],
+            "comportamento_label": escolhido,
+            "descricao_bruta": rep["descricao_bruta"],
+            "tempo_inicio_s": round(ws, 2),
+            "tempo_fim_s": round(we, 2),
+            "frame_inicio": rep["frame_inicio"],
+            "frame_fim": rep["frame_fim"],
+            "bbox_inicio": list(rep["bbox_inicio"]),
+            "zona_contexto": rep["zona_contexto"],
+            "n_amostras": sum(e["n_amostras"] for e, _ in no_bucket),
+            "confianca": rep.get("confianca", 0.7),
+            "principal": True,
+        })
+    return principais
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # ETAPA 5 · Persistência
 # ═════════════════════════════════════════════════════════════════════════
 def etapa_persistir(
@@ -1352,8 +1443,14 @@ def etapa_persistir(
     caminho_storage: str | None = None,
     cam_id: str | None = None,
     gravado_em: str | None = None,
+    eventos_auditoria: list[dict] | None = None,
 ) -> tuple[str, int]:
     """Persiste vídeo, comportamentos, eventos. Retorna (video_id, n_auto_validados).
+
+    Fase 16: `eventos` são os PRINCIPAIS (1/min) — contam p/ comportamentos,
+    total_eventos e validação (gravados com `principal=True`). `eventos_auditoria`
+    (opcional) são os crus (~100), gravados só como auditoria (`principal=False`),
+    sem contar em métricas/aprendizado.
 
     `video_path` é o caminho LOCAL usado pelo OpenCV. `caminho_storage`
     (opcional) é o que vai pra coluna `caminho` da tabela `videos` —
@@ -1453,12 +1550,40 @@ def etapa_persistir(
             # IMPORTANTE: validado_humano sempre explícito (PostgREST batch
             # não aplica DEFAULT de coluna ausente).
             "validado_humano": auto_validado,
+            # Fase 16: True nos principais; None quando a consolidação está off
+            # (comportamento antigo — o filtro downstream mantém True + None).
+            "principal": e.get("principal"),
         }
         if auto_validado:
             row["validacao_correto"] = True
             row["validado_em"] = datetime.utcnow().isoformat()
             n_auto_validados += 1
         linhas_eventos.append(row)
+
+    # Fase 16: eventos crus só como AUDITORIA (principal=False) — não contam em
+    # comportamentos/total_eventos nem viram sugestão de validação.
+    for e in (eventos_auditoria or []):
+        linhas_eventos.append({
+            "video_id": video_id, "empresa": empresa, "processo": processo,
+            "pessoa_track_id": e["pessoa_track_id"],
+            "comportamento_label": e["comportamento_label"],
+            "descricao_bruta": e["descricao_bruta"],
+            "tempo_inicio_s": e["tempo_inicio_s"], "tempo_fim_s": e["tempo_fim_s"],
+            "frame_inicio": e["frame_inicio"], "frame_fim": e["frame_fim"],
+            "bbox_inicio": {
+                "x1": e["bbox_inicio"][0], "y1": e["bbox_inicio"][1],
+                "x2": e["bbox_inicio"][2], "y2": e["bbox_inicio"][3],
+            },
+            "zona_contexto": e["zona_contexto"],
+            "n_amostras": e["n_amostras"], "confianca": e["confianca"],
+            "origem_validacao": "auditoria",
+            # validado_humano=True mantém os crus FORA de toda query "pendente"
+            # (validação/contagens) sem precisar filtrar por `principal` no banco.
+            # validacao_correto fica null → os leitores de métrica os removem pelo
+            # filtro em memória `principal is not False`.
+            "validado_humano": True,
+            "principal": False,
+        })
 
     CHUNK = 100
     for i in range(0, len(linhas_eventos), CHUNK):
@@ -1887,7 +2012,7 @@ def montar_contexto_agregado(
         sb.table("eventos")
         .select(
             "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, pessoa_track_id, validacao_correto, validado_humano"
+            "tempo_fim_s, pessoa_track_id, validacao_correto, validado_humano, principal"
         )
         .eq("empresa", empresa)
         .eq("processo", processo)
@@ -1895,7 +2020,11 @@ def montar_contexto_agregado(
         .execute()
         .data
     )
-    base = [e for e in todos_eventos if e.get("validacao_correto") is not False]
+    # Fase 16: só os PRINCIPAIS (1/min); crus de auditoria (principal=False) fora.
+    base = [
+        e for e in todos_eventos
+        if e.get("validacao_correto") is not False and e.get("principal") is not False
+    ]
 
     videos_ctx = (
         sb.table("videos")
@@ -3015,7 +3144,7 @@ def montar_snapshot_chat(
             .select(
                 "id, video_id, comportamento_label, label_corrigido, "
                 "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-                "confianca"
+                "confianca, principal"
             )
             .eq("empresa", empresa)
             .eq("processo", processo)
@@ -3025,7 +3154,10 @@ def montar_snapshot_chat(
         ) or []
     else:
         evs = eventos
-    base = [e for e in evs if e.get("validacao_correto") is not False]
+    base = [
+        e for e in evs
+        if e.get("validacao_correto") is not False and e.get("principal") is not False
+    ]
     # Dedup multi-câmera (Fase 3): mesma ação física vista por 2+ câmeras
     # vira 1 evento efetivo. Eventos sem cam_id/gravado_em ficam intocados.
     _anexar_meta_video(base, sb)
@@ -3399,13 +3531,15 @@ def agregar_portfolio(
         .select(
             "id, video_id, processo, comportamento_label, label_corrigido, "
             "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-            "origem_validacao, confianca"
+            "origem_validacao, confianca, principal"
         )
         .eq("empresa", empresa)
     )
     if processo is not None:
         q_ev = q_ev.eq("processo", processo)
     eventos = q_ev.limit(100000).execute().data or []
+    # Fase 16: só os PRINCIPAIS (1/min); crus de auditoria fora dos dois loops.
+    eventos = [e for e in eventos if e.get("principal") is not False]
 
     # Loop 1: contadores de validação (origem, pendentes, considerados, validados)
     # — usam o stream BRUTO (sem dedup), pra refletir o trabalho real do humano.
@@ -3912,7 +4046,7 @@ def montar_serie_temporal(sb: Client, empresa: str, processo: str) -> dict:
         sb.table("eventos")
         .select(
             "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, validacao_correto, pessoa_track_id"
+            "tempo_fim_s, validacao_correto, pessoa_track_id, principal"
         )
         .eq("empresa", empresa)
         .eq("processo", processo)
@@ -3931,10 +4065,10 @@ def montar_serie_temporal(sb: Client, empresa: str, processo: str) -> dict:
     ) or []
     cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
 
-    # agrupa eventos por vídeo
+    # agrupa eventos por vídeo (Fase 16: só principais; crus de auditoria fora)
     por_video: dict = defaultdict(list)
     for e in eventos:
-        if e.get("validacao_correto") is False:
+        if e.get("validacao_correto") is False or e.get("principal") is False:
             continue
         por_video[e.get("video_id")].append(e)
 
@@ -4503,8 +4637,24 @@ def processar_video(
     )
 
     progress_cb("segmentar", 0, "Formando eventos contínuos")
-    eventos = etapa_segmentar_eventos(observacoes, label_de, intervalo_amostragem_s)
-    progress_cb("segmentar", 100, f"{len(eventos)} eventos formados")
+    eventos_crus = etapa_segmentar_eventos(observacoes, label_de, intervalo_amostragem_s)
+
+    # Fase 16: reduz a ~1 evento PRINCIPAL por minuto (a ação que resume o minuto).
+    # Os crus viram AUDITORIA; os principais alimentam validação e métricas.
+    principais: list[dict] = []
+    if os.environ.get("KV_PRINCIPAL_ENABLE", "on") not in ("off", "0", "false", "False"):
+        try:
+            principais = etapa_consolidar_principais(
+                eventos_crus, catalogo, info_video["duracao_s"]
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"[principal] consolidação falhou (não-fatal): {e}")
+            principais = []
+    if principais:
+        eventos, eventos_auditoria = principais, eventos_crus
+    else:
+        eventos, eventos_auditoria = eventos_crus, None
+    progress_cb("segmentar", 100, f"{len(eventos_crus)} eventos → {len(eventos)} principais")
 
     progress_cb("persistir", 0, "Salvando no banco de dados")
     video_id, n_auto = etapa_persistir(
@@ -4521,6 +4671,7 @@ def processar_video(
         caminho_storage=caminho_storage,
         cam_id=cam_id,
         gravado_em=gravado_em,
+        eventos_auditoria=eventos_auditoria,
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
 

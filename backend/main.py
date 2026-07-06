@@ -1010,7 +1010,7 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .select(
             "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
             "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-            "origem_validacao, confianca"
+            "origem_validacao, confianca, principal"
         )
         .eq("empresa", user.empresa)
         .eq("processo", nome)
@@ -1053,7 +1053,10 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .data
     ) or []
 
-    base = [e for e in evs if e.get("validacao_correto") is not False]
+    base = [
+        e for e in evs
+        if e.get("validacao_correto") is not False and e.get("principal") is not False
+    ]
     seqs: dict = {}
     for e in base:
         chave = (e.get("video_id"), e.get("pessoa_track_id"))
@@ -1255,7 +1258,7 @@ def listar_eventos(
         .select(
             "id, video_id, comportamento_label, descricao_bruta, tempo_inicio_s, "
             "tempo_fim_s, confianca, validado_humano, validacao_correto, n_amostras, "
-            "label_corrigido, origem_validacao, frame_inicio, frame_fim, bbox_inicio, pessoa_track_id"
+            "label_corrigido, origem_validacao, frame_inicio, frame_fim, bbox_inicio, pessoa_track_id, principal"
         )
         .eq("empresa", user.empresa)
         .eq("processo", nome)
@@ -1267,6 +1270,9 @@ def listar_eventos(
 
     r = q.order("tempo_inicio_s").limit(500).execute()
     itens = r.data or []
+    # Fase 16: só os PRINCIPAIS (1/min) vão pros cards de validação; os crus de
+    # auditoria (principal=False) ficam de fora. Vídeos antigos (null) seguem.
+    itens = [e for e in itens if e.get("principal") is not False]
 
     # Categoria Lean PREVISTA + total_ocorrencias por label (join leve). A
     # categoria alimenta o display E o gate de relevância (Fase 5); o
