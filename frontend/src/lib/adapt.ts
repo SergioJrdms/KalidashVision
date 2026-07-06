@@ -8,6 +8,7 @@ import type {
   EventoPendente,
   EventoTabela,
   InsightGlobal,
+  InsightsQuantitativos,
   PadraoGlobal,
   PadraoProcesso,
   PerguntaProcesso,
@@ -53,6 +54,7 @@ export interface DetMock {
   sugestoes: SugMock[];
   videos: { id: string; nome: string; quando: string; eventos: number; dur: number }[];
   perguntasPendentes: number;
+  insights: InsightsQuantitativos | null;
 }
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
@@ -159,6 +161,7 @@ export function mapDashboard(d: DashboardData): DetMock {
     sugestoes,
     videos: (d.videos || []).map((v) => ({ id: v.id, nome: v.nome, quando: rel(v.processado_em), eventos: v.total_eventos, dur: v.duracao_s })),
     perguntasPendentes: d.perguntas_pendentes || 0,
+    insights: d.insights_quantitativos || null,
   };
 }
 

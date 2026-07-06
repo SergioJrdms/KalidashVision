@@ -197,6 +197,7 @@ export interface DashboardData {
   videos: VideoResumo[];
   composicao_valor: ComposicaoValor;
   pareto: ParetoItem[];
+  insights_quantitativos?: InsightsQuantitativos;
   padroes_resumo: Array<{
     id: string;
     tipo: string;
@@ -205,6 +206,19 @@ export interface DashboardData {
     relevancia: string;
     confianca: string;
   }>;
+}
+
+export interface InsightFrase {
+  texto: string;
+  tom: string; // ok | warn | high | info
+}
+
+export interface InsightsQuantitativos {
+  frases: InsightFrase[];
+  tempo_por_acao: Array<{ acao: string; seg: number; pct: number; categoria: string | null }>;
+  por_categoria: Record<string, { seg: number; pct: number }>;
+  por_roi: Array<{ zona: string; seg: number; pct: number; va_pct: number; desp_pct: number }>;
+  periodo: { texto: string; tendencia_desp_pp: number } | null;
 }
 
 export interface EventoIrmaoPendente {

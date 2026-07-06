@@ -56,6 +56,16 @@ export function fmtSeg(s: number) {
   return m > 0 ? `${m}m${String(r).padStart(2, "0")}s` : `${r}s`;
 }
 
+/** Duração legível p/ gestor (Fase 17): 3h20 / 45min / 12s. */
+export function fmtDur(s: number) {
+  s = Math.round(s || 0);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return m > 0 ? `${h}h${String(m).padStart(2, "0")}` : `${h}h`;
+  if (m > 0) return `${m}min`;
+  return `${s}s`;
+}
+
 export function tempoRelativo(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso).getTime();

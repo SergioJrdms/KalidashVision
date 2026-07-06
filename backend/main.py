@@ -40,6 +40,7 @@ from .pipeline import (
     gerar_titulo_conversa,
     gerar_sugestoes_chat,
     agregar_portfolio,
+    montar_insights_quantitativos,
     responder_chat_global,
     gerar_sugestoes_chat_global,
     gerar_insights_globais,
@@ -1010,7 +1011,7 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .select(
             "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
             "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-            "origem_validacao, confianca, principal"
+            "origem_validacao, confianca, principal, zona_contexto"
         )
         .eq("empresa", user.empresa)
         .eq("processo", nome)
@@ -1167,6 +1168,11 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         },
         "composicao_valor": composicao_valor,
         "pareto": pareto,
+        # Fase 17: insights simples e numéricos (frases + tempo por ação + Lean +
+        # ROI + tendência), determinísticos, a partir dos eventos principais.
+        "insights_quantitativos": montar_insights_quantitativos(
+            dist_enriquecida, composicao_valor, base, videos, cat_por_label
+        ),
         # mesma cap (50 mais recentes) que existia antes; videos foi buscado
         # uma vez no topo, mas só os mais recentes vão para a resposta.
         "videos": videos[:50],

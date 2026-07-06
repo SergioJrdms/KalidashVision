@@ -6,11 +6,11 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapDashboard, type DetMock, type CompMock, type ProcHeaderMock, type SugMock } from "../lib/adapt";
-import { leanCor, leanLabel, leanLong, fmtSeg, type LeanShort } from "../design/helpers";
+import { leanCor, leanLabel, leanLong, leanShort, fmtSeg, fmtDur, type LeanShort } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, toast } from "../design/ui";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
-import type { AcaoSugestao } from "../lib/types";
+import type { AcaoSugestao, InsightsQuantitativos } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
@@ -45,6 +45,8 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
         {!minimal && <Kpi label="Oportunidades alta prioridade" valor={String(det.sugestoes.filter((x) => x.prioridade === "alta").length)} sub="sugestões" icon="flame" alert ajuda="Sugestões marcadas como ALTA pela IA. Resolva por aqui primeiro." />}
         <Kpi label="Confiança nos dados" valor={`${s.validadoPct}%`} sub="validado por humano" icon="shield-check" ajuda="Quanto da base já foi confirmado por uma pessoa." />
       </div>
+
+      <InsightsNumericos iq={det.insights} />
 
       <div style={{ display: "grid", gridTemplateColumns: duasColunas, gap: 16, alignItems: "start" }}>
         <Sugestoes det={det} processoId={proc.id} />
@@ -320,6 +322,54 @@ function ParetoPanel({ det }: { det: DetMock }) {
           {data.map((d, i) => <circle key={i} cx={x(i) + bw / 2} cy={yT(d.acc)} r="3" fill="var(--accent)" />)}
           {data.map((d, i) => <text key={i} x={x(i) + bw / 2} y={H - padB + 14} fontSize="8.5" textAnchor="end" transform={`rotate(-32 ${x(i) + bw / 2} ${H - padB + 14})`} fill="var(--muted)" fontFamily="var(--mono)">{d.nome}</text>)}
         </svg>
+      )}
+    </Card>
+  );
+}
+
+// Fase 17 — Insights simples e numéricos (frases + tempo por ação), em destaque.
+function InsightsNumericos({ iq }: { iq: InsightsQuantitativos | null }) {
+  if (!iq || (!iq.frases?.length && !iq.tempo_por_acao?.length)) return null;
+  const tomCor: Record<string, string> = {
+    high: leanCor("desp"),
+    warn: "#c98a00",
+    ok: leanCor("va"),
+    info: "var(--faint)",
+  };
+  const top = (iq.tempo_por_acao || []).slice(0, 6);
+  return (
+    <Card style={{ padding: 20 }}>
+      <PanelHead
+        titulo="Insights (números)"
+        ajuda="Resumo direto, calculado dos vídeos: quanto tempo em cada ação, produtivo vs desperdício, por ROI e a tendência. Junta os 2 ângulos das câmeras."
+        leitura="Sem achismo — só os números que importam pro chão de fábrica."
+      />
+      <div className="col" style={{ gap: 9 }}>
+        {(iq.frases || []).map((f, i) => (
+          <div key={i} style={{ borderLeft: `3px solid ${tomCor[f.tom] || "var(--faint)"}`, paddingLeft: 11 }}>
+            <span style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.45 }}>{f.texto}</span>
+          </div>
+        ))}
+      </div>
+      {top.length > 0 && (
+        <div className="col" style={{ gap: 10, marginTop: 16 }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--muted)", fontWeight: 700 }}>Tempo por ação</div>
+          <ul className="col" style={{ gap: 9, listStyle: "none", padding: 0, margin: 0 }}>
+            {top.map((a, i) => {
+              const cat = leanShort(a.categoria);
+              return (
+                <li key={i}>
+                  <div className="row gap2" style={{ marginBottom: 3 }}>
+                    <span className="truncate" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", maxWidth: 240 }}>{a.acao}</span>
+                    <span className="grow" />
+                    <span className="tnum" style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>{Math.round(a.pct)}% · {fmtDur(a.seg)}</span>
+                  </div>
+                  <div className="track" style={{ height: 7 }}><i style={{ width: `${Math.max(2, a.pct)}%`, background: leanCor(cat) }} /></div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
     </Card>
   );

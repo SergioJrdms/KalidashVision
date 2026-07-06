@@ -4026,6 +4026,162 @@ def _desvio_padrao(xs: list[float]) -> float:
     return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Insights QUANTITATIVOS (determinísticos, sem IA) — Fase 17
+# ═════════════════════════════════════════════════════════════════════════
+def _fmt_dur_h(seg: float) -> str:
+    """Duração legível p/ gestor: 3h20 / 45min / 12s."""
+    s = int(round(seg or 0))
+    h, resto = divmod(s, 3600)
+    m = resto // 60
+    if h > 0:
+        return f"{h}h{m:02d}" if m else f"{h}h"
+    if m > 0:
+        return f"{m}min"
+    return f"{s}s"
+
+
+_LEAN_ROTULO = {
+    "valor_agregado": "produtivo",
+    "apoio": "apoio",
+    "desperdicio": "desperdício",
+    "nao_classificado": "não classificado",
+}
+
+
+def montar_insights_quantitativos(
+    dist: list[dict],
+    composicao: dict,
+    eventos: list[dict],
+    videos: list[dict],
+    cat_por_label: dict,
+    min_videos_tendencia: int = 4,
+) -> dict:
+    """Bloco de insights SIMPLES e NUMÉRICOS (sem IA): tempo por ação, split Lean,
+    por ROI (zona) e tendência — com frases prontas p/ o gestor. Determinístico:
+    todos os números saem dos eventos principais já agregados.
+
+    `dist` = distribuicao_comportamentos enriquecida (tempo_total_s, pct_tempo,
+    categoria_lean). `composicao` = composicao_valor (por_categoria_s + *_pct).
+    `eventos` = eventos JÁ filtrados (principais, não-descartados) com
+    zona_contexto/tempo_inicio_s/tempo_fim_s. `videos` = lista com id+processado_em.
+    """
+    total = float(composicao.get("tempo_total_s") or 0) or \
+        float(sum(d.get("tempo_total_s", 0) for d in (dist or []))) or 1.0
+    frases: list[dict] = []
+
+    # 1) Tempo observado
+    n_videos = len({v.get("id") for v in (videos or []) if v.get("id")})
+    frases.append({
+        "texto": f"Tempo observado: {_fmt_dur_h(total)} em {n_videos} vídeo(s).",
+        "tom": "info",
+    })
+
+    # 2) Onde o tempo foi (top ações)
+    tempo_por_acao = [
+        {"acao": d.get("comportamento"), "seg": round(d.get("tempo_total_s", 0), 1),
+         "pct": d.get("pct_tempo", 0), "categoria": d.get("categoria_lean")}
+        for d in sorted(dist or [], key=lambda x: x.get("tempo_total_s", 0), reverse=True)
+    ]
+    if tempo_por_acao:
+        topo = tempo_por_acao[:3]
+        partes = [f"{a['acao']} {_fmt_dur_h(a['seg'])} ({a['pct']:.0f}%)" for a in topo]
+        tom = "high" if (topo[0].get("categoria") == "desperdicio") else "info"
+        frases.append({"texto": "Onde o tempo foi: " + " · ".join(partes) + ".", "tom": tom})
+
+    # 3) Split Lean (produtivo/apoio/desperdício) com tempo absoluto
+    por_cat_s = composicao.get("por_categoria_s") or {}
+    por_categoria = {}
+    partes_lean = []
+    for k in ("valor_agregado", "apoio", "desperdicio", "nao_classificado"):
+        seg = float(por_cat_s.get(k, 0) or 0)
+        pct = round(seg / total * 100, 1)
+        por_categoria[k] = {"seg": round(seg, 1), "pct": pct}
+        if seg > 0:
+            partes_lean.append(f"{_LEAN_ROTULO[k]} {_fmt_dur_h(seg)} ({pct:.0f}%)")
+    desp_pct = por_categoria["desperdicio"]["pct"]
+    if partes_lean:
+        tom = "high" if desp_pct >= 40 else ("warn" if desp_pct >= 25 else "ok")
+        frases.append({"texto": " · ".join(partes_lean) + ".", "tom": tom})
+
+    # 4) Por ROI (zona_contexto): tempo + % produtivo/desperdício
+    por_zona: dict[str, dict] = {}
+    for e in (eventos or []):
+        zona = (e.get("zona_contexto") or "").strip()
+        if not zona:
+            continue
+        dur = max(0.0, float(e.get("tempo_fim_s", 0)) - float(e.get("tempo_inicio_s", 0)))
+        if dur <= 0:
+            continue
+        label = e.get("label_corrigido") or e.get("comportamento_label")
+        cat = cat_por_label.get(label) or "nao_classificado"
+        z = por_zona.setdefault(zona, {"seg": 0.0, "va": 0.0, "desp": 0.0})
+        z["seg"] += dur
+        if cat == "valor_agregado":
+            z["va"] += dur
+        elif cat == "desperdicio":
+            z["desp"] += dur
+    por_roi = []
+    for zona, z in sorted(por_zona.items(), key=lambda kv: kv[1]["seg"], reverse=True):
+        seg = z["seg"] or 1.0
+        por_roi.append({
+            "zona": zona, "seg": round(z["seg"], 1),
+            "pct": round(z["seg"] / total * 100, 1),
+            "va_pct": round(z["va"] / seg * 100, 1),
+            "desp_pct": round(z["desp"] / seg * 100, 1),
+        })
+    if len(por_roi) > 1:
+        partes_roi = [
+            f"ROI '{r['zona']}': {_fmt_dur_h(r['seg'])} ({r['va_pct']:.0f}% produtivo, {r['desp_pct']:.0f}% desperdício)"
+            for r in por_roi[:3]
+        ]
+        frases.append({"texto": " · ".join(partes_roi) + ".", "tom": "info"})
+
+    # 5) Tendência de desperdício ao longo dos vídeos
+    periodo = None
+    quando = {v.get("id"): v.get("processado_em") for v in (videos or [])}
+    desp_por_video: dict = {}
+    for e in (eventos or []):
+        vid = e.get("video_id")
+        if not vid:
+            continue
+        dur = max(0.0, float(e.get("tempo_fim_s", 0)) - float(e.get("tempo_inicio_s", 0)))
+        if dur <= 0:
+            continue
+        label = e.get("label_corrigido") or e.get("comportamento_label")
+        cat = cat_por_label.get(label) or "nao_classificado"
+        d = desp_por_video.setdefault(vid, {"tot": 0.0, "desp": 0.0})
+        d["tot"] += dur
+        if cat == "desperdicio":
+            d["desp"] += dur
+    ordenados = sorted(
+        (vid for vid in desp_por_video if quando.get(vid)),
+        key=lambda vid: quando.get(vid) or "",
+    )
+    if len(ordenados) >= min_videos_tendencia:
+        metade = len(ordenados) // 2
+        def _media_desp(ids):
+            vals = [desp_por_video[i]["desp"] / (desp_por_video[i]["tot"] or 1) * 100 for i in ids]
+            return sum(vals) / len(vals) if vals else 0.0
+        antes = _media_desp(ordenados[:metade])
+        depois = _media_desp(ordenados[metade:])
+        delta = round(depois - antes, 1)
+        direcao = "subiu" if delta > 0 else ("caiu" if delta < 0 else "estável")
+        periodo = {
+            "texto": f"Tendência do desperdício: {antes:.0f}% → {depois:.0f}% ({direcao} {abs(delta):.0f} pts).",
+            "tendencia_desp_pp": delta,
+        }
+        frases.append({"texto": periodo["texto"], "tom": "high" if delta > 0 else "ok"})
+
+    return {
+        "frases": frases,
+        "tempo_por_acao": tempo_por_acao,
+        "por_categoria": por_categoria,
+        "por_roi": por_roi,
+        "periodo": periodo,
+    }
+
+
 def montar_serie_temporal(sb: Client, empresa: str, processo: str) -> dict:
     """Série por vídeo (ordenada por processado_em) com o SHARE de % do
     tempo por comportamento (label efetivo) e por categoria Lean. Tudo
