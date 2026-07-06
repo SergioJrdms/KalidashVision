@@ -5,6 +5,7 @@ com múltiplos vídeos simultâneos, mude para Celery/RQ + GPU dedicada.
 """
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import tempfile
@@ -192,3 +193,11 @@ def executar_job(
                     Path(p).unlink()
                 except Exception:
                     pass
+        # Libera memória entre jobs: o worker é 1 processo longo-vivo e cada
+        # vídeo aloca frames/arrays grandes (OpenCV/YOLO). Sem isso, o RSS sobe
+        # a cada job e o Render (2GB) reinicia por OOM. gc.collect é barato
+        # perto do custo de processar 1 vídeo.
+        try:
+            gc.collect()
+        except Exception:
+            pass

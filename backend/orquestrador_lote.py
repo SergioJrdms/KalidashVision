@@ -22,7 +22,6 @@ import logging
 import os
 import threading
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 
 log = logging.getLogger("kalidash.lote")
@@ -47,6 +46,26 @@ def _parse_iso(s: str | None) -> datetime | None:
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _instante_epoch(s: dict) -> float | None:
+    """Instante do segmento em epoch (float), p/ o pareamento por janela.
+    Usa o token do nome (seg_AAAAMMDD_HHMMSS, idêntico entre cam1/cam2);
+    fallback = coluna `gravado_em`. None se nada casar (vira solo)."""
+    from .pipeline import _seg_token_nome
+    tok = _seg_token_nome(s.get("nome"))
+    if tok:
+        try:
+            data, hora = tok.split("_")
+            dt = datetime(
+                int(data[0:4]), int(data[4:6]), int(data[6:8]),
+                int(hora[0:2]), int(hora[2:4]), int(hora[4:6]),
+            )
+            return dt.timestamp()  # naive → TZ local do server, consistente entre cams
+        except Exception:
+            pass
+    dt = _parse_iso(s.get("gravado_em"))
+    return dt.timestamp() if dt else None
 
 
 def processar_lote(sb, empresa: str, processo: str) -> dict:
@@ -79,61 +98,84 @@ def processar_lote(sb, empresa: str, processo: str) -> dict:
         if not pend:
             return {"pares": 0, "solo": 0, "itens": 0}
 
-        # Agrupa por token do nome (seg_TIMESTAMP). Sem token → grupo próprio (solo).
-        grupos: dict[str, list[dict]] = defaultdict(list)
-        for s in pend:
-            tok = _seg_token_nome(s.get("nome")) or f"__solo_{s['id']}"
-            grupos[tok].append(s)
+        # ── Pareamento por JANELA DE TEMPO (Fase 15) ──────────────────────
+        # Antes pareava só por token EXATO (seg_AAAAMMDD_HHMMSS): cam1 09:20:01 e
+        # cam2 09:20:00 (1s de diferença) viravam 2 solos. Agora cam1↔cam2 são
+        # par se |Δt| ≤ KV_LOTE_PAR_JANELA_S (default 360s = 6min); fora disso,
+        # solo. Casamento guloso pelo par MAIS PRÓXIMO (nunca cam1+cam1).
+        janela_s = float(_env_int("KV_LOTE_PAR_JANELA_S", 360))
+        itens = [(s, _instante_epoch(s)) for s in pend]
+
+        candidatos: list[tuple[float, int, int]] = []
+        for i in range(len(itens)):
+            si, ti = itens[i]
+            if ti is None:
+                continue
+            ci = si.get("cam_id")
+            for j in range(i + 1, len(itens)):
+                sj, tj = itens[j]
+                if tj is None:
+                    continue
+                cj = sj.get("cam_id")
+                if ci and cj and ci != cj and abs(ti - tj) <= janela_s:
+                    candidatos.append((abs(ti - tj), i, j))
+        candidatos.sort(key=lambda x: x[0])
+
+        consumidos: set[int] = set()
+        pares: list[tuple[dict, dict]] = []
+        for _d, i, j in candidatos:
+            if i in consumidos or j in consumidos:
+                continue
+            consumidos.add(i)
+            consumidos.add(j)
+            si, sj = itens[i][0], itens[j][0]
+            # primário = câmera de MENOR id (cam1) — dirige a detecção/tracking.
+            if str(si.get("cam_id") or "") <= str(sj.get("cam_id") or ""):
+                pares.append((si, sj))
+            else:
+                pares.append((sj, si))
+        solos = [itens[k][0] for k in range(len(itens)) if k not in consumidos]
+
+        def _enfileirar(primario: dict, secundario: dict | None) -> None:
+            job = JOBS.create(processo_id=processo, user_id="edge-lote")
+            job_queue.enqueue(
+                job.id,
+                empresa,
+                processo,
+                primario["storage_path"],
+                None,                              # descrição é resolvida no pipeline
+                primario.get("nome"),
+                cam_id=primario.get("cam_id"),
+                gravado_em=primario.get("gravado_em"),
+                storage_path_secundario=(secundario or {}).get("storage_path"),
+                cam_id_secundario=(secundario or {}).get("cam_id"),
+                nome_secundario=(secundario or {}).get("nome"),
+                segmento_id=primario["id"],
+                segmento_id_secundario=(secundario or {}).get("id"),
+            )
+            ids = [primario["id"]] + ([secundario["id"]] if secundario else [])
+            for sid in ids:
+                try:
+                    sb.table("segmentos").update({"status": "enfileirado"}).eq("id", sid).execute()
+                except Exception as e:
+                    log.warning(f"[lote] falha ao marcar enfileirado {sid}: {e}")
 
         n_pares = n_solo = 0
-        # Ordem determinística/cronológica pela chave (timestamp no token).
-        for tok in sorted(grupos.keys()):
-            # CONSOME todos os membros do token: cada item = primário + (1º membro
-            # de câmera DIFERENTE como secundário). Nunca pareia cam1+cam1 como
-            # "dual-angle"; duplicatas da MESMA câmera viram solos (nada órfão).
-            restantes = sorted(grupos[tok], key=lambda x: str(x.get("cam_id") or ""))
-            while restantes:
-                primario = restantes.pop(0)
-                secundario = None
-                for idx, m in enumerate(restantes):
-                    if m.get("cam_id") and m.get("cam_id") != primario.get("cam_id"):
-                        secundario = restantes.pop(idx)
-                        break
-
-                job = JOBS.create(processo_id=processo, user_id="edge-lote")
-                job_queue.enqueue(
-                    job.id,
-                    empresa,
-                    processo,
-                    primario["storage_path"],
-                    None,                              # descrição é resolvida no pipeline
-                    primario.get("nome"),
-                    cam_id=primario.get("cam_id"),
-                    gravado_em=primario.get("gravado_em"),
-                    storage_path_secundario=(secundario or {}).get("storage_path"),
-                    cam_id_secundario=(secundario or {}).get("cam_id"),
-                    nome_secundario=(secundario or {}).get("nome"),
-                    segmento_id=primario["id"],
-                    segmento_id_secundario=(secundario or {}).get("id"),
-                )
-                ids = [primario["id"]] + ([secundario["id"]] if secundario else [])
-                for sid in ids:
-                    try:
-                        sb.table("segmentos").update({"status": "enfileirado"}).eq("id", sid).execute()
-                    except Exception as e:
-                        log.warning(f"[lote] falha ao marcar enfileirado {sid}: {e}")
-                if secundario:
-                    n_pares += 1
-                    log.info(
-                        f"[lote] {empresa}/{processo}: enfileirando seg {tok} "
-                        f"{primario.get('cam_id')}+{secundario.get('cam_id')} (par)"
-                    )
-                else:
-                    n_solo += 1
-                    log.info(
-                        f"[lote] {empresa}/{processo}: enfileirando seg {tok} "
-                        f"{primario.get('cam_id')} (solo)"
-                    )
+        for primario, secundario in pares:
+            _enfileirar(primario, secundario)
+            n_pares += 1
+            log.info(
+                f"[lote] {empresa}/{processo}: enfileirando seg "
+                f"{_seg_token_nome(primario.get('nome'))} {primario.get('cam_id')}+"
+                f"{secundario.get('cam_id')} (par, |Δt|≤{janela_s:.0f}s)"
+            )
+        for primario in solos:
+            _enfileirar(primario, None)
+            n_solo += 1
+            log.info(
+                f"[lote] {empresa}/{processo}: enfileirando seg "
+                f"{_seg_token_nome(primario.get('nome'))} {primario.get('cam_id')} (solo)"
+            )
 
         total = n_pares + n_solo
         log.info(
