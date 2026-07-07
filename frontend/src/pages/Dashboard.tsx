@@ -29,51 +29,99 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
       </Card>
     );
   }
-  const minimal = t.dashboard === "minimal";
   const denso = t.dashboard === "denso";
-  const s = det.snapshot;
-  const duasColunas = isMobile || minimal ? "1fr" : "1.65fr 1fr";
   return (
     <div className="col" style={{ gap: 18 }}>
       <DashHeader proc={proc} det={det} go={go} />
-      <LearningStrip proc={proc} det={det} go={go} />
 
-      <div style={{ display: "grid", gridTemplateColumns: minimal ? "repeat(auto-fit,minmax(200px,1fr))" : "repeat(auto-fit,minmax(190px,1fr))", gap: 14 }}>
-        <KpiVA det={det} />
-        <Kpi label="Tempo observado" valor={`${s.tempoObservadoMin} min`} sub={`${s.videos} vídeos`} icon="clock" ajuda="Soma da duração dos vídeos analisados. Quanto maior, mais robusta a base." />
-        <Kpi label="Onde o tempo se concentra" valor={`${s.topComportamento.pct}%`} sub={s.topComportamento.nome} icon="crosshair" ajuda="Comportamento que mais consome tempo — melhor candidato a otimização." />
-        {!minimal && <Kpi label="Oportunidades alta prioridade" valor={String(det.sugestoes.filter((x) => x.prioridade === "alta").length)} sub="sugestões" icon="flame" alert ajuda="Sugestões marcadas como ALTA pela IA. Resolva por aqui primeiro." />}
-        <Kpi label="Confiança nos dados" valor={`${s.validadoPct}%`} sub="validado por humano" icon="shield-check" ajuda="Quanto da base já foi confirmado por uma pessoa." />
-      </div>
+      {/* A resposta em 1 olhada: os 3 números que importam. */}
+      <KpisExecutivos det={det} />
 
+      {/* Insights rápidos — leitura de 5s (frases da Fase 17). */}
       <InsightsNumericos iq={det.insights} />
 
-      <div style={{ display: "grid", gridTemplateColumns: duasColunas, gap: 16, alignItems: "start" }}>
-        <Sugestoes det={det} processoId={proc.id} />
-        <div className="col" style={{ gap: 16 }}>
-          <Aprendizado det={det} />
-          {!minimal && <ResumoOportunidades det={det} />}
-        </div>
-      </div>
+      {/* Onde o tempo vai — o único "gráfico", com reclassificação Lean embutida. */}
+      <TempoPorComportamento det={det} denso={denso} processoId={proc.id} />
 
-      {!minimal && (
-        <div>
-          <div className="row gap2" style={{ marginBottom: 4 }}>
-            <h2 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>Sua operação em várias óticas</h2>
-            <Help text="Painéis para entender como o tempo é gasto e como as atividades se sequenciam — tudo derivado dos vídeos deste processo." />
-          </div>
-          <p style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Visão consolidada de todos os vídeos. As sugestões acima nascem dessa base.</p>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 380px),1fr))", gap: 16 }}>
-            <ComposicaoPanel det={det} />
-            <ParetoPanel det={det} />
-            <TempoPorComportamento det={det} denso={denso} processoId={proc.id} />
-            <FluxoPanel det={det} />
-          </div>
-        </div>
-      )}
+      {/* O que fazer agora — sugestões curadas (≤6 do agregado). */}
+      <Sugestoes det={det} processoId={proc.id} />
 
       <VideosRodape det={det} />
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Fase 18 — KPIs executivos: "1 olhada = a resposta".
+// Desperdício (o número que dói) · Produtivo · Tendência do desperdício.
+// Usa os segundos absolutos da Fase 17 (por_categoria) com fallback aos %.
+// ═══════════════════════════════════════════════════════════════════════
+function KpisExecutivos({ det }: { det: DetMock }) {
+  const iq = det.insights;
+  const s = det.snapshot;
+  const cat = iq?.por_categoria || {};
+  const desp = cat["desperdicio"];
+  const va = cat["valor_agregado"];
+  const despPct = desp ? Math.round(desp.pct) : s.desp;
+  const vaPct = va ? Math.round(va.pct) : s.va;
+  const despSub = desp ? fmtDur(desp.seg) : `${s.videos} vídeos`;
+  const vaSub = va ? fmtDur(va.seg) : `${s.videos} vídeos`;
+  const trend = iq?.periodo?.tendencia_desp_pp ?? null;
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 14 }}>
+      <KpiHero
+        label="Tempo desperdiçado"
+        valor={`${despPct}%`}
+        sub={despSub}
+        icon="alert-triangle"
+        cor={leanCor("desp")}
+        ajuda="Parte do tempo observado classificada como desperdício (Lean). É o número a atacar primeiro — cada ponto aqui é tempo que não vira valor."
+      />
+      <KpiHero
+        label="Tempo produtivo"
+        valor={`${vaPct}%`}
+        sub={vaSub}
+        icon="check-circle"
+        cor={leanCor("va")}
+        ajuda="Parte do tempo em comportamentos de valor agregado — o que o cliente efetivamente paga."
+      />
+      <KpiTendencia trend={trend} texto={iq?.periodo?.texto || null} />
+    </div>
+  );
+}
+
+function KpiHero({ label, valor, sub, icon, cor, ajuda }: { label: string; valor: string; sub?: string; icon: string; cor: string; ajuda: string }) {
+  return (
+    <Card style={{ padding: 18, borderLeft: `3px solid ${cor}` }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <span className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>{label} <Help text={ajuda} /></span>
+        <Icon name={icon} size={17} color={cor} />
+      </div>
+      <div className="font-display tnum" style={{ fontSize: 34, fontWeight: 700, color: "var(--ink)", marginTop: 6, lineHeight: 1 }}>{valor}</div>
+      {sub && <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>{sub}</div>}
+    </Card>
+  );
+}
+
+function KpiTendencia({ trend, texto }: { trend: number | null; texto: string | null }) {
+  // trend = variação em pontos do DESPERDÍCIO nos últimos vídeos.
+  // > 0 → desperdício SUBIU (piorou, vermelho ↑). < 0 → melhorou (verde ↓).
+  const temDado = trend !== null && Number.isFinite(trend) && Math.abs(trend) >= 0.5;
+  const piorou = (trend ?? 0) > 0;
+  const cor = !temDado ? "var(--faint)" : piorou ? leanCor("desp") : leanCor("va");
+  const seta = !temDado ? "minus" : piorou ? "trending-up" : "trending-down";
+  const valor = !temDado ? "estável" : `${piorou ? "+" : "−"}${Math.abs(Math.round(trend ?? 0))} pts`;
+  const sub = !temDado ? "poucos vídeos p/ tendência" : piorou ? "desperdício subindo" : "desperdício caindo";
+  return (
+    <Card style={{ padding: 18, borderLeft: `3px solid ${cor}` }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <span className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>Tendência do desperdício <Help text={texto || "Comparação do desperdício nos vídeos mais recentes contra os anteriores. Precisa de alguns vídeos para ser confiável."} width={240} /></span>
+        <Icon name={seta} size={17} color={cor} />
+      </div>
+      <div className="font-display tnum" style={{ fontSize: 34, fontWeight: 700, color: temDado ? cor : "var(--ink)", marginTop: 6, lineHeight: 1 }}>{valor}</div>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>{sub}</div>
+    </Card>
   );
 }
 
@@ -327,50 +375,30 @@ function ParetoPanel({ det }: { det: DetMock }) {
   );
 }
 
-// Fase 17 — Insights simples e numéricos (frases + tempo por ação), em destaque.
+// Fase 17/18 — Insights rápidos: só as frases prontas com números (leitura de 5s).
+// O "tempo por ação" saiu daqui — vive agora no painel "Onde o tempo vai" abaixo.
 function InsightsNumericos({ iq }: { iq: InsightsQuantitativos | null }) {
-  if (!iq || (!iq.frases?.length && !iq.tempo_por_acao?.length)) return null;
+  if (!iq || !iq.frases?.length) return null;
   const tomCor: Record<string, string> = {
     high: leanCor("desp"),
     warn: "#c98a00",
     ok: leanCor("va"),
     info: "var(--faint)",
   };
-  const top = (iq.tempo_por_acao || []).slice(0, 6);
   return (
     <Card style={{ padding: 20 }}>
       <PanelHead
-        titulo="Insights (números)"
-        ajuda="Resumo direto, calculado dos vídeos: quanto tempo em cada ação, produtivo vs desperdício, por ROI e a tendência. Junta os 2 ângulos das câmeras."
+        titulo="Leitura rápida"
+        ajuda="Resumo direto, calculado dos vídeos: onde o tempo foi, produtivo vs desperdício, por ROI e a tendência. Junta os 2 ângulos das câmeras."
         leitura="Sem achismo — só os números que importam pro chão de fábrica."
       />
       <div className="col" style={{ gap: 9 }}>
-        {(iq.frases || []).map((f, i) => (
+        {iq.frases.map((f, i) => (
           <div key={i} style={{ borderLeft: `3px solid ${tomCor[f.tom] || "var(--faint)"}`, paddingLeft: 11 }}>
             <span style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.45 }}>{f.texto}</span>
           </div>
         ))}
       </div>
-      {top.length > 0 && (
-        <div className="col" style={{ gap: 10, marginTop: 16 }}>
-          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--muted)", fontWeight: 700 }}>Tempo por ação</div>
-          <ul className="col" style={{ gap: 9, listStyle: "none", padding: 0, margin: 0 }}>
-            {top.map((a, i) => {
-              const cat = leanShort(a.categoria);
-              return (
-                <li key={i}>
-                  <div className="row gap2" style={{ marginBottom: 3 }}>
-                    <span className="truncate" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", maxWidth: 240 }}>{a.acao}</span>
-                    <span className="grow" />
-                    <span className="tnum" style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>{Math.round(a.pct)}% · {fmtDur(a.seg)}</span>
-                  </div>
-                  <div className="track" style={{ height: 7 }}><i style={{ width: `${Math.max(2, a.pct)}%`, background: leanCor(cat) }} /></div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
     </Card>
   );
 }

@@ -1049,7 +1049,7 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         .eq("processo", nome)
         .eq("status", "pendente")
         .order("criado_em", desc=True)
-        .limit(60)
+        .limit(12)  # Fase 18: sugestões curadas (≤ KV_SUGESTOES_MAX) — teto baixo
         .execute()
         .data
     ) or []
@@ -1194,12 +1194,16 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
 def sugestoes(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
+    # Fase 18: só as PENDENTES (o painel age sobre elas), com teto — evita
+    # devolver a pilha inteira. As sugestões já vêm curadas (≤ KV_SUGESTOES_MAX).
     r = (
         sb.table("sugestoes_melhoria")
         .select("*")
         .eq("empresa", user.empresa)
         .eq("processo", nome)
+        .eq("status", "pendente")
         .order("criado_em", desc=True)
+        .limit(20)
         .execute()
     )
     return r.data or []

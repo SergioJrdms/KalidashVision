@@ -2126,9 +2126,13 @@ def etapa_gerar_sugestoes(
     groq_client: Groq,
     empresa: str,
     processo: str,
-    video_id: str,
+    video_id: str | None,
     contexto_analise: dict,
 ) -> list[dict]:
+    """Fase 18: modelo CURADO (não empilha). Gera sugestões do AGREGADO, dedup
+    contra as pendentes/dispensadas, remove as pendentes que a IA não citou mais
+    (replace, como insights_globais) e limita a KV_SUGESTOES_MAX. NUNCA toca em
+    `realizada`/`dispensada`. Mantém o sinal `voltou_apos_realizada`."""
     prompt = PROMPT_ANALISE.format(empresa=empresa, processo=processo)
     resposta = groq_text_call(
         groq_client,
@@ -2138,52 +2142,113 @@ def etapa_gerar_sugestoes(
         max_tokens=4000,   # Fase 14: fora do Free Tier — mais espaço p/ qualidade
         temperatura=0.3,
     )
-    sugestoes = json.loads(resposta)["sugestoes"]
+    sugestoes = json.loads(resposta).get("sugestoes") or []
 
-    # Para sinalizar reincidência: tokens das sugestões que o gestor já marcou
-    # como REALIZADA neste processo. Se uma nova sugestão tem texto parecido
-    # (Jaccard ≥ 0.5) com uma já realizada, é porque a ação não foi cumprida —
-    # marcamos voltou_apos_realizada=true e o painel destaca isso pro gestor.
-    realizadas_tokens: list[set[str]] = []
+    def _carrega(status: str) -> list[dict]:
+        try:
+            return (
+                sb.table("sugestoes_melhoria")
+                .select("id, sugestao")
+                .eq("empresa", empresa)
+                .eq("processo", processo)
+                .eq("status", status)
+                .limit(500)
+                .execute()
+                .data
+            ) or []
+        except Exception as e:
+            log.warning(f"[sugestoes] falha ao ler {status}: {e}")
+            return []
+
+    pend = _carrega("pendente")
+    disp_tok = [_normalizar_pergunta(r.get("sugestao") or "") for r in _carrega("dispensada")]
+    rea_tok = [_normalizar_pergunta(r.get("sugestao") or "") for r in _carrega("realizada")]
+    pend_tok = [_normalizar_pergunta(r.get("sugestao") or "") for r in pend]
+
     try:
-        rea = (
-            sb.table("sugestoes_melhoria")
-            .select("sugestao")
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .eq("status", "realizada")
-            .limit(200)
-            .execute()
-            .data
-        ) or []
-        realizadas_tokens = [_normalizar_pergunta(r.get("sugestao") or "") for r in rea]
-    except Exception as e:
-        log.warning(f"Não foi possível checar sugestões já realizadas: {e}")
+        max_n = int(os.environ.get("KV_SUGESTOES_MAX", "6"))
+    except Exception:
+        max_n = 6
+    ordem_prio = {"alta": 0, "media": 1, "info": 2}
+    sugestoes = sorted(sugestoes, key=lambda s: ordem_prio.get((s.get("prioridade") or "info").lower(), 3))
 
-    linhas_sug = []
-    for s in sugestoes:
+    # Tokens das sugestões novas (após tirar as dispensadas) — p/ decidir quais
+    # pendentes continuam "vivas".
+    novas_validas = [s for s in sugestoes if not (disp_tok and _eh_duplicada(s.get("sugestao", "") or "", disp_tok, 0.5))]
+    novas_tok = [_normalizar_pergunta(s.get("sugestao", "") or "") for s in novas_validas]
+
+    # 1) DELETE das pendentes que a IA NÃO citou mais nesta rodada (replace).
+    ids_stale = [
+        r["id"] for r in pend
+        if not _eh_duplicada(r.get("sugestao", "") or "", novas_tok, 0.5)
+    ]
+    for sid in ids_stale:
+        try:
+            sb.table("sugestoes_melhoria").delete().eq("id", sid).eq("status", "pendente").execute()
+        except Exception as e:
+            log.warning(f"[sugestoes] falha ao remover pendente obsoleta {sid}: {e}")
+
+    # 2) INSERT só das genuinamente novas (não casam com pendente já existente),
+    #    respeitando o cap (mantendo as pendentes reaproveitadas).
+    reaproveitadas = len(pend) - len(ids_stale)
+    linhas_sug: list[dict] = []
+    for s, tok in zip(novas_validas, novas_tok):
+        if reaproveitadas + len(linhas_sug) >= max_n:
+            break
         texto = s.get("sugestao", "") or ""
-        voltou = bool(realizadas_tokens) and _eh_duplicada(texto, realizadas_tokens, limiar=0.5)
-        linhas_sug.append(
-            {
-                "video_id": video_id,
-                "empresa": empresa,
-                "processo": processo,
-                "prioridade": s.get("prioridade", "info"),
-                "area": s.get("area", ""),
-                "situacao": s.get("situacao", ""),
-                "causa_provavel": s.get("causa_provavel", ""),
-                "sugestao": texto,
-                "impacto_estimado": s.get("impacto_estimado", ""),
-                "eventos_relacionados": {
-                    "comportamentos": s.get("comportamentos_relacionados", [])
-                },
-                "voltou_apos_realizada": voltou,
-            }
-        )
+        if pend_tok and _eh_duplicada(texto, pend_tok, 0.5):
+            continue  # já existe uma pendente igual — não duplica
+        voltou = bool(rea_tok) and _eh_duplicada(texto, rea_tok, 0.5)
+        linhas_sug.append({
+            "video_id": video_id,
+            "empresa": empresa,
+            "processo": processo,
+            "prioridade": s.get("prioridade", "info"),
+            "area": s.get("area", ""),
+            "situacao": s.get("situacao", ""),
+            "causa_provavel": s.get("causa_provavel", ""),
+            "sugestao": texto,
+            "impacto_estimado": s.get("impacto_estimado", ""),
+            "eventos_relacionados": {"comportamentos": s.get("comportamentos_relacionados", [])},
+            "voltou_apos_realizada": voltou,
+        })
     if linhas_sug:
         sb.table("sugestoes_melhoria").insert(linhas_sug).execute()
+    log.info(
+        f"[sugestoes] {empresa}/{processo}: {len(novas_validas)} geradas → "
+        f"{reaproveitadas} mantidas + {len(linhas_sug)} novas, {len(ids_stale)} removidas"
+    )
     return sugestoes
+
+
+def recomputar_sugestoes_processo(sb: Client, empresa: str, processo: str) -> int:
+    """Fase 18: recomputa as sugestões do processo a partir do AGREGADO (chamado
+    pelo debouncer, 1× por rajada — NÃO por vídeo). Monta o contexto agregado e
+    delega ao modelo curado do `etapa_gerar_sugestoes`. Não-fatal."""
+    try:
+        descricao = resolver_descricao_processo(sb, empresa, processo, None)
+    except Exception:
+        descricao = ""
+    try:
+        conhecimento = construir_bloco_conhecimento_adquirido(sb, empresa, processo)
+    except Exception:
+        conhecimento = ""
+    try:
+        memoria = carregar_memoria_do_negocio(sb, empresa, processo)
+    except Exception:
+        memoria = None
+    try:
+        contexto = montar_contexto_agregado(
+            sb, empresa, processo,
+            descricao_processo=descricao, memoria=memoria,
+            conhecimento_adquirido_texto=conhecimento,
+        )
+        # groq_client vestigial (ai_provider); video_id=None (sugestão do agregado).
+        sug = etapa_gerar_sugestoes(sb, None, empresa, processo, None, contexto)
+        return len(sug or [])
+    except Exception as e:
+        log.warning(f"[sugestoes] recompute {empresa}/{processo} falhou (não-fatal): {e}")
+        return 0
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -4831,7 +4896,10 @@ def processar_video(
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
 
-    progress_cb("sugestoes", 0, "Gerando sugestões de produtividade")
+    # Fase 18: as sugestões NÃO são mais geradas por vídeo (isso empilhava — 47
+    # p/ 24 vídeos). O debouncer as recomputa 1× por rajada, sobre o AGREGADO,
+    # de forma curada (recomputar_sugestoes_processo). O `contexto` agregado
+    # ainda é montado aqui porque as PERGUNTAS proativas abaixo o consomem.
     contexto = montar_contexto_agregado(
         sb,
         empresa,
@@ -4846,8 +4914,7 @@ def processar_video(
             "eventos_neste_video": len(eventos),
         },
     )
-    sugestoes = etapa_gerar_sugestoes(sb, groq_client, empresa, processo, video_id, contexto)
-    progress_cb("sugestoes", 100, f"{len(sugestoes)} sugestões geradas")
+    sugestoes: list = []  # geradas no flush do debouncer (agregado, curadas)
 
     # Classificação Lean dos comportamentos — NÃO-FATAL.
     # Roda antes das perguntas pra que a próxima execução já veja as categorias.

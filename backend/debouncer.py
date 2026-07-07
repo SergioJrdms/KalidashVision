@@ -167,6 +167,7 @@ def _flush_processo(empresa: str, processo: str) -> None:
             analisar_padroes_processo,
             carregar_memoria_do_negocio,
             construir_bloco_conhecimento_adquirido,
+            recomputar_sugestoes_processo,
             resolver_descricao_processo,
         )
 
@@ -195,6 +196,13 @@ def _flush_processo(empresa: str, processo: str) -> None:
             )
         except Exception as e:
             log.warning(f"[debouncer] padroes_processo falhou (não-fatal): {e}")
+
+        # Fase 18: sugestões CURADAS a partir do agregado (1× por rajada, não por
+        # vídeo) — conserta o empilhamento (47 p/ 24 vídeos).
+        try:
+            recomputar_sugestoes_processo(sb, empresa, processo)
+        except Exception as e:
+            log.warning(f"[debouncer] sugestoes falhou (não-fatal): {e}")
     except Exception as e:
         log.warning(f"[debouncer] flush_processo({empresa}/{processo}) falhou: {e}")
 
