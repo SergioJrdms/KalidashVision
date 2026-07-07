@@ -1,6 +1,7 @@
 // ============================================================
-// Dashboard do processo — porte fiel de dashboard.jsx (dados reais).
-// t.dashboard = "equilibrado" | "minimal" | "denso"
+// Dashboard do processo — layout executivo (Fase 18/19): placar do processo,
+// KPIs "1 olhada", leitura rápida, onde o tempo vai e perguntas pro gestor.
+// É o dashboard PADRÃO — sem variantes (minimal/denso) por tweak.
 // ============================================================
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -9,14 +10,13 @@ import { mapDashboard, type DetMock, type CompMock, type ProcHeaderMock, type Su
 import { leanCor, leanLabel, leanLong, leanShort, fmtSeg, fmtDur, type LeanShort } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, Ring, toast } from "../design/ui";
 import type { Go } from "../design/Shell";
-import type { Tweaks } from "../App";
 import type { AcaoSugestao, InsightsQuantitativos, PerguntaGestor, PlacarProcesso } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
 const COMP_VISIVEL_PADRAO = 5;
 
-export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: Go; t: Tweaks }) {
+export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const isMobile = useIsMobile();
   const q = useQuery({ queryKey: ["dashboard", proc.id], queryFn: () => api.processos.dashboard(proc.id) });
   if (q.isLoading) return <Card><Empty icon="loader" title="Carregando dashboard…" /></Card>;
@@ -29,7 +29,6 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
       </Card>
     );
   }
-  const denso = t.dashboard === "denso";
   const temPosto = (det.insights?.por_roi?.length || 0) > 1;
   return (
     <div className="col" style={{ gap: 18 }}>
@@ -46,7 +45,7 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
 
       {/* Onde o tempo vai — por ação (com reclassificação Lean) e por posto. */}
       <div style={{ display: "grid", gridTemplateColumns: isMobile || !temPosto ? "1fr" : "1.4fr 1fr", gap: 16, alignItems: "start" }}>
-        <TempoPorComportamento det={det} denso={denso} processoId={proc.id} />
+        <TempoPorComportamento det={det} processoId={proc.id} />
         {temPosto && <PorPosto iq={det.insights} />}
       </div>
 
@@ -62,11 +61,46 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
 // ═══════════════════════════════════════════════════════════════════════
 // Fase 19 — Placar do processo: "rodou a X% do seu melhor dia".
 // O processo comparado com ELE MESMO — máximo julgamento, zero micro-gestão.
+// Acende com 2+ dias; 1 dia → compara por sessão; 1 sessão → linha de base.
 // ═══════════════════════════════════════════════════════════════════════
 function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
   if (!placar) return null;
   const p = placar;
-  const bom = p.eh_melhor_dia || p.score >= 85;
+  const ref = p.modo === "referencia";
+  const uni = p.unidade === "sessão" ? "sessão" : "dia";      // singular
+  const unis = uni === "dia" ? "dias" : "sessões";            // plural
+
+  // Modo REFERÊNCIA: uma unidade só — é a linha de base do processo.
+  if (ref) {
+    const va = p.dia_atual.va_pct;
+    const cor = va >= 60 ? leanCor("va") : va >= 40 ? "#c98a00" : leanCor("desp");
+    return (
+      <Card style={{ padding: "20px 22px", borderLeft: `3px solid ${cor}`, background: "linear-gradient(120deg, var(--soft), #fff 60%)" }}>
+        <div className="row gap4 wrap" style={{ alignItems: "center" }}>
+          <Ring pct={va} size={92} stroke={9} color={cor}>
+            <div className="col" style={{ alignItems: "center", lineHeight: 1 }}>
+              <span className="font-display tnum" style={{ fontSize: 26, fontWeight: 700, color: "var(--ink)" }}>{va.toFixed(0)}%</span>
+              <span style={{ fontSize: 9, color: "var(--muted)", fontWeight: 700 }}>produtivo</span>
+            </div>
+          </Ring>
+          <div className="col grow" style={{ gap: 6, minWidth: 220 }}>
+            <div className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>
+              Placar do processo <Help text={`Ainda não há histórico suficiente para comparar ${unis}. Esta primeira medição vira a linha de base — os próximos ${unis} serão pontuados contra ela.`} width={250} />
+            </div>
+            <p style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", margin: 0 }}>
+              Linha de base: <span style={{ color: cor }}>{va.toFixed(0)}% produtivo</span> em {fmtDur(p.dia_atual.seg)}.
+            </p>
+            <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
+              Primeira medição do processo. A partir dela, cada {uni} novo é comparado com o melhor já observado.
+            </p>
+          </div>
+        </div>
+      </Card>
+    );
+  }
+
+  // Modo COMPARATIVO.
+  const bom = p.eh_melhor || p.score >= 85;
   const cor = bom ? leanCor("va") : p.score >= 60 ? "#c98a00" : leanCor("desp");
   const vs = p.vs_anterior?.["desperdicio"];
   return (
@@ -80,20 +114,20 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
         </Ring>
         <div className="col grow" style={{ gap: 6, minWidth: 220 }}>
           <div className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>
-            Placar do processo <Help text={`Compara o dia mais recente com o MELHOR dia já observado deste processo (maior % de tempo produtivo). Base: ${p.n_dias} dias com observação suficiente.`} width={250} />
+            Placar do processo <Help text={`Compara ${uni === "dia" ? "o dia mais recente" : "a sessão mais recente"} com ${uni === "dia" ? "o melhor dia" : "a melhor sessão"} já observado deste processo (maior % de tempo produtivo). Base: ${p.n_unidades} ${unis} com observação suficiente.`} width={250} />
           </div>
-          {p.eh_melhor_dia ? (
+          {p.eh_melhor ? (
             <p style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", margin: 0 }}>
-              {p.dia_atual.dia} é o <span style={{ color: leanCor("va") }}>melhor dia já observado</span> — {p.dia_atual.va_pct.toFixed(0)}% produtivo em {fmtDur(p.dia_atual.seg)}.
+              {p.dia_atual.dia} é {uni === "dia" ? "o melhor dia" : "a melhor sessão"} <span style={{ color: leanCor("va") }}>já observado</span> — {p.dia_atual.va_pct.toFixed(0)}% produtivo em {fmtDur(p.dia_atual.seg)}.
             </p>
           ) : (
             <p style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", margin: 0 }}>
-              O processo rodou a <span style={{ color: cor }}>{p.score}% do seu melhor dia</span>.
+              O processo rodou a <span style={{ color: cor }}>{p.score}% do seu melhor {uni}</span>.
             </p>
           )}
-          {!p.eh_melhor_dia && (
+          {!p.eh_melhor && (
             <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
-              {p.dia_atual.dia}: <b style={{ color: "var(--text)" }}>{p.dia_atual.va_pct.toFixed(0)}% produtivo</b> ({fmtDur(p.dia_atual.seg)} observadas) · melhor dia {p.dia_melhor.dia}: <b style={{ color: "var(--text)" }}>{p.dia_melhor.va_pct.toFixed(0)}% produtivo</b>
+              {p.dia_atual.dia}: <b style={{ color: "var(--text)" }}>{p.dia_atual.va_pct.toFixed(0)}% produtivo</b> ({fmtDur(p.dia_atual.seg)} observadas) · melhor {uni} {p.dia_melhor.dia}: <b style={{ color: "var(--text)" }}>{p.dia_melhor.va_pct.toFixed(0)}% produtivo</b>
             </p>
           )}
           {p.puxou.length > 0 && (
@@ -107,7 +141,7 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
           )}
           {vs && Math.abs(vs.delta_pp) >= 1 && (
             <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
-              Vs dias anteriores: desperdício {vs.antes.toFixed(0)}% → {vs.atual.toFixed(0)}% ({vs.delta_pp > 0 ? "+" : "−"}{Math.abs(vs.delta_pp).toFixed(0)} pts)
+              Vs {unis} anteriores: desperdício {vs.antes.toFixed(0)}% → {vs.atual.toFixed(0)}% ({vs.delta_pp > 0 ? "+" : "−"}{Math.abs(vs.delta_pp).toFixed(0)} pts)
             </span>
           )}
         </div>
@@ -526,7 +560,7 @@ function InsightsNumericos({ iq }: { iq: InsightsQuantitativos | null }) {
   );
 }
 
-function TempoPorComportamento({ det, denso, processoId }: { det: DetMock; denso: boolean; processoId: string }) {
+function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: string }) {
   const qc = useQueryClient();
   const [edit, setEdit] = useState<string | null>(null);
   const [verTodos, setVerTodos] = useState(false);

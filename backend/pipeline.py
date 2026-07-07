@@ -4138,67 +4138,118 @@ def _montar_placar(
     eventos: list[dict],
     videos: list[dict],
     cat_por_label: dict,
-    min_dia_s: float | None = None,
+    min_unidade_s: float | None = None,
 ) -> dict | None:
-    """Fase 19 — Placar do PROCESSO vs o melhor dia dele mesmo.
+    """Fase 19 — Placar do PROCESSO comparado com ELE MESMO.
 
-    Agrupa os eventos principais por DIA real de gravação (relógio no nome do
-    vídeo) e compara o dia mais recente com o melhor dia observado (maior %
-    produtivo). score = produtivo_atual / produtivo_melhor. Devolve também "o
-    que puxou pra baixo" (ações não-produtivas que mais cresceram em share vs
-    o melhor dia) e a comparação com a média dos dias anteriores. Olha o
-    processo como um todo — nunca cita pessoa. None se < 2 dias com observação
-    mínima (KV_PLACAR_MIN_DIA_S, default 10 min)."""
-    if min_dia_s is None:
-        min_dia_s = float(os.environ.get("KV_PLACAR_MIN_DIA_S", "600"))
+    Agrupa os eventos principais e compara a unidade mais recente com a melhor
+    unidade observada (maior % produtivo). A unidade é o DIA real de gravação
+    (relógio no nome do vídeo); se só houver 1 dia, cai para SESSÃO (vídeo), de
+    modo que o placar acende já no primeiro dia com 2+ vídeos. Com uma unidade
+    só, entra em modo REFERÊNCIA (a base a partir da qual os próximos dias serão
+    comparados). Nunca cita pessoa. None só se não houver nenhuma observação
+    mínima (KV_PLACAR_MIN_UNIDADE_S, default 60s — apenas evita ruído)."""
+    if min_unidade_s is None:
+        min_unidade_s = float(os.environ.get("KV_PLACAR_MIN_UNIDADE_S", "60"))
 
-    dia_por_video: dict[str, str] = {}
+    # Metadados por vídeo: dia + rótulos + ordem cronológica.
+    meta: dict[str, dict] = {}
     for v in videos or []:
+        vid = v.get("id")
+        if not vid:
+            continue
         dt = _inicio_video_dt(v)
-        if v.get("id") and dt:
-            dia_por_video[v["id"]] = dt.date().isoformat()
+        if dt:
+            dia_iso = dt.date().isoformat()
+            p = dia_iso.split("-")
+            meta[vid] = {
+                "dia_iso": dia_iso,
+                "dia_rot": f"{p[2]}/{p[1]}",
+                "sessao_rot": dt.strftime("%d/%m %Hh%M"),
+                "ordem": dt.isoformat(),
+            }
+        else:
+            meta[vid] = {
+                "dia_iso": None,
+                "dia_rot": None,
+                "sessao_rot": (v.get("nome") or vid)[:18],
+                "ordem": v.get("processado_em") or "",
+            }
 
-    dias: dict[str, dict] = {}
-    for e in eventos or []:
-        dia = dia_por_video.get(e.get("video_id"))
-        if not dia:
-            continue
-        label, cat, dur = _cat_do_evento(e, cat_por_label)
-        if dur <= 0:
-            continue
-        d = dias.setdefault(dia, {"tot": 0.0, "va": 0.0, "desp": 0.0, "acoes": {}})
-        d["tot"] += dur
-        if cat == "valor_agregado":
-            d["va"] += dur
-        elif cat == "desperdicio":
-            d["desp"] += dur
-        a = d["acoes"].setdefault(label, {"seg": 0.0, "cat": cat})
-        a["seg"] += dur
+    def _agregar(chave_fn, rotulo_fn, ordem_fn) -> dict[str, dict]:
+        grupos: dict[str, dict] = {}
+        for e in eventos or []:
+            m = meta.get(e.get("video_id"))
+            if not m:
+                continue
+            ch = chave_fn(m, e.get("video_id"))
+            if ch is None:
+                continue
+            label, cat, dur = _cat_do_evento(e, cat_por_label)
+            if dur <= 0:
+                continue
+            g = grupos.get(ch)
+            if g is None:
+                g = grupos[ch] = {
+                    "tot": 0.0, "va": 0.0, "desp": 0.0, "acoes": {},
+                    "rotulo": rotulo_fn(m, e.get("video_id")), "ordem": ordem_fn(m, e.get("video_id")),
+                }
+            g["tot"] += dur
+            if cat == "valor_agregado":
+                g["va"] += dur
+            elif cat == "desperdicio":
+                g["desp"] += dur
+            a = g["acoes"].setdefault(label, {"seg": 0.0, "cat": cat})
+            a["seg"] += dur
+        return {k: g for k, g in grupos.items() if g["tot"] >= min_unidade_s}
 
-    validos = {dia: d for dia, d in dias.items() if d["tot"] >= min_dia_s}
-    if len(validos) < 2:
+    # 1) por DIA (só vídeos com dia confiável). 2) fallback por SESSÃO (vídeo).
+    grupos = _agregar(lambda m, _v: m["dia_iso"], lambda m, _v: m["dia_rot"], lambda m, _v: m["dia_iso"])
+    unidade = "dia"
+    if len(grupos) < 2:
+        grupos = _agregar(lambda _m, v: v, lambda m, _v: m["sessao_rot"], lambda m, _v: m["ordem"])
+        unidade = "sessão"
+    if not grupos:
         return None
 
-    def _va_pct(d: dict) -> float:
-        return d["va"] / d["tot"] * 100
+    def _va_pct(g: dict) -> float:
+        return g["va"] / g["tot"] * 100
 
-    def _desp_pct(d: dict) -> float:
-        return d["desp"] / d["tot"] * 100
+    def _desp_pct(g: dict) -> float:
+        return g["desp"] / g["tot"] * 100
 
-    def _fmt_dia(iso: str) -> str:
-        p = iso.split("-")
-        return f"{p[2]}/{p[1]}"
+    def _bloco(g: dict) -> dict:
+        return {
+            "dia": g["rotulo"], "va_pct": round(_va_pct(g), 1),
+            "desp_pct": round(_desp_pct(g), 1), "seg": round(g["tot"], 1),
+        }
 
-    dia_atual = max(validos)  # ISO ordena cronologicamente
-    dia_melhor = max(validos, key=lambda k: (_va_pct(validos[k]), k))
-    atual, melhor = validos[dia_atual], validos[dia_melhor]
-    eh_melhor = dia_melhor == dia_atual
+    atual_k = max(grupos, key=lambda k: grupos[k]["ordem"])
+    atual = grupos[atual_k]
+
+    # Modo REFERÊNCIA: uma unidade só — vira a linha de base do processo.
+    if len(grupos) < 2:
+        return {
+            "modo": "referencia",
+            "unidade": unidade,
+            "score": int(round(_va_pct(atual))),
+            "eh_melhor": True,
+            "dia_atual": _bloco(atual),
+            "dia_melhor": _bloco(atual),
+            "puxou": [],
+            "vs_anterior": None,
+            "n_unidades": 1,
+        }
+
+    melhor_k = max(grupos, key=lambda k: (_va_pct(grupos[k]), grupos[k]["ordem"]))
+    melhor = grupos[melhor_k]
+    eh_melhor = melhor_k == atual_k
     score = 100 if eh_melhor else min(
         100, int(round(_va_pct(atual) / max(_va_pct(melhor), 0.1) * 100))
     )
 
     # O que puxou pra baixo: ações NÃO-produtivas cujo share cresceu ≥5 pts
-    # em relação ao melhor dia.
+    # em relação à melhor unidade.
     puxou: list[tuple[float, str]] = []
     if not eh_melhor:
         for label, a in atual["acoes"].items():
@@ -4214,13 +4265,13 @@ def _montar_placar(
                 ))
         puxou.sort(key=lambda t: t[0], reverse=True)
 
-    # Vs os dias ANTERIORES (média ponderada pelo tempo observado).
-    anteriores = [d for k, d in validos.items() if k != dia_atual]
+    # Vs as unidades ANTERIORES (média ponderada pelo tempo observado).
+    anteriores = [g for k, g in grupos.items() if k != atual_k]
     vs_anterior = None
     if anteriores:
-        tot_ant = sum(d["tot"] for d in anteriores) or 1.0
-        va_ant = sum(d["va"] for d in anteriores) / tot_ant * 100
-        desp_ant = sum(d["desp"] for d in anteriores) / tot_ant * 100
+        tot_ant = sum(g["tot"] for g in anteriores) or 1.0
+        va_ant = sum(g["va"] for g in anteriores) / tot_ant * 100
+        desp_ant = sum(g["desp"] for g in anteriores) / tot_ant * 100
         vs_anterior = {
             "produtivo": {
                 "antes": round(va_ant, 1), "atual": round(_va_pct(atual), 1),
@@ -4233,19 +4284,15 @@ def _montar_placar(
         }
 
     return {
+        "modo": "comparativo",
+        "unidade": unidade,
         "score": score,
-        "eh_melhor_dia": eh_melhor,
-        "dia_atual": {
-            "dia": _fmt_dia(dia_atual), "va_pct": round(_va_pct(atual), 1),
-            "desp_pct": round(_desp_pct(atual), 1), "seg": round(atual["tot"], 1),
-        },
-        "dia_melhor": {
-            "dia": _fmt_dia(dia_melhor), "va_pct": round(_va_pct(melhor), 1),
-            "desp_pct": round(_desp_pct(melhor), 1), "seg": round(melhor["tot"], 1),
-        },
+        "eh_melhor": eh_melhor,
+        "dia_atual": _bloco(atual),
+        "dia_melhor": _bloco(melhor),
         "puxou": [t for _, t in puxou[:3]],
         "vs_anterior": vs_anterior,
-        "n_dias": len(validos),
+        "n_unidades": len(grupos),
     }
 
 

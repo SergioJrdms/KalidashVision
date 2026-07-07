@@ -221,13 +221,15 @@ export interface PlacarDia {
 }
 
 export interface PlacarProcesso {
-  score: number; // 0-100: % do melhor dia observado
-  eh_melhor_dia: boolean;
+  modo: "comparativo" | "referencia";
+  unidade: "dia" | "sessão";
+  score: number; // comparativo: % da melhor unidade · referência: % produtivo (linha de base)
+  eh_melhor: boolean;
   dia_atual: PlacarDia;
   dia_melhor: PlacarDia;
-  puxou: string[]; // o que puxou pra baixo vs melhor dia
+  puxou: string[]; // o que puxou pra baixo vs melhor unidade
   vs_anterior: Record<string, { antes: number; atual: number; delta_pp: number }> | null;
-  n_dias: number;
+  n_unidades: number;
 }
 
 export interface PerguntaGestor {

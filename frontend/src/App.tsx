@@ -109,7 +109,7 @@ function AppShell() {
           <span className="spin" style={{ width: 24, height: 24, border: "3px solid var(--p-100)", borderTopColor: "var(--accent)", borderRadius: "50%" }} />
         </div>
       );
-    } else if (route.tab === "dashboard") content = <Dashboard proc={proc} go={goTyped} t={TWEAKS} />;
+    } else if (route.tab === "dashboard") content = <Dashboard proc={proc} go={goTyped} />;
     else if (route.tab === "validacao") content = <Validacao proc={proc} go={goTyped} t={TWEAKS} />;
     else if (route.tab === "eventos") content = <Eventos proc={proc} />;
     else if (route.tab === "padroes") content = <Padroes proc={proc} go={goTyped} />;
