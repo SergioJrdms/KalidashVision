@@ -4114,6 +4114,241 @@ _LEAN_ROTULO = {
 }
 
 
+def _inicio_video_dt(v: dict) -> datetime | None:
+    """Instante REAL de gravação do vídeo: relógio no nome (edge, token
+    seg_YYYYMMDD_HHMMSS) com fallback em processado_em. None se nada parsear."""
+    iso = _parse_gravado_em_nome(v.get("nome")) or v.get("processado_em")
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
+    """(label efetivo, categoria lean, duração) de um evento principal."""
+    label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
+    cat = cat_por_label.get(label) or "nao_classificado"
+    dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+    return label, cat, dur
+
+
+def _montar_placar(
+    eventos: list[dict],
+    videos: list[dict],
+    cat_por_label: dict,
+    min_dia_s: float | None = None,
+) -> dict | None:
+    """Fase 19 — Placar do PROCESSO vs o melhor dia dele mesmo.
+
+    Agrupa os eventos principais por DIA real de gravação (relógio no nome do
+    vídeo) e compara o dia mais recente com o melhor dia observado (maior %
+    produtivo). score = produtivo_atual / produtivo_melhor. Devolve também "o
+    que puxou pra baixo" (ações não-produtivas que mais cresceram em share vs
+    o melhor dia) e a comparação com a média dos dias anteriores. Olha o
+    processo como um todo — nunca cita pessoa. None se < 2 dias com observação
+    mínima (KV_PLACAR_MIN_DIA_S, default 10 min)."""
+    if min_dia_s is None:
+        min_dia_s = float(os.environ.get("KV_PLACAR_MIN_DIA_S", "600"))
+
+    dia_por_video: dict[str, str] = {}
+    for v in videos or []:
+        dt = _inicio_video_dt(v)
+        if v.get("id") and dt:
+            dia_por_video[v["id"]] = dt.date().isoformat()
+
+    dias: dict[str, dict] = {}
+    for e in eventos or []:
+        dia = dia_por_video.get(e.get("video_id"))
+        if not dia:
+            continue
+        label, cat, dur = _cat_do_evento(e, cat_por_label)
+        if dur <= 0:
+            continue
+        d = dias.setdefault(dia, {"tot": 0.0, "va": 0.0, "desp": 0.0, "acoes": {}})
+        d["tot"] += dur
+        if cat == "valor_agregado":
+            d["va"] += dur
+        elif cat == "desperdicio":
+            d["desp"] += dur
+        a = d["acoes"].setdefault(label, {"seg": 0.0, "cat": cat})
+        a["seg"] += dur
+
+    validos = {dia: d for dia, d in dias.items() if d["tot"] >= min_dia_s}
+    if len(validos) < 2:
+        return None
+
+    def _va_pct(d: dict) -> float:
+        return d["va"] / d["tot"] * 100
+
+    def _desp_pct(d: dict) -> float:
+        return d["desp"] / d["tot"] * 100
+
+    def _fmt_dia(iso: str) -> str:
+        p = iso.split("-")
+        return f"{p[2]}/{p[1]}"
+
+    dia_atual = max(validos)  # ISO ordena cronologicamente
+    dia_melhor = max(validos, key=lambda k: (_va_pct(validos[k]), k))
+    atual, melhor = validos[dia_atual], validos[dia_melhor]
+    eh_melhor = dia_melhor == dia_atual
+    score = 100 if eh_melhor else min(
+        100, int(round(_va_pct(atual) / max(_va_pct(melhor), 0.1) * 100))
+    )
+
+    # O que puxou pra baixo: ações NÃO-produtivas cujo share cresceu ≥5 pts
+    # em relação ao melhor dia.
+    puxou: list[tuple[float, str]] = []
+    if not eh_melhor:
+        for label, a in atual["acoes"].items():
+            if a["cat"] == "valor_agregado":
+                continue
+            share_atual = a["seg"] / atual["tot"] * 100
+            share_melhor = melhor["acoes"].get(label, {}).get("seg", 0.0) / melhor["tot"] * 100
+            delta = share_atual - share_melhor
+            if delta >= 5:
+                puxou.append((
+                    delta,
+                    f"'{label}' subiu de {share_melhor:.0f}% para {share_atual:.0f}% (+{delta:.0f} pts)",
+                ))
+        puxou.sort(key=lambda t: t[0], reverse=True)
+
+    # Vs os dias ANTERIORES (média ponderada pelo tempo observado).
+    anteriores = [d for k, d in validos.items() if k != dia_atual]
+    vs_anterior = None
+    if anteriores:
+        tot_ant = sum(d["tot"] for d in anteriores) or 1.0
+        va_ant = sum(d["va"] for d in anteriores) / tot_ant * 100
+        desp_ant = sum(d["desp"] for d in anteriores) / tot_ant * 100
+        vs_anterior = {
+            "produtivo": {
+                "antes": round(va_ant, 1), "atual": round(_va_pct(atual), 1),
+                "delta_pp": round(_va_pct(atual) - va_ant, 1),
+            },
+            "desperdicio": {
+                "antes": round(desp_ant, 1), "atual": round(_desp_pct(atual), 1),
+                "delta_pp": round(_desp_pct(atual) - desp_ant, 1),
+            },
+        }
+
+    return {
+        "score": score,
+        "eh_melhor_dia": eh_melhor,
+        "dia_atual": {
+            "dia": _fmt_dia(dia_atual), "va_pct": round(_va_pct(atual), 1),
+            "desp_pct": round(_desp_pct(atual), 1), "seg": round(atual["tot"], 1),
+        },
+        "dia_melhor": {
+            "dia": _fmt_dia(dia_melhor), "va_pct": round(_va_pct(melhor), 1),
+            "desp_pct": round(_desp_pct(melhor), 1), "seg": round(melhor["tot"], 1),
+        },
+        "puxou": [t for _, t in puxou[:3]],
+        "vs_anterior": vs_anterior,
+        "n_dias": len(validos),
+    }
+
+
+def _montar_perguntas_gestor(
+    eventos: list[dict],
+    videos: list[dict],
+    cat_por_label: dict,
+    por_roi: list[dict],
+    tempo_por_acao: list[dict],
+    tendencia_pp: float | None,
+) -> list[dict]:
+    """Fase 19 — anomalias viram PERGUNTAS prontas pro gestor levar ao chão de
+    fábrica (com número e horário real quando possível). Determinístico, sem IA.
+    Foco no PROCESSO: nenhuma pergunta cita pessoa."""
+    from datetime import timedelta
+
+    perguntas: list[dict] = []
+
+    # 1) Maior parada contínua (sequência de eventos de desperdício, com o
+    #    horário do relógio real do vídeo quando o nome carrega o token).
+    inicio_por_video: dict[str, datetime] = {}
+    for v in videos or []:
+        dt = _inicio_video_dt(v)
+        if v.get("id") and dt:
+            inicio_por_video[v["id"]] = dt
+    por_video: dict[str, list[dict]] = {}
+    for e in eventos or []:
+        vid = e.get("video_id")
+        if vid:
+            por_video.setdefault(vid, []).append(e)
+    pior: tuple[float, str, float, float, str] | None = None  # (dur, vid, ini, fim, label)
+    for vid, evs in por_video.items():
+        evs.sort(key=lambda x: float(x.get("tempo_inicio_s") or 0))
+        run_ini: float | None = None
+        run_fim = 0.0
+        run_label = ""
+        def _fecha():
+            nonlocal pior
+            if run_ini is not None:
+                dur = run_fim - run_ini
+                if pior is None or dur > pior[0]:
+                    pior = (dur, vid, run_ini, run_fim, run_label)
+        for e in evs:
+            label, cat, dur = _cat_do_evento(e, cat_por_label)
+            i = float(e.get("tempo_inicio_s") or 0)
+            f = float(e.get("tempo_fim_s") or 0)
+            if cat == "desperdicio":
+                if run_ini is not None and i - run_fim <= 90:
+                    run_fim = max(run_fim, f)
+                else:
+                    _fecha()
+                    run_ini, run_fim, run_label = i, f, label
+            else:
+                _fecha()
+                run_ini = None
+        _fecha()
+    if pior and pior[0] >= float(os.environ.get("KV_PERGUNTA_PARADA_MIN_S", "600")):
+        dur, vid, i, f, label = pior
+        dt0 = inicio_por_video.get(vid)
+        quando = (
+            f"entre {(dt0 + timedelta(seconds=i)).strftime('%Hh%M')} e "
+            f"{(dt0 + timedelta(seconds=f)).strftime('%Hh%M')}"
+            if dt0 else "num trecho contínuo"
+        )
+        perguntas.append({
+            "texto": f"Houve {_fmt_dur_h(dur)} seguidos de '{label}' {quando} — "
+                     "o que travou o processo nesse horário?",
+            "contexto": "maior parada contínua observada",
+        })
+
+    # 2) Posto (ROI) com mais desperdício — recorte por POSTO, não por pessoa.
+    for r in por_roi or []:
+        if r.get("desp_pct", 0) >= 35 and r.get("seg", 0) >= 600:
+            perguntas.append({
+                "texto": f"O posto '{r['zona']}' passou {r['desp_pct']:.0f}% do tempo em "
+                         f"desperdício ({_fmt_dur_h(r['seg'] * r['desp_pct'] / 100)}) — "
+                         "falta material, equipamento ou instrução ali?",
+                "contexto": "posto com maior desperdício",
+            })
+            break
+
+    # 3) Ação de desperdício que mais consome o processo.
+    for a in tempo_por_acao or []:
+        if a.get("categoria") == "desperdicio" and a.get("pct", 0) >= 15:
+            perguntas.append({
+                "texto": f"'{a['acao']}' consumiu {_fmt_dur_h(a['seg'])} "
+                         f"({a['pct']:.0f}%) do tempo observado — essa espera é evitável "
+                         "ou faz parte do ciclo?",
+                "contexto": "ação que mais consome tempo sem agregar valor",
+            })
+            break
+
+    # 4) Tendência piorando.
+    if tendencia_pp is not None and tendencia_pp >= 3:
+        perguntas.append({
+            "texto": f"O desperdício subiu {tendencia_pp:.0f} pts nos vídeos mais "
+                     "recentes — mudou algo no processo (equipe, material, demanda)?",
+            "contexto": "tendência de piora",
+        })
+
+    return perguntas[:4]
+
+
 def montar_insights_quantitativos(
     dist: list[dict],
     composicao: dict,
@@ -4238,12 +4473,22 @@ def montar_insights_quantitativos(
         }
         frases.append({"texto": periodo["texto"], "tom": "high" if delta > 0 else "ok"})
 
+    # Fase 19 — Placar do processo (vs melhor dia) + perguntas prontas pro
+    # gestor. Determinísticos; olham o PROCESSO, nunca a pessoa.
+    placar = _montar_placar(eventos, videos, cat_por_label)
+    perguntas = _montar_perguntas_gestor(
+        eventos, videos, cat_por_label, por_roi, tempo_por_acao,
+        (periodo or {}).get("tendencia_desp_pp"),
+    )
+
     return {
         "frases": frases,
         "tempo_por_acao": tempo_por_acao,
         "por_categoria": por_categoria,
         "por_roi": por_roi,
         "periodo": periodo,
+        "placar": placar,
+        "perguntas": perguntas,
     }
 
 

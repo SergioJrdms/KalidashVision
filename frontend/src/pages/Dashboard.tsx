@@ -7,10 +7,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapDashboard, type DetMock, type CompMock, type ProcHeaderMock, type SugMock } from "../lib/adapt";
 import { leanCor, leanLabel, leanLong, leanShort, fmtSeg, fmtDur, type LeanShort } from "../design/helpers";
-import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, toast } from "../design/ui";
+import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, Ring, toast } from "../design/ui";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
-import type { AcaoSugestao, InsightsQuantitativos } from "../lib/types";
+import type { AcaoSugestao, InsightsQuantitativos, PerguntaGestor, PlacarProcesso } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
@@ -30,9 +30,13 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
     );
   }
   const denso = t.dashboard === "denso";
+  const temPosto = (det.insights?.por_roi?.length || 0) > 1;
   return (
     <div className="col" style={{ gap: 18 }}>
       <DashHeader proc={proc} det={det} go={go} />
+
+      {/* Fase 19 — HERÓI: o processo comparado com o melhor dia dele mesmo. */}
+      <PlacarHero placar={det.insights?.placar || null} />
 
       {/* A resposta em 1 olhada: os 3 números que importam. */}
       <KpisExecutivos det={det} />
@@ -40,14 +44,133 @@ export default function Dashboard({ proc, go, t }: { proc: ProcHeaderMock; go: G
       {/* Insights rápidos — leitura de 5s (frases da Fase 17). */}
       <InsightsNumericos iq={det.insights} />
 
-      {/* Onde o tempo vai — o único "gráfico", com reclassificação Lean embutida. */}
-      <TempoPorComportamento det={det} denso={denso} processoId={proc.id} />
+      {/* Onde o tempo vai — por ação (com reclassificação Lean) e por posto. */}
+      <div style={{ display: "grid", gridTemplateColumns: isMobile || !temPosto ? "1fr" : "1.4fr 1fr", gap: 16, alignItems: "start" }}>
+        <TempoPorComportamento det={det} denso={denso} processoId={proc.id} />
+        {temPosto && <PorPosto iq={det.insights} />}
+      </div>
 
-      {/* O que fazer agora — sugestões curadas (≤6 do agregado). */}
+      {/* Agir: perguntas prontas pro chão de fábrica + sugestões curadas. */}
+      <PerguntasGestor perguntas={det.insights?.perguntas || []} />
       <Sugestoes det={det} processoId={proc.id} />
 
       <VideosRodape det={det} />
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Fase 19 — Placar do processo: "rodou a X% do seu melhor dia".
+// O processo comparado com ELE MESMO — máximo julgamento, zero micro-gestão.
+// ═══════════════════════════════════════════════════════════════════════
+function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
+  if (!placar) return null;
+  const p = placar;
+  const bom = p.eh_melhor_dia || p.score >= 85;
+  const cor = bom ? leanCor("va") : p.score >= 60 ? "#c98a00" : leanCor("desp");
+  const vs = p.vs_anterior?.["desperdicio"];
+  return (
+    <Card style={{ padding: "20px 22px", borderLeft: `3px solid ${cor}`, background: "linear-gradient(120deg, var(--soft), #fff 60%)" }}>
+      <div className="row gap4 wrap" style={{ alignItems: "center" }}>
+        <Ring pct={p.score} size={92} stroke={9} color={cor}>
+          <div className="col" style={{ alignItems: "center", lineHeight: 1 }}>
+            <span className="font-display tnum" style={{ fontSize: 26, fontWeight: 700, color: "var(--ink)" }}>{p.score}</span>
+            <span style={{ fontSize: 9, color: "var(--muted)", fontWeight: 700 }}>/100</span>
+          </div>
+        </Ring>
+        <div className="col grow" style={{ gap: 6, minWidth: 220 }}>
+          <div className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>
+            Placar do processo <Help text={`Compara o dia mais recente com o MELHOR dia já observado deste processo (maior % de tempo produtivo). Base: ${p.n_dias} dias com observação suficiente.`} width={250} />
+          </div>
+          {p.eh_melhor_dia ? (
+            <p style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", margin: 0 }}>
+              {p.dia_atual.dia} é o <span style={{ color: leanCor("va") }}>melhor dia já observado</span> — {p.dia_atual.va_pct.toFixed(0)}% produtivo em {fmtDur(p.dia_atual.seg)}.
+            </p>
+          ) : (
+            <p style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", margin: 0 }}>
+              O processo rodou a <span style={{ color: cor }}>{p.score}% do seu melhor dia</span>.
+            </p>
+          )}
+          {!p.eh_melhor_dia && (
+            <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
+              {p.dia_atual.dia}: <b style={{ color: "var(--text)" }}>{p.dia_atual.va_pct.toFixed(0)}% produtivo</b> ({fmtDur(p.dia_atual.seg)} observadas) · melhor dia {p.dia_melhor.dia}: <b style={{ color: "var(--text)" }}>{p.dia_melhor.va_pct.toFixed(0)}% produtivo</b>
+            </p>
+          )}
+          {p.puxou.length > 0 && (
+            <div className="col" style={{ gap: 3, marginTop: 2 }}>
+              {p.puxou.map((tx, i) => (
+                <span key={i} className="row gap1" style={{ fontSize: 12.5, color: "var(--text)" }}>
+                  <Icon name="arrow-down-right" size={13} color={leanCor("desp")} /> {tx}
+                </span>
+              ))}
+            </div>
+          )}
+          {vs && Math.abs(vs.delta_pp) >= 1 && (
+            <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+              Vs dias anteriores: desperdício {vs.antes.toFixed(0)}% → {vs.atual.toFixed(0)}% ({vs.delta_pp > 0 ? "+" : "−"}{Math.abs(vs.delta_pp).toFixed(0)} pts)
+            </span>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// Fase 19 — anomalias viram perguntas prontas pra levar ao chão de fábrica.
+function PerguntasGestor({ perguntas }: { perguntas: PerguntaGestor[] }) {
+  if (!perguntas.length) return null;
+  return (
+    <Card style={{ padding: 20 }}>
+      <PanelHead
+        titulo="Perguntas para o chão de fábrica"
+        ajuda="O Prism transforma as anomalias dos números em perguntas prontas — com horário e tempo reais. Leve-as à conversa diária com a equipe: quem responde é o processo, não a câmera."
+        leitura="A pauta da sua próxima conversa com a equipe, direto dos dados."
+      />
+      <div className="col" style={{ gap: 10 }}>
+        {perguntas.map((q, i) => (
+          <div key={i} className="card-flat" style={{ padding: "10px 12px", display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <span className="center" style={{ width: 26, height: 26, borderRadius: 8, background: "var(--accent-soft)", color: "var(--accent-deep)", flex: "none" }}>
+              <Icon name="message-circle-question" size={14} />
+            </span>
+            <div className="col" style={{ gap: 2, minWidth: 0 }}>
+              <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink)", margin: 0, lineHeight: 1.45 }}>{q.texto}</p>
+              {q.contexto && <span style={{ fontSize: 11, color: "var(--faint)" }}>{q.contexto}</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// Fase 19 — recorte por POSTO (ROI da câmera) — o processo por estação, nunca
+// por pessoa. Só aparece quando há mais de um posto mapeado.
+function PorPosto({ iq }: { iq: InsightsQuantitativos | null }) {
+  const rois = iq?.por_roi || [];
+  if (rois.length < 2) return null;
+  return (
+    <Card style={{ padding: 20 }}>
+      <PanelHead
+        titulo="Por posto de trabalho"
+        ajuda="Cada posto é um ROI das câmeras (bancada, esteira…). Mostra quanto do tempo daquele posto é produtivo vs desperdício — o gargalo aparece na cor."
+        leitura="Onde o processo trava, por estação."
+      />
+      <ul className="col" style={{ gap: 12, listStyle: "none", padding: 0, margin: 0 }}>
+        {rois.slice(0, 6).map((r) => (
+          <li key={r.zona}>
+            <div className="row gap2" style={{ marginBottom: 4 }}>
+              <span className="truncate" style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{r.zona}</span>
+              <span className="grow" />
+              <span className="tnum" style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 600 }}>{fmtDur(r.seg)} observadas</span>
+            </div>
+            <LeanBar va={r.va_pct} desp={r.desp_pct} apoio={Math.max(0, 100 - r.va_pct - r.desp_pct)} none={0} />
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
+              <b style={{ color: leanCor("va") }}>{r.va_pct.toFixed(0)}% produtivo</b> · <b style={{ color: leanCor("desp") }}>{r.desp_pct.toFixed(0)}% desperdício</b>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 

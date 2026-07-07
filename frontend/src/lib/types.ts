@@ -213,12 +213,37 @@ export interface InsightFrase {
   tom: string; // ok | warn | high | info
 }
 
+export interface PlacarDia {
+  dia: string; // "27/06"
+  va_pct: number;
+  desp_pct: number;
+  seg: number;
+}
+
+export interface PlacarProcesso {
+  score: number; // 0-100: % do melhor dia observado
+  eh_melhor_dia: boolean;
+  dia_atual: PlacarDia;
+  dia_melhor: PlacarDia;
+  puxou: string[]; // o que puxou pra baixo vs melhor dia
+  vs_anterior: Record<string, { antes: number; atual: number; delta_pp: number }> | null;
+  n_dias: number;
+}
+
+export interface PerguntaGestor {
+  texto: string;
+  contexto?: string;
+}
+
 export interface InsightsQuantitativos {
   frases: InsightFrase[];
   tempo_por_acao: Array<{ acao: string; seg: number; pct: number; categoria: string | null }>;
   por_categoria: Record<string, { seg: number; pct: number }>;
   por_roi: Array<{ zona: string; seg: number; pct: number; va_pct: number; desp_pct: number }>;
   periodo: { texto: string; tendencia_desp_pp: number } | null;
+  // Fase 19 — placar vs melhor dia + perguntas prontas pro chão de fábrica
+  placar?: PlacarProcesso | null;
+  perguntas?: PerguntaGestor[];
 }
 
 export interface EventoIrmaoPendente {
