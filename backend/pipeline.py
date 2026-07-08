@@ -3263,6 +3263,11 @@ def montar_snapshot_chat(
         a["dur"] += d
         a["vids"].add(e.get("video_id"))
 
+    # Fase 20: % sobre o tempo de ATIVIDADE (soma dos eventos), não sobre a
+    # duração bruta dos vídeos — é a MESMA régua da composição Lean e das
+    # frases do dashboard ("30min de 1h06" = 45%, não 13%). A duração bruta
+    # segue exposta em tempo_total_observado_min.
+    total_atividade = sum(a["dur"] for a in agg.values())
     distrib = []
     for l, a in sorted(agg.items(), key=lambda kv: kv[1]["dur"], reverse=True):
         distrib.append(
@@ -3271,7 +3276,7 @@ def montar_snapshot_chat(
                 "descricao": desc_por_label.get(l, l),
                 "ocorrencias": a["oc"],
                 "tempo_total_s": round(a["dur"], 1),
-                "pct_tempo": round(a["dur"] / max(1, dur_total) * 100, 1),
+                "pct_tempo": round(a["dur"] / max(1.0, total_atividade) * 100, 1),
                 "em_n_videos": len(a["vids"]),
             }
         )
@@ -4239,6 +4244,7 @@ def _montar_placar(
             "puxou": [],
             "vs_anterior": None,
             "n_unidades": 1,
+            "ganho": None,
         }
 
     melhor_k = max(grupos, key=lambda k: (_va_pct(grupos[k]), grupos[k]["ordem"]))
@@ -4283,6 +4289,23 @@ def _montar_placar(
             },
         }
 
+    # Fase 20 — quanto VALE fechar o gap: se o processo rodar como o melhor
+    # dia/sessão, quantas horas produtivas cada turno ganha (e por mês).
+    # Determinístico: gap de % produtivo × horas do turno (KV_TURNO_H, default
+    # 8h) × turnos/mês (KV_TURNOS_MES, default 22).
+    ganho = None
+    gap_pp = round(_va_pct(melhor) - _va_pct(atual), 1)
+    if not eh_melhor and gap_pp >= 2:
+        turno_h = float(os.environ.get("KV_TURNO_H", "8"))
+        turnos_mes = float(os.environ.get("KV_TURNOS_MES", "22"))
+        por_turno_s = gap_pp / 100.0 * turno_h * 3600
+        ganho = {
+            "gap_pp": gap_pp,
+            "turno_h": round(turno_h, 1),
+            "por_turno_s": round(por_turno_s, 1),
+            "por_mes_s": round(por_turno_s * turnos_mes, 1),
+        }
+
     return {
         "modo": "comparativo",
         "unidade": unidade,
@@ -4293,6 +4316,7 @@ def _montar_placar(
         "puxou": [t for _, t in puxou[:3]],
         "vs_anterior": vs_anterior,
         "n_unidades": len(grupos),
+        "ganho": ganho,
     }
 
 
@@ -4303,10 +4327,14 @@ def _montar_perguntas_gestor(
     por_roi: list[dict],
     tempo_por_acao: list[dict],
     tendencia_pp: float | None,
+    placar: dict | None = None,
+    por_categoria: dict | None = None,
 ) -> list[dict]:
-    """Fase 19 — anomalias viram PERGUNTAS prontas pro gestor levar ao chão de
-    fábrica (com número e horário real quando possível). Determinístico, sem IA.
-    Foco no PROCESSO: nenhuma pergunta cita pessoa."""
+    """Fase 19/20 — os números viram PERGUNTAS prontas pro gestor levar ao chão
+    de fábrica (com número e horário real quando possível). Determinístico, sem
+    IA. Foco no PROCESSO: nenhuma pergunta cita pessoa. Sempre tenta entregar
+    algo útil: além das anomalias (parada, posto, tendência), pergunta como
+    REPETIR o melhor dia e pede nome pro tempo ainda sem categoria."""
     from datetime import timedelta
 
     perguntas: list[dict] = []
@@ -4363,7 +4391,20 @@ def _montar_perguntas_gestor(
             "contexto": "maior parada contínua observada",
         })
 
-    # 2) Posto (ROI) com mais desperdício — recorte por POSTO, não por pessoa.
+    # 2) Aprender com o MELHOR dia (Fase 20 — pergunta positiva, sempre que há
+    #    comparação e o gap é relevante). Kaizen clássico: estudar o dia bom.
+    if placar and placar.get("modo") == "comparativo" and not placar.get("eh_melhor") \
+            and placar.get("score", 100) <= 90:
+        uni = placar.get("unidade") or "dia"
+        m, a = placar["dia_melhor"], placar["dia_atual"]
+        perguntas.append({
+            "texto": f"O melhor {uni} ({m['dia']}) rodou a {m['va_pct']:.0f}% produtivo "
+                     f"vs {a['va_pct']:.0f}% agora — o que estava diferente lá "
+                     "(preparação, material, ritmo)? Dá para repetir?",
+            "contexto": "aprenda com o melhor — é a melhoria mais barata",
+        })
+
+    # 3) Posto (ROI) com mais desperdício — recorte por POSTO, não por pessoa.
     for r in por_roi or []:
         if r.get("desp_pct", 0) >= 35 and r.get("seg", 0) >= 600:
             perguntas.append({
@@ -4374,7 +4415,27 @@ def _montar_perguntas_gestor(
             })
             break
 
-    # 3) Ação de desperdício que mais consome o processo.
+    # 4) Batizar o tempo CINZA (Fase 20): a maior ação ainda sem categoria Lean.
+    #    Só o gestor sabe se aquilo agrega valor — e a resposta destrava todos
+    #    os outros números.
+    nao_class = (por_categoria or {}).get("nao_classificado") or {}
+    if float(nao_class.get("pct") or 0) >= 10:
+        maior_cinza = next(
+            (a for a in (tempo_por_acao or [])
+             if (a.get("categoria") or "nao_classificado") == "nao_classificado"
+             and a.get("seg", 0) >= 120),
+            None,
+        )
+        if maior_cinza:
+            perguntas.append({
+                "texto": f"'{maior_cinza['acao']}' tomou {_fmt_dur_h(maior_cinza['seg'])} "
+                         f"({maior_cinza['pct']:.0f}%) e ainda não tem categoria — isso "
+                         "agrega valor, é apoio ou é desperdício? Classifique em 'Tempo "
+                         "por comportamento' e o placar passa a refletir a realidade.",
+                "contexto": f"{nao_class.get('pct', 0):.0f}% do tempo ainda sem categoria",
+            })
+
+    # 5) Ação de desperdício que mais consome o processo.
     for a in tempo_por_acao or []:
         if a.get("categoria") == "desperdicio" and a.get("pct", 0) >= 15:
             perguntas.append({
@@ -4385,7 +4446,7 @@ def _montar_perguntas_gestor(
             })
             break
 
-    # 4) Tendência piorando.
+    # 6) Tendência piorando.
     if tendencia_pp is not None and tendencia_pp >= 3:
         perguntas.append({
             "texto": f"O desperdício subiu {tendencia_pp:.0f} pts nos vídeos mais "
@@ -4417,17 +4478,29 @@ def montar_insights_quantitativos(
         float(sum(d.get("tempo_total_s", 0) for d in (dist or []))) or 1.0
     frases: list[dict] = []
 
-    # 1) Tempo observado
+    # 1) Atividade analisada vs filmagem bruta (Fase 20 — duas réguas, ditas
+    #    com honestidade: as % do dashboard são sobre o tempo de ATIVIDADE).
     n_videos = len({v.get("id") for v in (videos or []) if v.get("id")})
-    frases.append({
-        "texto": f"Tempo observado: {_fmt_dur_h(total)} em {n_videos} vídeo(s).",
-        "tom": "info",
-    })
+    filmagem_s = sum(float(v.get("duracao_s") or 0) for v in (videos or []))
+    if filmagem_s > total * 1.15:
+        frases.append({
+            "texto": f"Atividade analisada: {_fmt_dur_h(total)} em {n_videos} vídeo(s) "
+                     f"({_fmt_dur_h(filmagem_s)} de filmagem — o restante é tempo sem "
+                     "ação detectada em cena).",
+            "tom": "info",
+        })
+    else:
+        frases.append({
+            "texto": f"Atividade analisada: {_fmt_dur_h(total)} em {n_videos} vídeo(s).",
+            "tom": "info",
+        })
 
-    # 2) Onde o tempo foi (top ações)
+    # 2) Onde o tempo foi (top ações) — % recalculada sobre a MESMA régua do
+    #    total acima (tempo de atividade), independente da base do `dist`.
     tempo_por_acao = [
         {"acao": d.get("comportamento"), "seg": round(d.get("tempo_total_s", 0), 1),
-         "pct": d.get("pct_tempo", 0), "categoria": d.get("categoria_lean")}
+         "pct": round(float(d.get("tempo_total_s", 0)) / total * 100, 1),
+         "categoria": d.get("categoria_lean")}
         for d in sorted(dist or [], key=lambda x: x.get("tempo_total_s", 0), reverse=True)
     ]
     if tempo_por_acao:
@@ -4520,12 +4593,14 @@ def montar_insights_quantitativos(
         }
         frases.append({"texto": periodo["texto"], "tom": "high" if delta > 0 else "ok"})
 
-    # Fase 19 — Placar do processo (vs melhor dia) + perguntas prontas pro
-    # gestor. Determinísticos; olham o PROCESSO, nunca a pessoa.
+    # Fase 19/20 — Placar do processo (vs melhor dia, com ganho projetado) +
+    # perguntas prontas pro gestor. Determinísticos; olham o PROCESSO, nunca a
+    # pessoa. O placar entra ANTES: as perguntas usam o melhor dia dele.
     placar = _montar_placar(eventos, videos, cat_por_label)
     perguntas = _montar_perguntas_gestor(
         eventos, videos, cat_por_label, por_roi, tempo_por_acao,
         (periodo or {}).get("tendencia_desp_pp"),
+        placar=placar, por_categoria=por_categoria,
     )
 
     return {

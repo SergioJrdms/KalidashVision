@@ -37,6 +37,9 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
       {/* Fase 19 — HERÓI: o processo comparado com o melhor dia dele mesmo. */}
       <PlacarHero placar={det.insights?.placar || null} />
 
+      {/* Fase 20 — a ação de maior alavancagem agora (1 por vez). */}
+      <ProximoPasso det={det} proc={proc} go={go} />
+
       {/* A resposta em 1 olhada: os 3 números que importam. */}
       <KpisExecutivos det={det} />
 
@@ -130,6 +133,14 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
               {p.dia_atual.dia}: <b style={{ color: "var(--text)" }}>{p.dia_atual.va_pct.toFixed(0)}% produtivo</b> ({fmtDur(p.dia_atual.seg)} observadas) · melhor {uni} {p.dia_melhor.dia}: <b style={{ color: "var(--text)" }}>{p.dia_melhor.va_pct.toFixed(0)}% produtivo</b>
             </p>
           )}
+          {p.ganho && (
+            <div className="row gap1" style={{ marginTop: 2, padding: "6px 10px", borderRadius: 8, background: "var(--accent-soft)", width: "fit-content", maxWidth: "100%" }}>
+              <Icon name="gem" size={14} color="var(--accent-deep)" />
+              <span style={{ fontSize: 12.5, color: "var(--accent-deep)", fontWeight: 600 }}>
+                Rodando como o melhor {uni}, cada turno de {p.ganho.turno_h}h ganha <b>+{fmtDur(p.ganho.por_turno_s)} produtivas</b> (~+{fmtDur(p.ganho.por_mes_s)}/mês).
+              </span>
+            </div>
+          )}
           {p.puxou.length > 0 && (
             <div className="col" style={{ gap: 3, marginTop: 2 }}>
               {p.puxou.map((tx, i) => (
@@ -145,6 +156,63 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
             </span>
           )}
         </div>
+      </div>
+    </Card>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Fase 20 — Próximo passo: a ÚNICA ação de maior alavancagem agora.
+// Regra de prioridade: (1) tempo sem categoria ≥15% (classificar destrava
+// todos os números) → (2) fila de validação grande (ensinar o Prism) →
+// (3) desperdício relevante (agir nas sugestões). Nada disparou → some.
+// ═══════════════════════════════════════════════════════════════════════
+function ProximoPasso({ det, proc, go }: { det: DetMock; proc: ProcHeaderMock; go: Go }) {
+  const none = det.insights?.por_categoria?.["nao_classificado"];
+  const nonePct = none?.pct ?? det.snapshot.none;
+  const topCinza = det.comportamentos.find((c) => c.cat === "none");
+  const desp = det.insights?.por_categoria?.["desperdicio"];
+
+  let passo: { titulo: string; desc: string; cta: string; onClick: () => void } | null = null;
+  if (nonePct >= 15 && topCinza) {
+    passo = {
+      titulo: "Classifique o tempo sem categoria",
+      desc: `${Math.round(nonePct)}% do tempo (${fmtDur(none?.seg ?? topCinza.seg)}) ainda é cinza — comece por '${topCinza.nome}' (${fmtDur(topCinza.seg)}). Toque no chip de categoria e diga se agrega valor, apoia ou desperdiça. O placar fica real na hora.`,
+      cta: "Classificar agora",
+      onClick: () => document.getElementById("painel-tempo-comportamento")?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    };
+  } else if (proc.pendencias >= 30) {
+    passo = {
+      titulo: `Valide ${proc.pendencias} eventos e ensine o Prism`,
+      desc: "Cada validação vira um padrão que o Prism aplica sozinho nos próximos vídeos — a fila encolhe de forma permanente e os números ficam mais confiáveis.",
+      cta: "Ir para a validação",
+      onClick: () => go("processo", proc.id, "validacao"),
+    };
+  } else if ((desp?.pct ?? 0) >= 15) {
+    passo = {
+      titulo: "Ataque o desperdício",
+      desc: `${Math.round(desp!.pct)}% do tempo (${fmtDur(desp!.seg)}) é desperdício. As perguntas e sugestões abaixo mostram por onde começar.`,
+      cta: "Ver o que fazer",
+      onClick: () => document.getElementById("painel-sugestoes")?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    };
+  }
+  if (!passo) return null;
+  return (
+    <Card style={{ padding: "14px 18px", borderLeft: "3px solid var(--accent)" }}>
+      <div className="row gap3 wrap" style={{ justifyContent: "space-between", alignItems: "center" }}>
+        <div className="row gap3" style={{ minWidth: 0, flex: 1 }}>
+          <span className="center" style={{ width: 34, height: 34, borderRadius: 10, background: "var(--accent-soft)", color: "var(--accent-deep)", flex: "none" }}>
+            <Icon name="crosshair" size={17} />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div className="row gap2" style={{ alignItems: "baseline" }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--accent-deep)" }}>Próximo passo</span>
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>{passo.titulo}</span>
+            </div>
+            <p className="pretty" style={{ fontSize: 12.5, color: "var(--muted)", margin: "2px 0 0" }}>{passo.desc}</p>
+          </div>
+        </div>
+        <Btn icon="arrow-right" onClick={passo.onClick} style={{ flex: "none" }}>{passo.cta}</Btn>
       </div>
     </Card>
   );
@@ -365,7 +433,7 @@ function Sugestoes({ det, processoId }: { det: DetMock; processoId: string }) {
   });
 
   return (
-    <Card style={{ padding: 18 }}>
+    <Card id="painel-sugestoes" style={{ padding: 18 }}>
       <PanelHead titulo="Sugestões de produtividade" ajuda="Geradas pela IA combinando seus dados agregados com os 7 desperdícios do Lean. Marque como realizada quando aplicar a ação — se ela voltar depois, o Prism avisa que não foi cumprida." right={<span style={{ fontSize: 12, color: "var(--muted)" }}>{visiveis.length} de {lista.length}</span>} />
       <div className="row gap1 wrap" style={{ marginBottom: 12 }}>
         {["todas", "alta", "media", "info"].map((p) => (
@@ -572,7 +640,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
   const lista: CompMock[] = verTodos ? det.comportamentos : det.comportamentos.slice(0, COMP_VISIVEL_PADRAO);
   const marca: Record<string, { m: string; c: string }> = { humano: { m: "check", c: "var(--accent-deep)" }, aprendido: { m: "rotate-ccw", c: "var(--va)" }, ia: { m: "sparkles", c: "var(--faint)" } };
   return (
-    <Card style={{ padding: 20 }}>
+    <Card id="painel-tempo-comportamento" style={{ padding: 20 }}>
       <PanelHead
         titulo="Tempo por comportamento"
         ajuda="Os comportamentos que mais consomem tempo. Clique no chip de categoria para reclassificar — sua decisão vale para comportamentos de mesmo nome em outros processos."

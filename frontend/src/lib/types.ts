@@ -230,6 +230,8 @@ export interface PlacarProcesso {
   puxou: string[]; // o que puxou pra baixo vs melhor unidade
   vs_anterior: Record<string, { antes: number; atual: number; delta_pp: number }> | null;
   n_unidades: number;
+  // Fase 20 — quanto vale fechar o gap vs o melhor dia (horas produtivas)
+  ganho?: { gap_pp: number; turno_h: number; por_turno_s: number; por_mes_s: number } | null;
 }
 
 export interface PerguntaGestor {
