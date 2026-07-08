@@ -22,7 +22,7 @@ except ImportError:
     pass
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -4593,6 +4593,54 @@ def montar_insights_quantitativos(
         }
         frases.append({"texto": periodo["texto"], "tom": "high" if delta > 0 else "ok"})
 
+    # 6) Fase 21 — Ritmo por hora do relógio REAL (junta todos os dias): em
+    #    que horas o processo rende e em que horas trava. Só entra quando o
+    #    nome do vídeo carrega o token de relógio (edge) ou há processado_em.
+    inicio_por_video = {}
+    for v in (videos or []):
+        dt0 = _inicio_video_dt(v)
+        if v.get("id") and dt0:
+            inicio_por_video[v["id"]] = dt0
+    ritmo_agg: dict[int, dict] = {}
+    for e in (eventos or []):
+        dt0 = inicio_por_video.get(e.get("video_id"))
+        if dt0 is None:
+            continue
+        _label, cat, dur = _cat_do_evento(e, cat_por_label)
+        if dur <= 0:
+            continue
+        hora = (dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))).hour
+        h = ritmo_agg.setdefault(hora, {"seg": 0.0, "va": 0.0, "apoio": 0.0, "desp": 0.0})
+        h["seg"] += dur
+        if cat == "valor_agregado":
+            h["va"] += dur
+        elif cat == "apoio":
+            h["apoio"] += dur
+        elif cat == "desperdicio":
+            h["desp"] += dur
+    por_hora = []
+    for hora in sorted(ritmo_agg):
+        h = ritmo_agg[hora]
+        if h["seg"] < 120:  # menos de 2 min na hora = ruído
+            continue
+        s = h["seg"]
+        por_hora.append({
+            "hora": hora, "seg": round(s, 1),
+            "va_pct": round(h["va"] / s * 100, 1),
+            "apoio_pct": round(h["apoio"] / s * 100, 1),
+            "desp_pct": round(h["desp"] / s * 100, 1),
+        })
+    if len(por_hora) >= 3:
+        melhor_h = max(por_hora, key=lambda x: x["va_pct"])
+        pior_h = min(por_hora, key=lambda x: x["va_pct"])
+        if melhor_h["hora"] != pior_h["hora"] and melhor_h["va_pct"] - pior_h["va_pct"] >= 10:
+            frases.append({
+                "texto": f"Ritmo do dia: melhor hora {melhor_h['hora']}h "
+                         f"({melhor_h['va_pct']:.0f}% produtivo) · pior hora "
+                         f"{pior_h['hora']}h ({pior_h['va_pct']:.0f}%).",
+                "tom": "info",
+            })
+
     # Fase 19/20 — Placar do processo (vs melhor dia, com ganho projetado) +
     # perguntas prontas pro gestor. Determinísticos; olham o PROCESSO, nunca a
     # pessoa. O placar entra ANTES: as perguntas usam o melhor dia dele.
@@ -4608,6 +4656,7 @@ def montar_insights_quantitativos(
         "tempo_por_acao": tempo_por_acao,
         "por_categoria": por_categoria,
         "por_roi": por_roi,
+        "por_hora": por_hora,
         "periodo": periodo,
         "placar": placar,
         "perguntas": perguntas,

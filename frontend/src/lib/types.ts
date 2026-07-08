@@ -244,6 +244,8 @@ export interface InsightsQuantitativos {
   tempo_por_acao: Array<{ acao: string; seg: number; pct: number; categoria: string | null }>;
   por_categoria: Record<string, { seg: number; pct: number }>;
   por_roi: Array<{ zona: string; seg: number; pct: number; va_pct: number; desp_pct: number }>;
+  // Fase 21 — ritmo por hora do relógio real (junta todos os dias)
+  por_hora?: Array<{ hora: number; seg: number; va_pct: number; apoio_pct: number; desp_pct: number }>;
   periodo: { texto: string; tendencia_desp_pp: number } | null;
   // Fase 19 — placar vs melhor dia + perguntas prontas pro chão de fábrica
   placar?: PlacarProcesso | null;

@@ -56,8 +56,156 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
       <PerguntasGestor perguntas={det.insights?.perguntas || []} />
       <Sugestoes det={det} processoId={proc.id} />
 
+      {/* Fase 21 — a operação em gráficos: evolução, ritmo do dia e as
+          demais óticas visuais, para quem quer se aprofundar. */}
+      <OperacaoEmGraficos det={det} iq={det.insights} processoId={proc.id} />
+
       <VideosRodape det={det} />
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Fase 21 — Seção visual: gráficos e óticas complementares, abaixo das
+// sugestões. O topo responde em 1 olhada; aqui é onde o gestor se aprofunda.
+// ═══════════════════════════════════════════════════════════════════════
+function OperacaoEmGraficos({ det, iq, processoId }: { det: DetMock; iq: InsightsQuantitativos | null; processoId: string }) {
+  return (
+    <div>
+      <div className="row gap2" style={{ marginBottom: 4 }}>
+        <h2 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>A operação em gráficos</h2>
+        <Help text="Visões complementares calculadas dos mesmos vídeos: como o processo evolui, em que horas rende, onde o tempo se concentra e como as atividades se sequenciam." />
+      </div>
+      <p style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Os números do topo, agora em imagem — para investigar padrões e contar a história da operação.</p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 380px),1fr))", gap: 16 }}>
+        <EvolucaoPanel processoId={processoId} />
+        <RitmoDoDia iq={iq} />
+        <ParetoPanel det={det} />
+        <ComposicaoPanel det={det} />
+        <FluxoPanel det={det} />
+        <Aprendizado det={det} />
+      </div>
+    </div>
+  );
+}
+
+// Evolução por vídeo: colunas 100% empilhadas (produtivo/apoio/desperdício/
+// não classificado), em ordem cronológica — a história do processo.
+function EvolucaoPanel({ processoId }: { processoId: string }) {
+  const q = useQuery({ queryKey: ["serie", processoId], queryFn: () => api.padroes.serie(processoId) });
+  const pontos = (q.data?.pontos || []).slice(-16); // últimos 16 vídeos
+  const rotulo = (p: { processado_em: string | null }, i: number): string => {
+    if (p.processado_em) {
+      const d = new Date(p.processado_em);
+      if (!Number.isNaN(d.getTime())) return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+    }
+    return `V${i + 1}`;
+  };
+  const W = 460, H = 210, padT = 8, padB = 26, padL = 8, padR = 8;
+  const n = Math.max(1, pontos.length);
+  const slot = (W - padL - padR) / n;
+  const bw = Math.min(30, slot - 6);
+  const plotH = H - padT - padB;
+  const CATS: Array<{ k: string; cat: LeanShort }> = [
+    { k: "valor_agregado", cat: "va" }, { k: "apoio", cat: "apoio" },
+    { k: "desperdicio", cat: "desp" }, { k: "nao_classificado", cat: "none" },
+  ];
+  return (
+    <Card style={{ padding: 20 }}>
+      <PanelHead
+        titulo="Evolução por vídeo"
+        ajuda="Cada coluna é um vídeo (em ordem cronológica), dividida em produtivo, apoio, desperdício e não classificado. Mostra se a operação está melhorando de um vídeo para o outro."
+        leitura="Verde crescendo = o processo está aprendendo a render."
+        right={q.data ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{pontos.length} de {q.data.n_videos}</span> : undefined}
+      />
+      {pontos.length < 2 ? (
+        <p style={{ fontSize: 13, color: "var(--muted)" }}>Precisa de pelo menos 2 vídeos para mostrar a evolução.</p>
+      ) : (
+        <>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }} role="img" aria-label="Evolução da composição do tempo por vídeo">
+            {[0, 25, 50, 75, 100].map((g) => (
+              <line key={g} x1={padL} x2={W - padR} y1={padT + (1 - g / 100) * plotH} y2={padT + (1 - g / 100) * plotH} stroke="var(--line-2)" />
+            ))}
+            {/* Rótulos esparsos: no máx. ~6, senão colidem com muitas colunas. */}
+            {pontos.map((p, i) => {
+              const sc = p.share_categoria || {};
+              const va = Math.max(0, sc["valor_agregado"] || 0);
+              const apoio = Math.max(0, sc["apoio"] || 0);
+              const desp = Math.max(0, sc["desperdicio"] || 0);
+              const none = Math.max(0, 100 - va - apoio - desp);
+              const vals: Record<string, number> = { valor_agregado: va, apoio, desperdicio: desp, nao_classificado: none };
+              const x = padL + i * slot + (slot - bw) / 2;
+              let yTopo = H - padB; // empilha de baixo (produtivo) pra cima
+              const tip = `${rotulo(p, i)} — produtivo ${Math.round(va)}% · apoio ${Math.round(apoio)}% · desperdício ${Math.round(desp)}% · não classif. ${Math.round(none)}%`;
+              const passoRotulo = Math.ceil(pontos.length / 6);
+              const mostraRotulo = i % passoRotulo === 0;
+              return (
+                <g key={p.video_id || i}>
+                  {CATS.map(({ k, cat }) => {
+                    const h = (vals[k] / 100) * plotH;
+                    if (h <= 0.5) return null;
+                    yTopo -= h;
+                    return <rect key={k} x={x} y={yTopo + 1} width={bw} height={Math.max(1, h - 2)} rx="2.5" fill={leanCor(cat)} opacity={cat === "none" ? 0.55 : 0.92}><title>{tip}</title></rect>;
+                  })}
+                  {mostraRotulo && <text x={x + bw / 2} y={H - padB + 14} fontSize="9" textAnchor="middle" fill="var(--muted)" fontFamily="var(--mono)">{rotulo(p, i)}</text>}
+                </g>
+              );
+            })}
+          </svg>
+          <div className="row wrap" style={{ gap: 10, fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
+            {CATS.map(({ cat }) => (
+              <span key={cat} className="row" style={{ gap: 5 }}>
+                <i style={{ width: 9, height: 9, borderRadius: 3, background: leanCor(cat) }} /> {leanLabel(cat)}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+// Ritmo do dia: em que horas o processo rende e em que horas trava —
+// agregado pelo relógio REAL dos vídeos (todos os dias juntos).
+function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
+  const horas = iq?.por_hora || [];
+  const maxSeg = Math.max(1, ...horas.map((h) => h.seg));
+  return (
+    <Card style={{ padding: 20 }}>
+      <PanelHead
+        titulo="Ritmo do dia"
+        ajuda="O tempo de cada hora do relógio (somando todos os dias filmados), dividido em produtivo, apoio e desperdício. Revela padrões estruturais: começo de turno lento, queda pós-almoço, fim de dia disperso."
+        leitura="Procure a hora mais vermelha — é onde a rotina trava todo dia."
+      />
+      {horas.length < 2 ? (
+        <p style={{ fontSize: 13, color: "var(--muted)" }}>Ainda não há horas suficientes com atividade para desenhar o ritmo.</p>
+      ) : (
+        <>
+          <ul className="col" style={{ gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
+            {horas.map((h) => {
+              const none = Math.max(0, 100 - h.va_pct - h.apoio_pct - h.desp_pct);
+              return (
+                <li key={h.hora} className="row gap2" title={`${h.hora}h — ${fmtDur(h.seg)} de atividade · ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
+                  <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
+                  <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
+                    <LeanBar va={h.va_pct} apoio={h.apoio_pct} desp={h.desp_pct} none={none} height={10} />
+                  </div>
+                  <span className="tnum" style={{ width: 52, textAlign: "right", fontSize: 11, color: "var(--muted)", flex: "none" }}>{fmtDur(h.seg)}</span>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="row wrap" style={{ gap: 10, fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
+            {(["va", "apoio", "desp", "none"] as LeanShort[]).map((c) => (
+              <span key={c} className="row" style={{ gap: 5 }}>
+                <i style={{ width: 9, height: 9, borderRadius: 3, background: leanCor(c) }} /> {leanLabel(c)}
+              </span>
+            ))}
+            <span style={{ marginLeft: "auto" }}>barra mais forte = mais tempo filmado naquela hora</span>
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 
