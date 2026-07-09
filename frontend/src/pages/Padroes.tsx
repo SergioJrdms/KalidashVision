@@ -18,7 +18,23 @@ const TIPO_PADRAO: Record<string, { icon: string; label: string }> = {
   valor: { icon: "arrow-up", label: "Valor recorrente" },
 };
 
-export default function Padroes({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
+// Fase 24: a tela de Padrões está DESATIVADA ("em breve") p/ cortar o consumo
+// de tokens da análise de padrões no backend. Nada foi removido — a
+// implementação original segue INTACTA em `PadroesOriginal` abaixo; para
+// reativar, basta o export default voltar a renderizá-la (e KV_PADROES_ENABLE=on).
+export default function Padroes(_props: { proc: ProcHeaderMock; go: Go }) {
+  return (
+    <Card>
+      <Empty
+        icon="sparkles"
+        title="Padrões — em breve"
+        desc="Estamos aprimorando a detecção de padrões da operação (tendências, recorrências e desvios ao longo dos turnos). Em breve por aqui."
+      />
+    </Card>
+  );
+}
+
+function PadroesOriginal({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const serieQ = useQuery({ queryKey: ["serie", proc.id], queryFn: () => api.padroes.serie(proc.id) });
   const padQ = useQuery({ queryKey: ["padroes", proc.id], queryFn: () => api.padroes.doProcesso(proc.id) });
 

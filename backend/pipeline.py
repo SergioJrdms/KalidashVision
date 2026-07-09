@@ -4306,6 +4306,20 @@ def gerar_insights_globais(
 MIN_VIDEOS_PADRAO = 3
 MIN_PROCESSOS_GLOBAL = 2
 
+# Fase 24: a análise de padrões (LLM) está DESATIVADA por padrão p/ cortar
+# tokens (a tela de Padrões está "em breve"). Reative com KV_PADROES_ENABLE=on
+# sem tocar em código — nenhum padrão já gravado é apagado quando desligada.
+_PADROES_ENABLE = os.environ.get("KV_PADROES_ENABLE", "off") not in ("off", "0", "false", "False", "")
+_padroes_desativado_logado = False
+
+
+def _padroes_ativo() -> bool:
+    global _padroes_desativado_logado
+    if not _PADROES_ENABLE and not _padroes_desativado_logado:
+        log.info("[padroes] análise de padrões DESATIVADA (KV_PADROES_ENABLE=off) — 0 tokens")
+        _padroes_desativado_logado = True
+    return _PADROES_ENABLE
+
 
 def _media(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
@@ -5236,6 +5250,8 @@ def analisar_padroes_processo(
 ) -> int:
     """Calcula sinais (Python) e pede ao LLM a interpretação. Persiste
     (substituindo os vigentes). Não-fatal. Retorna nº de padrões."""
+    if not _padroes_ativo():
+        return 0   # Fase 24: desativado — não gasta token nem apaga vigentes
     serie = montar_serie_temporal(sb, empresa, processo)
     if serie["n_videos"] < MIN_VIDEOS_PADRAO:
         # massa insuficiente — limpa vigentes e não chama LLM
@@ -5317,6 +5333,8 @@ def analisar_padroes_globais(
 ) -> int:
     """Calcula sinais globais (Python) + interpretação LLM. Substitui os
     vigentes da empresa. Não-fatal."""
+    if not _padroes_ativo():
+        return 0   # Fase 24: desativado — não gasta token nem apaga vigentes
     sinais = calcular_sinais_globais(sb, empresa, portfolio=portfolio)
     if sinais["n_processos_com_dados"] < MIN_PROCESSOS_GLOBAL:
         try:
