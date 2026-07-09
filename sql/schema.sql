@@ -36,12 +36,18 @@ create table if not exists segmentos (
     video_id uuid,
     erro text,
     recebido_em timestamptz default now(),
-    processado_em timestamptz
+    processado_em timestamptz,
+    score numeric,                     -- Fase 22: pontuação de atividade do edge (0-100)
+    selecao text                       -- Fase 22: motivo da subida (topk|calibracao|retry)
 );
 
 -- Migrações idempotentes p/ bases já existentes (Fase 1 multi-câmera)
 alter table videos add column if not exists cam_id text;
 alter table videos add column if not exists gravado_em timestamptz;
+
+-- Fase 22 — seleção top-K no edge (auditoria: quais segmentos subiram e por quê)
+alter table segmentos add column if not exists score numeric;
+alter table segmentos add column if not exists selecao text;
 
 create table if not exists comportamentos (
     id uuid primary key default gen_random_uuid(),

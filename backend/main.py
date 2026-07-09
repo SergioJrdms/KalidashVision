@@ -710,6 +710,10 @@ async def upload_video(
     # Upload manual (frontend) NÃO passa — fica NULL no banco.
     cam_id: str | None = Form(default=None),
     gravado_em: str | None = Form(default=None),
+    # Fase 22 — auditoria da seleção top-K do edge (opcionais): score 0-100 da
+    # pontuação de atividade e o motivo da subida ('topk'|'calibracao'|'retry').
+    score: float | None = Form(default=None),
+    selecao: str | None = Form(default=None),
     user: CurrentUser = Depends(get_current_user),
 ):
     sb = make_supabase_client()
@@ -793,6 +797,12 @@ async def upload_video(
         }
         if gravado_em_efetivo:
             linha_seg["gravado_em"] = gravado_em_efetivo
+        # Fase 22 — auditoria da seleção top-K (colunas novas; só quando o edge
+        # manda; requer `alter table segmentos add column ...` — ver SCHEMA).
+        if score is not None:
+            linha_seg["score"] = score
+        if selecao:
+            linha_seg["selecao"] = selecao
         try:
             sb.table("segmentos").insert(linha_seg).execute()
         except Exception as e:
