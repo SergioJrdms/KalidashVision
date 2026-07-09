@@ -983,6 +983,106 @@ def inspecionar_video(video_path: str) -> dict:
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Gate de repetição do VLM (Fase 23) — config + helpers puros
+# A mudança de ação é o evento; a repetição do padrão só é contabilizada.
+# Um classificador barato (pose local grátis; VLM binário na dúvida) decide
+# se a amostra repete a ÚLTIMA analisada (padrão) ou é diferente (mudança de
+# contexto). Só as diferentes pagam a análise completa. Feature-flag: default
+# OFF → pipeline idêntico ao de hoje.
+# ═════════════════════════════════════════════════════════════════════════
+_GATE_ENABLE = os.environ.get("KV_GATE_ENABLE", "off") not in ("off", "0", "false", "False", "")
+_GATE_LIMIAR_IGUAL = float(os.environ.get("KV_GATE_LIMIAR_IGUAL", "0.12"))
+_GATE_LIMIAR_DIFERENTE = float(os.environ.get("KV_GATE_LIMIAR_DIFERENTE", "0.30"))
+_GATE_PESO_POSE = float(os.environ.get("KV_GATE_PESO_POSE", "0.6"))
+_GATE_PESO_MOV = float(os.environ.get("KV_GATE_PESO_MOV", "0.4"))
+_GATE_MOV_REF = float(os.environ.get("KV_GATE_MOV_REF", "18.0"))   # absdiff cinza "muito diferente"
+
+
+def _crop_cinza_pequeno(frame, bbox, lado: int = 32):
+    """Recorte cinza pequeno (lado×lado) da pessoa — assinatura visual barata
+    p/ o termo de movimento do gate. None se o bbox for degenerado."""
+    x1, y1, x2, y2 = bbox
+    h, w = frame.shape[:2]
+    x1 = max(0, min(int(x1), w - 1)); x2 = max(x1 + 1, min(int(x2), w))
+    y1 = max(0, min(int(y1), h - 1)); y2 = max(y1 + 1, min(int(y2), h))
+    sub = frame[y1:y2, x1:x2]
+    if sub.size == 0:
+        return None
+    try:
+        cinza = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(cinza, (lado, lado)).astype("float32")
+    except Exception:
+        return None
+
+
+def _dist_pose(kpts_a, kpts_b) -> float | None:
+    """Distância entre duas poses (keypoints normalizados [0-1], shape (K,2)).
+    Re-centra no centroide e re-escala pela dispersão p/ ser invariante a
+    posição/tamanho — mede a FORMA do esqueleto. None se faltarem keypoints
+    válidos. Retorno ~0 = mesma pose; cresce com a diferença."""
+    if kpts_a is None or kpts_b is None:
+        return None
+    try:
+        import numpy as _np
+        a = _np.asarray(kpts_a, dtype="float32").reshape(-1, 2)
+        b = _np.asarray(kpts_b, dtype="float32").reshape(-1, 2)
+        if a.shape != b.shape or a.shape[0] == 0:
+            return None
+        # keypoints ausentes vêm como (0,0) do YOLO → só compara os presentes nos DOIS
+        val = (a[:, 0] > 0) & (a[:, 1] > 0) & (b[:, 0] > 0) & (b[:, 1] > 0)
+        if val.sum() < 4:
+            return None
+        a, b = a[val], b[val]
+
+        def _norm(p):
+            c = p.mean(axis=0)
+            q = p - c
+            esc = _np.sqrt((q ** 2).sum(axis=1)).mean() or 1.0
+            return q / esc
+
+        an, bn = _norm(a), _norm(b)
+        return float(_np.sqrt(((an - bn) ** 2).sum(axis=1)).mean())
+    except Exception:
+        return None
+
+
+def _dist_movimento(crop_a, crop_b) -> float | None:
+    """Movimento entre dois crops cinza (absdiff médio normalizado por
+    _GATE_MOV_REF → 0..1). None se algum faltar/incompatível."""
+    if crop_a is None or crop_b is None:
+        return None
+    try:
+        import numpy as _np
+        a = _np.asarray(crop_a, dtype="float32")
+        b = _np.asarray(crop_b, dtype="float32")
+        if a.shape != b.shape:
+            return None
+        return float(min(1.0, _np.abs(a - b).mean() / max(0.001, _GATE_MOV_REF)))
+    except Exception:
+        return None
+
+
+def _gate_distancia(ancora: dict, pessoa: dict) -> float:
+    """Distância 0..~1 entre a amostra atual e a ÂNCORA (última analisada do
+    mesmo track). Combina pose (forma do corpo) e movimento (mudança visual);
+    troca de ZONA força "diferente". Pesos re-normalizados entre os sinais
+    disponíveis (pose e/ou crop podem faltar). Puro e testável."""
+    if pessoa.get("zona") != ancora.get("zona"):
+        return 1.0   # mudou de posto/zona → sempre reanalisa
+    dp = _dist_pose(ancora.get("kpts"), pessoa.get("kpts"))
+    dm = _dist_movimento(ancora.get("crop"), pessoa.get("crop"))
+    termos, pesos = [], []
+    if dp is not None:
+        termos.append(min(1.0, dp)); pesos.append(_GATE_PESO_POSE)
+    if dm is not None:
+        termos.append(dm); pesos.append(_GATE_PESO_MOV)
+    if not termos:
+        return _GATE_LIMIAR_DIFERENTE   # sem sinal → cai na FRONTEIRA (VLM binário decide)
+    soma = sum(p for p in pesos) or 1.0
+    return sum(t * p for t, p in zip(termos, pesos)) / soma
+
+
 def etapa_detectar_e_amostrar(
     yolo: YOLO,
     video_path: str,
@@ -1039,21 +1139,37 @@ def etapa_detectar_e_amostrar(
                 ):
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     ids = results[0].boxes.id.cpu().numpy().astype(int)
+                    # Keypoints da pose (Fase 23): o yolo11n-POSE já os calcula —
+                    # os lemos aqui p/ o gate de repetição (comparação grátis de
+                    # pose entre amostras). `xyn` = normalizado [0-1], alinhado
+                    # (mesma ordem) aos boxes ANTES do mask. None se sem pose.
+                    kpts_all = None
+                    if getattr(results[0], "keypoints", None) is not None and \
+                            results[0].keypoints.xyn is not None:
+                        try:
+                            kpts_all = results[0].keypoints.xyn.cpu().numpy()
+                        except Exception:
+                            kpts_all = None
                     areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
                     mask = areas >= area_min_px
+                    idx_validos = [j for j, m in enumerate(mask) if m]
                     pessoas = []
-                    for i, (box, tid) in enumerate(zip(boxes[mask], ids[mask])):
+                    for i, j in enumerate(idx_validos):
+                        box, tid = boxes[j], ids[j]
                         x1, y1, x2, y2 = box.astype(int)
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                        pessoas.append(
-                            {
-                                "track_id": int(tid),
-                                "bbox": (int(x1), int(y1), int(x2), int(y2)),
-                                "centro": (cx, cy),
-                                "zona": _zona_contexto(cx, cy, rois),
-                                "rotulo": f"P{i + 1}",
-                            }
-                        )
+                        pessoa = {
+                            "track_id": int(tid),
+                            "bbox": (int(x1), int(y1), int(x2), int(y2)),
+                            "centro": (cx, cy),
+                            "zona": _zona_contexto(cx, cy, rois),
+                            "rotulo": f"P{i + 1}",
+                        }
+                        if kpts_all is not None and j < len(kpts_all):
+                            pessoa["kpts"] = kpts_all[j].astype("float32")
+                        if _GATE_ENABLE:
+                            pessoa["crop"] = _crop_cinza_pequeno(frame, pessoa["bbox"])
+                        pessoas.append(pessoa)
                     if pessoas:
                         # Codifica imediatamente em base64 (mesma pipeline:
                         # anotar→resize→JPEG, com defaults max_lado=1024 e
@@ -1137,6 +1253,30 @@ def _analisar_amostra_vlm(
     }
 
 
+def _gate_vlm_binario(groq_client, amostra: Amostra, desc_ancora: str) -> bool:
+    """Desempate BARATO do gate (só na fronteira): mostra o frame e pergunta
+    se a pessoa AINDA está fazendo a ação da âncora — resposta sim/não
+    (max_tokens minúsculo). True = repetição (mantém o padrão). Em erro,
+    devolve False (na dúvida, ANALISA — falso "diferente" só custa 1 chamada,
+    falso "igual" perderia um insight)."""
+    prompt = (
+        "Você compara ações em vídeo industrial. A ação observada até agora é:\n"
+        f"\"{desc_ancora}\"\n"
+        "Olhando a imagem, a pessoa AINDA está fazendo essencialmente essa mesma ação? "
+        "Responda APENAS com uma palavra: SIM ou NAO."
+    )
+    try:
+        r = groq_vision_call(
+            groq_client, amostra.img_b64, prompt,
+            json_mode=False, max_tokens=3, temperatura=0.0,
+            imagens_extra=([amostra.img_b64_secundario] if amostra.img_b64_secundario else None),
+        )
+        return (r or "").strip().lower().startswith("s")
+    except Exception as e:
+        log.warning(f"[gate] binário falhou no frame {amostra.frame_idx} ({e}) — analisando.")
+        return False
+
+
 def etapa_analise_vlm(
     groq_client: Groq,
     amostras: list[Amostra],
@@ -1145,29 +1285,111 @@ def etapa_analise_vlm(
     progress_cb: ProgressCb,
     conhecimento_adquirido: str = "",
 ) -> list[dict]:
-    progress_cb("vlm", 0, f"Analisando {len(amostras)} amostras com VLM")
+    """Analisa as amostras com o VLM. Com KV_GATE_ENABLE=on (Fase 23), um gate
+    de repetição evita reanalisar o PADRÃO: por track, mantém uma ÂNCORA (a
+    última amostra analisada) e, para cada nova amostra, decide barato —
+      • pose+movimento local (grátis) muito parecidos → REPETIÇÃO: herda a
+        descrição da âncora, sem chamar o VLM (só contabiliza o tempo);
+      • muito diferentes → analisa (VLM completo), vira a nova âncora;
+      • na fronteira → 1 VLM BINÁRIO barato (sim/não) desempata.
+    TODA amostra continua gerando observação (tempo 100% preservado); as
+    suprimidas herdam o rótulo e estendem o mesmo evento downstream."""
+    progress_cb("vlm", 0, f"Analisando {len(amostras)} amostras com VLM"
+                + (" · gate ON" if _GATE_ENABLE else ""))
     observacoes: list[dict] = []
+    ancoras: dict[int, dict] = {}   # track_id → {kpts, crop, zona, descricao}
+    n_completo = n_binario = n_repeticao = 0
+
     for i, am in enumerate(amostras):
-        descricoes = _analisar_amostra_vlm(
-            groq_client, am, descricao_processo, memoria, conhecimento_adquirido
+        # Quais tracks desta amostra podem ser servidos pela âncora (repetição)?
+        analisar_agora = not _GATE_ENABLE
+        decisao: dict[int, tuple[str, str]] = {}   # track_id → (origem, descricao_ou_"")
+        if _GATE_ENABLE:
+            precisa_vlm = False
+            for p in am.pessoas:
+                tid = p["track_id"]
+                anc = ancoras.get(tid)
+                if anc is None:
+                    decisao[tid] = ("analisar", "")      # 1ª vez do track → analisa
+                    precisa_vlm = True
+                    continue
+                d = _gate_distancia(anc, p)
+                if d <= _GATE_LIMIAR_IGUAL:
+                    decisao[tid] = ("repeticao_pose", anc["descricao"])
+                elif d >= _GATE_LIMIAR_DIFERENTE:
+                    decisao[tid] = ("analisar", "")
+                    precisa_vlm = True
+                else:
+                    # fronteira: desempata com 1 VLM binário barato
+                    n_binario += 1
+                    if _gate_vlm_binario(groq_client, am, anc["descricao"]):
+                        decisao[tid] = ("repeticao_gate", anc["descricao"])
+                    else:
+                        decisao[tid] = ("analisar", "")
+                        precisa_vlm = True
+            analisar_agora = precisa_vlm
+
+        descricoes = (
+            _analisar_amostra_vlm(
+                groq_client, am, descricao_processo, memoria, conhecimento_adquirido
+            )
+            if analisar_agora else {}
         )
+        if analisar_agora:
+            n_completo += 1
+
         for p in am.pessoas:
-            desc = descricoes.get(p["track_id"])
-            if desc:
-                observacoes.append(
-                    {
-                        "tempo_s": am.tempo_s,
-                        "frame_idx": am.frame_idx,
-                        "track_id": p["track_id"],
-                        "descricao": desc,
-                        "bbox": p["bbox"],
-                        "zona": p["zona"],
-                    }
-                )
+            tid = p["track_id"]
+            if not _GATE_ENABLE:
+                desc = descricoes.get(tid)
+                origem_gate = "analisado"
+            else:
+                origem, desc_ancora = decisao.get(tid, ("analisar", ""))
+                if origem == "analisar":
+                    desc = descricoes.get(tid)
+                    origem_gate = "analisado"
+                else:
+                    desc = desc_ancora            # herda o padrão (sem token)
+                    origem_gate = origem
+                    n_repeticao += 1
+            if not desc:
+                continue
+            # Atualiza/instala a âncora quando a amostra foi de fato ANALISADA.
+            if _GATE_ENABLE and origem_gate == "analisado":
+                ancoras[tid] = {
+                    "kpts": p.get("kpts"), "crop": p.get("crop"),
+                    "zona": p.get("zona"), "descricao": desc,
+                }
+            observacoes.append(
+                {
+                    "tempo_s": am.tempo_s,
+                    "frame_idx": am.frame_idx,
+                    "track_id": tid,
+                    "descricao": desc,
+                    "bbox": p["bbox"],
+                    "zona": p["zona"],
+                    "origem_gate": origem_gate,
+                    "mudanca_contexto": origem_gate == "analisado",
+                }
+            )
         pct = int((i + 1) / max(1, len(amostras)) * 100)
         progress_cb(
             "vlm", pct, f"{i + 1}/{len(amostras)} amostras · {len(observacoes)} observações"
         )
+
+    if _GATE_ENABLE:
+        chamadas = n_completo + n_binario
+        base = len(amostras)
+        economia = round((1 - chamadas / max(1, base)) * 100, 1)
+        log.info(
+            "[gate] %d amostras → %d VLM completo + %d binário (%d repetições contadas) "
+            "· ~%.0f%% menos chamadas de amostragem",
+            base, n_completo, n_binario, n_repeticao, economia,
+        )
+        etapa_analise_vlm._ultima_economia = {   # type: ignore[attr-defined]
+            "amostras": base, "vlm_completo": n_completo, "vlm_binario": n_binario,
+            "repeticoes": n_repeticao, "economia_pct": economia,
+        }
     return observacoes
 
 
@@ -5394,4 +5616,6 @@ def processar_video(
         "n_auto_validados": n_auto,
         "n_sugestoes": len(sugestoes),
         "n_perguntas": n_perguntas,
+        # Fase 23: economia do gate de repetição (None se KV_GATE_ENABLE=off).
+        "gate": getattr(etapa_analise_vlm, "_ultima_economia", None) if _GATE_ENABLE else None,
     }
