@@ -3759,6 +3759,27 @@ def gerar_sugestoes_chat(
 # Usado pelo GET /processos enriquecido, pelo snapshot global e pelos
 # insights globais. Faz ~5 queries por empresa (não N× por processo).
 # ═════════════════════════════════════════════════════════════════════════
+def _scan_todos(fabrica, pagina: int = 1000) -> list[dict]:
+    """Lê TODAS as linhas paginando por .range().
+
+    O PostgREST trunca respostas no seu teto de linhas (`max-rows`, tipicamente
+    1000) MESMO com `.limit()` alto — então uma varredura da empresa inteira
+    voltava truncada e escondia os eventos de alguns processos (o card da home
+    zerava enquanto o dashboard, escopado a 1 processo, ficava sob o teto e
+    mostrava os números certos). `fabrica` deve devolver uma query NOVA a cada
+    chamada, já com um `.order()` estável (chave única) p/ a paginação não
+    pular nem repetir linhas."""
+    linhas: list[dict] = []
+    ini = 0
+    while True:
+        lote = fabrica().range(ini, ini + pagina - 1).execute().data or []
+        linhas.extend(lote)
+        if len(lote) < pagina:
+            break
+        ini += pagina
+    return linhas
+
+
 def agregar_portfolio(
     sb: Client, empresa: str, processo: str | None = None
 ) -> dict[str, dict]:
@@ -3794,14 +3815,15 @@ def agregar_portfolio(
         for n in nomes
     }
 
-    q_vid = (
-        sb.table("videos")
-        .select("processo, duracao_s, processado_em")
-        .eq("empresa", empresa)
-    )
-    if processo is not None:
-        q_vid = q_vid.eq("processo", processo)
-    videos = q_vid.limit(50000).execute().data or []
+    def _fab_vid():
+        q = (
+            sb.table("videos")
+            .select("processo, duracao_s, processado_em")
+            .eq("empresa", empresa)
+            .order("id")
+        )
+        return q.eq("processo", processo) if processo is not None else q
+    videos = _scan_todos(_fab_vid)
     for v in videos:
         p = base.get(v.get("processo"))
         if not p:
@@ -3812,30 +3834,32 @@ def agregar_portfolio(
         if pe and (p["ultimo_video_em"] is None or pe > p["ultimo_video_em"]):
             p["ultimo_video_em"] = pe
 
-    q_cmp = (
-        sb.table("comportamentos")
-        .select("processo, label, categoria_lean")
-        .eq("empresa", empresa)
-    )
-    if processo is not None:
-        q_cmp = q_cmp.eq("processo", processo)
-    comps = q_cmp.limit(50000).execute().data or []
+    def _fab_cmp():
+        q = (
+            sb.table("comportamentos")
+            .select("processo, label, categoria_lean")
+            .eq("empresa", empresa)
+            .order("id")
+        )
+        return q.eq("processo", processo) if processo is not None else q
+    comps = _scan_todos(_fab_cmp)
     cat_por_pl: dict[tuple, str | None] = {}
     for c in comps:
         cat_por_pl[(c.get("processo"), c.get("label"))] = c.get("categoria_lean")
 
-    q_ev = (
-        sb.table("eventos")
-        .select(
-            "id, video_id, processo, comportamento_label, label_corrigido, "
-            "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-            "origem_validacao, confianca, principal"
+    def _fab_ev():
+        q = (
+            sb.table("eventos")
+            .select(
+                "id, video_id, processo, comportamento_label, label_corrigido, "
+                "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
+                "origem_validacao, confianca, principal"
+            )
+            .eq("empresa", empresa)
+            .order("id")
         )
-        .eq("empresa", empresa)
-    )
-    if processo is not None:
-        q_ev = q_ev.eq("processo", processo)
-    eventos = q_ev.limit(100000).execute().data or []
+        return q.eq("processo", processo) if processo is not None else q
+    eventos = _scan_todos(_fab_ev)
     # Fase 16: preferir os PRINCIPAIS (1/min), deixando os crus de auditoria de
     # fora. Fallback (Fase 26): se um processo não tem NENHUM evento principal
     # (todos com principal=False), usar todos os eventos DELE — senão o card da
@@ -3889,15 +3913,16 @@ def agregar_portfolio(
             a["dur"] += dur
             a["oc"] += 1
 
-    q_sug = (
-        sb.table("sugestoes_melhoria")
-        .select("processo, prioridade, status")
-        .eq("empresa", empresa)
-        .eq("status", "pendente")
-    )
-    if processo is not None:
-        q_sug = q_sug.eq("processo", processo)
-    sugs = q_sug.limit(50000).execute().data or []
+    def _fab_sug():
+        q = (
+            sb.table("sugestoes_melhoria")
+            .select("processo, prioridade, status")
+            .eq("empresa", empresa)
+            .eq("status", "pendente")
+            .order("id")
+        )
+        return q.eq("processo", processo) if processo is not None else q
+    sugs = _scan_todos(_fab_sug)
     for s in sugs:
         p = base.get(s.get("processo"))
         if not p:
