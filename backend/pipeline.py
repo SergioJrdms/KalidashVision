@@ -3836,8 +3836,19 @@ def agregar_portfolio(
     if processo is not None:
         q_ev = q_ev.eq("processo", processo)
     eventos = q_ev.limit(100000).execute().data or []
-    # Fase 16: só os PRINCIPAIS (1/min); crus de auditoria fora dos dois loops.
-    eventos = [e for e in eventos if e.get("principal") is not False]
+    # Fase 16: preferir os PRINCIPAIS (1/min), deixando os crus de auditoria de
+    # fora. Fallback (Fase 26): se um processo não tem NENHUM evento principal
+    # (todos com principal=False), usar todos os eventos DELE — senão o card da
+    # home zera (pendências/validado/valor agregado) enquanto o dashboard, que
+    # não filtra por principal, mostra os números reais.
+    _proc_com_principal = {
+        e.get("processo") for e in eventos if e.get("principal") is not False
+    }
+    eventos = [
+        e for e in eventos
+        if e.get("principal") is not False
+        or e.get("processo") not in _proc_com_principal
+    ]
 
     # Loop 1: contadores de validação (origem, pendentes, considerados, validados)
     # — usam o stream BRUTO (sem dedup), pra refletir o trabalho real do humano.
@@ -4425,11 +4436,12 @@ def _montar_placar(
 
     Agrupa os eventos principais e compara a unidade mais recente com a melhor
     unidade observada (maior % produtivo). A unidade é o DIA real de gravação
-    (relógio no nome do vídeo); se só houver 1 dia, cai para SESSÃO (vídeo), de
-    modo que o placar acende já no primeiro dia com 2+ vídeos. Com uma unidade
-    só, entra em modo REFERÊNCIA (a base a partir da qual os próximos dias serão
-    comparados). Nunca cita pessoa. None só se não houver nenhuma observação
-    mínima (KV_PLACAR_MIN_UNIDADE_S, default 60s — apenas evita ruído)."""
+    (relógio no nome do vídeo); só cai para SESSÃO (vídeo) quando nenhum vídeo
+    tem data confiável. Com uma unidade só — o caso típico de 1 dia — entra em
+    modo REFERÊNCIA sobre o dia AGREGADO (a base a partir da qual os próximos
+    dias serão comparados), em vez de comparar vídeo-a-vídeo (o que deixava um
+    clipe curto/atípico do fim do dia zerar o placar). Nunca cita pessoa. None
+    só se não houver observação mínima (KV_PLACAR_MIN_UNIDADE_S, default 60s)."""
     if min_unidade_s is None:
         min_unidade_s = float(os.environ.get("KV_PLACAR_MIN_UNIDADE_S", "60"))
 
@@ -4484,10 +4496,13 @@ def _montar_placar(
             a["seg"] += dur
         return {k: g for k, g in grupos.items() if g["tot"] >= min_unidade_s}
 
-    # 1) por DIA (só vídeos com dia confiável). 2) fallback por SESSÃO (vídeo).
+    # 1) por DIA (só vídeos com dia confiável). 2) fallback por SESSÃO (vídeo)
+    #    SÓ quando não há nenhum dia confiável — assim, com 1 dia só, o placar
+    #    entra em modo REFERÊNCIA sobre o dia AGREGADO (Fase 26), em vez de
+    #    comparar vídeo-a-vídeo e deixar um clipe curto/atípico zerar o placar.
     grupos = _agregar(lambda m, _v: m["dia_iso"], lambda m, _v: m["dia_rot"], lambda m, _v: m["dia_iso"])
     unidade = "dia"
-    if len(grupos) < 2:
+    if not grupos:
         grupos = _agregar(lambda _m, v: v, lambda m, _v: m["sessao_rot"], lambda m, _v: m["ordem"])
         unidade = "sessão"
     if not grupos:
