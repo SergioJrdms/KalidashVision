@@ -72,6 +72,13 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
     if (labelMudou || catMudou) toast("Correção salva. O Prism aprendeu com você.", { icon: "check" });
     setEditId(null);
   }
+  // Reclassificação Lean direta pela coluna (fora da correção). Vale para o
+  // comportamento (mesmo endpoint do gráfico "Tempo por comportamento").
+  function reclassificar(e: EvTabMock, cat: LeanShort) {
+    if (!e.comportamentoId || cat === e.cat) return;
+    setCatMut.mutate({ id: e.comportamentoId, cat });
+    toast(`“${e.label}” reclassificado como ${leanLabel(cat)}.`, { icon: "check" });
+  }
 
   function toggle(id: string) { setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
   function toggleAll() { setSel((s) => (s.size === filtrados.length ? new Set() : new Set(filtrados.map((e) => e.id)))); }
@@ -142,7 +149,7 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
             </thead>
             <tbody>
               {filtrados.map((e) => (
-                <LinhaEvento key={e.id} e={e} sel={sel.has(e.id)} onToggle={() => toggle(e.id)} expand={expand === e.id} onExpand={() => setExpand((c) => (c === e.id ? null : e.id))} onResolver={resolver} labels={comps} editing={editId === e.id} onPedirCorrigir={() => pedirCorrigir(e)} onSalvar={(label, cat) => salvarCorrecao(e, label, cat)} onCancelarEdicao={() => setEditId(null)} />
+                <LinhaEvento key={e.id} e={e} sel={sel.has(e.id)} onToggle={() => toggle(e.id)} expand={expand === e.id} onExpand={() => setExpand((c) => (c === e.id ? null : e.id))} onResolver={resolver} labels={comps} editing={editId === e.id} onPedirCorrigir={() => pedirCorrigir(e)} onSalvar={(label, cat) => salvarCorrecao(e, label, cat)} onCancelarEdicao={() => setEditId(null)} onSetCat={(cat) => reclassificar(e, cat)} savingCat={setCatMut.isPending} />
               ))}
             </tbody>
           </table>
@@ -173,7 +180,7 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
   );
 }
 
-function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, editing, onPedirCorrigir, onSalvar, onCancelarEdicao }: { e: EvTabMock; sel: boolean; onToggle: () => void; expand: boolean; onExpand: () => void; onResolver: (id: string, acao: AcaoEvento) => void; labels: string[]; editing: boolean; onPedirCorrigir: () => void; onSalvar: (label: string, cat: LeanShort) => void; onCancelarEdicao: () => void }) {
+function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, editing, onPedirCorrigir, onSalvar, onCancelarEdicao, onSetCat, savingCat }: { e: EvTabMock; sel: boolean; onToggle: () => void; expand: boolean; onExpand: () => void; onResolver: (id: string, acao: AcaoEvento) => void; labels: string[]; editing: boolean; onPedirCorrigir: () => void; onSalvar: (label: string, cat: LeanShort) => void; onCancelarEdicao: () => void; onSetCat: (cat: LeanShort) => void; savingCat: boolean }) {
   const m = STATUS_META[e.status] || STATUS_META.pendente;
   return (
     <>
@@ -194,9 +201,7 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
           )}
         </td>
         <td style={{ padding: "10px 12px" }}>
-          <span className="row gap1" style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", padding: "2px 8px", borderRadius: 7, border: "1px solid var(--line)", background: "#fff", display: "inline-flex", whiteSpace: "nowrap" }}>
-            <i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(e.cat), flex: "none" }} /> {leanLabel(e.cat)}
-          </span>
+          <LeanCell e={e} onSet={onSetCat} saving={savingCat} />
         </td>
         <td style={{ padding: "10px 12px", color: "var(--muted)", fontSize: 11.5 }}>
           <div className="truncate" style={{ maxWidth: 150 }}>{e.video}</div>
@@ -234,6 +239,37 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
         </tr>
       )}
     </>
+  );
+}
+
+// Classificação Lean clicável na própria coluna (fora da correção): clica no
+// chip atual e escolhe a nova categoria — igual ao gráfico "Tempo por
+// comportamento". A troca vale para o comportamento (não só para este evento).
+function LeanCell({ e, onSet, saving }: { e: EvTabMock; onSet: (cat: LeanShort) => void; saving: boolean }) {
+  const [open, setOpen] = useState(false);
+  const editable = !!e.comportamentoId;
+  const chip = (
+    <button
+      type="button"
+      onClick={() => editable && setOpen((v) => !v)}
+      disabled={!editable || saving}
+      title={editable ? "Clique para reclassificar — vale para este comportamento" : "Disponível quando o comportamento entra no catálogo"}
+      className="row gap1"
+      style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", padding: "2px 8px", borderRadius: 7, border: open ? "1px solid var(--ink)" : "1px solid var(--line)", background: "#fff", cursor: editable ? "pointer" : "default", whiteSpace: "nowrap", opacity: saving ? 0.6 : 1 }}
+    >
+      <i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(e.cat), flex: "none" }} /> {leanLabel(e.cat)}
+      {editable && <Icon name={open ? "chevron-up" : "chevron-down"} size={11} color="var(--faint)" />}
+    </button>
+  );
+  if (!open) return chip;
+  return (
+    <span className="row gap1" style={{ whiteSpace: "nowrap" }}>
+      {chip}
+      {(["va", "apoio", "desp"] as LeanShort[]).map((c) => (
+        <button key={c} type="button" title={leanLabel(c)} onClick={() => { onSet(c); setOpen(false); }}
+          style={{ width: 20, height: 20, borderRadius: 5, border: e.cat === c ? "2px solid var(--ink)" : "1px solid var(--line)", background: leanCor(c), cursor: "pointer", flex: "none" }} />
+      ))}
+    </span>
   );
 }
 
