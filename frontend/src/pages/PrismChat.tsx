@@ -10,7 +10,37 @@ import type { ProcHeaderMock } from "../lib/adapt";
 
 type Msg = { who: "me" | "prism"; text: string };
 
+// Fase 25: o Chat do Prism está DESATIVADO ("em breve") p/ cortar tokens. A
+// implementação real segue INTACTA em `PrismPanelOriginal` abaixo (nada foi
+// removido); para reativar, o export volta a renderizá-la (e
+// KV_PRISM_CHAT_ENABLE=on no backend).
 export function PrismPanel({ open, onClose, scope, proc }: { open: boolean; onClose: () => void; scope: "global" | "processo"; proc?: ProcHeaderMock | null }) {
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(26,16,49,.3)", backdropFilter: "blur(2px)", zIndex: 90, opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none", transition: "opacity .25s" }} />
+      <aside style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: "min(440px, 94vw)", background: "#fff", zIndex: 100, boxShadow: "-20px 0 60px -20px rgba(26,16,49,.4)", borderLeft: "1px solid var(--line)", transform: open ? "translateX(0)" : "translateX(100%)", transition: "transform .3s cubic-bezier(.3,.8,.3,1)", display: "flex", flexDirection: "column" }}>
+        <header className="row gap2" style={{ padding: "14px 16px", borderBottom: "1px solid var(--line)" }}>
+          <Prism size={34} ring />
+          <div className="grow">
+            <div className="font-display" style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>Prism</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{scope === "global" ? "visão geral da operação" : `inteligência · ${proc?.nome || ""}`}</div>
+          </div>
+          <button onClick={onClose} title="Fechar" className="center" style={{ width: 32, height: 32, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)" }}
+            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "var(--line-2)")} onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}><Icon name="x" size={18} /></button>
+        </header>
+        <div className="grow center col gap2" style={{ padding: 28, textAlign: "center" }}>
+          <Prism size={54} ring />
+          <div className="font-display" style={{ fontSize: 18, fontWeight: 700, color: "var(--ink)", marginTop: 6 }}>Prism — em breve</div>
+          <div className="pretty" style={{ fontSize: 13.5, color: "var(--muted)", lineHeight: 1.55, maxWidth: 320 }}>
+            Estamos aprimorando o assistente do Prism. Em breve você poderá conversar sobre sua operação por aqui.
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function PrismPanelOriginal({ open, onClose, scope, proc }: { open: boolean; onClose: () => void; scope: "global" | "processo"; proc?: ProcHeaderMock | null }) {
   const processoId = scope === "processo" ? proc?.id ?? null : null;
   const prism = useMemo(() => api.prism(processoId), [processoId]);
   const [convId, setConvId] = useState<string | null>(null);

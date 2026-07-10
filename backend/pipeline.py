@@ -3575,6 +3575,8 @@ def responder_chat(
     historico: list[dict] | None = None,
     max_trocas: int = 6,
 ) -> str:
+    if not _prism_chat_ativo():
+        return PRISM_CHAT_EM_BREVE   # Fase 25: chat desativado — 0 token
     historico = historico or []
     descricao = resolver_descricao_processo(sb, empresa, processo, None)
     conhecimento = construir_bloco_conhecimento_adquirido(sb, empresa, processo)
@@ -3607,6 +3609,8 @@ def gerar_titulo_conversa(
     """Gera um título curto (3-6 palavras) para uma conversa do Prism, a
     partir da primeira pergunta + primeira resposta. Devolve None se falhar.
     """
+    if not _prism_chat_ativo():
+        return None   # Fase 25: chat desativado — sem LLM p/ título
     if not pergunta.strip() or not resposta.strip():
         return None
     prompt = (
@@ -3661,6 +3665,8 @@ def gerar_sugestoes_chat(
     dados do processo, evitando repetir as já mostradas (lista `excluir`).
     Não-fatal: em caso de falha, devolve um fallback genérico (marcado).
     """
+    if not _prism_chat_ativo():
+        return []   # Fase 25: chat desativado — sem sugestões, 0 token
     excluir = [s.strip() for s in (excluir or []) if s and s.strip()]
     try:
         snapshot = montar_snapshot_chat(sb, empresa, processo)
@@ -4112,6 +4118,8 @@ def responder_chat_global(
     historico: list[dict] | None = None,
     max_trocas: int = 6,
 ) -> str:
+    if not _prism_chat_ativo():
+        return PRISM_CHAT_EM_BREVE   # Fase 25: chat desativado — 0 token
     historico = historico or []
     snapshot = montar_snapshot_global(sb, empresa)
     mensagens = [{"role": "system", "content": system_prompt_chat_global(empresa, snapshot)}]
@@ -4129,6 +4137,8 @@ def gerar_sugestoes_chat_global(
     excluir: list[str] | None = None,
     n: int = 4,
 ) -> list[str]:
+    if not _prism_chat_ativo():
+        return []   # Fase 25: chat desativado — sem sugestões, 0 token
     excluir = [s.strip() for s in (excluir or []) if s and s.strip()]
     try:
         snap = montar_snapshot_global(sb, empresa)
@@ -4227,6 +4237,8 @@ def gerar_insights_globais(
 
     `snapshot_global` pode vir pré-computado para evitar refazer o portfólio.
     """
+    if not _insights_globais_ativo():
+        return 0   # Fase 25: visão global desativada — não gasta token nem apaga
     if snapshot_global is not None:
         snap = snapshot_global
     else:
@@ -4319,6 +4331,34 @@ def _padroes_ativo() -> bool:
         log.info("[padroes] análise de padrões DESATIVADA (KV_PADROES_ENABLE=off) — 0 tokens")
         _padroes_desativado_logado = True
     return _PADROES_ENABLE
+
+
+# Fase 25: mesma lógica p/ a VISÃO GLOBAL (insights de portfólio) e o CHAT do
+# Prism — ambos "em breve" e DESATIVADOS por padrão p/ zerar tokens. Reative com
+# KV_INSIGHTS_GLOBAIS_ENABLE=on / KV_PRISM_CHAT_ENABLE=on. Nada é apagado.
+_INSIGHTS_GLOBAIS_ENABLE = os.environ.get("KV_INSIGHTS_GLOBAIS_ENABLE", "off") not in ("off", "0", "false", "False", "")
+_PRISM_CHAT_ENABLE = os.environ.get("KV_PRISM_CHAT_ENABLE", "off") not in ("off", "0", "false", "False", "")
+_insights_desativado_logado = False
+_chat_desativado_logado = False
+
+# Resposta fixa do chat quando desativado (sem chamar o LLM).
+PRISM_CHAT_EM_BREVE = "O Prism está temporariamente em manutenção e voltará em breve. 🛠️"
+
+
+def _insights_globais_ativo() -> bool:
+    global _insights_desativado_logado
+    if not _INSIGHTS_GLOBAIS_ENABLE and not _insights_desativado_logado:
+        log.info("[insights] visão global DESATIVADA (KV_INSIGHTS_GLOBAIS_ENABLE=off) — 0 tokens")
+        _insights_desativado_logado = True
+    return _INSIGHTS_GLOBAIS_ENABLE
+
+
+def _prism_chat_ativo() -> bool:
+    global _chat_desativado_logado
+    if not _PRISM_CHAT_ENABLE and not _chat_desativado_logado:
+        log.info("[prism] chat DESATIVADO (KV_PRISM_CHAT_ENABLE=off) — 0 tokens")
+        _chat_desativado_logado = True
+    return _PRISM_CHAT_ENABLE
 
 
 def _media(xs: list[float]) -> float:

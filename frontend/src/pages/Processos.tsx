@@ -9,11 +9,17 @@ import { nivelDe } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Help, Badge, PrioBadge, MaturityMeter, LeanBar, Modal, Empty, toast } from "../design/ui";
 import type { Go } from "../design/Shell";
 
+// Fase 25: a "visão geral do Prism" (insights + padrões de portfólio) está
+// DESATIVADA ("em breve") p/ cortar tokens. Trocar p/ false reativa (e
+// KV_INSIGHTS_GLOBAIS_ENABLE=on no backend). Nada foi removido.
+const VISAO_GLOBAL_EM_BREVE = true;
+
 export default function Processos({ go }: { go: Go }) {
   const [novo, setNovo] = useState(false);
   const procs = useQuery({ queryKey: ["processos"], queryFn: () => api.processos.list() });
-  const insights = useQuery({ queryKey: ["insights-globais"], queryFn: () => api.insightsGlobais() });
-  const padroes = useQuery({ queryKey: ["padroes-globais"], queryFn: () => api.padroes.globais() });
+  // Desativadas quando em "em breve" — não disparam request nem consomem token.
+  const insights = useQuery({ queryKey: ["insights-globais"], queryFn: () => api.insightsGlobais(), enabled: !VISAO_GLOBAL_EM_BREVE });
+  const padroes = useQuery({ queryKey: ["padroes-globais"], queryFn: () => api.padroes.globais(), enabled: !VISAO_GLOBAL_EM_BREVE });
 
   const PROCESSOS = mapProcessos(procs.data || []);
   const INSIGHTS = mapInsights(insights.data || []);
@@ -31,9 +37,20 @@ export default function Processos({ go }: { go: Go }) {
         <Btn icon="plus" onClick={() => setNovo(true)}>Novo processo</Btn>
       </div>
 
-      {(INSIGHTS.length > 0 || PROCESSOS.length > 0) && <InsightsGlobais insights={INSIGHTS} count={PROCESSOS.length} go={go} />}
-
-      {PADROES_GLOBAIS.length > 0 && <PadroesGlobais padroes={PADROES_GLOBAIS} />}
+      {VISAO_GLOBAL_EM_BREVE ? (
+        <Card>
+          <Empty
+            icon="sparkles"
+            title="Visão geral do Prism — em breve"
+            desc="Estamos aprimorando a leitura de portfólio do Prism (insights e padrões cruzando todos os processos). Em breve por aqui."
+          />
+        </Card>
+      ) : (
+        <>
+          {(INSIGHTS.length > 0 || PROCESSOS.length > 0) && <InsightsGlobais insights={INSIGHTS} count={PROCESSOS.length} go={go} />}
+          {PADROES_GLOBAIS.length > 0 && <PadroesGlobais padroes={PADROES_GLOBAIS} />}
+        </>
+      )}
 
       <div>
         <div className="row" style={{ justifyContent: "space-between", marginBottom: 14 }}>
