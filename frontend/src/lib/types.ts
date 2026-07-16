@@ -317,6 +317,8 @@ export interface EventoTabela {
   comportamento_id?: string | null;
   cam_id?: string | null;
   papel_pessoa?: string | null; // Fase 28: 'operador' | 'visitante' | 'posto_vazio'
+  // Fase 29: segmento par (cam2, clock-aligned) p/ mostrar as 2 câmeras juntas
+  segundo_angulo?: { segmento_id: string; cam_id: string | null } | null;
 }
 
 export interface EventosTabelaResposta {

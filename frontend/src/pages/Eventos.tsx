@@ -230,7 +230,21 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
         <tr style={{ background: "var(--soft)" }}>
           <td colSpan={9} style={{ padding: 16 }}>
             <div className="row gap3 wrap" style={{ alignItems: "flex-start" }}>
-              <div style={{ width: 240, flex: "none" }}><FrameReal id={e.id} pessoa={e.pessoa} height={140} /></div>
+              {/* Fase 29: as duas câmeras do MESMO instante, lado a lado. */}
+              <div style={{ width: 240, flex: "none" }} className="col" >
+                <span className="badge badge-purple" style={{ fontSize: 10, alignSelf: "flex-start", marginBottom: 4 }}>
+                  {(e.camId || "cam1").replace(/^cam/i, "Cam ")}
+                </span>
+                <FrameReal id={e.id} pessoa={e.pessoa} height={140} />
+              </div>
+              {e.segundoAngulo && (
+                <div style={{ width: 240, flex: "none" }} className="col">
+                  <span className="badge badge-purple" style={{ fontSize: 10, alignSelf: "flex-start", marginBottom: 4 }}>
+                    {(e.segundoAngulo.camId || "cam2").replace(/^cam/i, "Cam ")} · mesmo instante
+                  </span>
+                  <FrameSegundoAngulo segmentoId={e.segundoAngulo.segmentoId} ini={e.ini} fim={e.fim} />
+                </div>
+              )}
               <div className="grow" style={{ minWidth: 220 }}>
                 <p style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginBottom: 12 }}>{e.descricao}</p>
                 {editing ? (
@@ -249,6 +263,29 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
         </tr>
       )}
     </>
+  );
+}
+
+// Fase 29: frame do 2º ângulo (cam2) no MESMO instante do evento — o segmento
+// par é clock-aligned com a cam1, então basta pedir a janela [ini, fim] e
+// mostrar o frame do MEIO. Mesmo endpoint da Validação (/segmentos/{id}/frames).
+function FrameSegundoAngulo({ segmentoId, ini, fim }: { segmentoId: string; ini: number; fim: number }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["frames-seg", segmentoId, Math.round(ini), Math.round(fim)],
+    queryFn: () => api.segmentos.frames(segmentoId, ini, fim),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const frames = data?.frames || [];
+  const meio = frames[1] ?? frames[0] ?? null;
+  return (
+    <div style={{ height: 140, borderRadius: 10, overflow: "hidden", background: "#0d0820", display: "grid", placeItems: "center" }}>
+      {meio ? (
+        <img src={meio} alt="2º ângulo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      ) : (
+        <span style={{ fontSize: 11, color: "rgba(255,255,255,.55)" }}>{isLoading ? "Carregando 2º ângulo…" : "2º ângulo indisponível"}</span>
+      )}
+    </div>
   );
 }
 

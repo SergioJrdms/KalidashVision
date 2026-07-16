@@ -1878,6 +1878,36 @@ def listar_eventos_tabela(
             ev["categoria_lean"] = cat_por_label.get(label_ef)
         ev["comportamento_id"] = comp_id_por_label.get(label_ef)
 
+    # Fase 29: 2º ângulo (par cam2 do mesmo vídeo, clock-aligned) para a linha
+    # expandida mostrar as duas câmeras lado a lado. Mesmo lookup dos pendentes
+    # (listar_eventos): segmento concluído do MESMO video_id com OUTRA câmera.
+    try:
+        if vids:
+            rs = (
+                sb.table("segmentos")
+                .select("id, video_id, cam_id")
+                .eq("empresa", user.empresa)
+                .in_("video_id", list(vids))
+                .eq("status", "concluido")
+                .execute()
+                .data
+            ) or []
+            segs_por_video: dict[str, list[dict]] = {}
+            for s in rs:
+                segs_por_video.setdefault(s.get("video_id"), []).append(s)
+            for ev in itens:
+                pares = [
+                    s for s in segs_por_video.get(ev.get("video_id"), [])
+                    if s.get("cam_id") and s.get("cam_id") != ev.get("cam_id")
+                ]
+                if pares:
+                    ev["segundo_angulo"] = {
+                        "segmento_id": pares[0]["id"],
+                        "cam_id": pares[0].get("cam_id"),
+                    }
+    except Exception as e:
+        log.warning("tabela: segundo_angulo lookup falhou (%s)", e)
+
     return {
         "itens": itens,
         "total": r.count or 0,
