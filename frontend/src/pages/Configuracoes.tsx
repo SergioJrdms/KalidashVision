@@ -10,6 +10,7 @@ import { Btn, Card, Icon, Empty, Eyebrow, PanelHead, Modal, toast } from "../des
 import type { Go } from "../design/Shell";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { TurnoProcesso, IntervaloTurno } from "../lib/types";
+import { ZonasBloco } from "./ConfiguracoesZonas";
 
 const DIAS = [
   { n: 1, abrev: "Seg", longo: "Segunda" },
@@ -45,6 +46,7 @@ export default function Configuracoes({ proc }: { proc: ProcHeaderMock; go: Go }
       </div>
 
       <TurnosBloco proc={proc} />
+      <ZonasBloco proc={proc} />
     </div>
   );
 }

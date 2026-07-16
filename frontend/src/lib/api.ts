@@ -23,6 +23,9 @@ import type {
   AcaoSugestao,
   TurnoProcesso,
   TurnoBody,
+  ZonaCamera,
+  ZonaBody,
+  FrameReferencia,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -195,6 +198,22 @@ export const api = {
       }),
     excluir: (turnoId: string) =>
       req<{ ok: boolean }>(`/turnos/${turnoId}`, { method: "DELETE" }),
+  },
+  zonas: {
+    listar: (processoId: string, camId?: string) =>
+      req<ZonaCamera[]>(`/processos/${processoId}/zonas${camId ? `?cam_id=${encodeURIComponent(camId)}` : ""}`),
+    criar: (processoId: string, body: ZonaBody) =>
+      req<ZonaCamera>(`/processos/${processoId}/zonas`, { method: "POST", body: JSON.stringify(body) }),
+    atualizar: (zonaId: string, body: ZonaBody) =>
+      req<ZonaCamera>(`/zonas/${zonaId}`, { method: "PUT", body: JSON.stringify(body) }),
+    excluir: (zonaId: string) =>
+      req<{ ok: boolean }>(`/zonas/${zonaId}`, { method: "DELETE" }),
+  },
+  cameras: {
+    listar: (processoId: string) =>
+      req<{ cameras: string[] }>(`/processos/${processoId}/cameras`),
+    frameReferencia: (processoId: string, camId: string) =>
+      req<FrameReferencia>(`/processos/${processoId}/cameras/${encodeURIComponent(camId)}/frame-referencia`),
   },
   comportamentos: {
     setCategoria: (comportamentoId: string, categoria_lean: CategoriaLean | null) =>

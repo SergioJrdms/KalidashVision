@@ -422,3 +422,39 @@ export interface TurnoBody {
   dias_semana: number[];
   ativo: boolean;
 }
+
+// ── Zonas por câmera (Fase 28) ──────────────────────────────
+export type PapelZona = "posto_operador" | "maquina" | "interacao";
+
+export interface ZonaCamera {
+  id: string;
+  cam_id: string;
+  nome: string;
+  papel: PapelZona;
+  pts_rel: [number, number][]; // normalizado [0-1] no espaço do vídeo enviado
+  descricao_contexto: string | null;
+  frame_ref_w: number | null;
+  frame_ref_h: number | null;
+  ativo: boolean;
+  criado_em: string;
+  atualizado_em: string;
+}
+
+export interface ZonaBody {
+  cam_id: string;
+  nome: string;
+  papel: PapelZona;
+  pts_rel: [number, number][];
+  descricao_contexto?: string | null;
+  frame_ref_w?: number | null;
+  frame_ref_h?: number | null;
+  ativo: boolean;
+}
+
+export interface FrameReferencia {
+  img: string; // data:image/jpeg;base64,...
+  largura: number | null;
+  altura: number | null;
+  video_nome: string | null;
+  gravado_em: string | null;
+}
