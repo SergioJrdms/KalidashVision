@@ -420,7 +420,7 @@ function FilaFoco({
         >
           <div className="row gap2" style={{ justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--line-2)" }}>
             <span className="row gap2" style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)", flexWrap: "wrap" }}>
-              <Icon name="user" size={13} /> PESSOA-{String(evento.pessoa).padStart(3, "0")} · {evento.ini.toFixed(1)}s→{evento.fim.toFixed(1)}s · {fmtSeg(evento.fim - evento.ini)}
+              <Icon name="user" size={13} /> {evento.papel === "operador" ? "OPERADOR" : evento.papel === "visitante" ? "VISITANTE NO POSTO" : `PESSOA-${String(evento.pessoa).padStart(3, "0")}`} · {evento.ini.toFixed(1)}s→{evento.fim.toFixed(1)}s · {fmtSeg(evento.fim - evento.ini)}
               {((evento.irmaos && evento.irmaos.length > 0) || evento.segundoAngulo) && (
                 <span className="badge badge-purple" style={{ fontFamily: "var(--sans)" }}>
                   <Icon name="video" size={11} /> {(evento.irmaos?.length ?? 0) + (evento.segundoAngulo ? 1 : 0) + 1} ângulos

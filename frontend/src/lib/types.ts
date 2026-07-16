@@ -277,6 +277,7 @@ export interface EventoPendente {
   label_corrigido: string | null;
   origem_validacao: string | null;
   pessoa_track_id: number;
+  papel_pessoa?: string | null; // Fase 28: 'operador' | 'visitante' | 'posto_vazio'
   categoria_lean_prevista?: string | null;
   cam_id?: string | null;
   gravado_em?: string | null;
@@ -315,6 +316,7 @@ export interface EventoTabela {
   categoria_lean?: CategoriaLean | null;
   comportamento_id?: string | null;
   cam_id?: string | null;
+  papel_pessoa?: string | null; // Fase 28: 'operador' | 'visitante' | 'posto_vazio'
 }
 
 export interface EventosTabelaResposta {

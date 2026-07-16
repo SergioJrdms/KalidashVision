@@ -670,32 +670,115 @@ def frame_para_base64(frame_bgr: np.ndarray, max_lado: int | None = None, qualid
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
-def _anexar_segundo_angulo(amostras: list, video_path_secundario: str) -> int:
+def _anexar_segundo_angulo(
+    amostras: list,
+    video_path_secundario: str,
+    yolo=None,
+    rois_sec: dict | None = None,
+) -> int:
     """Fase 6: para cada Amostra (da cam1), pega o frame da cam2 no MESMO tempo
     relativo (clock-aligned → mesmo instante real) e guarda em
-    `img_b64_secundario`. Não roda YOLO na cam2 (é só contexto p/ o VLM).
-    Retorna quantas amostras receberam o 2º ângulo. Defensivo: nunca levanta.
+    `img_b64_secundario`. Retorna quantas amostras receberam o 2º ângulo.
+    Defensivo: nunca levanta.
+
+    Fase 28: se `yolo` + `rois_sec` (com zona posto_operador) vierem, roda um
+    predict LEVE no frame da cam2 e marca `am.op_cam2` — a cam2 é a câmera com
+    PROFUNDIDADE que confirma se o operador está mesmo atrás da máquina
+    (desambigua o outro torneiro visto por cima do torno na cam1).
+    op_cam2 = True/False; None = não deu pra confirmar (frame além da duração
+    da cam2, predict falhou, stride pulou) → o chamador confia na cam1.
     """
     n = 0
+    posto_sec = None
+    if yolo is not None and rois_sec:
+        _tem_posto = any(i.get("papel") == "posto_operador" for i in rois_sec.values())
+        posto_sec = rois_sec if (_OPERADOR_FILTRO_ENABLE and _tem_posto) else None
     try:
         cap = cv2.VideoCapture(video_path_secundario)
         if not cap.isOpened():
             log.warning(f"2º ângulo: não abriu {video_path_secundario}")
             return 0
         dur_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / (cap.get(cv2.CAP_PROP_FPS) or 30.0) * 1000.0
-        for am in amostras:
+        rois2 = None
+        for idx, am in enumerate(amostras):
             alvo_ms = am.tempo_s * 1000.0
-            if dur_ms and alvo_ms > dur_ms:  # cam2 mais curta — usa o último frame
+            alem_da_cam2 = bool(dur_ms) and alvo_ms > dur_ms
+            if alem_da_cam2:  # cam2 mais curta — usa o último frame (só imagem)
                 alvo_ms = max(0.0, dur_ms - 1.0)
             cap.set(cv2.CAP_PROP_POS_MSEC, alvo_ms)
             ok, frame = cap.read()
-            if ok and frame is not None:
+            if not ok or frame is None:
+                continue
+            if am.pessoas or am.img_b64:   # amostras vazias não vão ao VLM
                 am.img_b64_secundario = frame_para_base64(frame)
-                n += 1
+            n += 1
+            # Confirmação do operador pela cam2 (Fase 28) — barata: predict
+            # (sem tracker/estado) só nos slots de amostra, imgsz pequeno.
+            if posto_sec is None or alem_da_cam2 or (idx % _CAM2_CONFIRM_STRIDE) != 0:
+                continue
+            try:
+                if rois2 is None:
+                    h2, w2 = frame.shape[:2]
+                    rois2 = _build_rois(
+                        {n2: i for n2, i in posto_sec.items()
+                         if i.get("papel") == "posto_operador"},
+                        w2, h2,
+                    )
+                res = yolo.predict(
+                    frame, classes=[0], conf=_CAM2_CONF, imgsz=416, verbose=False
+                )
+                achou = False
+                if res and res[0].boxes is not None and len(res[0].boxes) > 0:
+                    boxes2 = res[0].boxes.xyxy.cpu().numpy()
+                    kpts2 = None
+                    if getattr(res[0], "keypoints", None) is not None and \
+                            res[0].keypoints.xyn is not None:
+                        try:
+                            kpts2 = res[0].keypoints.xyn.cpu().numpy()
+                        except Exception:
+                            kpts2 = None
+                    h2, w2 = frame.shape[:2]
+                    for j, b in enumerate(boxes2):
+                        pessoa2 = {"bbox": tuple(b.astype(int))}
+                        if kpts2 is not None and j < len(kpts2):
+                            pessoa2["kpts"] = kpts2[j].astype("float32")
+                        ax, ay = _ponto_ancora(pessoa2, w2, h2)
+                        if any(_ponto_em_roi(ax, ay, i["polygon"]) for i in rois2.values()):
+                            achou = True
+                            break
+                am.op_cam2 = achou
+            except Exception as e:
+                log.warning(f"[operador] confirmação cam2 falhou no slot {am.tempo_s:.0f}s ({e})")
+                am.op_cam2 = None
         cap.release()
     except Exception as e:
         log.warning(f"2º ângulo falhou ({e}) — segue só com a cam1")
     return n
+
+
+def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
+    """Fase 28 — veredito POR SLOT (tracks não cruzam câmeras):
+      op_cam1 = alguma pessoa da amostra tem papel 'operador'.
+      politica 'cam1' : presente = op_cam1.
+      politica 'dupla': presente = op_cam1 E op_cam2 is not False
+        · op_cam2 is None  → confia na cam1 (cam2 caiu/solo/sem zona/stride);
+        · op_cam1 e op_cam2 is False → é o OUTRO torneiro visto por cima do
+          torno na cam1: REBAIXA (remove as pessoas 'operador' da amostra) e o
+          slot vira candidato a posto_vazio. Visitantes seguem analisáveis.
+    Marca am.operador_presente. Retorna stats p/ log."""
+    stats = {"slots": len(amostras), "presentes": 0, "vazios": 0, "rebaixados": 0}
+    for am in amostras:
+        op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
+        if politica == "dupla" and op_cam1 and am.op_cam2 is False:
+            am.pessoas = [p for p in am.pessoas if p.get("papel") != "operador"]
+            stats["rebaixados"] += 1
+            op_cam1 = False
+        am.operador_presente = op_cam1
+        if op_cam1:
+            stats["presentes"] += 1
+        elif not am.pessoas:
+            stats["vazios"] += 1
+    return stats
 
 
 def _ponto_em_roi(cx: float, cy: float, polygon: np.ndarray) -> bool:
@@ -717,6 +800,86 @@ def _zona_contexto(cx: int, cy: int, rois: dict) -> str | None:
         if _ponto_em_roi(cx, cy, info["polygon"]):
             return info["descricao_contexto"]
     return None
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 28 — análise focada no OPERADOR titular do posto.
+# Zonas com papel (posto_operador/maquina/interacao) classificam cada pessoa:
+# no posto = operador (1 por câmera, eleito por presença acumulada);
+# em interacao = visitante; fora de tudo = transeunte (descartado na raiz).
+# ═════════════════════════════════════════════════════════════════════════
+_OPERADOR_FILTRO_ENABLE = os.environ.get("KV_OPERADOR_FILTRO_ENABLE", "on") not in ("off", "0", "false", "False", "")
+_OPERADOR_CONFIRMACAO = os.environ.get("KV_OPERADOR_CONFIRMACAO", "dupla")   # dupla | cam1
+_POSTO_VAZIO_ENABLE = os.environ.get("KV_POSTO_VAZIO_ENABLE", "on") not in ("off", "0", "false", "False", "")
+_CAM2_CONF = float(os.environ.get("KV_CAM2_CONF", "0.35"))
+_CAM2_CONFIRM_STRIDE = max(1, int(os.environ.get("KV_CAM2_CONFIRM_STRIDE", "1")))
+
+POSTO_VAZIO_LABEL = "posto_vazio"
+POSTO_VAZIO_TID = -1
+POSTO_VAZIO_DESC = "posto de trabalho vazio (operador ausente)"
+
+
+def _modo_operador(rois: dict) -> bool:
+    """True quando a análise deve focar no operador: flag global ligada E
+    existe zona ativa com papel posto_operador nesta câmera."""
+    if not _OPERADOR_FILTRO_ENABLE:
+        return False
+    return any((info.get("papel") == "posto_operador") for info in rois.values())
+
+
+def _ponto_ancora(pessoa: dict, w: int, h: int) -> tuple[float, float]:
+    """Ponto que representa a pessoa no teste de zona, robusto à OCLUSÃO pela
+    máquina (o operador atrás do torno tem só tronco/cabeça visíveis; o bbox
+    dele termina em cima da máquina, enquanto um transeunte à frente tem o
+    corpo inteiro). Prioridade:
+      1) ponto médio dos OMBROS (kpts COCO 5 e 6) quando ambos válidos;
+      2) um ombro só, se apenas um é válido;
+      3) NARIZ (kpt 0) deslocado 10% da altura do bbox para baixo (≈ pescoço);
+      4) sem pose: topo-do-tronco do bbox → (cx, y1 + 0.30*(y2-y1)).
+    kpts vêm normalizados (xyn) — retorna em PIXELS."""
+    x1, y1, x2, y2 = pessoa["bbox"]
+    kpts = pessoa.get("kpts")
+    if kpts is not None and len(kpts) >= 7:
+        le, ld = kpts[5], kpts[6]   # ombro esq/dir (x, y) normalizados
+        val_e = le[0] > 0 and le[1] > 0
+        val_d = ld[0] > 0 and ld[1] > 0
+        if val_e and val_d:
+            return ((le[0] + ld[0]) / 2 * w, (le[1] + ld[1]) / 2 * h)
+        if val_e:
+            return (le[0] * w, le[1] * h)
+        if val_d:
+            return (ld[0] * w, ld[1] * h)
+        nariz = kpts[0]
+        if nariz[0] > 0 and nariz[1] > 0:
+            return (nariz[0] * w, nariz[1] * h + 0.10 * max(0, y2 - y1))
+    return ((x1 + x2) / 2.0, y1 + 0.30 * max(0, y2 - y1))
+
+
+def _fracao_inferior_visivel(kpts) -> float:
+    """Fração de keypoints INFERIORES válidos (quadris/joelhos/tornozelos,
+    COCO 11-16). Operador ocluso pela máquina ≈ 0.0; transeunte de corpo
+    inteiro ≈ 1.0. Usado só em telemetria/log nesta fase."""
+    if kpts is None or len(kpts) < 17:
+        return 0.0
+    baixos = [kpts[i] for i in range(11, 17)]
+    validos = sum(1 for k in baixos if k[0] > 0 and k[1] > 0)
+    return validos / 6.0
+
+
+def _zona_da_pessoa(ax: float, ay: float, rois: dict) -> tuple[str | None, str | None, str | None]:
+    """(nome_zona, papel, descricao) da pessoa pela âncora. Prioridade
+    posto_operador > interacao. Zona 'maquina' NÃO classifica pessoa (é
+    contexto da cena). None em tudo = fora das áreas de interesse."""
+    achado: tuple[str | None, str | None, str | None] = (None, None, None)
+    for nome, info in rois.items():
+        papel = info.get("papel")
+        if papel not in ("posto_operador", "interacao"):
+            continue
+        if _ponto_em_roi(ax, ay, info["polygon"]):
+            if papel == "posto_operador":
+                return (nome, papel, info.get("descricao_contexto"))
+            achado = (nome, papel, info.get("descricao_contexto"))
+    return achado
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -901,6 +1064,51 @@ Responda APENAS um JSON no formato:
 {{"acoes": {{"P1": "...", "P2": "...", ...}}}}"""
 
 
+# Fase 28 — modo OPERADOR: P1 é sempre o operador titular do posto; P2+ são
+# pessoas DENTRO da área do posto interagindo com ele. Transeuntes nem chegam
+# ao prompt (foram filtrados na detecção).
+PROMPT_VLM_OPERADOR = """Você é um analista de processos industriais observando UM posto de trabalho específico.
+Na imagem, P1 é o OPERADOR TITULAR deste posto (ele trabalha nesta máquina).
+Outras pessoas marcadas (P2, P3, ...), se existirem, estão DENTRO da área do posto interagindo com ele.
+
+Descreva em UMA FRASE CURTA (até 10 palavras) o que cada pessoa marcada está fazendo:
+- P1 (o operador): a AÇÃO dele no posto (verbo + objeto), ex.: "operando o torno", "medindo a peça", "monitorando o ciclo da máquina".
+- P2+ (se houver): a INTERAÇÃO com o posto/operador, ex.: "conversando com o operador", "entregando material ao posto".
+
+{bloco_processo}{bloco_vocabulario}REGRAS:
+- Foque na AÇÃO, não na aparência.
+- Use linguagem operacional clara em português.
+- Se a ação não estiver clara, escreva "ação não identificada".
+- NÃO invente ações que não estão visíveis.
+
+CONTEXTO: {contexto_zonas}
+
+Responda APENAS um JSON no formato:
+{{"acoes": {{"P1": "...", "P2": "...", ...}}}}"""
+
+
+PROMPT_VLM_DUAL_OPERADOR = """Você é um analista de processos industriais observando UM posto de trabalho específico.
+Você recebe DUAS IMAGENS do MESMO posto e MESMO instante, de CÂMERAS DIFERENTES:
+- IMAGEM 1 (câmera principal): P1 é o OPERADOR TITULAR deste posto. Outras pessoas marcadas (P2, P3, ...), se existirem, estão DENTRO da área do posto interagindo com ele.
+- IMAGEM 2 (câmera lateral): a MESMA cena com visão clara da área de trabalho ATRÁS da máquina, SEM rótulos — use-a para confirmar o que o operador realmente está fazendo (a máquina esconde parte do corpo dele na IMAGEM 1).
+
+Descreva em UMA FRASE CURTA (até 10 palavras) o que cada pessoa marcada está fazendo:
+- P1 (o operador): a AÇÃO dele no posto (verbo + objeto), ex.: "operando o torno", "medindo a peça", "monitorando o ciclo da máquina".
+- P2+ (se houver): a INTERAÇÃO com o posto/operador, ex.: "conversando com o operador", "entregando material ao posto".
+
+{bloco_processo}{bloco_vocabulario}REGRAS:
+- Foque na AÇÃO, não na aparência.
+- Use linguagem operacional clara em português.
+- Os rótulos P1, P2 referem-se SEMPRE às pessoas marcadas na IMAGEM 1.
+- Se mesmo com os dois ângulos a ação não estiver clara, escreva "ação não identificada".
+- NÃO invente ações que não estão visíveis em nenhum dos ângulos.
+
+CONTEXTO: {contexto_zonas}
+
+Responda APENAS um JSON no formato:
+{{"acoes": {{"P1": "...", "P2": "...", ...}}}}"""
+
+
 PROMPT_CLUSTER = """Você é um analista de processos industriais.
 Abaixo está uma lista de descrições de ações observadas num vídeo de operação.
 Várias descrições se referem ao MESMO comportamento, mas com palavras diferentes.
@@ -995,6 +1203,8 @@ class Amostra:
     img_b64: str
     pessoas: list
     img_b64_secundario: str | None = None   # 2º ângulo (cam2) no mesmo instante (Fase 6)
+    op_cam2: bool | None = None             # Fase 28: operador visto no posto pela cam2
+    operador_presente: bool | None = None   # Fase 28: veredito do slot (pós-confirmação)
 
 
 def inspecionar_video(video_path: str) -> dict:
@@ -1129,6 +1339,13 @@ def etapa_detectar_e_amostrar(
 
     rois = _build_rois(rois_contexto, w, h)
     area_min_px = AREA_MIN_RATIO * (w * h)
+    # Fase 28: com zona de posto_operador configurada, a análise foca no
+    # operador titular — transeuntes (fora das zonas) morrem aqui na raiz.
+    modo_op = _modo_operador(rois)
+    presenca_zona: dict[int, int] = {}   # track_id → nº de amostras no posto
+    if modo_op:
+        log.info("[operador] modo operador ATIVO — zonas: "
+                 + ", ".join(f"{n}({i.get('papel')})" for n, i in rois.items()))
 
     # Aceleração da detecção (env-tunável, sem novo deploy):
     #  - KV_TRACK_FPS: cadência efetiva do tracking (faixa útil 4–8). O YOLO roda 1 a
@@ -1164,6 +1381,7 @@ def etapa_detectar_e_amostrar(
             tempo_s = frame_idx / fps
             if tempo_s >= prox_amostra_s:
                 prox_amostra_s += intervalo_s   # consome este slot (~1 amostra / intervalo_s)
+                pessoas = []
                 if (
                     results[0].boxes is not None
                     and results[0].boxes.id is not None
@@ -1184,8 +1402,7 @@ def etapa_detectar_e_amostrar(
                     areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
                     mask = areas >= area_min_px
                     idx_validos = [j for j, m in enumerate(mask) if m]
-                    pessoas = []
-                    for i, j in enumerate(idx_validos):
+                    for j in idx_validos:
                         box, tid = boxes[j], ids[j]
                         x1, y1, x2, y2 = box.astype(int)
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
@@ -1193,32 +1410,80 @@ def etapa_detectar_e_amostrar(
                             "track_id": int(tid),
                             "bbox": (int(x1), int(y1), int(x2), int(y2)),
                             "centro": (cx, cy),
-                            "zona": _zona_contexto(cx, cy, rois),
-                            "rotulo": f"P{i + 1}",
                         }
                         if kpts_all is not None and j < len(kpts_all):
                             pessoa["kpts"] = kpts_all[j].astype("float32")
+                        if modo_op:
+                            # Fase 28: classifica pela ÂNCORA robusta à oclusão
+                            # (ombros/nariz/topo-do-tronco — o operador atrás do
+                            # torno tem a parte de baixo escondida). Fora das
+                            # zonas de interesse = transeunte → descartado ANTES
+                            # de virar pessoa/evento/métrica.
+                            ax, ay = _ponto_ancora(pessoa, w, h)
+                            nome_z, papel_z, desc_z = _zona_da_pessoa(ax, ay, rois)
+                            if papel_z is None:
+                                continue
+                            pessoa["zona"] = nome_z
+                            pessoa["zona_desc"] = desc_z
+                            pessoa["_papel_zona"] = papel_z
+                        else:
+                            pessoa["zona"] = _zona_contexto(cx, cy, rois)
                         if _GATE_ENABLE:
                             pessoa["crop"] = _crop_cinza_pequeno(frame, pessoa["bbox"])
                         pessoas.append(pessoa)
-                    if pessoas:
-                        # Codifica imediatamente em base64 (mesma pipeline:
-                        # anotar→resize→JPEG, com defaults max_lado=1024 e
-                        # qualidade=85). Guardamos só a string e descartamos
-                        # o numpy do frame, evitando reter ~1–2 GB de RAM em
-                        # vídeos longos até a etapa VLM. anotar_frame_com_ids
-                        # já copia internamente, então não precisa frame.copy().
-                        img_b64 = frame_para_base64(
-                            anotar_frame_com_ids(frame, pessoas)
+                    if modo_op and pessoas:
+                        # Eleição do OPERADOR: entre quem está no posto, vence o
+                        # track com maior presença acumulada (desempate: maior
+                        # bbox). Demais no posto e todos em 'interacao' são
+                        # visitantes. Operador reordenado p/ 1º → P1 = operador.
+                        no_posto = [p for p in pessoas if p["_papel_zona"] == "posto_operador"]
+                        for p in no_posto:
+                            presenca_zona[p["track_id"]] = presenca_zona.get(p["track_id"], 0) + 1
+                        if no_posto:
+                            def _rank_op(p):
+                                bx1, by1, bx2, by2 = p["bbox"]
+                                return (-presenca_zona.get(p["track_id"], 0),
+                                        -(bx2 - bx1) * (by2 - by1))
+                            no_posto.sort(key=_rank_op)
+                            titular = no_posto[0]
+                            titular["papel"] = "operador"
+                            for p in pessoas:
+                                if p is not titular:
+                                    p["papel"] = "visitante"
+                            pessoas.sort(key=lambda p: 0 if p.get("papel") == "operador" else 1)
+                        else:
+                            for p in pessoas:
+                                p["papel"] = "visitante"
+                        for p in pessoas:
+                            p.pop("_papel_zona", None)
+                    for i, p in enumerate(pessoas):
+                        p["rotulo"] = f"P{i + 1}"
+                if pessoas:
+                    # Codifica imediatamente em base64 (mesma pipeline:
+                    # anotar→resize→JPEG, com defaults max_lado=1024 e
+                    # qualidade=85). Guardamos só a string e descartamos
+                    # o numpy do frame, evitando reter ~1–2 GB de RAM em
+                    # vídeos longos até a etapa VLM. anotar_frame_com_ids
+                    # já copia internamente, então não precisa frame.copy().
+                    img_b64 = frame_para_base64(
+                        anotar_frame_com_ids(frame, pessoas)
+                    )
+                    amostras.append(
+                        Amostra(
+                            frame_idx=frame_idx,
+                            tempo_s=tempo_s,
+                            img_b64=img_b64,
+                            pessoas=pessoas,
                         )
-                        amostras.append(
-                            Amostra(
-                                frame_idx=frame_idx,
-                                tempo_s=tempo_s,
-                                img_b64=img_b64,
-                                pessoas=pessoas,
-                            )
-                        )
+                    )
+                elif modo_op:
+                    # Fase 28: slot sem ninguém de interesse — amostra VAZIA
+                    # (sem encode JPEG, custo zero). É o insumo do posto_vazio
+                    # e da confirmação pela cam2.
+                    amostras.append(
+                        Amostra(frame_idx=frame_idx, tempo_s=tempo_s,
+                                img_b64="", pessoas=[])
+                    )
         frame_idx += 1
         if frame_idx % 60 == 0:
             pct = int(frame_idx / max(1, total_frames) * 100)
@@ -1249,13 +1514,22 @@ def _analisar_amostra_vlm(
     img_b64 = amostra.img_b64
     img_sec = amostra.img_b64_secundario   # 2º ângulo (cam2), se houver (Fase 6)
 
+    # Fase 28: amostras com papel usam o prompt de OPERADOR (P1 = titular).
+    modo_op = any(p.get("papel") for p in amostra.pessoas)
+
     contexto_partes = []
     for p in amostra.pessoas:
-        if p["zona"]:
-            contexto_partes.append(f"{p['rotulo']} está em {p['zona']}")
+        zona_txt = p.get("zona_desc") or p.get("zona")
+        if zona_txt:
+            quem = "o OPERADOR" if p.get("papel") == "operador" else p["rotulo"]
+            contexto_partes.append(f"{p['rotulo']} ({quem}) está em: {zona_txt}"
+                                   if modo_op else f"{p['rotulo']} está em {zona_txt}")
     contexto = ". ".join(contexto_partes) if contexto_partes else "sem zonas pré-definidas"
 
-    template = PROMPT_VLM_DUAL if img_sec else PROMPT_VLM
+    if modo_op:
+        template = PROMPT_VLM_DUAL_OPERADOR if img_sec else PROMPT_VLM_OPERADOR
+    else:
+        template = PROMPT_VLM_DUAL if img_sec else PROMPT_VLM
     prompt = template.format(
         bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
@@ -1315,6 +1589,7 @@ def etapa_analise_vlm(
     memoria: dict,
     progress_cb: ProgressCb,
     conhecimento_adquirido: str = "",
+    zona_posto: str | None = None,
 ) -> list[dict]:
     """Analisa as amostras com o VLM. Com KV_GATE_ENABLE=on (Fase 23), um gate
     de repetição evita reanalisar o PADRÃO: por track, mantém uma ÂNCORA (a
@@ -1324,7 +1599,10 @@ def etapa_analise_vlm(
       • muito diferentes → analisa (VLM completo), vira a nova âncora;
       • na fronteira → 1 VLM BINÁRIO barato (sim/não) desempata.
     TODA amostra continua gerando observação (tempo 100% preservado); as
-    suprimidas herdam o rótulo e estendem o mesmo evento downstream."""
+    suprimidas herdam o rótulo e estendem o mesmo evento downstream.
+
+    Fase 28: `zona_posto` (nome da zona posto_operador) liga a síntese de
+    POSTO VAZIO — amostras vazias viram observação determinística sem VLM."""
     progress_cb("vlm", 0, f"Analisando {len(amostras)} amostras com VLM"
                 + (" · gate ON" if _GATE_ENABLE else ""))
     observacoes: list[dict] = []
@@ -1332,6 +1610,25 @@ def etapa_analise_vlm(
     n_completo = n_binario = n_repeticao = 0
 
     for i, am in enumerate(amostras):
+        # Fase 28: slot SEM ninguém de interesse (modo operador) → observação
+        # sintética de POSTO VAZIO, determinística e sem chamada VLM (custo
+        # zero). Amostras vazias só existem quando o modo operador está ativo.
+        if not am.pessoas:
+            if _POSTO_VAZIO_ENABLE and zona_posto:
+                observacoes.append(
+                    {
+                        "tempo_s": am.tempo_s,
+                        "frame_idx": am.frame_idx,
+                        "track_id": POSTO_VAZIO_TID,
+                        "descricao": POSTO_VAZIO_DESC,
+                        "bbox": (0, 0, 0, 0),
+                        "zona": zona_posto,
+                        "papel": "posto_vazio",
+                        "origem_gate": "posto_vazio",
+                        "mudanca_contexto": False,
+                    }
+                )
+            continue
         # Quais tracks desta amostra podem ser servidos pela âncora (repetição)?
         analisar_agora = not _GATE_ENABLE
         decisao: dict[int, tuple[str, str]] = {}   # track_id → (origem, descricao_ou_"")
@@ -1399,6 +1696,7 @@ def etapa_analise_vlm(
                     "descricao": desc,
                     "bbox": p["bbox"],
                     "zona": p["zona"],
+                    "papel": p.get("papel"),
                     "origem_gate": origem_gate,
                     "mudanca_contexto": origem_gate == "analisado",
                 }
@@ -1445,6 +1743,9 @@ def etapa_clusterizar(
     descricoes_novas: list[str] = []
     for d in descricoes_unicas:
         d_lower = d.lower().strip()
+        if d_lower == POSTO_VAZIO_DESC:
+            # Fase 28: label determinístico — nunca passa pela LLM.
+            continue
         if d_lower in correcoes:
             descricoes_conhecidas[d] = correcoes[d_lower]
         else:
@@ -1464,6 +1765,13 @@ def etapa_clusterizar(
 
     mapa_descricao_label: dict[str, str] = {}
     catalogo: dict[str, str] = {}
+
+    # Fase 28: posto_vazio é semeado direto (curto-circuito determinístico).
+    if any(d.lower().strip() == POSTO_VAZIO_DESC for d in descricoes_unicas):
+        mapa_descricao_label[POSTO_VAZIO_DESC] = POSTO_VAZIO_LABEL
+        catalogo[POSTO_VAZIO_LABEL] = (
+            "Posto de trabalho vazio — operador ausente do posto"
+        )
 
     for desc, label in descricoes_conhecidas.items():
         mapa_descricao_label[desc.lower().strip()] = label
@@ -1562,11 +1870,18 @@ def etapa_segmentar_eventos(
             "frame_fim": obs_lista[0]["frame_idx"],
             "bbox_inicio": list(obs_lista[0]["bbox"]),
             "zona_contexto": obs_lista[0]["zona"],
+            "papel_pessoa": obs_lista[0].get("papel"),
             "n_amostras": 1,
         }
         for o in obs_lista[1:]:
             gap = o["tempo_s"] - atual["tempo_fim_s"]
-            if o["label"] == atual["comportamento_label"] and gap <= janela_continuidade_s:
+            # Fase 28: mudança de PAPEL (operador↔visitante) quebra o evento —
+            # o mesmo track em papéis diferentes conta separado nas métricas.
+            if (
+                o["label"] == atual["comportamento_label"]
+                and o.get("papel") == atual.get("papel_pessoa")
+                and gap <= janela_continuidade_s
+            ):
                 atual["tempo_fim_s"] = o["tempo_s"]
                 atual["frame_fim"] = o["frame_idx"]
                 atual["n_amostras"] += 1
@@ -1582,6 +1897,7 @@ def etapa_segmentar_eventos(
                     "frame_fim": o["frame_idx"],
                     "bbox_inicio": list(o["bbox"]),
                     "zona_contexto": o["zona"],
+                    "papel_pessoa": o.get("papel"),
                     "n_amostras": 1,
                 }
         eventos.append(atual)
@@ -1672,6 +1988,7 @@ def etapa_consolidar_principais(
             "frame_fim": rep["frame_fim"],
             "bbox_inicio": list(rep["bbox_inicio"]),
             "zona_contexto": rep["zona_contexto"],
+            "papel_pessoa": rep.get("papel_pessoa"),
             "n_amostras": sum(e["n_amostras"] for e, _ in no_bucket),
             "confianca": rep.get("confianca", 0.7),
             "principal": True,
@@ -1779,6 +2096,11 @@ def etapa_persistir(
     for e in eventos:
         origem = origem_de(e["descricao_bruta"])
         auto_validado = origem in ("correcao_aprendida", "vocabulario_canonico")
+        # Fase 28: posto_vazio é determinístico (sem VLM) — nasce validado e
+        # FORA da fila de validação, mas DENTRO das métricas (principal=True).
+        if e.get("papel_pessoa") == "posto_vazio":
+            origem = "posto_vazio"
+            auto_validado = True
         row = {
             "video_id": video_id,
             "empresa": empresa,
@@ -1797,6 +2119,7 @@ def etapa_persistir(
                 "y2": e["bbox_inicio"][3],
             },
             "zona_contexto": e["zona_contexto"],
+            "papel_pessoa": e.get("papel_pessoa"),
             "n_amostras": e["n_amostras"],
             "confianca": e["confianca"],
             "origem_validacao": origem,
@@ -1828,6 +2151,7 @@ def etapa_persistir(
                 "x2": e["bbox_inicio"][2], "y2": e["bbox_inicio"][3],
             },
             "zona_contexto": e["zona_contexto"],
+            "papel_pessoa": e.get("papel_pessoa"),
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
             "origem_validacao": "auditoria",
             # validado_humano=True mantém os crus FORA de toda query "pendente"
@@ -2684,6 +3008,18 @@ def classificar_comportamentos_lean(
         origem = c.get("categoria_lean_origem")
         if origem == "humano":
             continue  # inviolável
+        # Fase 28: posto_vazio é regra DURA — posto parado = espera/desperdício
+        # no racional Lean do posto. Sem LLM; o gestor pode reclassificar pela
+        # UI (vira origem='humano' e nunca mais é tocado).
+        if c.get("label") == POSTO_VAZIO_LABEL:
+            if c.get("categoria_lean") != "desperdicio":
+                try:
+                    sb.table("comportamentos").update(
+                        {"categoria_lean": "desperdicio", "categoria_lean_origem": "ia"}
+                    ).eq("id", c["id"]).execute()
+                except Exception as e:
+                    log.warning(f"Lean: posto_vazio não atualizado: {e}")
+            continue
         # 'aprendido' e 'ia' são candidatos a refinamento se reclassificar_ia
         if c.get("categoria_lean") and origem in ("ia", "aprendido") and not reclassificar_ia:
             continue
@@ -3355,21 +3691,25 @@ def extrair_3_frames_evento(evento: dict, video_path: str) -> list[np.ndarray]:
         a = frame.copy()  # copia: o mesmo frame pode servir a mais de um alvo
         h, w = a.shape[:2]
         m = max(h, w)
+        # Fase 28: bbox degenerado (posto_vazio, track -1) → frame inteiro sem
+        # anotação (não há pessoa a destacar).
+        bbox_valido = (x2 - x1) > 1 and (y2 - y1) > 1
         # Anotação PROPORCIONAL ao tamanho do frame — assim a caixa não vira um
         # "blob" verde em frames pequenos nem some em frames grandes.
-        esp = max(2, round(m / 360))
-        fsc = max(0.5, min(1.2, m / 900))
-        fth = max(1, round(m / 600))
-        cv2.rectangle(a, (x1, y1), (x2, y2), (0, 255, 100), esp)
-        cv2.putText(
-            a,
-            f'P{evento["pessoa_track_id"]:03d}',
-            (x1, max(20, y1 - 10)),
-            cv2.FONT_HERSHEY_DUPLEX,
-            fsc,
-            (0, 255, 100),
-            fth,
-        )
+        if bbox_valido:
+            esp = max(2, round(m / 360))
+            fsc = max(0.5, min(1.2, m / 900))
+            fth = max(1, round(m / 600))
+            cv2.rectangle(a, (x1, y1), (x2, y2), (0, 255, 100), esp)
+            cv2.putText(
+                a,
+                f'P{evento["pessoa_track_id"]:03d}',
+                (x1, max(20, y1 - 10)),
+                cv2.FONT_HERSHEY_DUPLEX,
+                fsc,
+                (0, 255, 100),
+                fth,
+            )
         # Frame de validação: normaliza para no máx. 720px no maior lado (meio
         # termo entre nitidez e peso). NÃO faz upscale — preserva a resolução
         # nativa quando menor, deixando o navegador escalar no display.
@@ -4871,6 +5211,20 @@ def montar_insights_quantitativos(
         tom = "high" if desp_pct >= 40 else ("warn" if desp_pct >= 25 else "ok")
         frases.append({"texto": " · ".join(partes_lean) + ".", "tom": tom})
 
+    # 3b) Fase 28: posto vazio (operador ausente) — frase dedicada, direta.
+    vazio_s = sum(
+        max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        for e in (eventos or [])
+        if (e.get("label_corrigido") or e.get("comportamento_label")) == POSTO_VAZIO_LABEL
+    )
+    if vazio_s > 0:
+        vazio_pct = round(vazio_s / total * 100, 1)
+        frases.append({
+            "texto": f"Posto vazio (operador ausente) por {_fmt_dur_h(vazio_s)} "
+                     f"({vazio_pct:.0f}% do tempo observado).",
+            "tom": "high" if vazio_pct >= 20 else "warn",
+        })
+
     # 4) Por ROI (zona_contexto): tempo + % produtivo/desperdício
     por_zona: dict[str, dict] = {}
     for e in (eventos or []):
@@ -5552,6 +5906,7 @@ def processar_video(
     gravado_em: str | None = None,
     video_path_secundario: str | None = None,
     cam_id_secundario: str | None = None,
+    rois_contexto_secundario: dict | None = None,
 ) -> dict:
     """Roda o pipeline completo. Devolve dict com video_id, n_eventos,
     n_auto_validados, n_sugestoes.
@@ -5559,6 +5914,11 @@ def processar_video(
     Fase 6 (dual-angle): se `video_path_secundario` for dado, a cam2 entra como
     2º ângulo na MESMA chamada ao VLM (a cam1 dirige detecção/segmentação). Gera
     UMA trilha de eventos (na cam1) — sem duplicidade na validação/métricas.
+
+    Fase 28: `rois_contexto` com zona papel='posto_operador' liga o MODO
+    OPERADOR (só o titular do posto é analisado; transeuntes descartados;
+    ausência vira posto_vazio). `rois_contexto_secundario` (zonas da cam2)
+    habilita a CONFIRMAÇÃO em profundidade pela câmera lateral.
     """
     progress_cb = progress_cb or _noop_progress
     rois_contexto = rois_contexto or DEFAULT_ROIS_CONTEXTO
@@ -5595,18 +5955,47 @@ def processar_video(
             "n_perguntas": 0,
         }
 
+    # Fase 28: nome da zona do posto (liga posto_vazio + confirmação dupla).
+    zona_posto = None
+    if _OPERADOR_FILTRO_ENABLE:
+        zona_posto = next(
+            (n for n, i in rois_contexto.items() if i.get("papel") == "posto_operador"),
+            None,
+        )
+
     # Fase 6: 2º ângulo (cam2) anexado a cada amostra para o VLM concluir com os
     # dois pontos de vista. cam1 já dirigiu detecção/tracking acima.
+    # Fase 28: com zonas na cam2, o mesmo passe roda um predict leve por slot e
+    # marca op_cam2 (o operador está mesmo ATRÁS da máquina?).
     if video_path_secundario:
-        n_sec = _anexar_segundo_angulo(amostras, video_path_secundario)
+        n_sec = _anexar_segundo_angulo(
+            amostras, video_path_secundario,
+            yolo=(yolo if zona_posto else None),
+            rois_sec=rois_contexto_secundario,
+        )
         log.info(
             f"[dual-angle] {cam_id or 'cam1'} + {cam_id_secundario or 'cam2'}: "
             f"2º ângulo em {n_sec}/{len(amostras)} amostras"
         )
 
+    # Fase 28: veredito por slot (dupla quando a cam2 tem zona de posto).
+    if zona_posto:
+        tem_posto_sec = any(
+            i.get("papel") == "posto_operador"
+            for i in (rois_contexto_secundario or {}).values()
+        )
+        politica = _OPERADOR_CONFIRMACAO if (tem_posto_sec and video_path_secundario) else "cam1"
+        stats_op = etapa_confirmar_operador(amostras, politica)
+        log.info(
+            "[operador] política=%s · %d slots: %d com operador, %d vazios, %d rebaixados pela cam2",
+            politica, stats_op["slots"], stats_op["presentes"],
+            stats_op["vazios"], stats_op["rebaixados"],
+        )
+
     observacoes = etapa_analise_vlm(
         groq_client, amostras, descricao, memoria, progress_cb,
         conhecimento_adquirido=conhecimento,
+        zona_posto=zona_posto,
     )
 
     if not observacoes:

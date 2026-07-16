@@ -1589,7 +1589,7 @@ def listar_eventos(
         .select(
             "id, video_id, comportamento_label, descricao_bruta, tempo_inicio_s, "
             "tempo_fim_s, confianca, validado_humano, validacao_correto, n_amostras, "
-            "label_corrigido, origem_validacao, frame_inicio, frame_fim, bbox_inicio, pessoa_track_id, principal"
+            "label_corrigido, origem_validacao, frame_inicio, frame_fim, bbox_inicio, pessoa_track_id, principal, papel_pessoa"
         )
         .eq("empresa", user.empresa)
         .eq("processo", nome)
@@ -1786,7 +1786,7 @@ def listar_eventos_tabela(
         "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
         "descricao_bruta, tempo_inicio_s, tempo_fim_s, duracao_s, confianca, "
         "validado_humano, validacao_correto, origem_validacao, criado_em, validado_em, "
-        "categoria_lean, categoria_lean_origem"
+        "categoria_lean, categoria_lean_origem, papel_pessoa"
     )
     q = (
         sb.table("eventos")

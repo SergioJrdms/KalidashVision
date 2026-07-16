@@ -72,6 +72,36 @@ def _marcar_segmentos(sb, ids: list[str | None], **campos) -> None:
             log.warning(f"falha ao marcar segmento {sid}: {e}")
 
 
+def _buscar_zonas_por_cam(sb, empresa: str, processo: str) -> dict[str, dict]:
+    """Fase 28: zonas ATIVAS do processo agrupadas por cam_id, no formato que
+    `processar_video`/`_build_rois` consomem:
+      {cam_id: {nome: {pts_rel, descricao_contexto, papel}}}
+    Não-fatal — falha vira {} (pipeline segue no comportamento legado)."""
+    try:
+        r = (
+            sb.table("zonas_camera")
+            .select("cam_id, nome, papel, pts_rel, descricao_contexto")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .eq("ativo", True)
+            .execute()
+        )
+        zonas: dict[str, dict] = {}
+        for z in r.data or []:
+            pts = z.get("pts_rel") or []
+            if not z.get("cam_id") or not z.get("nome") or len(pts) < 3:
+                continue
+            zonas.setdefault(z["cam_id"], {})[z["nome"]] = {
+                "pts_rel": pts,
+                "descricao_contexto": z.get("descricao_contexto"),
+                "papel": z.get("papel"),
+            }
+        return zonas
+    except Exception as e:
+        log.warning(f"zonas_camera não carregadas ({e}) — pipeline sem zonas")
+        return {}
+
+
 def executar_job(
     job_id: str,
     empresa: str,
@@ -139,6 +169,9 @@ def executar_job(
                 mensagem=mensagem,
             )
 
+        # Fase 28: zonas por câmera (posto do operador etc.). Sem zonas ou em
+        # upload manual (cam_id=None) → None → pipeline legado, sem filtro.
+        zonas = _buscar_zonas_por_cam(sb, empresa, processo)
         resultado = processar_video(
             empresa=empresa,
             processo=processo,
@@ -154,6 +187,10 @@ def executar_job(
             gravado_em=gravado_em,
             video_path_secundario=local_path_sec,
             cam_id_secundario=cam_id_secundario,
+            rois_contexto=(zonas.get(cam_id) if cam_id else None),
+            rois_contexto_secundario=(
+                zonas.get(cam_id_secundario) if cam_id_secundario else None
+            ),
         )
 
         JOBS.update(

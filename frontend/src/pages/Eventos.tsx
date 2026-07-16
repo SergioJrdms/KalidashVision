@@ -207,7 +207,17 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
           <div className="truncate" style={{ maxWidth: 150 }}>{e.video}</div>
           <div className="font-mono">{e.ini.toFixed(0)}→{e.fim.toFixed(0)}s · {fmtSeg(e.fim - e.ini)}</div>
         </td>
-        <td style={{ padding: "10px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12 }} className="font-mono">{String(e.pessoa).padStart(3, "0")}</td>
+        <td style={{ padding: "10px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12 }} className="font-mono">
+          {e.papel === "operador" ? (
+            <span className="badge badge-purple" style={{ fontSize: 10 }} title={`Operador titular do posto (track ${e.pessoa})`}>Operador</span>
+          ) : e.papel === "visitante" ? (
+            <span className="badge" style={{ fontSize: 10, background: "#fdf3e0", color: "#9a6b00" }} title={`Pessoa interagindo no posto (track ${e.pessoa})`}>Visitante</span>
+          ) : e.papel === "posto_vazio" ? (
+            <span className="badge" style={{ fontSize: 10, background: "var(--line-2)", color: "var(--muted)" }} title="Operador ausente do posto">Posto vazio</span>
+          ) : (
+            String(e.pessoa).padStart(3, "0")
+          )}
+        </td>
         <td style={{ padding: "10px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12 }} className="tnum">{Math.round(e.conf * 100)}%</td>
         <td style={{ padding: "10px 12px", textAlign: "center" }}><Badge tone={m.tone}>{m.label}</Badge></td>
         <td style={{ padding: "10px 12px", textAlign: "right" }}>
