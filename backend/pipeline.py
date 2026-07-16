@@ -670,23 +670,48 @@ def frame_para_base64(frame_bgr: np.ndarray, max_lado: int | None = None, qualid
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+def _offset_entre_nomes(nome_prim: str | None, nome_sec: str | None) -> float:
+    """Fase 30 — offset REAL de relógio entre os dois segmentos do par, em
+    segundos: t0(prim) − t0(sec), parseado do token seg_YYYYMMDD_HHMMSS dos
+    nomes. O instante relativo `tempo_s` da cam1 corresponde a
+    `tempo_s + offset` na cam2: se a cam2 começou DEPOIS (t0_sec > t0_prim),
+    offset < 0 e o mesmo instante real cai mais cedo no relógio relativo da
+    cam2. Nome não parseável → 0.0 (assume alinhado, comportamento anterior)."""
+    ta, tb = _seg_token_nome(nome_prim), _seg_token_nome(nome_sec)
+    if not ta or not tb:
+        return 0.0
+    try:
+        da, db = ta.split("_"), tb.split("_")
+        dt_a = datetime(int(da[0][0:4]), int(da[0][4:6]), int(da[0][6:8]),
+                        int(da[1][0:2]), int(da[1][2:4]), int(da[1][4:6]))
+        dt_b = datetime(int(db[0][0:4]), int(db[0][4:6]), int(db[0][6:8]),
+                        int(db[1][0:2]), int(db[1][2:4]), int(db[1][4:6]))
+        return (dt_a - dt_b).total_seconds()
+    except Exception:
+        return 0.0
+
+
 def _anexar_segundo_angulo(
     amostras: list,
     video_path_secundario: str,
     yolo=None,
     rois_sec: dict | None = None,
+    offset_s: float = 0.0,
 ) -> int:
-    """Fase 6: para cada Amostra (da cam1), pega o frame da cam2 no MESMO tempo
-    relativo (clock-aligned → mesmo instante real) e guarda em
-    `img_b64_secundario`. Retorna quantas amostras receberam o 2º ângulo.
-    Defensivo: nunca levanta.
+    """Fase 6: para cada Amostra (da cam1), pega o frame da cam2 no MESMO
+    instante REAL e guarda em `img_b64_secundario`. Retorna quantas amostras
+    receberam o 2º ângulo. Defensivo: nunca levanta.
+
+    Fase 30: os segmentos do par NÃO começam no mesmo segundo (podem diferir
+    de segundos a minutos) — `offset_s = t0(cam1) − t0(cam2)` corrige:
+    instante na cam2 = tempo_s + offset_s. Fora de [0, duração da cam2] →
+    frame clampado só como contexto visual e `op_cam2=None` (não confirma
+    nem nega — o desalinhado não pode rebaixar o operador).
 
     Fase 28: se `yolo` + `rois_sec` (com zona posto_operador) vierem, roda um
     predict LEVE no frame da cam2 e marca `am.op_cam2` — a cam2 é a câmera com
     PROFUNDIDADE que confirma se o operador está mesmo atrás da máquina
     (desambigua o outro torneiro visto por cima do torno na cam1).
-    op_cam2 = True/False; None = não deu pra confirmar (frame além da duração
-    da cam2, predict falhou, stride pulou) → o chamador confia na cam1.
     """
     n = 0
     posto_sec = None
@@ -699,12 +724,14 @@ def _anexar_segundo_angulo(
             log.warning(f"2º ângulo: não abriu {video_path_secundario}")
             return 0
         dur_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / (cap.get(cv2.CAP_PROP_FPS) or 30.0) * 1000.0
+        if abs(offset_s) > 0.5:
+            log.info(f"[dual-angle] offset de relógio cam1→cam2 = {offset_s:+.0f}s (alinhado pelo nome)")
         rois2 = None
         for idx, am in enumerate(amostras):
-            alvo_ms = am.tempo_s * 1000.0
-            alem_da_cam2 = bool(dur_ms) and alvo_ms > dur_ms
-            if alem_da_cam2:  # cam2 mais curta — usa o último frame (só imagem)
-                alvo_ms = max(0.0, dur_ms - 1.0)
+            alvo_ms = (am.tempo_s + offset_s) * 1000.0
+            fora_da_cam2 = alvo_ms < 0 or (bool(dur_ms) and alvo_ms > dur_ms)
+            if fora_da_cam2:  # instante não existe na cam2 — clampa (só imagem)
+                alvo_ms = min(max(0.0, alvo_ms), max(0.0, dur_ms - 1.0))
             cap.set(cv2.CAP_PROP_POS_MSEC, alvo_ms)
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -714,7 +741,7 @@ def _anexar_segundo_angulo(
             n += 1
             # Confirmação do operador pela cam2 (Fase 28) — barata: predict
             # (sem tracker/estado) só nos slots de amostra, imgsz pequeno.
-            if posto_sec is None or alem_da_cam2 or (idx % _CAM2_CONFIRM_STRIDE) != 0:
+            if posto_sec is None or fora_da_cam2 or (idx % _CAM2_CONFIRM_STRIDE) != 0:
                 continue
             try:
                 if rois2 is None:
@@ -765,11 +792,39 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
         · op_cam1 e op_cam2 is False → é o OUTRO torneiro visto por cima do
           torno na cam1: REBAIXA (remove as pessoas 'operador' da amostra) e o
           slot vira candidato a posto_vazio. Visitantes seguem analisáveis.
+
+    Fase 30 — GUARDRAIL: avalia em 2 fases (decidir → aplicar). Se a cam2
+    negaria mais que KV_CAM2_REBAIXA_MAX dos slots em que a cam1 viu o
+    operador, o problema é sistêmico (desalinhamento de relógio, zona errada,
+    câmera mexida) — aí IGNORA a cam2 no vídeo inteiro (vira política cam1)
+    em vez de zerar tudo como posto_vazio.
     Marca am.operador_presente. Retorna stats p/ log."""
-    stats = {"slots": len(amostras), "presentes": 0, "vazios": 0, "rebaixados": 0}
+    # Fase 1: decidir sem mutar.
+    decisoes = []   # (am, op_cam1, rebaixaria)
+    n_op_cam1 = n_rebaixaria = 0
     for am in amostras:
         op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
-        if politica == "dupla" and op_cam1 and am.op_cam2 is False:
+        rebaixaria = politica == "dupla" and op_cam1 and am.op_cam2 is False
+        n_op_cam1 += 1 if op_cam1 else 0
+        n_rebaixaria += 1 if rebaixaria else 0
+        decisoes.append((am, op_cam1, rebaixaria))
+
+    # Guardrail só com massa mínima (≥5 slots com operador): em vídeos muito
+    # curtos a fração é ruidosa e o impacto de confiar na cam2 é pequeno.
+    aplicar_cam2 = politica == "dupla"
+    if aplicar_cam2 and n_op_cam1 >= 5 and (n_rebaixaria / n_op_cam1) > _CAM2_REBAIXA_MAX:
+        log.warning(
+            "[operador] GUARDRAIL: a cam2 negaria %d de %d slots com operador "
+            "(>%d%%) — provável desalinhamento/zona errada na cam2. Ignorando a "
+            "confirmação dupla NESTE vídeo (confiando na cam1).",
+            n_rebaixaria, n_op_cam1, int(_CAM2_REBAIXA_MAX * 100),
+        )
+        aplicar_cam2 = False
+
+    # Fase 2: aplicar.
+    stats = {"slots": len(amostras), "presentes": 0, "vazios": 0, "rebaixados": 0}
+    for am, op_cam1, rebaixaria in decisoes:
+        if aplicar_cam2 and rebaixaria:
             am.pessoas = [p for p in am.pessoas if p.get("papel") != "operador"]
             stats["rebaixados"] += 1
             op_cam1 = False
@@ -813,6 +868,10 @@ _OPERADOR_CONFIRMACAO = os.environ.get("KV_OPERADOR_CONFIRMACAO", "dupla")   # d
 _POSTO_VAZIO_ENABLE = os.environ.get("KV_POSTO_VAZIO_ENABLE", "on") not in ("off", "0", "false", "False", "")
 _CAM2_CONF = float(os.environ.get("KV_CAM2_CONF", "0.35"))
 _CAM2_CONFIRM_STRIDE = max(1, int(os.environ.get("KV_CAM2_CONFIRM_STRIDE", "1")))
+# Fase 30: guardrail — se a cam2 negar mais que esta fração dos slots em que a
+# cam1 viu o operador, algo está errado (desalinhamento/zona) → ignora a cam2
+# no vídeo inteiro em vez de zerar tudo como posto_vazio.
+_CAM2_REBAIXA_MAX = float(os.environ.get("KV_CAM2_REBAIXA_MAX", "0.8"))
 
 POSTO_VAZIO_LABEL = "posto_vazio"
 POSTO_VAZIO_TID = -1
@@ -5907,6 +5966,7 @@ def processar_video(
     video_path_secundario: str | None = None,
     cam_id_secundario: str | None = None,
     rois_contexto_secundario: dict | None = None,
+    nome_secundario: str | None = None,
 ) -> dict:
     """Roda o pipeline completo. Devolve dict com video_id, n_eventos,
     n_auto_validados, n_sugestoes.
@@ -5968,10 +6028,15 @@ def processar_video(
     # Fase 28: com zonas na cam2, o mesmo passe roda um predict leve por slot e
     # marca op_cam2 (o operador está mesmo ATRÁS da máquina?).
     if video_path_secundario:
+        # Fase 30: offset REAL de relógio entre os dois segmentos (podem começar
+        # com segundos/minutos de diferença) — sem isso a confirmação e o frame
+        # do 2º ângulo olham o instante errado.
+        offset_cam2 = _offset_entre_nomes(nome_video, nome_secundario)
         n_sec = _anexar_segundo_angulo(
             amostras, video_path_secundario,
             yolo=(yolo if zona_posto else None),
             rois_sec=rois_contexto_secundario,
+            offset_s=offset_cam2,
         )
         log.info(
             f"[dual-angle] {cam_id or 'cam1'} + {cam_id_secundario or 'cam2'}: "

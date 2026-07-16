@@ -1574,6 +1574,43 @@ def marcar_sugestao(
 # ═════════════════════════════════════════════════════════════════════════
 # VALIDAÇÃO HUMANA
 # ═════════════════════════════════════════════════════════════════════════
+def _offset_video_segmento(video_meta: dict, seg: dict) -> float:
+    """Fase 30: offset (s) entre o início do vídeo (cam1) e o do segmento par
+    (cam2) — os dois NÃO começam no mesmo segundo. O front soma este offset em
+    ini/fim ao pedir frames do 2º ângulo (/segmentos/{id}/frames).
+
+    Usa a MESMA fonte nos dois lados (gravado_em de ambos, senão o token
+    seg_YYYYMMDD_HHMMSS do nome de ambos) para nunca misturar tz-aware com
+    naive. Sem dado confiável → 0.0 (comportamento anterior)."""
+    from datetime import datetime as _dt
+    import re as _re
+
+    def _iso(v):
+        try:
+            return _dt.fromisoformat(str(v).replace("Z", "+00:00")) if v else None
+        except Exception:
+            return None
+
+    def _token(nome):
+        m = _re.search(r"seg_(\d{8})_(\d{6})", nome or "")
+        if not m:
+            return None
+        d, h = m.group(1), m.group(2)
+        try:
+            return _dt(int(d[0:4]), int(d[4:6]), int(d[6:8]),
+                       int(h[0:2]), int(h[2:4]), int(h[4:6]))
+        except Exception:
+            return None
+
+    ga, gb = _iso(video_meta.get("gravado_em")), _iso(seg.get("gravado_em"))
+    if ga is not None and gb is not None:
+        return round((ga - gb).total_seconds(), 1)
+    na, nb = _token(video_meta.get("nome")), _token(seg.get("nome"))
+    if na is not None and nb is not None:
+        return round((na - nb).total_seconds(), 1)
+    return 0.0
+
+
 @app.get("/processos/{processo_id}/eventos")
 def listar_eventos(
     processo_id: str,
@@ -1642,7 +1679,7 @@ def listar_eventos(
         if vids:
             rv = (
                 sb.table("videos")
-                .select("id, cam_id, gravado_em")
+                .select("id, cam_id, gravado_em, nome")
                 .in_("id", list(vids))
                 .execute()
             )
@@ -1679,7 +1716,7 @@ def listar_eventos(
             if vids:
                 rs = (
                     sb.table("segmentos")
-                    .select("id, video_id, cam_id")
+                    .select("id, video_id, cam_id, gravado_em, nome")
                     .eq("empresa", user.empresa)
                     .in_("video_id", list(vids))
                     .eq("status", "concluido")
@@ -1697,7 +1734,14 @@ def listar_eventos(
                         if s.get("cam_id") and s.get("cam_id") != i.get("cam_id")
                     ]
                     if pares:
-                        i["segundo_angulo"] = {"segmento_id": pares[0]["id"], "cam_id": pares[0].get("cam_id")}
+                        i["segundo_angulo"] = {
+                            "segmento_id": pares[0]["id"],
+                            "cam_id": pares[0].get("cam_id"),
+                            # Fase 30: offset real de relógio cam1→cam2
+                            "offset_s": _offset_video_segmento(
+                                meta_video.get(i.get("video_id"), {}), pares[0]
+                            ),
+                        }
         except Exception as e:
             log.warning("segundo_angulo: lookup falhou (%s)", e)
 
@@ -1843,12 +1887,15 @@ def listar_eventos_tabela(
     if vids:
         rv = (
             sb.table("videos")
-            .select("id, nome, cam_id")
+            .select("id, nome, cam_id, gravado_em")
             .in_("id", list(vids))
             .execute()
         )
         nomes = {v["id"]: v.get("nome", "") for v in (rv.data or [])}
         cams = {v["id"]: v.get("cam_id") for v in (rv.data or [])}
+        meta_video_tab = {v["id"]: v for v in (rv.data or [])}
+    else:
+        meta_video_tab = {}
 
     # Categoria Lean + id do comportamento (mapa label → ...), para exibir a
     # classificação e permitir reclassificar pela lista de eventos.
@@ -1885,7 +1932,7 @@ def listar_eventos_tabela(
         if vids:
             rs = (
                 sb.table("segmentos")
-                .select("id, video_id, cam_id")
+                .select("id, video_id, cam_id, gravado_em, nome")
                 .eq("empresa", user.empresa)
                 .in_("video_id", list(vids))
                 .eq("status", "concluido")
@@ -1904,6 +1951,10 @@ def listar_eventos_tabela(
                     ev["segundo_angulo"] = {
                         "segmento_id": pares[0]["id"],
                         "cam_id": pares[0].get("cam_id"),
+                        # Fase 30: offset real de relógio cam1→cam2
+                        "offset_s": _offset_video_segmento(
+                            meta_video_tab.get(ev.get("video_id"), {}), pares[0]
+                        ),
                     }
     except Exception as e:
         log.warning("tabela: segundo_angulo lookup falhou (%s)", e)

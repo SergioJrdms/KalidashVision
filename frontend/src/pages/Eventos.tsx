@@ -242,7 +242,13 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
                   <span className="badge badge-purple" style={{ fontSize: 10, alignSelf: "flex-start", marginBottom: 4 }}>
                     {(e.segundoAngulo.camId || "cam2").replace(/^cam/i, "Cam ")} · mesmo instante
                   </span>
-                  <FrameSegundoAngulo segmentoId={e.segundoAngulo.segmentoId} ini={e.ini} fim={e.fim} />
+                  {/* Fase 30: soma o offset de relógio cam1→cam2 (os segmentos
+                      do par não começam no mesmo segundo). */}
+                  <FrameSegundoAngulo
+                    segmentoId={e.segundoAngulo.segmentoId}
+                    ini={Math.max(0, e.ini + e.segundoAngulo.offsetS)}
+                    fim={Math.max(0, e.fim + e.segundoAngulo.offsetS)}
+                  />
                 </div>
               )}
               <div className="grow" style={{ minWidth: 220 }}>

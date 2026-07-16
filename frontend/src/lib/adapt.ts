@@ -58,9 +58,9 @@ export interface DetMock {
 }
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
-export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null } | null }
+export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[] }
-export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null; papel: string | null; segundoAngulo: { segmentoId: string; camId: string | null } | null }
+export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null; papel: string | null; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; apoio: number; desp: number; none: number }[] }
 export interface PadProcMock { id: string; tipo: string; confianca: string; relevancia: string; titulo: string; descricao: string; recomendacao: string | null; comportamentos: string[] }
 export interface InsightMock { id: string; prioridade: string; titulo: string; descricao: string; processos: string[] }
@@ -188,7 +188,7 @@ export function mapPendentes(rows: EventoPendente[]): PendMock[] {
       sugestao: leanShort(s.categoria_lean_prevista),
     })),
     segundoAngulo: e.segundo_angulo
-      ? { segmentoId: e.segundo_angulo.segmento_id, camId: e.segundo_angulo.cam_id ?? null }
+      ? { segmentoId: e.segundo_angulo.segmento_id, camId: e.segundo_angulo.cam_id ?? null, offsetS: e.segundo_angulo.offset_s ?? 0 }
       : null,
   }));
 }
@@ -227,7 +227,7 @@ export function mapEventosTabela(rows: EventoTabela[]): EvTabMock[] {
     camId: e.cam_id ?? null,
     papel: e.papel_pessoa ?? null,
     segundoAngulo: e.segundo_angulo
-      ? { segmentoId: e.segundo_angulo.segmento_id, camId: e.segundo_angulo.cam_id ?? null }
+      ? { segmentoId: e.segundo_angulo.segmento_id, camId: e.segundo_angulo.cam_id ?? null, offsetS: e.segundo_angulo.offset_s ?? 0 }
       : null,
   }));
 }

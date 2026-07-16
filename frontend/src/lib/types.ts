@@ -284,7 +284,9 @@ export interface EventoPendente {
   irmaos?: EventoIrmaoPendente[];
   // Fase 6 (dual-angle): 2º ângulo (segmento da cam2) p/ mostrar no card de
   // validação quando o evento foi processado com os 2 ângulos juntos (sem irmão).
-  segundo_angulo?: { segmento_id: string; cam_id: string | null } | null;
+  // Fase 30: offset_s = início do vídeo cam1 − início do segmento cam2 (os
+  // dois NÃO começam no mesmo segundo) — somar em ini/fim ao pedir frames.
+  segundo_angulo?: { segmento_id: string; cam_id: string | null; offset_s?: number } | null;
 }
 
 export type StatusEfetivo =
@@ -317,8 +319,9 @@ export interface EventoTabela {
   comportamento_id?: string | null;
   cam_id?: string | null;
   papel_pessoa?: string | null; // Fase 28: 'operador' | 'visitante' | 'posto_vazio'
-  // Fase 29: segmento par (cam2, clock-aligned) p/ mostrar as 2 câmeras juntas
-  segundo_angulo?: { segmento_id: string; cam_id: string | null } | null;
+  // Fase 29: segmento par (cam2) p/ mostrar as 2 câmeras juntas.
+  // Fase 30: offset_s corrige o relógio (ver EventoPendente.segundo_angulo).
+  segundo_angulo?: { segmento_id: string; cam_id: string | null; offset_s?: number } | null;
 }
 
 export interface EventosTabelaResposta {

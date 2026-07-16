@@ -313,8 +313,9 @@ function FaixasMultiCamera({ evento }: { evento: PendMock }) {
         <FaixaSegundoAngulo
           camId={evento.segundoAngulo.camId}
           segmentoId={evento.segundoAngulo.segmentoId}
-          ini={evento.ini}
-          fim={evento.fim}
+          /* Fase 30: offset de relógio cam1→cam2 (segmentos não começam juntos) */
+          ini={Math.max(0, evento.ini + evento.segundoAngulo.offsetS)}
+          fim={Math.max(0, evento.fim + evento.segundoAngulo.offsetS)}
         />
       )}
     </div>
