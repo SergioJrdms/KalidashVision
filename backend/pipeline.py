@@ -303,6 +303,35 @@ create table if not exists turnos_processo (
 );
 create index if not exists idx_turnos_ctx on turnos_processo(empresa, processo);
 
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 28: zonas nomeadas por câmera. Coordenadas normalizadas [0-1] no
+-- ESPAÇO DO VÍDEO ENVIADO (recorte CAMn_ROI do edge). papel:
+-- 'posto_operador' (onde o operador titular trabalha, máx. 1 ativa por
+-- câmera), 'maquina' (contexto), 'interacao' (terceiros no posto).
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists zonas_camera (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    cam_id text not null,
+    nome text not null,
+    papel text not null,
+    pts_rel jsonb not null,
+    descricao_contexto text,
+    frame_ref_w int,
+    frame_ref_h int,
+    ativo boolean not null default true,
+    criado_em timestamptz default now(),
+    atualizado_em timestamptz default now(),
+    constraint zonas_papel_chk check (papel in ('posto_operador','maquina','interacao')),
+    unique (empresa, processo, cam_id, nome)
+);
+create index if not exists idx_zonas_ctx on zonas_camera(empresa, processo, cam_id);
+
+-- Fase 28: papel da pessoa no evento ('operador'|'visitante'|'posto_vazio'|null)
+alter table eventos add column if not exists papel_pessoa text;
+create index if not exists idx_eventos_papel on eventos(papel_pessoa);
+
 -- Prism: suporte a conversas de escopo global (visão de toda a empresa).
 -- Conversas globais têm escopo='global' e processo = null.
 alter table prism_conversas add column if not exists escopo text not null default 'processo';
@@ -367,6 +396,8 @@ begin
   delete from perguntas_processo
     where empresa = p_empresa and processo = p_processo;
   delete from turnos_processo
+    where empresa = p_empresa and processo = p_processo;
+  delete from zonas_camera
     where empresa = p_empresa and processo = p_processo;
   delete from videos
     where empresa = p_empresa and processo = p_processo;

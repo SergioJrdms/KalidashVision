@@ -190,6 +190,22 @@ class TurnoBody(BaseModel):
     ativo: bool = True
 
 
+PAPEIS_ZONA = ("posto_operador", "maquina", "interacao")
+
+
+class ZonaBody(BaseModel):
+    """Fase 28: zona nomeada por câmera. pts_rel em [0-1] no espaço do vídeo
+    ENVIADO (recorte do edge)."""
+    cam_id: str = Field(min_length=1, max_length=20)
+    nome: str = Field(min_length=1, max_length=80)
+    papel: str
+    pts_rel: list[list[float]] = Field(min_length=3, max_length=30)
+    descricao_contexto: str | None = Field(default=None, max_length=300)
+    frame_ref_w: int | None = None
+    frame_ref_h: int | None = None
+    ativo: bool = True
+
+
 class PrismMensagemBody(BaseModel):
     pergunta: str = Field(min_length=1, max_length=4000)
 
@@ -603,6 +619,301 @@ def excluir_turno(turno_id: str, user: CurrentUser = Depends(get_current_user)):
     _carregar_turno_proprio(sb, user, turno_id)
     sb.table("turnos_processo").delete().eq("id", turno_id).execute()
     return {"ok": True}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ZONAS POR CÂMERA (Fase 28) — onde o operador titular trabalha.
+# Consumidas pelo pipeline (filtro de pessoas) e baixadas pelo edge (score).
+# ═════════════════════════════════════════════════════════════════════════
+_ZONA_CAMPOS = (
+    "id, cam_id, nome, papel, pts_rel, descricao_contexto, "
+    "frame_ref_w, frame_ref_h, ativo, criado_em, atualizado_em"
+)
+
+
+def _validar_zona(sb, user: CurrentUser, nome_proc: str, body: ZonaBody,
+                  zona_id: str | None = None) -> None:
+    """Valida papel/pontos e a unicidade de posto_operador ativa por câmera."""
+    if body.papel not in PAPEIS_ZONA:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"papel deve ser um de: {', '.join(PAPEIS_ZONA)}.",
+        )
+    for pt in body.pts_rel:
+        if len(pt) != 2 or not all(0.0 <= v <= 1.0 for v in pt):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Cada ponto de pts_rel deve ser [x, y] com valores em [0, 1].",
+            )
+    if body.papel == "posto_operador" and body.ativo:
+        q = (
+            sb.table("zonas_camera")
+            .select("id")
+            .eq("empresa", user.empresa)
+            .eq("processo", nome_proc)
+            .eq("cam_id", body.cam_id.strip())
+            .eq("papel", "posto_operador")
+            .eq("ativo", True)
+        )
+        if zona_id:
+            q = q.neq("id", zona_id)
+        if q.limit(1).execute().data:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Já existe uma zona 'posto do operador' ativa nesta câmera. "
+                "Desative ou edite a existente — o posto tem um único titular.",
+            )
+
+
+@app.get("/processos/{processo_id}/zonas")
+def listar_zonas(
+    processo_id: str,
+    cam_id: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    q = (
+        sb.table("zonas_camera")
+        .select(_ZONA_CAMPOS)
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .order("criado_em", desc=False)
+    )
+    if cam_id:
+        q = q.eq("cam_id", cam_id)
+    return q.execute().data or []
+
+
+@app.post("/processos/{processo_id}/zonas")
+def criar_zona(
+    processo_id: str,
+    body: ZonaBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    _validar_zona(sb, user, nome, body)
+    r = (
+        sb.table("zonas_camera")
+        .insert(
+            {
+                "empresa": user.empresa,
+                "processo": nome,
+                "cam_id": body.cam_id.strip(),
+                "nome": body.nome.strip(),
+                "papel": body.papel,
+                "pts_rel": body.pts_rel,
+                "descricao_contexto": (body.descricao_contexto or "").strip() or None,
+                "frame_ref_w": body.frame_ref_w,
+                "frame_ref_h": body.frame_ref_h,
+                "ativo": bool(body.ativo),
+            }
+        )
+        .execute()
+    )
+    return r.data[0]
+
+
+def _carregar_zona_propria(sb, user: CurrentUser, zona_id: str) -> dict:
+    r = (
+        sb.table("zonas_camera")
+        .select("id, empresa, processo")
+        .eq("id", zona_id)
+        .execute()
+    )
+    if not r.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Zona não encontrada")
+    z = r.data[0]
+    if z["empresa"] != user.empresa:
+        raise HTTPException(status.HTTP_403_FORBIDDEN)
+    return z
+
+
+@app.put("/zonas/{zona_id}")
+def atualizar_zona(
+    zona_id: str,
+    body: ZonaBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    from datetime import datetime
+
+    sb = make_supabase_client()
+    z = _carregar_zona_propria(sb, user, zona_id)
+    _validar_zona(sb, user, z["processo"], body, zona_id=zona_id)
+    r = (
+        sb.table("zonas_camera")
+        .update(
+            {
+                "cam_id": body.cam_id.strip(),
+                "nome": body.nome.strip(),
+                "papel": body.papel,
+                "pts_rel": body.pts_rel,
+                "descricao_contexto": (body.descricao_contexto or "").strip() or None,
+                "frame_ref_w": body.frame_ref_w,
+                "frame_ref_h": body.frame_ref_h,
+                "ativo": bool(body.ativo),
+                "atualizado_em": datetime.utcnow().isoformat(),
+            }
+        )
+        .eq("id", zona_id)
+        .execute()
+    )
+    return (r.data or [{}])[0]
+
+
+@app.delete("/zonas/{zona_id}")
+def excluir_zona(zona_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    _carregar_zona_propria(sb, user, zona_id)
+    sb.table("zonas_camera").delete().eq("id", zona_id).execute()
+    return {"ok": True}
+
+
+@app.get("/processos/{processo_id}/cameras")
+def listar_cameras(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    """cam_ids distintos vistos neste processo (videos ∪ segmentos)."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    cams: set[str] = set()
+    for tbl in ("videos", "segmentos"):
+        try:
+            r = (
+                sb.table(tbl)
+                .select("cam_id")
+                .eq("empresa", user.empresa)
+                .eq("processo", nome)
+                .not_.is_("cam_id", "null")
+                .limit(2000)
+                .execute()
+            )
+            cams.update(row["cam_id"] for row in (r.data or []) if row.get("cam_id"))
+        except Exception as e:
+            log.warning(f"listar_cameras: falha em {tbl}: {e}")
+    return {"cameras": sorted(cams)}
+
+
+@app.get("/processos/{processo_id}/cameras/{cam_id}/frame-referencia")
+def frame_referencia(
+    processo_id: str,
+    cam_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Um frame real da câmera (vídeo mais recente) para desenhar zonas em cima.
+    Cache em Storage ao lado do vídeo (padrão de frames_evento)."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    v = (
+        sb.table("videos")
+        .select("id, caminho, nome, gravado_em, processado_em")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .eq("cam_id", cam_id)
+        .order("processado_em", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not v:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "Esta câmera ainda não tem vídeo processado. Suba ao menos 1 "
+            "segmento dela para desenhar as zonas sobre um frame real.",
+        )
+    video = v[0]
+    caminho = video.get("caminho")
+    if not caminho or caminho.startswith(("/", "\\")) or (len(caminho) > 1 and caminho[1] == ":"):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "O vídeo mais recente desta câmera não tem storage path válido. "
+            "Processe um segmento novo e tente de novo.",
+        )
+
+    import base64
+    import posixpath
+    import tempfile
+    from pathlib import Path
+
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    ref_key = f"{posixpath.dirname(caminho)}/__frames/ref_{cam_id}_{video['id']}.jpg"
+
+    jpeg: bytes | None = None
+    try:
+        jpeg = sb.storage.from_(bucket).download(ref_key) or None
+    except Exception:
+        jpeg = None
+
+    largura = altura = None
+    if jpeg is None:
+        # Miss: streaming pro disco (RAM ≈ 1 chunk) → frame do MEIO via cv2.
+        import cv2
+        import httpx
+        from urllib.parse import quote
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(caminho).suffix or ".mp4")
+        try:
+            url = f"{os.environ['SUPABASE_URL']}/storage/v1/object/{bucket}/{quote(caminho, safe='/')}"
+            headers = {
+                "Authorization": f"Bearer {os.environ['SUPABASE_KEY']}",
+                "apikey": os.environ["SUPABASE_KEY"],
+            }
+            with httpx.stream("GET", url, headers=headers, timeout=120) as resp:
+                resp.raise_for_status()
+                for chunk in resp.iter_bytes(1 << 16):
+                    tmp.write(chunk)
+            tmp.close()
+            cap = cv2.VideoCapture(tmp.name)
+            try:
+                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                if total > 1:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, total // 2)
+                ok, frame = cap.read()
+            finally:
+                cap.release()
+            if not ok or frame is None:
+                raise RuntimeError("não foi possível ler um frame do vídeo")
+            altura, largura = frame.shape[:2]
+            ok2, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if not ok2:
+                raise RuntimeError("falha ao codificar JPEG")
+            jpeg = buf.tobytes()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao extrair frame: {e}"
+            )
+        finally:
+            try:
+                Path(tmp.name).unlink()
+            except Exception:
+                pass
+        try:  # cache (não-fatal)
+            sb.storage.from_(bucket).upload(
+                ref_key, jpeg, {"content-type": "image/jpeg", "upsert": "true"}
+            )
+        except Exception as e:
+            log.warning(f"cache do frame de referência falhou (não-fatal): {e}")
+
+    if largura is None:
+        # Veio do cache: decodifica só as dimensões (barato, imagem pequena).
+        try:
+            import cv2
+            import numpy as np
+
+            img = cv2.imdecode(np.frombuffer(jpeg, dtype="uint8"), cv2.IMREAD_COLOR)
+            if img is not None:
+                altura, largura = img.shape[:2]
+        except Exception:
+            pass
+
+    return {
+        "img": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii"),
+        "largura": largura,
+        "altura": altura,
+        "video_nome": video.get("nome"),
+        "gravado_em": video.get("gravado_em"),
+    }
 
 
 @app.delete("/processos/{processo_id}")
