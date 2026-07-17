@@ -736,8 +736,9 @@ def _anexar_segundo_angulo(
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            if am.pessoas or am.img_b64:   # amostras vazias não vão ao VLM
-                am.img_b64_secundario = frame_para_base64(frame)
+            # Fase 33: anexa SEMPRE — amostras vazias na cam1 usam esta imagem
+            # p/ o RESGATE pela lateral (a cam2 vê o operador que a cam1 não vê).
+            am.img_b64_secundario = frame_para_base64(frame)
             n += 1
             # Confirmação do operador pela cam2 (Fase 28) — barata: predict
             # (sem tracker/estado) só nos slots de amostra, imgsz pequeno.
@@ -788,52 +789,63 @@ def _anexar_segundo_angulo(
 
 
 def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
-    """Fase 28 — veredito POR SLOT (tracks não cruzam câmeras):
+    """Fase 28/33 — veredito POR SLOT, usando AS DUAS câmeras SIMETRICAMENTE
+    (tracks não cruzam câmeras; o veredito é por instante):
       op_cam1 = alguma pessoa da amostra tem papel 'operador'.
       politica 'cam1' : presente = op_cam1.
-      politica 'dupla': presente = op_cam1 E op_cam2 is not False
-        · op_cam2 is None  → confia na cam1 (cam2 caiu/solo/sem zona/stride);
-        · op_cam1 e op_cam2 is False → é o OUTRO torneiro visto por cima do
-          torno na cam1: REBAIXA (remove as pessoas 'operador' da amostra) e o
-          slot vira candidato a posto_vazio. Visitantes seguem analisáveis.
+      politica 'dupla': presente = op_cam1 OU op_cam2 — qualquer câmera que
+        veja o operador no posto ESTABELECE a presença (Fase 33; antes a cam2
+        só podia negar, e oclusão total na cam1 virava posto_vazio falso):
+        · op_cam1 e op_cam2 True/None → presente (cam2 confirma ou não opina);
+        · op_cam1 e op_cam2 False → é o OUTRO torneiro visto por cima do torno
+          na cam1: REBAIXA (remove as pessoas 'operador'); visitantes seguem;
+        · sem op_cam1 mas op_cam2 True → RESGATE: presente=True mesmo sem
+          pessoa 'operador' na cam1 (a etapa VLM descreve a ação pela imagem
+          da lateral — track sintético OPERADOR_CAM2_TID);
+        · nenhuma das duas → ausente (candidato a posto_vazio).
 
     Fase 30 — GUARDRAIL: avalia em 2 fases (decidir → aplicar). Se a cam2
     negaria mais que KV_CAM2_REBAIXA_MAX dos slots em que a cam1 viu o
     operador, o problema é sistêmico (desalinhamento de relógio, zona errada,
-    câmera mexida) — aí IGNORA a cam2 no vídeo inteiro (vira política cam1)
-    em vez de zerar tudo como posto_vazio.
+    câmera mexida) — aí IGNORA a negação da cam2 no vídeo inteiro em vez de
+    zerar tudo como posto_vazio (o RESGATE positivo continua valendo).
     Marca am.operador_presente. Retorna stats p/ log."""
     # Fase 1: decidir sem mutar.
-    decisoes = []   # (am, op_cam1, rebaixaria)
+    decisoes = []   # (am, op_cam1, rebaixaria, resgataria)
     n_op_cam1 = n_rebaixaria = 0
     for am in amostras:
         op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
         rebaixaria = politica == "dupla" and op_cam1 and am.op_cam2 is False
+        resgataria = politica == "dupla" and not op_cam1 and am.op_cam2 is True
         n_op_cam1 += 1 if op_cam1 else 0
         n_rebaixaria += 1 if rebaixaria else 0
-        decisoes.append((am, op_cam1, rebaixaria))
+        decisoes.append((am, op_cam1, rebaixaria, resgataria))
 
     # Guardrail só com massa mínima (≥5 slots com operador): em vídeos muito
     # curtos a fração é ruidosa e o impacto de confiar na cam2 é pequeno.
-    aplicar_cam2 = politica == "dupla"
-    if aplicar_cam2 and n_op_cam1 >= 5 and (n_rebaixaria / n_op_cam1) > _CAM2_REBAIXA_MAX:
+    aplicar_negacao = politica == "dupla"
+    if aplicar_negacao and n_op_cam1 >= 5 and (n_rebaixaria / n_op_cam1) > _CAM2_REBAIXA_MAX:
         log.warning(
             "[operador] GUARDRAIL: a cam2 negaria %d de %d slots com operador "
             "(>%d%%) — provável desalinhamento/zona errada na cam2. Ignorando a "
-            "confirmação dupla NESTE vídeo (confiando na cam1).",
+            "NEGAÇÃO da cam2 neste vídeo (o resgate positivo continua valendo).",
             n_rebaixaria, n_op_cam1, int(_CAM2_REBAIXA_MAX * 100),
         )
-        aplicar_cam2 = False
+        aplicar_negacao = False
 
     # Fase 2: aplicar.
-    stats = {"slots": len(amostras), "presentes": 0, "vazios": 0, "rebaixados": 0}
-    for am, op_cam1, rebaixaria in decisoes:
-        if aplicar_cam2 and rebaixaria:
+    stats = {"slots": len(amostras), "presentes": 0, "vazios": 0,
+             "rebaixados": 0, "resgatados_cam2": 0}
+    for am, op_cam1, rebaixaria, resgataria in decisoes:
+        if aplicar_negacao and rebaixaria:
             am.pessoas = [p for p in am.pessoas if p.get("papel") != "operador"]
             stats["rebaixados"] += 1
             op_cam1 = False
-        am.operador_presente = op_cam1
-        if op_cam1:
+        presente = op_cam1 or resgataria
+        if resgataria and not op_cam1:
+            stats["resgatados_cam2"] += 1
+        am.operador_presente = presente
+        if presente:
             stats["presentes"] += 1
         elif not am.pessoas:
             stats["vazios"] += 1
@@ -880,6 +892,9 @@ _CAM2_REBAIXA_MAX = float(os.environ.get("KV_CAM2_REBAIXA_MAX", "0.8"))
 POSTO_VAZIO_LABEL = "posto_vazio"
 POSTO_VAZIO_TID = -1
 POSTO_VAZIO_DESC = "posto de trabalho vazio (operador ausente)"
+# Fase 33: operador estabelecido pela CÂMERA LATERAL (cam1 não o detectou —
+# oclusão total pela máquina — mas a cam2 o vê na zona do posto).
+OPERADOR_CAM2_TID = -2
 
 
 def _modo_operador(rois: dict) -> bool:
@@ -1188,6 +1203,52 @@ CONTEXTO: {contexto_zonas}
 
 Responda APENAS um JSON no formato:
 {{"acoes": {{"P1": "...", "P2": "...", ...}}}}"""
+
+
+# Fase 33 — RESGATE pela lateral: a cam1 não detectou o operador (oclusão
+# total pela máquina), mas a cam2 o vê dentro da zona do posto. A ação é
+# descrita pela IMAGEM DA CÂMERA LATERAL.
+PROMPT_VLM_OPERADOR_CAM2 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
+O OPERADOR TITULAR do posto está DENTRO da área de trabalho dele, atrás da máquina — visível nesta imagem (a câmera frontal não o enxerga neste instante porque a máquina o esconde).
+
+Descreva em UMA FRASE CURTA (até 10 palavras) o que o OPERADOR está fazendo (verbo + objeto), ex.: "operando o torno", "medindo a peça", "monitorando o ciclo da máquina".
+
+{bloco_processo}{bloco_vocabulario}REGRAS:
+- Foque na AÇÃO do operador (a pessoa junto à máquina, na área de trabalho).
+- Use linguagem operacional clara em português.
+- Se a ação não estiver clara, escreva "ação não identificada".
+- NÃO invente ações que não estão visíveis.
+
+CONTEXTO: {contexto_zonas}
+
+Responda APENAS um JSON no formato:
+{{"acao": "..."}}"""
+
+
+def _analisar_operador_cam2(
+    groq_client: Groq,
+    img_cam2_b64: str,
+    descricao_processo: str,
+    memoria: dict,
+    conhecimento_adquirido: str = "",
+    zona_desc: str | None = None,
+) -> str | None:
+    """Fase 33: descreve a ação do operador PELA IMAGEM DA CAM2 (resgate).
+    None em falha (o slot cai para posto_vazio se nada mais o cobrir)."""
+    prompt = PROMPT_VLM_OPERADOR_CAM2.format(
+        bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
+        bloco_vocabulario=construir_bloco_vocabulario(memoria),
+        contexto_zonas=(zona_desc or "área de trabalho do operador, atrás da máquina"),
+    )
+    try:
+        resposta = groq_vision_call(
+            groq_client, img_cam2_b64, prompt, json_mode=True, max_tokens=200,
+        )
+        acao = (json.loads(resposta).get("acao") or "").strip().lower()
+        return acao or None
+    except Exception as e:
+        log.warning(f"[operador] resgate pela cam2 falhou: {e}")
+        return None
 
 
 PROMPT_CLUSTER = """Você é um analista de processos industriais.
@@ -1595,8 +1656,11 @@ def _analisar_amostra_vlm(
     img_b64 = amostra.img_b64
     img_sec = amostra.img_b64_secundario   # 2º ângulo (cam2), se houver (Fase 6)
 
-    # Fase 28: amostras com papel usam o prompt de OPERADOR (P1 = titular).
+    # Fase 28/33: o prompt de OPERADOR (P1 = titular) só vale quando há de
+    # fato um operador na amostra; amostra só com VISITANTES usa o prompt
+    # neutro (senão o P1-visitante seria descrito como se fosse o operador).
     modo_op = any(p.get("papel") for p in amostra.pessoas)
+    tem_operador = any(p.get("papel") == "operador" for p in amostra.pessoas)
 
     contexto_partes = []
     for p in amostra.pessoas:
@@ -1607,7 +1671,7 @@ def _analisar_amostra_vlm(
                                    if modo_op else f"{p['rotulo']} está em {zona_txt}")
     contexto = ". ".join(contexto_partes) if contexto_partes else "sem zonas pré-definidas"
 
-    if modo_op:
+    if tem_operador:
         template = PROMPT_VLM_DUAL_OPERADOR if img_sec else PROMPT_VLM_OPERADOR
     else:
         template = PROMPT_VLM_DUAL if img_sec else PROMPT_VLM
@@ -1691,11 +1755,36 @@ def etapa_analise_vlm(
     n_completo = n_binario = n_repeticao = 0
 
     for i, am in enumerate(amostras):
-        # Fase 28: slot SEM ninguém de interesse (modo operador) → observação
-        # sintética de POSTO VAZIO, determinística e sem chamada VLM (custo
-        # zero). Amostras vazias só existem quando o modo operador está ativo.
+        # Fase 33: RESGATE pela lateral — a cam2 ESTABELECEU a presença mas a
+        # cam1 não tem pessoa 'operador' neste slot (oclusão total): a ação é
+        # descrita pela IMAGEM DA CAM2 (track sintético). Visitantes que
+        # existam na cam1 seguem no fluxo normal abaixo.
+        tem_op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
+        if (zona_posto and am.operador_presente and not tem_op_cam1
+                and am.img_b64_secundario):
+            desc_cam2 = _analisar_operador_cam2(
+                groq_client, am.img_b64_secundario, descricao_processo,
+                memoria, conhecimento_adquirido, zona_desc=zona_posto,
+            )
+            if desc_cam2:
+                n_completo += 1
+                observacoes.append(
+                    {
+                        "tempo_s": am.tempo_s,
+                        "frame_idx": am.frame_idx,
+                        "track_id": OPERADOR_CAM2_TID,
+                        "descricao": desc_cam2,
+                        "bbox": (0, 0, 0, 0),
+                        "zona": zona_posto,
+                        "papel": "operador",
+                        "origem_gate": "resgate_cam2",
+                        "mudanca_contexto": True,
+                    }
+                )
+        # Fase 28/33: slot sem ninguém de interesse E sem operador confirmado
+        # por NENHUMA das câmeras → POSTO VAZIO sintético (custo zero).
         if not am.pessoas:
-            if _POSTO_VAZIO_ENABLE and zona_posto:
+            if _POSTO_VAZIO_ENABLE and zona_posto and not am.operador_presente:
                 observacoes.append(
                     {
                         "tempo_s": am.tempo_s,
@@ -6074,9 +6163,10 @@ def processar_video(
         politica = _OPERADOR_CONFIRMACAO if (tem_posto_sec and video_path_secundario) else "cam1"
         stats_op = etapa_confirmar_operador(amostras, politica)
         log.info(
-            "[operador] política=%s · %d slots: %d com operador, %d vazios, %d rebaixados pela cam2",
+            "[operador] política=%s · %d slots: %d com operador (%d resgatados "
+            "pela cam2), %d vazios, %d rebaixados pela cam2",
             politica, stats_op["slots"], stats_op["presentes"],
-            stats_op["vazios"], stats_op["rebaixados"],
+            stats_op["resgatados_cam2"], stats_op["vazios"], stats_op["rebaixados"],
         )
 
     observacoes = etapa_analise_vlm(
