@@ -182,10 +182,9 @@ function UploadParTeste({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
       const msg = (e as Error).message || "";
       if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
         setErro(
-          `A conexão caiu durante o envio da ${etapa}. Arquivos grandes (>~30 MB) podem estourar o ` +
-          "tempo máximo do servidor (~100s) dependendo do seu upload. Clique em \"Enviar par\" de novo — " +
-          "o que já subiu NÃO sobe de novo (é idempotente, o passo pula em segundos). Se persistir, use " +
-          "segmentos de 10 min (arquivos menores) ou uma conexão com upload mais rápido.",
+          `A conexão caiu durante o envio da ${etapa}. O arquivo agora vai DIRETO pro armazenamento ` +
+          "(sem passar pelo servidor), então normalmente é oscilação da sua internet. Clique em " +
+          "\"Tentar de novo\" — o que já subiu NÃO sobe de novo (é idempotente, o passo pula em segundos).",
         );
       } else {
         setErro(`Falha na etapa ${etapa}: ${msg}`);

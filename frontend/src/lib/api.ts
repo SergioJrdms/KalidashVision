@@ -131,26 +131,43 @@ export const api = {
       if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
       return r.json();
     },
-    // Modo teste (sem o Pi): sobe um segmento COM cam_id → cai na inbox
-    // `segmentos` exatamente como o edge (gravado_em é lido do nome
-    // seg_YYYYMMDD_HHMMSS pelo backend). Depois, api.processos.processarLote
-    // pareia cam1+cam2 e dispara o dual-angle.
+    // Modo teste (sem o Pi), Fase 32: os BYTES vão DIRETO ao Supabase Storage
+    // (URL assinada) — o backend/proxy, que corta uploads longos, só vê dois
+    // JSONs de milissegundos (pedir URL + registrar na inbox `segmentos`).
+    // gravado_em é lido do nome seg_YYYYMMDD_HHMMSS; depois
+    // api.processos.processarLote pareia cam1+cam2 e dispara o dual-angle.
     uploadSegmento: async (
       processoId: string,
       file: File,
       camId: string,
-    ): Promise<{ ok: boolean; modo: string; status: string }> => {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("cam_id", camId);
-      const headers = await authHeader();
-      const r = await fetch(`${API}/processos/${processoId}/videos`, {
+    ): Promise<{ ok: boolean; status: string }> => {
+      const r1 = await req<{
+        ok: boolean; status: string; bucket?: string; storage_path?: string; token?: string;
+      }>(`/processos/${processoId}/segmentos/upload-url`, {
         method: "POST",
-        body: fd,
-        headers,
+        body: JSON.stringify({ nome: file.name, cam_id: camId }),
       });
-      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-      return r.json();
+      if (r1.status === "duplicado") return { ok: true, status: "duplicado" };
+      if (!r1.bucket || !r1.storage_path || !r1.token) {
+        throw new Error("Resposta inválida do upload-url.");
+      }
+      const { error } = await supabase.storage
+        .from(r1.bucket)
+        .uploadToSignedUrl(r1.storage_path, r1.token, file, {
+          contentType: file.type || "video/mp4",
+        });
+      if (error) throw new Error(`Storage: ${error.message}`);
+      return req<{ ok: boolean; status: string }>(
+        `/processos/${processoId}/segmentos/registrar`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            nome: file.name,
+            cam_id: camId,
+            storage_path: r1.storage_path,
+          }),
+        },
+      );
     },
   },
   jobs: {

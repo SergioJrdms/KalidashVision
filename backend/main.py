@@ -190,6 +190,18 @@ class TurnoBody(BaseModel):
     ativo: bool = True
 
 
+class SegmentoUploadUrlBody(BaseModel):
+    """Fase 32: modo teste — o navegador sobe o arquivo DIRETO ao Storage."""
+    nome: str = Field(min_length=1, max_length=200)
+    cam_id: str = Field(min_length=1, max_length=20)
+
+
+class SegmentoRegistrarBody(BaseModel):
+    nome: str = Field(min_length=1, max_length=200)
+    cam_id: str = Field(min_length=1, max_length=20)
+    storage_path: str = Field(min_length=1, max_length=400)
+
+
 PAPEIS_ZONA = ("posto_operador", "maquina", "interacao")
 
 
@@ -1137,6 +1149,114 @@ async def upload_video(
         gravado_em=gravado_em_efetivo,
     )
     return {"job_id": job.id}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 32 — modo teste: upload de segmento DIRETO do navegador ao Storage.
+# Os bytes NÃO passam pelo backend/proxy (que corta uploads longos): o front
+# pede uma URL ASSINADA, sobe direto ao Supabase e depois só REGISTRA aqui
+# (JSON de milissegundos). Mesma inbox/idempotência do caminho do edge.
+# ═════════════════════════════════════════════════════════════════════════
+def _segmento_ja_existe(sb, user: CurrentUser, processo_nome: str, cam_id: str, nome: str) -> bool:
+    try:
+        ja = (
+            sb.table("segmentos")
+            .select("id")
+            .eq("empresa", user.empresa)
+            .eq("processo", processo_nome)
+            .eq("cam_id", cam_id)
+            .eq("nome", nome)
+            .limit(1)
+            .execute()
+            .data
+        ) or []
+        return bool(ja)
+    except Exception:
+        return False
+
+
+@app.post("/processos/{processo_id}/segmentos/upload-url")
+def segmento_upload_url(
+    processo_id: str,
+    body: SegmentoUploadUrlBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    processo_nome = _processo_nome(sb, user, processo_id)
+    if _segmento_ja_existe(sb, user, processo_nome, body.cam_id.strip(), body.nome):
+        return {"ok": True, "status": "duplicado"}
+
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    nome_orig = body.nome
+    if "." in nome_orig:
+        base_nome, _, ext_nome = nome_orig.rpartition(".")
+    else:
+        base_nome, ext_nome = nome_orig, "mp4"
+    arquivo = f"{uuid.uuid4()}_{_slug_storage(base_nome, 'video')}.{_slug_storage(ext_nome, 'mp4')}"
+    storage_path = f"{_slug_storage(user.empresa, 'empresa')}/{_slug_storage(processo_nome, 'processo')}/{arquivo}"
+    try:
+        assinado = sb.storage.from_(bucket).create_signed_upload_url(storage_path)
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao criar URL assinada: {e}"
+        )
+    token = (assinado or {}).get("token")
+    if not token:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Storage não devolveu token de upload assinado.",
+        )
+    return {
+        "ok": True,
+        "status": "novo",
+        "bucket": bucket,
+        "storage_path": storage_path,
+        "token": token,
+    }
+
+
+@app.post("/processos/{processo_id}/segmentos/registrar")
+def segmento_registrar(
+    processo_id: str,
+    body: SegmentoRegistrarBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    processo_nome = _processo_nome(sb, user, processo_id)
+    # O caminho tem que estar no prefixo da PRÓPRIA empresa (nunca registrar
+    # objeto de outro tenant).
+    prefixo = f"{_slug_storage(user.empresa, 'empresa')}/"
+    if not body.storage_path.startswith(prefixo):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "storage_path fora do escopo da empresa.")
+    if _segmento_ja_existe(sb, user, processo_nome, body.cam_id.strip(), body.nome):
+        return {"ok": True, "modo": "lote", "status": "duplicado"}
+    # Confere que o objeto chegou mesmo no Storage (URL de leitura falha se não).
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    try:
+        sb.storage.from_(bucket).create_signed_url(body.storage_path, 60)
+    except Exception:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "O arquivo não foi encontrado no Storage — o upload direto falhou ou não terminou.",
+        )
+    linha_seg: dict = {
+        "empresa": user.empresa,
+        "processo": processo_nome,
+        "storage_path": body.storage_path,
+        "nome": body.nome,
+        "cam_id": body.cam_id.strip(),
+        "status": "pendente",
+    }
+    gravado_em_efetivo = _parse_gravado_em_nome(body.nome)
+    if gravado_em_efetivo:
+        linha_seg["gravado_em"] = gravado_em_efetivo
+    try:
+        sb.table("segmentos").insert(linha_seg).execute()
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao registrar segmento: {e}"
+        )
+    return {"ok": True, "modo": "lote", "status": "pendente"}
 
 
 @app.post("/processos/{processo_id}/lote/concluido")
