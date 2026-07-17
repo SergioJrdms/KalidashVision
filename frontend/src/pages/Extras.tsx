@@ -109,7 +109,119 @@ export function Upload({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
           <Btn disabled={!file || enviando} icon="play" onClick={iniciar}>{enviando ? "Enviando…" : "Iniciar análise"}</Btn>
         </div>
       </Card>
+
+      <UploadParTeste proc={proc} go={go} />
     </div>
+  );
+}
+
+// ── MODO TESTE (temporário): subir um PAR cam1+cam2 do PC, sem o Pi ─────────
+// Usa exatamente o caminho do edge: upload com cam_id → inbox `segmentos`
+// (gravado_em lido do nome seg_YYYYMMDD_HHMMSS) → "processar lote" pareia e
+// dispara o dual-angle com zonas/operador. Para retirar depois: apagar este
+// componente e a linha <UploadParTeste/> acima (+ api.videos.uploadSegmento).
+const RE_SEG_TOKEN = /seg_(\d{8})_(\d{6})/;
+
+function UploadParTeste({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
+  const [f1, setF1] = useState<File | null>(null);
+  const [f2, setF2] = useState<File | null>(null);
+  const [enviando, setEnviando] = useState(false);
+  const [erro, setErro] = useState<string | null>(null);
+  const ref1 = useRef<HTMLInputElement>(null);
+  const ref2 = useRef<HTMLInputElement>(null);
+
+  function tokenDe(f: File | null): string | null {
+    const m = f ? RE_SEG_TOKEN.exec(f.name) : null;
+    return m ? `${m[1]}_${m[2]}` : null;
+  }
+  const t1 = tokenDe(f1);
+  const t2 = tokenDe(f2);
+  const nomesOk = !!(t1 && t2);
+  // Pareamento tolera ~6 min entre os relógios dos nomes.
+  const paream = (() => {
+    if (!t1 || !t2) return false;
+    const p = (t: string) => {
+      const d = t.split("_");
+      return new Date(+d[0].slice(0, 4), +d[0].slice(4, 6) - 1, +d[0].slice(6, 8),
+        +d[1].slice(0, 2), +d[1].slice(2, 4), +d[1].slice(4, 6)).getTime();
+    };
+    return Math.abs(p(t1) - p(t2)) <= 360_000;
+  })();
+
+  async function enviarPar() {
+    if (!f1 || !f2) return;
+    setErro(null);
+    setEnviando(true);
+    try {
+      await api.videos.uploadSegmento(proc.id, f1, "cam1");
+      await api.videos.uploadSegmento(proc.id, f2, "cam2");
+      const r = await api.processos.processarLote(proc.id);
+      toast(`Par enviado — ${r.itens} item(ns) na fila de processamento.`, { icon: "check" });
+      setF1(null); setF2(null);
+      go("processo", proc.id, "fila");
+    } catch (e) {
+      setErro((e as Error).message);
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  const Slot = ({ f, cam, onPick, onClear, inputRef }: { f: File | null; cam: string; onPick: () => void; onClear: () => void; inputRef: React.RefObject<HTMLInputElement | null> }) => (
+    <div onClick={() => !f && onPick()} className={f ? "" : "click"}
+      style={{ flex: "1 1 220px", border: "1.5px dashed var(--line)", borderRadius: 12, padding: "14px 14px", background: "var(--soft)", textAlign: "center" }}>
+      <span className="badge badge-purple" style={{ fontSize: 10 }}>{cam.replace(/^cam/i, "Cam ")}</span>
+      {f ? (
+        <div style={{ marginTop: 6 }}>
+          <p style={{ fontSize: 12.5, color: "var(--ink)", wordBreak: "break-all" }}><b>{f.name}</b></p>
+          <p style={{ fontSize: 11, color: "var(--muted)" }}>{(f.size / 1048576).toFixed(1)} MB · <button onClick={(e) => { e.stopPropagation(); onClear(); }} style={{ border: "none", background: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11 }}>trocar</button></p>
+        </div>
+      ) : (
+        <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 6 }}>Selecionar segmento da {cam.replace(/^cam/i, "câmera ")}</p>
+      )}
+    </div>
+  );
+
+  return (
+    <Card style={{ padding: 22, marginTop: 16, border: "1px dashed var(--p-200)" }}>
+      <div className="row gap2" style={{ alignItems: "center" }}>
+        <Icon name="flask-conical" size={16} color="var(--accent)" />
+        <h2 className="font-display" style={{ fontSize: 15.5, fontWeight: 700 }}>Modo teste — par de câmeras (sem o Pi)</h2>
+      </div>
+      <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+        Sobe um segmento da <b>cam1</b> + um da <b>cam2</b> direto do seu PC, pelo mesmo caminho do
+        Raspberry (inbox → pareamento → análise dual-angle com zonas). Os nomes precisam ter o
+        carimbo <code className="font-mono">seg_AAAAMMDD_HHMMSS</code> com relógios até 6 min de distância — é
+        por ele que o par se encontra e se alinha.
+      </p>
+      <div className="row gap2 wrap" style={{ marginTop: 12 }}>
+        <Slot f={f1} cam="cam1" onPick={() => ref1.current?.click()} onClear={() => setF1(null)} inputRef={ref1} />
+        <Slot f={f2} cam="cam2" onPick={() => ref2.current?.click()} onClear={() => setF2(null)} inputRef={ref2} />
+      </div>
+      <input ref={ref1} type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => setF1(e.target.files?.[0] || null)} />
+      <input ref={ref2} type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => setF2(e.target.files?.[0] || null)} />
+
+      {f1 && f2 && !nomesOk && (
+        <p style={{ fontSize: 12, color: "var(--desp)", marginTop: 10 }}>
+          Os nomes precisam conter <code className="font-mono">seg_AAAAMMDD_HHMMSS</code> (ex.:
+          <code className="font-mono"> seg_20260715_080001_roi.mp4</code>) — sem isso o par não se forma. Renomeie os arquivos e selecione de novo.
+        </p>
+      )}
+      {nomesOk && !paream && (
+        <p style={{ fontSize: 12, color: "var(--desp)", marginTop: 10 }}>
+          Os relógios dos nomes estão a mais de 6 minutos um do outro — o pareamento não vai juntá-los. Use o par gravado do mesmo instante.
+        </p>
+      )}
+      {erro && <p style={{ fontSize: 12, color: "var(--desp)", marginTop: 10 }}>{erro}</p>}
+
+      <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+        <Btn size="sm" disabled={!f1 || !f2 || !nomesOk || !paream || enviando} icon="play" onClick={enviarPar}>
+          {enviando ? "Enviando par…" : "Enviar par e processar"}
+        </Btn>
+      </div>
+      <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 8 }}>
+        O progresso aparece na aba <b>Fila</b> (você será levado pra lá). Ferramenta temporária de teste.
+      </p>
+    </Card>
   );
 }
 
