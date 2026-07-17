@@ -126,6 +126,7 @@ function UploadParTeste({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const [f1, setF1] = useState<File | null>(null);
   const [f2, setF2] = useState<File | null>(null);
   const [enviando, setEnviando] = useState(false);
+  const [passo, setPasso] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const ref1 = useRef<HTMLInputElement>(null);
   const ref2 = useRef<HTMLInputElement>(null);
@@ -152,17 +153,46 @@ function UploadParTeste({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
     if (!f1 || !f2) return;
     setErro(null);
     setEnviando(true);
+    let etapa = "Cam 1";
     try {
-      await api.videos.uploadSegmento(proc.id, f1, "cam1");
-      await api.videos.uploadSegmento(proc.id, f2, "cam2");
+      setPasso(`Enviando Cam 1 (${(f1.size / 1048576).toFixed(0)} MB — pode levar alguns minutos)…`);
+      const r1 = await api.videos.uploadSegmento(proc.id, f1, "cam1");
+      if (r1.status === "duplicado") toast("Cam 1: este segmento já estava na plataforma.", { icon: "info" });
+
+      etapa = "Cam 2";
+      setPasso(`Enviando Cam 2 (${(f2.size / 1048576).toFixed(0)} MB)…`);
+      const r2 = await api.videos.uploadSegmento(proc.id, f2, "cam2");
+      if (r2.status === "duplicado") toast("Cam 2: este segmento já estava na plataforma.", { icon: "info" });
+
+      etapa = "pareamento";
+      setPasso("Pareando cam1+cam2 e disparando a análise…");
       const r = await api.processos.processarLote(proc.id);
-      toast(`Par enviado — ${r.itens} item(ns) na fila de processamento.`, { icon: "check" });
-      setF1(null); setF2(null);
-      go("processo", proc.id, "fila");
+      if (r.itens === 0) {
+        setErro(
+          "Nada novo entrou na fila — este par provavelmente JÁ FOI processado antes (o upload é " +
+          "idempotente por nome). Para reprocessar o mesmo par, exclua o vídeo antigo no Dashboard " +
+          "(lista de vídeos) e envie de novo.",
+        );
+      } else {
+        toast(`Par enviado — ${r.itens} item(ns) na fila de processamento.`, { icon: "check" });
+        setF1(null); setF2(null);
+        go("processo", proc.id, "fila");
+      }
     } catch (e) {
-      setErro((e as Error).message);
+      const msg = (e as Error).message || "";
+      if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
+        setErro(
+          `A conexão caiu durante o envio da ${etapa}. Arquivos grandes (>~30 MB) podem estourar o ` +
+          "tempo máximo do servidor (~100s) dependendo do seu upload. Clique em \"Enviar par\" de novo — " +
+          "o que já subiu NÃO sobe de novo (é idempotente, o passo pula em segundos). Se persistir, use " +
+          "segmentos de 10 min (arquivos menores) ou uma conexão com upload mais rápido.",
+        );
+      } else {
+        setErro(`Falha na etapa ${etapa}: ${msg}`);
+      }
     } finally {
       setEnviando(false);
+      setPasso(null);
     }
   }
 
@@ -211,11 +241,12 @@ function UploadParTeste({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
           Os relógios dos nomes estão a mais de 6 minutos um do outro — o pareamento não vai juntá-los. Use o par gravado do mesmo instante.
         </p>
       )}
-      {erro && <p style={{ fontSize: 12, color: "var(--desp)", marginTop: 10 }}>{erro}</p>}
+      {erro && <p style={{ fontSize: 12, color: "var(--desp)", marginTop: 10, lineHeight: 1.5 }}>{erro}</p>}
+      {passo && <p style={{ fontSize: 12, color: "var(--accent-deep)", marginTop: 10 }}><b>{passo}</b> Não feche esta aba.</p>}
 
       <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
         <Btn size="sm" disabled={!f1 || !f2 || !nomesOk || !paream || enviando} icon="play" onClick={enviarPar}>
-          {enviando ? "Enviando par…" : "Enviar par e processar"}
+          {enviando ? "Enviando par…" : erro ? "Tentar de novo" : "Enviar par e processar"}
         </Btn>
       </div>
       <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 8 }}>
