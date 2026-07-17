@@ -769,8 +769,12 @@ def _anexar_segundo_angulo(
                         pessoa2 = {"bbox": tuple(b.astype(int))}
                         if kpts2 is not None and j < len(kpts2):
                             pessoa2["kpts"] = kpts2[j].astype("float32")
-                        ax, ay = _ponto_ancora(pessoa2, w2, h2)
-                        if any(_ponto_em_roi(ax, ay, i["polygon"]) for i in rois2.values()):
+                        # Fase 31: qualquer parte do corpo no posto conta.
+                        pontos2 = _pontos_da_pessoa(pessoa2, w2, h2)
+                        if any(
+                            _ponto_em_roi(px, py, i["polygon"])
+                            for i in rois2.values() for px, py in pontos2
+                        ):
                             achou = True
                             break
                 am.op_cam2 = achou
@@ -925,16 +929,34 @@ def _fracao_inferior_visivel(kpts) -> float:
     return validos / 6.0
 
 
-def _zona_da_pessoa(ax: float, ay: float, rois: dict) -> tuple[str | None, str | None, str | None]:
-    """(nome_zona, papel, descricao) da pessoa pela âncora. Prioridade
-    posto_operador > interacao. Zona 'maquina' NÃO classifica pessoa (é
-    contexto da cena). None em tudo = fora das áreas de interesse."""
+def _pontos_da_pessoa(pessoa: dict, w: int, h: int) -> list[tuple[float, float]]:
+    """Fase 31 — TODOS os pontos que representam a pessoa no teste de zona:
+    os 17 keypoints COCO válidos (punhos, cotovelos, tornozelos, joelhos...)
+    em pixels + a âncora (`_ponto_ancora`) como garantia p/ pose parcial/sem
+    pose. Semântica pedida: UM PÉ ou UM BRAÇO dentro da zona já conta como
+    "a pessoa estava ali"."""
+    pontos: list[tuple[float, float]] = []
+    kpts = pessoa.get("kpts")
+    if kpts is not None:
+        for k in kpts:
+            if k[0] > 0 and k[1] > 0:
+                pontos.append((float(k[0]) * w, float(k[1]) * h))
+    pontos.append(_ponto_ancora(pessoa, w, h))
+    return pontos
+
+
+def _zona_da_pessoa(pontos: list[tuple[float, float]], rois: dict) -> tuple[str | None, str | None, str | None]:
+    """(nome_zona, papel, descricao) da pessoa: pertence à zona se QUALQUER
+    um dos seus pontos (kpts + âncora — Fase 31) cair no polígono. Prioridade
+    posto_operador > interacao (pé no posto + corpo na interação → posto).
+    Zona 'maquina' NÃO classifica pessoa (é contexto da cena). None em tudo =
+    fora das áreas de interesse."""
     achado: tuple[str | None, str | None, str | None] = (None, None, None)
     for nome, info in rois.items():
         papel = info.get("papel")
         if papel not in ("posto_operador", "interacao"):
             continue
-        if _ponto_em_roi(ax, ay, info["polygon"]):
+        if any(_ponto_em_roi(px, py, info["polygon"]) for px, py in pontos):
             if papel == "posto_operador":
                 return (nome, papel, info.get("descricao_contexto"))
             achado = (nome, papel, info.get("descricao_contexto"))
@@ -1473,13 +1495,13 @@ def etapa_detectar_e_amostrar(
                         if kpts_all is not None and j < len(kpts_all):
                             pessoa["kpts"] = kpts_all[j].astype("float32")
                         if modo_op:
-                            # Fase 28: classifica pela ÂNCORA robusta à oclusão
-                            # (ombros/nariz/topo-do-tronco — o operador atrás do
-                            # torno tem a parte de baixo escondida). Fora das
-                            # zonas de interesse = transeunte → descartado ANTES
-                            # de virar pessoa/evento/métrica.
-                            ax, ay = _ponto_ancora(pessoa, w, h)
-                            nome_z, papel_z, desc_z = _zona_da_pessoa(ax, ay, rois)
+                            # Fase 28/31: classifica por QUALQUER parte do corpo
+                            # na zona (kpts: pé, braço, joelho... + âncora dos
+                            # ombros p/ pose parcial — robusto à oclusão pelo
+                            # torno). Fora das zonas de interesse = transeunte →
+                            # descartado ANTES de virar pessoa/evento/métrica.
+                            pontos = _pontos_da_pessoa(pessoa, w, h)
+                            nome_z, papel_z, desc_z = _zona_da_pessoa(pontos, rois)
                             if papel_z is None:
                                 continue
                             pessoa["zona"] = nome_z
