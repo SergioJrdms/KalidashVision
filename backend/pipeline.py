@@ -835,7 +835,7 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
 
     # Fase 2: aplicar.
     stats = {"slots": len(amostras), "presentes": 0, "vazios": 0,
-             "rebaixados": 0, "resgatados_cam2": 0}
+             "rebaixados": 0, "resgatados_cam2": 0, "pontes": 0}
     for am, op_cam1, rebaixaria, resgataria in decisoes:
         if aplicar_negacao and rebaixaria:
             am.pessoas = [p for p in am.pessoas if p.get("papel") != "operador"]
@@ -845,7 +845,27 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
         if resgataria and not op_cam1:
             stats["resgatados_cam2"] += 1
         am.operador_presente = presente
-        if presente:
+        am.operador_ponte = False
+
+    # Fase 34: PONTE TEMPORAL — o operador não se teletransporta. Ausência de
+    # até _OPERADOR_GAP_SLOTS slots ENTRE duas presenças vira presença (o
+    # YOLO "pisca" em oclusão momentânea; cada piscada virava posto_vazio).
+    if _OPERADOR_GAP_SLOTS > 0 and len(amostras) > 2:
+        pres = [bool(a.operador_presente) for a in amostras]
+        for i, a in enumerate(amostras):
+            if pres[i]:
+                continue
+            antes = any(pres[j] for j in range(max(0, i - _OPERADOR_GAP_SLOTS), i))
+            depois = any(
+                pres[j] for j in range(i + 1, min(len(pres), i + 1 + _OPERADOR_GAP_SLOTS))
+            )
+            if antes and depois:
+                a.operador_presente = True
+                a.operador_ponte = True
+                stats["pontes"] += 1
+
+    for am in amostras:
+        if am.operador_presente:
             stats["presentes"] += 1
         elif not am.pessoas:
             stats["vazios"] += 1
@@ -888,6 +908,10 @@ _CAM2_CONFIRM_STRIDE = max(1, int(os.environ.get("KV_CAM2_CONFIRM_STRIDE", "1"))
 # cam1 viu o operador, algo está errado (desalinhamento/zona) → ignora a cam2
 # no vídeo inteiro em vez de zerar tudo como posto_vazio.
 _CAM2_REBAIXA_MAX = float(os.environ.get("KV_CAM2_REBAIXA_MAX", "0.8"))
+# Fase 34: PONTE TEMPORAL — operador não se teletransporta. Ausência de até N
+# slots ENTRE duas presenças confirmadas conta como presente (o YOLO "pisca"
+# em oclusão momentânea; sem a ponte, cada piscada virava posto_vazio falso).
+_OPERADOR_GAP_SLOTS = max(0, int(os.environ.get("KV_OPERADOR_GAP_SLOTS", "3")))
 
 POSTO_VAZIO_LABEL = "posto_vazio"
 POSTO_VAZIO_TID = -1
@@ -1347,6 +1371,7 @@ class Amostra:
     img_b64_secundario: str | None = None   # 2º ângulo (cam2) no mesmo instante (Fase 6)
     op_cam2: bool | None = None             # Fase 28: operador visto no posto pela cam2
     operador_presente: bool | None = None   # Fase 28: veredito do slot (pós-confirmação)
+    operador_ponte: bool = False            # Fase 34: presença por PONTE temporal
 
 
 def inspecionar_video(video_path: str) -> dict:
@@ -1753,6 +1778,15 @@ def etapa_analise_vlm(
     observacoes: list[dict] = []
     ancoras: dict[int, dict] = {}   # track_id → {kpts, crop, zona, descricao}
     n_completo = n_binario = n_repeticao = 0
+    # Fase 34: última ação CONHECIDA do operador (qualquer track) — herdada
+    # nas pontes temporais e quando o VLM devolve "ação não identificada"
+    # (operador ocluso é difícil de ler; indefinida só fica sem histórico).
+    ultima_desc_op: str | None = None
+    ultimo_tid_op: int | None = None
+    n_herdadas = 0
+
+    def _eh_indefinida(d: str | None) -> bool:
+        return bool(d) and ("não identificada" in d or "nao identificada" in d)
 
     for i, am in enumerate(amostras):
         # Fase 33: RESGATE pela lateral — a cam2 ESTABELECEU a presença mas a
@@ -1760,27 +1794,44 @@ def etapa_analise_vlm(
         # descrita pela IMAGEM DA CAM2 (track sintético). Visitantes que
         # existam na cam1 seguem no fluxo normal abaixo.
         tem_op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
-        if (zona_posto and am.operador_presente and not tem_op_cam1
-                and am.img_b64_secundario):
-            desc_cam2 = _analisar_operador_cam2(
-                groq_client, am.img_b64_secundario, descricao_processo,
-                memoria, conhecimento_adquirido, zona_desc=zona_posto,
-            )
+        if zona_posto and am.operador_presente and not tem_op_cam1:
+            desc_cam2 = None
+            origem_resgate = "resgate_cam2"
+            if am.operador_ponte:
+                # Fase 34: PONTE — presença por continuidade temporal; herda a
+                # última ação conhecida SEM chamada de VLM (custo zero).
+                desc_cam2 = ultima_desc_op
+                origem_resgate = "ponte_temporal"
+            elif am.img_b64_secundario:
+                desc_cam2 = _analisar_operador_cam2(
+                    groq_client, am.img_b64_secundario, descricao_processo,
+                    memoria, conhecimento_adquirido, zona_desc=zona_posto,
+                )
+                if desc_cam2:
+                    n_completo += 1
+                if _eh_indefinida(desc_cam2) and ultima_desc_op:
+                    desc_cam2 = ultima_desc_op   # Fase 34: herda o padrão
+                    origem_resgate = "indefinida_herdada"
+                    n_herdadas += 1
             if desc_cam2:
-                n_completo += 1
                 observacoes.append(
                     {
                         "tempo_s": am.tempo_s,
                         "frame_idx": am.frame_idx,
-                        "track_id": OPERADOR_CAM2_TID,
+                        "track_id": (ultimo_tid_op if origem_resgate == "ponte_temporal"
+                                     and ultimo_tid_op is not None else OPERADOR_CAM2_TID),
                         "descricao": desc_cam2,
                         "bbox": (0, 0, 0, 0),
                         "zona": zona_posto,
                         "papel": "operador",
-                        "origem_gate": "resgate_cam2",
-                        "mudanca_contexto": True,
+                        "origem_gate": origem_resgate,
+                        "mudanca_contexto": origem_resgate == "resgate_cam2",
                     }
                 )
+                if not _eh_indefinida(desc_cam2):
+                    ultima_desc_op = desc_cam2
+                    if origem_resgate == "resgate_cam2":
+                        ultimo_tid_op = OPERADOR_CAM2_TID
         # Fase 28/33: slot sem ninguém de interesse E sem operador confirmado
         # por NENHUMA das câmeras → POSTO VAZIO sintético (custo zero).
         if not am.pessoas:
@@ -1852,6 +1903,17 @@ def etapa_analise_vlm(
                     n_repeticao += 1
             if not desc:
                 continue
+            # Fase 34: operador com "ação não identificada" HERDA a última
+            # ação conhecida (ocluso é difícil de ler; indefinida de verdade
+            # só quando ainda não há histórico no vídeo).
+            if p.get("papel") == "operador":
+                if _eh_indefinida(desc) and ultima_desc_op:
+                    desc = ultima_desc_op
+                    origem_gate = "indefinida_herdada"
+                    n_herdadas += 1
+                elif not _eh_indefinida(desc):
+                    ultima_desc_op = desc
+                    ultimo_tid_op = tid
             # Atualiza/instala a âncora quando a amostra foi de fato ANALISADA.
             if _GATE_ENABLE and origem_gate == "analisado":
                 ancoras[tid] = {
@@ -1876,6 +1938,9 @@ def etapa_analise_vlm(
             "vlm", pct, f"{i + 1}/{len(amostras)} amostras · {len(observacoes)} observações"
         )
 
+    if n_herdadas:
+        log.info("[operador] %d observação(ões) herdaram a última ação conhecida "
+                 "(indefinida/ponte — operador ocluso).", n_herdadas)
     if _GATE_ENABLE:
         chamadas = n_completo + n_binario
         base = len(amostras)
@@ -6164,9 +6229,10 @@ def processar_video(
         stats_op = etapa_confirmar_operador(amostras, politica)
         log.info(
             "[operador] política=%s · %d slots: %d com operador (%d resgatados "
-            "pela cam2), %d vazios, %d rebaixados pela cam2",
+            "pela cam2, %d por ponte temporal), %d vazios, %d rebaixados pela cam2",
             politica, stats_op["slots"], stats_op["presentes"],
-            stats_op["resgatados_cam2"], stats_op["vazios"], stats_op["rebaixados"],
+            stats_op["resgatados_cam2"], stats_op["pontes"],
+            stats_op["vazios"], stats_op["rebaixados"],
         )
 
     observacoes = etapa_analise_vlm(
