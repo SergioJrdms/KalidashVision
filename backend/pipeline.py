@@ -5599,6 +5599,238 @@ def montar_insights_quantitativos(
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 35 — ANÁLISE DIÁRIA ("Dia a dia"): como foi o dia do operador, dia a
+# dia, comparando JANELAS de tempo (7/30 dias — nunca dia contra dia) e
+# marcando dias SEM TRABALHO. Python puro, zero token de IA.
+# ═════════════════════════════════════════════════════════════════════════
+def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 30) -> dict:
+    """Agrega os eventos por DIA REAL (relógio dos vídeos) e devolve:
+      dias:      [{dia, rot, dow, tempo_obs_s, va/apoio/desp/none_pct,
+                   posto_vazio_s/pct, n_videos, visitas, primeira_h, ultima_h,
+                   top_acao, por_hora[], sem_trabalho}]  (calendário contínuo —
+                   dia sem vídeo vira sem_trabalho='sem_captura'; dia filmado
+                   mas ~só posto_vazio vira 'posto_vazio')
+      janelas:   últimos 7 vs 7 anteriores e últimos 30 vs 30 anteriores
+                 (agregado + delta de % produtivo)
+      tendencia: inclinação (pts de produtivo por dia trabalhado) + direção.
+    """
+    videos = (
+        sb.table("videos")
+        .select("id, nome, duracao_s, gravado_em, processado_em")
+        .eq("empresa", empresa)
+        .eq("processo", processo)
+        .limit(50000)
+        .execute()
+        .data
+    ) or []
+    inicio_por_video: dict[str, datetime] = {}
+    for v in videos:
+        dt0 = _inicio_video_dt(v)
+        if v.get("id") and dt0:
+            inicio_por_video[v["id"]] = dt0
+    if not inicio_por_video:
+        return {"dias": [], "janelas": None, "tendencia": None}
+
+    comps = (
+        sb.table("comportamentos")
+        .select("label, categoria_lean")
+        .eq("empresa", empresa)
+        .eq("processo", processo)
+        .limit(5000)
+        .execute()
+        .data
+    ) or []
+    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+
+    eventos = (
+        sb.table("eventos")
+        .select(
+            "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
+            "tempo_fim_s, validacao_correto, principal, papel_pessoa"
+        )
+        .eq("empresa", empresa)
+        .eq("processo", processo)
+        .limit(100000)
+        .execute()
+        .data
+    ) or []
+    eventos = [
+        e for e in eventos
+        if e.get("validacao_correto") is not False and e.get("principal") is not False
+    ]
+
+    # ── Agregação por dia (e por hora dentro do dia) ──
+    por_dia: dict[str, dict] = {}
+    videos_por_dia: dict[str, set] = defaultdict(set)
+    for vid, dt0 in inicio_por_video.items():
+        videos_por_dia[dt0.date().isoformat()].add(vid)
+
+    for e in eventos:
+        dt0 = inicio_por_video.get(e.get("video_id"))
+        if dt0 is None:
+            continue
+        label, cat, dur = _cat_do_evento(e, cat_por_label)
+        if dur <= 0:
+            continue
+        inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
+        dia = inst.date().isoformat()
+        d = por_dia.setdefault(dia, {
+            "tot": 0.0, "va": 0.0, "apoio": 0.0, "desp": 0.0,
+            "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
+            "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "apoio": 0.0, "desp": 0.0}),
+            "primeiro": inst, "ultimo": inst,
+        })
+        d["tot"] += dur
+        eh_vazio = (e.get("papel_pessoa") == "posto_vazio") or (label == POSTO_VAZIO_LABEL)
+        if eh_vazio:
+            d["vazio"] += dur
+        elif cat == "valor_agregado":
+            d["va"] += dur
+        elif cat == "apoio":
+            d["apoio"] += dur
+        elif cat == "desperdicio":
+            d["desp"] += dur
+        if e.get("papel_pessoa") == "visitante":
+            d["visitas"] += 1
+        if not eh_vazio:
+            d["acoes"][label] += dur
+        h = d["horas"][inst.hour]
+        h["seg"] += dur
+        if eh_vazio:
+            pass
+        elif cat == "valor_agregado":
+            h["va"] += dur
+        elif cat == "apoio":
+            h["apoio"] += dur
+        elif cat == "desperdicio":
+            h["desp"] += dur
+        if inst < d["primeiro"]:
+            d["primeiro"] = inst
+        fim = dt0 + timedelta(seconds=float(e.get("tempo_fim_s") or 0))
+        if fim > d["ultimo"]:
+            d["ultimo"] = fim
+
+    # ── Calendário contínuo: 60 dias internos (p/ mês vs mês anterior);
+    #    o retorno exibe só os últimos `dias`. ──
+    todos_dias = sorted(set(por_dia) | set(videos_por_dia))
+    fim_cal = datetime.fromisoformat(todos_dias[-1]).date()
+    ini_cal = fim_cal - timedelta(days=59)
+    DOW = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+    saida_dias: list[dict] = []
+    cursor = ini_cal
+    while cursor <= fim_cal:
+        iso = cursor.isoformat()
+        rot = f"{cursor.day:02d}/{cursor.month:02d}"
+        dow = DOW[cursor.weekday()]
+        d = por_dia.get(iso)
+        if d is None or d["tot"] <= 0:
+            saida_dias.append({
+                "dia": iso, "rot": rot, "dow": dow, "tempo_obs_s": 0.0,
+                "va_pct": 0.0, "apoio_pct": 0.0, "desp_pct": 0.0, "none_pct": 0.0,
+                "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
+                "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
+                "por_hora": [],
+                # sem vídeo nenhum = sem captura; com vídeo mas sem evento = vazio
+                "sem_trabalho": "sem_captura" if not videos_por_dia.get(iso) else "posto_vazio",
+            })
+        else:
+            tot = d["tot"]
+            vazio_pct = d["vazio"] / tot * 100
+            atividade = d["va"] + d["apoio"] + d["desp"]
+            # Dia filmado mas ~só posto vazio (ou atividade desprezível) =
+            # "máquina vazia o dia todo" → o dono precisa VER isso.
+            sem_trab = "posto_vazio" if (vazio_pct >= 90 or atividade < 120) else None
+            none_s = max(0.0, tot - d["va"] - d["apoio"] - d["desp"] - d["vazio"])
+            top = max(d["acoes"].items(), key=lambda kv: kv[1]) if d["acoes"] else None
+            por_hora = []
+            for hora in sorted(d["horas"]):
+                h = d["horas"][hora]
+                if h["seg"] < 60:
+                    continue
+                por_hora.append({
+                    "hora": hora, "seg": round(h["seg"], 1),
+                    "va_pct": round(h["va"] / h["seg"] * 100, 1),
+                    "apoio_pct": round(h["apoio"] / h["seg"] * 100, 1),
+                    "desp_pct": round(h["desp"] / h["seg"] * 100, 1),
+                })
+            saida_dias.append({
+                "dia": iso, "rot": rot, "dow": dow,
+                "tempo_obs_s": round(tot, 1),
+                "va_pct": round(d["va"] / tot * 100, 1),
+                "apoio_pct": round(d["apoio"] / tot * 100, 1),
+                "desp_pct": round(d["desp"] / tot * 100, 1),
+                "none_pct": round(none_s / tot * 100, 1),
+                "posto_vazio_s": round(d["vazio"], 1),
+                "posto_vazio_pct": round(vazio_pct, 1),
+                "n_videos": len(videos_por_dia.get(iso, ())),
+                "visitas": d["visitas"],
+                "primeira_h": d["primeiro"].strftime("%H:%M"),
+                "ultima_h": d["ultimo"].strftime("%H:%M"),
+                "top_acao": ({"label": top[0], "seg": round(top[1], 1)} if top else None),
+                "por_hora": por_hora,
+                "sem_trabalho": sem_trab,
+            })
+        cursor += timedelta(days=1)
+
+    # ── Janelas (rolando a partir do dia mais recente — NUNCA dia vs dia) ──
+    def _janela(ds: list[dict]) -> dict:
+        trab = [x for x in ds if not x["sem_trabalho"] and x["tempo_obs_s"] > 0]
+        tot = sum(x["tempo_obs_s"] for x in trab)
+        va_s = sum(x["tempo_obs_s"] * x["va_pct"] / 100 for x in trab)
+        vazio_s = sum(x["posto_vazio_s"] for x in ds)
+        return {
+            "dias": len(ds),
+            "dias_trabalhados": len(trab),
+            "dias_sem_trabalho": sum(1 for x in ds if x["sem_trabalho"]),
+            "tempo_obs_s": round(tot, 1),
+            "va_pct": round(va_s / tot * 100, 1) if tot > 0 else 0.0,
+            "posto_vazio_s": round(vazio_s, 1),
+            "horas_produtivas_dia": round(va_s / 3600 / max(1, len(trab)), 2),
+        }
+
+    def _fatia(n_fim: int, n_ini: int) -> list[dict]:
+        # dias [len-n_ini : len-n_fim] contando do fim (calendário contínuo)
+        a = max(0, len(saida_dias) - n_ini)
+        b = max(0, len(saida_dias) - n_fim)
+        return saida_dias[a:b]
+
+    janelas = None
+    if saida_dias:
+        j7 = _janela(_fatia(0, 7))
+        j7_ant = _janela(_fatia(7, 14))
+        j30 = _janela(_fatia(0, 30))
+        j30_ant = _janela(_fatia(30, 60))
+        janelas = {
+            "semana": {"atual": j7, "anterior": j7_ant,
+                       "delta_va_pp": round(j7["va_pct"] - j7_ant["va_pct"], 1)
+                       if j7_ant["dias_trabalhados"] else None},
+            "mes": {"atual": j30, "anterior": j30_ant,
+                    "delta_va_pp": round(j30["va_pct"] - j30_ant["va_pct"], 1)
+                    if j30_ant["dias_trabalhados"] else None},
+        }
+
+    # ── Tendência: inclinação da % produtiva pelos dias TRABALHADOS ──
+    tendencia = None
+    dias_exibidos = saida_dias[-max(1, dias):]
+    trabalhados = [d for d in dias_exibidos if not d["sem_trabalho"] and d["tempo_obs_s"] > 0]
+    if len(trabalhados) >= 3:
+        ys = [d["va_pct"] for d in trabalhados]
+        n = len(ys)
+        xm = (n - 1) / 2.0
+        ym = sum(ys) / n
+        den = sum((i - xm) ** 2 for i in range(n)) or 1.0
+        slope = sum((i - xm) * (y - ym) for i, y in enumerate(ys)) / den
+        direcao = "ascendente" if slope >= 0.3 else ("descendente" if slope <= -0.3 else "estável")
+        tendencia = {
+            "slope_pts_dia": round(slope, 2),
+            "direcao": direcao,
+            "dias_considerados": n,
+        }
+
+    return {"dias": dias_exibidos, "janelas": janelas, "tendencia": tendencia}
+
+
 def montar_serie_temporal(sb: Client, empresa: str, processo: str) -> dict:
     """Série por vídeo (ordenada por processado_em) com o SHARE de % do
     tempo por comportamento (label efetivo) e por categoria Lean. Tudo

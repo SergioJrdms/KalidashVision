@@ -26,6 +26,7 @@ import type {
   ZonaCamera,
   ZonaBody,
   FrameReferencia,
+  AnaliseDiaria,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -246,6 +247,11 @@ export const api = {
       req<ZonaCamera>(`/zonas/${zonaId}`, { method: "PUT", body: JSON.stringify(body) }),
     excluir: (zonaId: string) =>
       req<{ ok: boolean }>(`/zonas/${zonaId}`, { method: "DELETE" }),
+  },
+  diaadia: {
+    // Fase 35: análise diária (evolução por dia, janelas 7/30, tendência).
+    analise: (processoId: string, dias = 30) =>
+      req<AnaliseDiaria>(`/processos/${processoId}/dias?dias=${dias}`),
   },
   cameras: {
     listar: (processoId: string) =>

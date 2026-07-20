@@ -6,7 +6,7 @@ import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
 export type Screen = "login" | "processos" | "processo" | "ajuda" | "fila-global";
-export type Tab = "dashboard" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
+export type Tab = "dashboard" | "diaadia" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
 
@@ -61,6 +61,7 @@ export function Sidebar({
   ];
   const procNav = [
     { tab: "dashboard", label: "Dashboard", icon: "layout-dashboard" },
+    { tab: "diaadia", label: "Dia a dia", icon: "calendar-days" },
     { tab: "validacao", label: "Validação", icon: "git-pull-request-arrow", badge: proc?.pendencias },
     { tab: "eventos", label: "Eventos", icon: "table-2" },
     { tab: "padroes", label: "Padrões", icon: "activity" },

@@ -458,6 +458,54 @@ export interface ZonaBody {
   ativo: boolean;
 }
 
+// ── Análise diária "Dia a dia" (Fase 35) ────────────────────
+export interface DiaHora {
+  hora: number;
+  seg: number;
+  va_pct: number;
+  apoio_pct: number;
+  desp_pct: number;
+}
+
+export interface DiaAnalise {
+  dia: string; // ISO
+  rot: string; // "18/07"
+  dow: string; // "sex"
+  tempo_obs_s: number;
+  va_pct: number;
+  apoio_pct: number;
+  desp_pct: number;
+  none_pct: number;
+  posto_vazio_s: number;
+  posto_vazio_pct: number;
+  n_videos: number;
+  visitas: number;
+  primeira_h: string | null;
+  ultima_h: string | null;
+  top_acao: { label: string; seg: number } | null;
+  por_hora: DiaHora[];
+  sem_trabalho: "sem_captura" | "posto_vazio" | null;
+}
+
+export interface JanelaAgregada {
+  dias: number;
+  dias_trabalhados: number;
+  dias_sem_trabalho: number;
+  tempo_obs_s: number;
+  va_pct: number;
+  posto_vazio_s: number;
+  horas_produtivas_dia: number;
+}
+
+export interface AnaliseDiaria {
+  dias: DiaAnalise[];
+  janelas: {
+    semana: { atual: JanelaAgregada; anterior: JanelaAgregada; delta_va_pp: number | null };
+    mes: { atual: JanelaAgregada; anterior: JanelaAgregada; delta_va_pp: number | null };
+  } | null;
+  tendencia: { slope_pts_dia: number; direcao: string; dias_considerados: number } | null;
+}
+
 export interface FrameReferencia {
   img: string; // data:image/jpeg;base64,...
   largura: number | null;

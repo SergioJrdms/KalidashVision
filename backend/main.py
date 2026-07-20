@@ -40,6 +40,7 @@ from .pipeline import (
     gerar_titulo_conversa,
     gerar_sugestoes_chat,
     agregar_portfolio,
+    montar_analise_diaria,
     montar_insights_quantitativos,
     responder_chat_global,
     gerar_sugestoes_chat_global,
@@ -3062,6 +3063,20 @@ def serie_temporal_processo(processo_id: str, user: CurrentUser = Depends(get_cu
     nome = _processo_nome(sb, user, processo_id)
     serie = montar_serie_temporal(sb, user.empresa, nome)
     return serie
+
+
+@app.get("/processos/{processo_id}/dias")
+def analise_diaria_processo(
+    processo_id: str,
+    dias: int = Query(30, ge=7, le=60),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 35 — Dashboard "Dia a dia": agregação por DIA real (evolução,
+    ritmo/resumão do dia, dias sem trabalho) + janelas 7/30 dias + tendência.
+    Python puro (sem custo de IA)."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    return montar_analise_diaria(sb, user.empresa, nome, dias=dias)
 
 
 @app.get("/prism/padroes-globais")
