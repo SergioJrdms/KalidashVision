@@ -34,9 +34,23 @@ export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
     <div className="col" style={{ gap: 16 }}>
       <VereditoHero dados={dados} />
       <EvolucaoPorDia dias={dias} selecionado={selecionado} onSelecionar={(d) => setDiaSel(d.dia)} trabalhados={trabalhados} />
+      {selecionado && !selecionado.sem_trabalho && (
+        <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
+          <div style={{ flex: "1.4 1 420px" }}><JornadaDoDia d={selecionado} /></div>
+          <div style={{ flex: "1 1 300px" }}><TopAcoesDia d={selecionado} /></div>
+        </div>
+      )}
       <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
         <div style={{ flex: "1.2 1 380px" }}><TendenciaCard dias={trabalhados} tendencia={dados.tendencia} /></div>
-        <div style={{ flex: "1 1 320px" }}><PresencaCard dias={dias} /></div>
+        <div style={{ flex: "1 1 340px" }}><HeatmapQuinzena dias={dias} onSelecionar={(d) => setDiaSel(d.dia)} /></div>
+      </div>
+      <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
+        <div style={{ flex: "1 1 360px" }}><JanelasComparador dados={dados} /></div>
+        <div style={{ flex: "1 1 340px" }}><HorasUteisCard dias={trabalhados} /></div>
+      </div>
+      <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
+        <div style={{ flex: "1 1 340px" }}><PresencaCard dias={dias} /></div>
+        <div style={{ flex: "1 1 300px" }}><RecordesCard dias={dias} trabalhados={trabalhados} /></div>
       </div>
       <ComparadorFuturo />
     </div>
@@ -368,7 +382,288 @@ function PresencaCard({ dias }: { dias: DiaAnalise[] }) {
   );
 }
 
-// ═══ 5) O que vem: comparar operadores/postos (pedido do Fernando) ═══
+// ═══ Jornada do dia: o FILME do dia selecionado numa faixa só ═══
+const CAT_CORES: Record<string, string> = {
+  va: leanCor("va"), apoio: leanCor("apoio"), desp: leanCor("desp"),
+  none: leanCor("none"), vazio: "#8a8598",
+};
+const CAT_NOMES: Record<string, string> = {
+  va: "produtivo", apoio: "apoio", desp: "desperdício", none: "não classificado", vazio: "posto vazio",
+};
+
+function fmtMin(m: number): string {
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(Math.round(m % 60)).padStart(2, "0")}`;
+}
+
+function JornadaDoDia({ d }: { d: DiaAnalise }) {
+  const faixas = d.linha_tempo || [];
+  if (faixas.length === 0) return null;
+  const ini = Math.max(0, faixas[0].ini_m - 15);
+  const fim = Math.min(1440, faixas[faixas.length - 1].fim_m + 15);
+  const span = Math.max(1, fim - ini);
+  const marcas: number[] = [];
+  for (let h = Math.ceil(ini / 60); h * 60 <= fim; h++) marcas.push(h * 60);
+  return (
+    <Card style={{ padding: 20, height: "100%" }}>
+      <PanelHead
+        titulo={`A jornada de ${d.dow} ${d.rot}`}
+        ajuda="O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produzindo, azul = apoio, vermelho = desperdício, cinza escuro = posto vazio. Buracos em branco = sem filmagem naquele horário."
+        leitura="O filme do dia: dá pra ver quando começou, o almoço, os buracos e onde o dia rendeu."
+      />
+      <div style={{ position: "relative", height: 46, marginTop: 6 }}>
+        <div style={{ position: "absolute", inset: "8px 0 14px", background: "var(--soft)", borderRadius: 8, border: "1px solid var(--line-2)" }} />
+        {faixas.map((f, i) => (
+          <div key={i}
+            title={`${fmtMin(f.ini_m)}–${fmtMin(f.fim_m)} · ${CAT_NOMES[f.cat]}`}
+            style={{
+              position: "absolute", top: 8, bottom: 14,
+              left: `${((f.ini_m - ini) / span) * 100}%`,
+              width: `${((f.fim_m - f.ini_m) / span) * 100}%`,
+              background: CAT_CORES[f.cat], opacity: f.cat === "none" ? 0.55 : 0.92,
+              borderRadius: 3,
+            }} />
+        ))}
+        {marcas.map((m) => (
+          <span key={m} style={{ position: "absolute", bottom: 0, left: `${((m - ini) / span) * 100}%`, transform: "translateX(-50%)", fontSize: 9, color: "var(--faint)", fontFamily: "var(--mono)" }}>
+            {Math.floor(m / 60)}h
+          </span>
+        ))}
+      </div>
+      <div className="row wrap" style={{ gap: 10, fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
+        {(["va", "apoio", "desp", "vazio", "none"] as const).map((c) => (
+          <span key={c} className="row" style={{ gap: 5 }}>
+            <i style={{ width: 9, height: 9, borderRadius: 3, background: CAT_CORES[c] }} /> {CAT_NOMES[c]}
+          </span>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// ═══ Top ações do dia selecionado (mini-pareto do dia) ═══
+function TopAcoesDia({ d }: { d: DiaAnalise }) {
+  const acoes = d.top_acoes || [];
+  const maxSeg = Math.max(1, ...acoes.map((a) => a.seg));
+  return (
+    <Card style={{ padding: 20, height: "100%" }}>
+      <PanelHead
+        titulo={`No que ${d.dow} ${d.rot} foi gasto`}
+        ajuda="As 5 ações que mais consumiram o tempo do dia selecionado."
+        leitura="A ação nº 1 deveria ser a que agrega valor — se não for, o dia contou outra história."
+      />
+      {acoes.length === 0 ? (
+        <p style={{ fontSize: 13, color: "var(--muted)" }}>Sem ações registradas neste dia.</p>
+      ) : (
+        <ul className="col" style={{ gap: 9, listStyle: "none", padding: 0, margin: 0 }}>
+          {acoes.map((a, i) => (
+            <li key={a.label} className="col" style={{ gap: 3 }}>
+              <div className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+                <code className="font-mono" style={{ background: "var(--line-2)", padding: "1px 7px", borderRadius: 5, fontSize: 11 }}>{i + 1}. {a.label}</code>
+                <span className="tnum" style={{ color: "var(--muted)" }}>{fmtDur(a.seg)}</span>
+              </div>
+              <div className="track" style={{ height: 7 }}>
+                <i style={{ width: `${(a.seg / maxSeg) * 100}%`, background: "var(--grad-cta)", display: "block", height: "100%", borderRadius: 99 }} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+// ═══ Mapa da quinzena: dia × hora — o padrão da semana pula aos olhos ═══
+function HeatmapQuinzena({ dias, onSelecionar }: { dias: DiaAnalise[]; onSelecionar: (d: DiaAnalise) => void }) {
+  const ultimos = dias.slice(-14);
+  const horasSet = new Set<number>();
+  ultimos.forEach((d) => (d.por_hora || []).forEach((h) => horasSet.add(h.hora)));
+  const horas = Array.from(horasSet).sort((a, b) => a - b);
+  if (horas.length === 0) {
+    return (
+      <Card style={{ padding: 20, height: "100%" }}>
+        <PanelHead titulo="Mapa da quinzena" ajuda="Cada linha é um dia, cada célula uma hora — a cor diz o quanto rendeu." leitura="" />
+        <p style={{ fontSize: 13, color: "var(--muted)" }}>Ainda não há horas suficientes para o mapa.</p>
+      </Card>
+    );
+  }
+  const corCelula = (va: number) => {
+    if (va >= 60) return leanCor("va");
+    if (va >= 35) return "#c98a00";
+    return leanCor("desp");
+  };
+  return (
+    <Card style={{ padding: 20, height: "100%" }}>
+      <PanelHead
+        titulo="Mapa da quinzena"
+        ajuda="Cada linha é um dia (últimos 14), cada célula é uma hora do relógio. Verde = hora produtiva, âmbar = mediana, vermelho = hora perdida, ✕ = dia sem trabalho. A opacidade acompanha o tempo filmado na hora."
+        leitura="Padrões saltam aos olhos: toda tarde caindo? Toda segunda fraca?"
+      />
+      <div className="col" style={{ gap: 4 }}>
+        <div className="row" style={{ gap: 3, paddingLeft: 52 }}>
+          {horas.map((h) => (
+            <span key={h} style={{ flex: 1, textAlign: "center", fontSize: 8.5, color: "var(--faint)", fontFamily: "var(--mono)" }}>{h}h</span>
+          ))}
+        </div>
+        {ultimos.map((d) => {
+          const porHora = new Map((d.por_hora || []).map((h) => [h.hora, h]));
+          const maxSeg = Math.max(1, ...(d.por_hora || []).map((h) => h.seg));
+          return (
+            <div key={d.dia} className="row" style={{ gap: 3, alignItems: "center", cursor: "pointer" }} onClick={() => onSelecionar(d)}>
+              <span className="tnum" style={{ width: 48, fontSize: 10.5, fontWeight: 600, color: "var(--muted)", flex: "none" }}>{d.dow} {d.rot}</span>
+              {horas.map((h) => {
+                if (d.sem_trabalho) {
+                  return <span key={h} title={`${d.dow} ${d.rot} — ${d.sem_trabalho === "posto_vazio" ? "máquina vazia" : "sem captura"}`}
+                    style={{ flex: 1, height: 16, borderRadius: 3, background: "var(--line-2)", display: "grid", placeItems: "center", fontSize: 8, color: "var(--faint)" }}>✕</span>;
+                }
+                const hd = porHora.get(h);
+                if (!hd) return <span key={h} style={{ flex: 1, height: 16, borderRadius: 3, background: "var(--soft)", border: "1px solid var(--line-2)" }} />;
+                return (
+                  <span key={h}
+                    title={`${d.dow} ${d.rot} ${h}h — ${Math.round(hd.va_pct)}% produtivo · ${fmtDur(hd.seg)}`}
+                    style={{ flex: 1, height: 16, borderRadius: 3, background: corCelula(hd.va_pct), opacity: 0.35 + 0.65 * (hd.seg / maxSeg) }} />
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// ═══ Semana vs semana: a comparação de JANELAS em barras (não em frase) ═══
+function JanelasComparador({ dados }: { dados: AnaliseDiaria }) {
+  const j = dados.janelas;
+  if (!j || !j.semana.anterior.dias_trabalhados) {
+    return (
+      <Card style={{ padding: 20, height: "100%" }}>
+        <PanelHead titulo="Semana vs semana" ajuda="Compara os últimos 7 dias com os 7 anteriores — sempre janela contra janela." leitura="" />
+        <p style={{ fontSize: 13, color: "var(--muted)" }}>Quando houver duas semanas medidas, a comparação aparece aqui.</p>
+      </Card>
+    );
+  }
+  const linhas: Array<{ nome: string; cat: LeanShort | "vazio"; a: number; b: number }> = [
+    { nome: "Produtivo", cat: "va", a: j.semana.atual.va_pct, b: j.semana.anterior.va_pct },
+    { nome: "Apoio", cat: "apoio", a: j.semana.atual.apoio_pct, b: j.semana.anterior.apoio_pct },
+    { nome: "Desperdício", cat: "desp", a: j.semana.atual.desp_pct, b: j.semana.anterior.desp_pct },
+    { nome: "Posto vazio", cat: "vazio", a: j.semana.atual.vazio_pct, b: j.semana.anterior.vazio_pct },
+  ];
+  return (
+    <Card style={{ padding: 20, height: "100%" }}>
+      <PanelHead
+        titulo="Semana vs semana"
+        ajuda="Os últimos 7 dias (barra forte) contra os 7 anteriores (barra clara), categoria a categoria. É a comparação certa: janela contra janela, nunca um dia isolado."
+        leitura="Produtivo subindo + desperdício caindo = a semana foi melhor de verdade."
+      />
+      <ul className="col" style={{ gap: 12, listStyle: "none", padding: 0, margin: 0 }}>
+        {linhas.map((l) => {
+          const delta = l.a - l.b;
+          const bom = l.cat === "va" ? delta >= 0 : delta <= 0;
+          const cor = l.cat === "vazio" ? CAT_CORES.vazio : leanCor(l.cat as LeanShort);
+          return (
+            <li key={l.nome} className="col" style={{ gap: 4 }}>
+              <div className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+                <span style={{ fontWeight: 600, color: "var(--text)" }}>{l.nome}</span>
+                <span className="tnum" style={{ fontWeight: 700, color: bom ? leanCor("va") : leanCor("desp") }}>
+                  {delta >= 0 ? "▲" : "▼"} {Math.abs(delta).toFixed(0)} pts
+                </span>
+              </div>
+              <div className="track" style={{ height: 9 }} title={`Últimos 7 dias: ${l.a.toFixed(0)}%`}>
+                <i style={{ width: `${Math.min(100, l.a)}%`, background: cor, display: "block", height: "100%", borderRadius: 99 }} />
+              </div>
+              <div className="track" style={{ height: 9, opacity: 0.45 }} title={`7 dias anteriores: ${l.b.toFixed(0)}%`}>
+                <i style={{ width: `${Math.min(100, l.b)}%`, background: cor, display: "block", height: "100%", borderRadius: 99 }} />
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 10 }}>barra forte = últimos 7 dias · barra clara = 7 dias anteriores</p>
+    </Card>
+  );
+}
+
+// ═══ Horas úteis por dia: o dono pensa em HORAS, não em % ═══
+function HorasUteisCard({ dias }: { dias: DiaAnalise[] }) {
+  const ultimos = dias.slice(-10);
+  const horasDia = ultimos.map((d) => ({ d, h: (d.tempo_obs_s * d.va_pct) / 100 / 3600 }));
+  const media = horasDia.length ? horasDia.reduce((s, x) => s + x.h, 0) / horasDia.length : 0;
+  const maxH = Math.max(0.5, ...horasDia.map((x) => x.h));
+  return (
+    <Card style={{ padding: 20, height: "100%" }}>
+      <PanelHead
+        titulo="Horas úteis por dia"
+        ajuda="Horas de trabalho PRODUTIVO entregues em cada dia (tempo observado × % produtivo). A linha pontilhada é a média do período."
+        leitura="A pergunta em horas: quantas horas de valor o posto entrega por dia?"
+      />
+      <div className="row" style={{ gap: 6, alignItems: "flex-end", height: 120, position: "relative", marginTop: 6 }}>
+        <div style={{ position: "absolute", left: 0, right: 0, bottom: `${(media / maxH) * 100}%`, borderTop: "2px dashed var(--accent)", opacity: 0.6 }} title={`média ${media.toFixed(1)}h/dia`} />
+        {horasDia.map(({ d, h }) => (
+          <div key={d.dia} className="col" style={{ flex: 1, alignItems: "center", gap: 3, height: "100%", justifyContent: "flex-end" }}
+            title={`${d.dow} ${d.rot} — ${h.toFixed(1)}h produtivas de ${fmtDur(d.tempo_obs_s)} observadas`}>
+            <span className="tnum" style={{ fontSize: 9.5, color: "var(--muted)" }}>{h.toFixed(1)}</span>
+            <div style={{ width: "70%", height: `${(h / maxH) * 82}%`, minHeight: 2, background: leanCor("va"), borderRadius: 4, opacity: 0.9 }} />
+            <span style={{ fontSize: 8.5, color: "var(--faint)", fontFamily: "var(--mono)" }}>{d.rot}</span>
+          </div>
+        ))}
+      </div>
+      <p style={{ fontSize: 12, color: "var(--text)", marginTop: 10 }}>
+        Média do período: <b>{media.toFixed(1)}h produtivas/dia</b>.
+      </p>
+    </Card>
+  );
+}
+
+// ═══ Recordes & constância: marcos que o dono cobra na segunda-feira ═══
+function RecordesCard({ dias, trabalhados }: { dias: DiaAnalise[]; trabalhados: DiaAnalise[] }) {
+  if (trabalhados.length === 0) return null;
+  const melhor = trabalhados.reduce((a, b) => (b.va_pct > a.va_pct ? b : a));
+  const pior = trabalhados.reduce((a, b) => (b.va_pct < a.va_pct ? b : a));
+  // Sequência atual de dias trabalhados (do fim pra trás) + recorde do período.
+  let streakAtual = 0;
+  for (let i = dias.length - 1; i >= 0; i--) {
+    if (dias[i].sem_trabalho) break;
+    if (dias[i].tempo_obs_s > 0) streakAtual++;
+  }
+  let recorde = 0, atual = 0;
+  dias.forEach((d) => {
+    if (!d.sem_trabalho && d.tempo_obs_s > 0) { atual++; recorde = Math.max(recorde, atual); }
+    else atual = 0;
+  });
+  const media = trabalhados.reduce((s, d) => s + d.va_pct, 0) / trabalhados.length;
+  const desvio = Math.sqrt(trabalhados.reduce((s, d) => s + (d.va_pct - media) ** 2, 0) / trabalhados.length);
+  const constancia = desvio <= 8 ? "constante" : desvio <= 16 ? "variável" : "irregular";
+  const itens = [
+    { icon: "trophy", titulo: "Melhor dia", valor: `${melhor.dow} ${melhor.rot} · ${melhor.va_pct.toFixed(0)}%`, cor: leanCor("va") },
+    { icon: "trending-down", titulo: "Pior dia", valor: `${pior.dow} ${pior.rot} · ${pior.va_pct.toFixed(0)}%`, cor: leanCor("desp") },
+    { icon: "flame", titulo: "Sequência trabalhando", valor: `${streakAtual} dia(s) · recorde ${recorde}`, cor: "var(--accent)" },
+    { icon: "activity", titulo: "Constância", valor: `${constancia} (±${desvio.toFixed(0)} pts)`, cor: desvio <= 8 ? leanCor("va") : desvio <= 16 ? "#c98a00" : leanCor("desp") },
+  ];
+  return (
+    <Card style={{ padding: 20, height: "100%" }}>
+      <PanelHead
+        titulo="Recordes & constância"
+        ajuda="Melhor e pior dia do período, a sequência atual de dias trabalhados sem falha e a regularidade da produtividade (desvio entre os dias)."
+        leitura="Melhor dia é a meta; constância é o que sustenta o mês."
+      />
+      <ul className="col" style={{ gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
+        {itens.map((it) => (
+          <li key={it.titulo} className="row gap2" style={{ alignItems: "center" }}>
+            <span className="center" style={{ width: 30, height: 30, borderRadius: 9, background: "var(--soft)", color: it.cor, flex: "none" }}>
+              <Icon name={it.icon} size={15} />
+            </span>
+            <div className="col" style={{ gap: 1 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--muted)" }}>{it.titulo}</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{it.valor}</span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+// ═══ O que vem: comparar operadores/postos (pedido do Fernando) ═══
 function ComparadorFuturo() {
   return (
     <Card style={{ padding: "14px 20px", border: "1px dashed var(--p-200)", background: "var(--soft)" }}>

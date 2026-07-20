@@ -5679,6 +5679,10 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             "tot": 0.0, "va": 0.0, "apoio": 0.0, "desp": 0.0,
             "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
             "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "apoio": 0.0, "desp": 0.0}),
+            # Fase 35.2: "jornada" — buckets de 15 min do dia (96) com segundos
+            # por categoria, p/ desenhar o filme do dia em uma faixa.
+            "buckets": defaultdict(lambda: {"va": 0.0, "apoio": 0.0, "desp": 0.0,
+                                            "vazio": 0.0, "none": 0.0}),
             "primeiro": inst, "ultimo": inst,
         })
         d["tot"] += dur
@@ -5710,6 +5714,20 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         fim = dt0 + timedelta(seconds=float(e.get("tempo_fim_s") or 0))
         if fim > d["ultimo"]:
             d["ultimo"] = fim
+        # Fase 35.2: pinta os buckets de 15 min pela sobreposição real do
+        # evento no relógio do dia (o "filme" da jornada).
+        chave_cat = ("vazio" if eh_vazio else
+                     "va" if cat == "valor_agregado" else
+                     "apoio" if cat == "apoio" else
+                     "desp" if cat == "desperdicio" else "none")
+        m_ini = inst.hour * 60 + inst.minute + inst.second / 60.0
+        m_fim = min(1440.0, m_ini + dur / 60.0)
+        b = int(m_ini // 15)
+        while b * 15 < m_fim and b < 96:
+            ov = min(m_fim, (b + 1) * 15) - max(m_ini, b * 15)
+            if ov > 0:
+                d["buckets"][b][chave_cat] += ov * 60.0
+            b += 1
 
     # ── Calendário contínuo: 60 dias internos (p/ mês vs mês anterior);
     #    o retorno exibe só os últimos `dias`. ──
@@ -5730,6 +5748,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 "va_pct": 0.0, "apoio_pct": 0.0, "desp_pct": 0.0, "none_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
+                "top_acoes": [], "linha_tempo": [],
                 "por_hora": [],
                 # sem vídeo nenhum = sem captura; com vídeo mas sem evento = vazio
                 "sem_trabalho": "sem_captura" if not videos_por_dia.get(iso) else "posto_vazio",
@@ -5743,6 +5762,26 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             sem_trab = "posto_vazio" if (vazio_pct >= 90 or atividade < 120) else None
             none_s = max(0.0, tot - d["va"] - d["apoio"] - d["desp"] - d["vazio"])
             top = max(d["acoes"].items(), key=lambda kv: kv[1]) if d["acoes"] else None
+            # Fase 35.2: top 5 ações do dia (mini-pareto do dia selecionado).
+            top_acoes = [
+                {"label": lbl, "seg": round(s, 1)}
+                for lbl, s in sorted(d["acoes"].items(), key=lambda kv: kv[1], reverse=True)[:5]
+            ]
+            # Fase 35.2: linha do tempo da JORNADA — categoria dominante por
+            # bucket de 15 min, buckets contíguos iguais fundidos em faixas.
+            linha_tempo: list[dict] = []
+            for b in sorted(d["buckets"]):
+                bk = d["buckets"][b]
+                seg_b = sum(bk.values())
+                if seg_b < 60:            # menos de 1 min no bucket = buraco
+                    continue
+                cat_dom = max(bk.items(), key=lambda kv: kv[1])[0]
+                ini_m, fim_m = b * 15, (b + 1) * 15
+                if linha_tempo and linha_tempo[-1]["cat"] == cat_dom \
+                        and linha_tempo[-1]["fim_m"] == ini_m:
+                    linha_tempo[-1]["fim_m"] = fim_m
+                else:
+                    linha_tempo.append({"ini_m": ini_m, "fim_m": fim_m, "cat": cat_dom})
             por_hora = []
             for hora in sorted(d["horas"]):
                 h = d["horas"][hora]
@@ -5768,6 +5807,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 "primeira_h": d["primeiro"].strftime("%H:%M"),
                 "ultima_h": d["ultimo"].strftime("%H:%M"),
                 "top_acao": ({"label": top[0], "seg": round(top[1], 1)} if top else None),
+                "top_acoes": top_acoes,
+                "linha_tempo": linha_tempo,
                 "por_hora": por_hora,
                 "sem_trabalho": sem_trab,
             })
@@ -5778,6 +5819,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         trab = [x for x in ds if not x["sem_trabalho"] and x["tempo_obs_s"] > 0]
         tot = sum(x["tempo_obs_s"] for x in trab)
         va_s = sum(x["tempo_obs_s"] * x["va_pct"] / 100 for x in trab)
+        apoio_s = sum(x["tempo_obs_s"] * x["apoio_pct"] / 100 for x in trab)
+        desp_s = sum(x["tempo_obs_s"] * x["desp_pct"] / 100 for x in trab)
         vazio_s = sum(x["posto_vazio_s"] for x in ds)
         return {
             "dias": len(ds),
@@ -5785,7 +5828,11 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             "dias_sem_trabalho": sum(1 for x in ds if x["sem_trabalho"]),
             "tempo_obs_s": round(tot, 1),
             "va_pct": round(va_s / tot * 100, 1) if tot > 0 else 0.0,
+            "apoio_pct": round(apoio_s / tot * 100, 1) if tot > 0 else 0.0,
+            "desp_pct": round(desp_s / tot * 100, 1) if tot > 0 else 0.0,
+            "vazio_pct": round(vazio_s / tot * 100, 1) if tot > 0 else 0.0,
             "posto_vazio_s": round(vazio_s, 1),
+            "visitas": sum(x["visitas"] for x in ds),
             "horas_produtivas_dia": round(va_s / 3600 / max(1, len(trab)), 2),
         }
 

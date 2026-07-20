@@ -483,6 +483,9 @@ export interface DiaAnalise {
   primeira_h: string | null;
   ultima_h: string | null;
   top_acao: { label: string; seg: number } | null;
+  top_acoes: { label: string; seg: number }[];
+  // Fase 35.2: o "filme" do dia — faixas de 15 min com a categoria dominante
+  linha_tempo: { ini_m: number; fim_m: number; cat: "va" | "apoio" | "desp" | "vazio" | "none" }[];
   por_hora: DiaHora[];
   sem_trabalho: "sem_captura" | "posto_vazio" | null;
 }
@@ -493,7 +496,11 @@ export interface JanelaAgregada {
   dias_sem_trabalho: number;
   tempo_obs_s: number;
   va_pct: number;
+  apoio_pct: number;
+  desp_pct: number;
+  vazio_pct: number;
   posto_vazio_s: number;
+  visitas: number;
   horas_produtivas_dia: number;
 }
 
