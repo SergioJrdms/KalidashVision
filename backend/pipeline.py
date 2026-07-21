@@ -1192,10 +1192,11 @@ Na imagem, P1 é o OPERADOR TITULAR deste posto (ele trabalha nesta máquina).
 Outras pessoas marcadas (P2, P3, ...), se existirem, estão DENTRO da área do posto interagindo com ele.
 
 Descreva em UMA FRASE CURTA (até 10 palavras) o que cada pessoa marcada está fazendo:
-- P1 (o operador): a AÇÃO dele no posto (verbo + objeto), ex.: "operando o torno", "medindo a peça", "monitorando o ciclo da máquina".
+- P1 (o operador): a AÇÃO dele no posto (verbo + objeto), ex.: "monitorando o ciclo da máquina", "observando a operação", "operando o torno", "medindo a peça".
 - P2+ (se houver): a INTERAÇÃO com o posto/operador, ex.: "conversando com o operador", "entregando material ao posto".
 
 {bloco_processo}{bloco_vocabulario}REGRAS:
+- DISTINÇÃO CRÍTICA (operar × monitorar): só diga que ele está OPERANDO, manipulando, preparando, ajustando ou medindo se você VÊ as MÃOS dele na máquina, na ferramenta ou na peça, em ação. Se ele está PARADO, de pé, braços ao lado do corpo, apenas OLHANDO/acompanhando a máquina ou a área, é "monitorando o ciclo da máquina" ou "observando a operação" — NÃO é operar. Na dúvida entre operar e monitorar, escolha MONITORAR.
 - Foque na AÇÃO, não na aparência.
 - Use linguagem operacional clara em português.
 - Se a ação não estiver clara, escreva "ação não identificada".
@@ -1213,10 +1214,11 @@ Você recebe DUAS IMAGENS do MESMO posto e MESMO instante, de CÂMERAS DIFERENTE
 - IMAGEM 2 (câmera lateral): a MESMA cena com visão clara da área de trabalho ATRÁS da máquina, SEM rótulos — use-a para confirmar o que o operador realmente está fazendo (a máquina esconde parte do corpo dele na IMAGEM 1).
 
 Descreva em UMA FRASE CURTA (até 10 palavras) o que cada pessoa marcada está fazendo:
-- P1 (o operador): a AÇÃO dele no posto (verbo + objeto), ex.: "operando o torno", "medindo a peça", "monitorando o ciclo da máquina".
+- P1 (o operador): a AÇÃO dele no posto (verbo + objeto), ex.: "monitorando o ciclo da máquina", "observando a operação", "operando o torno", "medindo a peça".
 - P2+ (se houver): a INTERAÇÃO com o posto/operador, ex.: "conversando com o operador", "entregando material ao posto".
 
 {bloco_processo}{bloco_vocabulario}REGRAS:
+- DISTINÇÃO CRÍTICA (operar × monitorar): só diga que ele está OPERANDO, manipulando, preparando, ajustando ou medindo se você VÊ as MÃOS dele na máquina, na ferramenta ou na peça, em ação — em QUALQUER um dos dois ângulos. Se, mesmo vendo os dois ângulos, ele está PARADO, de pé, braços ao lado do corpo, apenas OLHANDO/acompanhando a máquina ou a área, é "monitorando o ciclo da máquina" ou "observando a operação" — NÃO é operar. Na dúvida entre operar e monitorar, escolha MONITORAR.
 - Foque na AÇÃO, não na aparência.
 - Use linguagem operacional clara em português.
 - Os rótulos P1, P2 referem-se SEMPRE às pessoas marcadas na IMAGEM 1.
@@ -1235,9 +1237,10 @@ Responda APENAS um JSON no formato:
 PROMPT_VLM_OPERADOR_CAM2 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
 O OPERADOR TITULAR do posto está DENTRO da área de trabalho dele, atrás da máquina — visível nesta imagem (a câmera frontal não o enxerga neste instante porque a máquina o esconde).
 
-Descreva em UMA FRASE CURTA (até 10 palavras) o que o OPERADOR está fazendo (verbo + objeto), ex.: "operando o torno", "medindo a peça", "monitorando o ciclo da máquina".
+Descreva em UMA FRASE CURTA (até 10 palavras) o que o OPERADOR está fazendo (verbo + objeto), ex.: "monitorando o ciclo da máquina", "observando a operação", "operando o torno", "medindo a peça".
 
 {bloco_processo}{bloco_vocabulario}REGRAS:
+- DISTINÇÃO CRÍTICA (operar × monitorar): só diga que ele está OPERANDO, manipulando, preparando, ajustando ou medindo se você VÊ as MÃOS dele na máquina, na ferramenta ou na peça, em ação. Se ele está PARADO, de pé, braços ao lado do corpo, apenas OLHANDO/acompanhando a máquina ou a área, é "monitorando o ciclo da máquina" ou "observando a operação" — NÃO é operar. Na dúvida entre operar e monitorar, escolha MONITORAR.
 - Foque na AÇÃO do operador (a pessoa junto à máquina, na área de trabalho).
 - Use linguagem operacional clara em português.
 - Se a ação não estiver clara, escreva "ação não identificada".
