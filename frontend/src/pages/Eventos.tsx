@@ -195,7 +195,13 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
         </td>
         <td style={{ padding: "10px 12px", textAlign: "center" }}>
           {e.camId ? (
-            <span className="badge badge-purple" style={{ fontSize: 10 }}>{e.camId.replace(/^cam/i, "Cam ")}</span>
+            // Fase 40: se o evento tem os 2 ângulos (dual-angle), mostra
+            // "Cam 1 + Cam 2" — foi analisado com as duas câmeras.
+            <span className="badge badge-purple" style={{ fontSize: 10 }}
+              title={e.segundoAngulo ? "Evento analisado com as duas câmeras (dual-angle)" : undefined}>
+              {e.camId.replace(/^cam/i, "Cam ")}
+              {e.segundoAngulo ? ` + ${(e.segundoAngulo.camId || "cam2").replace(/^cam/i, "Cam ")}` : ""}
+            </span>
           ) : (
             <span style={{ color: "var(--faint)", fontSize: 12 }}>—</span>
           )}
