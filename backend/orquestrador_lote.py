@@ -83,7 +83,7 @@ def processar_lote(sb, empresa: str, processo: str) -> dict:
         try:
             pend = (
                 sb.table("segmentos")
-                .select("id, storage_path, nome, cam_id, gravado_em, status")
+                .select("id, storage_path, nome, cam_id, gravado_em, status, recebido_em")
                 .eq("empresa", empresa)
                 .eq("processo", processo)
                 .eq("status", "pendente")
@@ -134,7 +134,34 @@ def processar_lote(sb, empresa: str, processo: str) -> dict:
                 pares.append((si, sj))
             else:
                 pares.append((sj, si))
-        solos = [itens[k][0] for k in range(len(itens)) if k not in consumidos]
+        # ── CARÊNCIA DE SOLO (Fase 39) ────────────────────────────────────
+        # O edge sobe a cam1 inteira e depois a cam2 (cada recorte leva minutos).
+        # Se o pareamento rodar NO MEIO (sweep quieto ou /lote/concluido de um
+        # run vizinho), a cam1 sem par ainda seria solada — e quando a cam2
+        # chega, o par dela já foi → 2 solos no lugar de 1 par. Aqui, um
+        # segmento SEM par só vira solo depois de KV_LOTE_SOLO_GRACE_S desde
+        # que chegou; recém-chegados sem par FICAM pendentes esperando o par
+        # (a próxima passada os pareia). Assim, nunca solamos um par cedo demais;
+        # solos DE VERDADE (câmera única / par que nunca vem) processam após a
+        # carência. Segmento sem `recebido_em` (legado) não é segurado.
+        grace_s = float(_env_int("KV_LOTE_SOLO_GRACE_S", 1200))   # 20min
+        agora = datetime.now(timezone.utc)
+        solos, segurados = [], 0
+        for k in range(len(itens)):
+            if k in consumidos:
+                continue
+            s = itens[k][0]
+            rec = _parse_iso(s.get("recebido_em"))
+            idade = (agora - rec).total_seconds() if rec else None
+            if idade is not None and idade < grace_s:
+                segurados += 1        # jovem e sem par → espera o par chegar
+            else:
+                solos.append(s)
+        if segurados:
+            log.info(
+                f"[lote] {empresa}/{processo}: {segurados} segmento(s) sem par "
+                f"SEGURADO(s) (<{grace_s:.0f}s) — aguardando o par da outra câmera."
+            )
 
         def _enfileirar(primario: dict, secundario: dict | None) -> None:
             job = JOBS.create(processo_id=processo, user_id="edge-lote")
