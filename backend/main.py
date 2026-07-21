@@ -827,13 +827,35 @@ def frame_referencia(
         .execute()
         .data
     )
-    if not v:
+    video: dict | None = v[0] if v else None
+    # Fallback (Fase 28.1 fix): no dual-angle o PAR vira UM vídeo registrado
+    # com o cam_id PRIMÁRIO (cam1) — a cam2 nunca ganha linha em `videos`.
+    # O arquivo dela vive na inbox `segmentos`; usamos o mais recente.
+    if video is None or not video.get("caminho"):
+        s = (
+            sb.table("segmentos")
+            .select("id, storage_path, nome, gravado_em, recebido_em")
+            .eq("empresa", user.empresa)
+            .eq("processo", nome)
+            .eq("cam_id", cam_id)
+            .order("recebido_em", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if s and s[0].get("storage_path"):
+            video = {
+                "id": s[0]["id"],
+                "caminho": s[0]["storage_path"],
+                "nome": s[0].get("nome"),
+                "gravado_em": s[0].get("gravado_em"),
+            }
+    if video is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             "Esta câmera ainda não tem vídeo processado. Suba ao menos 1 "
             "segmento dela para desenhar as zonas sobre um frame real.",
         )
-    video = v[0]
     caminho = video.get("caminho")
     if not caminho or caminho.startswith(("/", "\\")) or (len(caminho) > 1 and caminho[1] == ":"):
         raise HTTPException(
