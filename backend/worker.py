@@ -188,6 +188,8 @@ def executar_job(
             video_path_secundario=local_path_sec,
             cam_id_secundario=cam_id_secundario,
             nome_secundario=nome_secundario,
+            storage_path_secundario=storage_path_secundario,
+            segmento_id_secundario=segmento_id_secundario,
             rois_contexto=(zonas.get(cam_id) if cam_id else None),
             rois_contexto_secundario=(
                 zonas.get(cam_id_secundario) if cam_id_secundario else None

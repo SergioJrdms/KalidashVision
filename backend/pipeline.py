@@ -2398,10 +2398,15 @@ def etapa_persistir(
         })
 
     CHUNK = 100
+    inseridos: list[dict] = []
     for i in range(0, len(linhas_eventos), CHUNK):
-        sb.table("eventos").insert(linhas_eventos[i : i + CHUNK]).execute()
+        resp = sb.table("eventos").insert(linhas_eventos[i : i + CHUNK]).execute()
+        inseridos.extend(resp.data or [])
+    # Fase 36: ids dos PRINCIPAIS (mesma ordem de `eventos` — os primeiros N
+    # de linhas_eventos), p/ pré-extrair os frames enquanto o vídeo é local.
+    ids_principais = [r.get("id") for r in inseridos[: len(eventos)]]
 
-    return video_id, n_auto_validados
+    return video_id, n_auto_validados, ids_principais
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -3971,6 +3976,117 @@ def frame_para_jpeg_bytes(frame_bgr: np.ndarray, qualidade: int = 85) -> bytes:
     ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, qualidade])
     assert ok
     return buf.tobytes()
+
+
+def pre_extrair_frames(
+    sb: Client,
+    caminho_storage: str | None,
+    video_path_local: str,
+    eventos: list[dict],
+    ids_eventos: list,
+    video_id: str,
+    cam_id: str | None,
+    *,
+    video_path_sec: str | None = None,
+    storage_path_sec: str | None = None,
+    segmento_id_sec: str | None = None,
+    cam_id_sec: str | None = None,
+    offset_s: float = 0.0,
+) -> dict:
+    """Fase 36 — pré-gera TODOS os JPEGs de visualização enquanto os vídeos
+    ainda estão no DISCO LOCAL do worker, com as MESMAS chaves de cache dos
+    endpoints de frames. Antes, o 1º acesso a cada evento baixava o vídeo
+    INTEIRO do Storage (20-40MB) só para extrair 3 frames — a maior fonte de
+    egress. Agora visualizar custa só os JPEGs (~50KB). Uploads são ingress
+    (grátis). Tudo não-fatal. KV_PREEXTRAIR_FRAMES=off desliga."""
+    import posixpath
+
+    stats = {"eventos": 0, "cam2": 0, "refs": 0, "falhas": 0}
+    if os.environ.get("KV_PREEXTRAIR_FRAMES", "on") in ("off", "0", "false", "False"):
+        return stats
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+
+    def _up(key: str, jpeg: bytes) -> None:
+        try:
+            sb.storage.from_(bucket).upload(
+                key, jpeg, {"content-type": "image/jpeg", "upsert": "true"}
+            )
+        except Exception as e:
+            stats["falhas"] += 1
+            log.warning(f"[pre-frames] upload falhou {key}: {e}")
+
+    # 1) Frames dos eventos PRINCIPAIS (chaves de GET /eventos/{id}/frames).
+    if caminho_storage and not caminho_storage.startswith(("/", "\\")):
+        prefix1 = posixpath.dirname(caminho_storage) + "/__frames"
+        for eid, ev in zip(ids_eventos or [], eventos or []):
+            if not eid:
+                continue
+            try:
+                jpegs = [frame_para_jpeg_bytes(c)
+                         for c in extrair_3_frames_evento(ev, video_path_local)]
+                for k, j in enumerate(jpegs):
+                    _up(f"{prefix1}/{eid}_v2_{k}.jpg", j)
+                stats["eventos"] += 1
+            except Exception as e:
+                stats["falhas"] += 1
+                log.warning(f"[pre-frames] evento {eid}: {e}")
+        # Frame de referência da câmera primária (editor de zonas).
+        if cam_id:
+            try:
+                cap = cv2.VideoCapture(video_path_local)
+                try:
+                    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    if total > 1:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, total // 2)
+                    ok, frame = cap.read()
+                finally:
+                    cap.release()
+                if ok and frame is not None:
+                    _up(f"{prefix1}/ref_{cam_id}_{video_id}.jpg", frame_para_jpeg_bytes(frame))
+                    stats["refs"] += 1
+            except Exception as e:
+                log.warning(f"[pre-frames] ref {cam_id}: {e}")
+
+    # 2) Strips da cam2 por janela dos eventos (chaves de GET /segmentos/{id}/
+    #    frames, com o MESMO offset de relógio que o front soma — Fase 30).
+    if video_path_sec and storage_path_sec and segmento_id_sec:
+        prefix2 = posixpath.dirname(storage_path_sec) + "/__frames"
+        for ev in eventos or []:
+            try:
+                ini_c = max(0.0, float(ev.get("tempo_inicio_s") or 0) + offset_s)
+                fim_c = max(0.0, float(ev.get("tempo_fim_s") or 0) + offset_s)
+                chave_t = f"{int(round(ini_c))}_{int(round(fim_c))}"
+                jpegs = [frame_para_jpeg_bytes(c)
+                         for c in extrair_3_frames_tempo(video_path_sec, ini_c, fim_c)]
+                for k, j in enumerate(jpegs):
+                    _up(f"{prefix2}/seg_{segmento_id_sec}_{chave_t}_{k}.jpg", j)
+                stats["cam2"] += 1
+            except Exception as e:
+                stats["falhas"] += 1
+                log.warning(f"[pre-frames] strip cam2: {e}")
+        if cam_id_sec:
+            try:
+                cap = cv2.VideoCapture(video_path_sec)
+                try:
+                    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    if total > 1:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, total // 2)
+                    ok, frame = cap.read()
+                finally:
+                    cap.release()
+                if ok and frame is not None:
+                    _up(f"{prefix2}/ref_{cam_id_sec}_{segmento_id_sec}.jpg",
+                        frame_para_jpeg_bytes(frame))
+                    stats["refs"] += 1
+            except Exception as e:
+                log.warning(f"[pre-frames] ref {cam_id_sec}: {e}")
+
+    log.info(
+        "[pre-frames] %d evento(s), %d strip(s) cam2, %d referência(s), %d falha(s) "
+        "— visualização servida do cache (egress ~zero)",
+        stats["eventos"], stats["cam2"], stats["refs"], stats["falhas"],
+    )
+    return stats
 
 
 def extrair_3_frames_tempo(video_path: str, ini_s: float, fim_s: float) -> list[np.ndarray]:
@@ -6422,6 +6538,8 @@ def processar_video(
     cam_id_secundario: str | None = None,
     rois_contexto_secundario: dict | None = None,
     nome_secundario: str | None = None,
+    storage_path_secundario: str | None = None,
+    segmento_id_secundario: str | None = None,
 ) -> dict:
     """Roda o pipeline completo. Devolve dict com video_id, n_eventos,
     n_auto_validados, n_sugestoes.
@@ -6482,6 +6600,7 @@ def processar_video(
     # dois pontos de vista. cam1 já dirigiu detecção/tracking acima.
     # Fase 28: com zonas na cam2, o mesmo passe roda um predict leve por slot e
     # marca op_cam2 (o operador está mesmo ATRÁS da máquina?).
+    offset_cam2 = 0.0
     if video_path_secundario:
         # Fase 30: offset REAL de relógio entre os dois segmentos (podem começar
         # com segundos/minutos de diferença) — sem isso a confirmação e o frame
@@ -6556,7 +6675,7 @@ def processar_video(
     progress_cb("segmentar", 100, f"{len(eventos_crus)} eventos → {len(eventos)} principais")
 
     progress_cb("persistir", 0, "Salvando no banco de dados")
-    video_id, n_auto = etapa_persistir(
+    video_id, n_auto, ids_principais = etapa_persistir(
         sb,
         empresa,
         processo,
@@ -6573,6 +6692,23 @@ def processar_video(
         eventos_auditoria=eventos_auditoria,
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
+
+    # Fase 36: PRÉ-EXTRAI todos os JPEGs de visualização (frames dos eventos,
+    # strips da cam2 e frames de referência) enquanto os vídeos ainda estão no
+    # DISCO LOCAL — ver um evento depois custa ~50KB de egress, não o vídeo
+    # inteiro (era a maior fonte de egress do Storage). Não-fatal.
+    try:
+        pre_extrair_frames(
+            sb, caminho_storage, video_path, eventos, ids_principais,
+            video_id, cam_id,
+            video_path_sec=video_path_secundario,
+            storage_path_sec=storage_path_secundario,
+            segmento_id_sec=segmento_id_secundario,
+            cam_id_sec=cam_id_secundario,
+            offset_s=offset_cam2,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[pre-frames] pré-extração falhou (não-fatal): {e}")
 
     # Fase 18: as sugestões NÃO são mais geradas por vídeo (isso empilhava — 47
     # p/ 24 vídeos). O debouncer as recomputa 1× por rajada, sobre o AGREGADO,
