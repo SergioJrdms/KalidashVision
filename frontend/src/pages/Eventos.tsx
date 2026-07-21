@@ -236,12 +236,14 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
         <tr style={{ background: "var(--soft)" }}>
           <td colSpan={9} style={{ padding: 16 }}>
             <div className="row gap3 wrap" style={{ alignItems: "flex-start" }}>
-              {/* Fase 29: as duas câmeras do MESMO instante, lado a lado. */}
+              {/* Fase 29/41: as duas câmeras no MESMO instante do evento, lado
+                  a lado — ambas o frame do MEIO do minuto (pos=1); a cam2 já
+                  usa o do meio, agora a cam1 também, então batem o instante. */}
               <div style={{ width: 240, flex: "none" }} className="col" >
                 <span className="badge badge-purple" style={{ fontSize: 10, alignSelf: "flex-start", marginBottom: 4 }}>
-                  {(e.camId || "cam1").replace(/^cam/i, "Cam ")}
+                  {(e.camId || "cam1").replace(/^cam/i, "Cam ")}{e.segundoAngulo ? " · mesmo instante" : ""}
                 </span>
-                <FrameReal id={e.id} pessoa={e.pessoa} height={140} />
+                <FrameReal id={e.id} pessoa={e.pessoa} height={140} pos={1} />
               </div>
               {e.segundoAngulo && (
                 <div style={{ width: 240, flex: "none" }} className="col">

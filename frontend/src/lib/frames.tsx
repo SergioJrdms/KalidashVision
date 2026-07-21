@@ -78,9 +78,10 @@ export function FrameStripSegmento({ segmentoId, ini, fim }: { segmentoId: strin
 }
 
 // Frame único (cabeçalho de card / linha expandida). `enabled` permite carga lazy.
-export function FrameReal({ id, pessoa, height, enabled = true }: { id: string; pessoa: number; height: number; enabled?: boolean }) {
+export function FrameReal({ id, pessoa, height, enabled = true, pos = 0 }: { id: string; pessoa: number; height: number; enabled?: boolean; pos?: number }) {
   const { data } = useEventFrames(id, enabled);
-  const frame = data?.frames?.[0];
+  // pos: qual dos 3 frames do evento (0=início, 1=meio, 2=fim). Default início.
+  const frame = data?.frames?.[pos] ?? data?.frames?.[0];
   if (frame) return <img src={frame} alt="" style={{ ...imgBase, height }} />;
   return <CameraScene height={height} hud={false} boxes={[{ id: `P-${String(pessoa).padStart(2, "0")}`, x: 34, y: 26, w: 26, h: 50, act: "" }]} />;
 }
