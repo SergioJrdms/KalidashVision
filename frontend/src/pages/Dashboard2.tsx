@@ -18,12 +18,18 @@ export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
   const dados = q.data || null;
   const dias = useMemo(() => dados?.dias || [], [dados]);
   const trabalhados = useMemo(() => dias.filter((d) => !d.sem_trabalho && d.tempo_obs_s > 0), [dias]);
+  // null = NENHUM dia selecionado → os cards de detalhe mostram o AGREGADO de
+  // todos os dias trabalhados. Clicar num dia já selecionado deseleciona (volta
+  // pro agregado). O padrão é o agregado.
   const [diaSel, setDiaSel] = useState<string | null>(null);
-  const selecionado = useMemo(() => {
-    const alvo = diaSel && dias.find((d) => d.dia === diaSel);
-    if (alvo) return alvo;
-    return trabalhados.length ? trabalhados[trabalhados.length - 1] : null;
-  }, [dias, trabalhados, diaSel]);
+  const toggleDia = (d: DiaAnalise) => setDiaSel((prev) => (prev === d.dia ? null : d.dia));
+  const selecionado = useMemo(
+    () => (diaSel ? dias.find((d) => d.dia === diaSel) || null : null),
+    [dias, diaSel],
+  );
+  const agregado = useMemo(() => construirAgregado(trabalhados), [trabalhados]);
+  const alvo = selecionado ?? agregado;   // o que os cards de detalhe exibem
+  const ehAgregado = !selecionado;
 
   if (q.isLoading) return <Empty icon="loader" title="Montando o dia a dia…" />;
   if (!dados || dias.length === 0 || trabalhados.length === 0) {
@@ -33,16 +39,16 @@ export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
   return (
     <div className="col" style={{ gap: 16 }}>
       <VereditoHero dados={dados} />
-      <EvolucaoPorDia dias={dias} selecionado={selecionado} onSelecionar={(d) => setDiaSel(d.dia)} trabalhados={trabalhados} />
-      {selecionado && !selecionado.sem_trabalho && (
+      <EvolucaoPorDia dias={dias} selecionado={selecionado} alvo={alvo} ehAgregado={ehAgregado} onSelecionar={toggleDia} trabalhados={trabalhados} />
+      {alvo && !alvo.sem_trabalho && (alvo.linha_tempo.length > 0 || alvo.top_acoes.length > 0) && (
         <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
-          <div style={{ flex: "1.4 1 420px" }}><JornadaDoDia d={selecionado} /></div>
-          <div style={{ flex: "1 1 300px" }}><TopAcoesDia d={selecionado} /></div>
+          {alvo.linha_tempo.length > 0 && <div style={{ flex: "1.4 1 420px" }}><JornadaDoDia d={alvo} /></div>}
+          <div style={{ flex: "1 1 300px" }}><TopAcoesDia d={alvo} agregado={ehAgregado} /></div>
         </div>
       )}
       <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
         <div style={{ flex: "1.2 1 380px" }}><TendenciaCard dias={trabalhados} tendencia={dados.tendencia} /></div>
-        <div style={{ flex: "1 1 340px" }}><HeatmapQuinzena dias={dias} onSelecionar={(d) => setDiaSel(d.dia)} /></div>
+        <div style={{ flex: "1 1 340px" }}><HeatmapQuinzena dias={dias} onSelecionar={toggleDia} /></div>
       </div>
       <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
         <div style={{ flex: "1 1 360px" }}><JanelasComparador dados={dados} /></div>
@@ -134,8 +140,54 @@ const CATS: Array<{ k: keyof Pick<DiaAnalise, "va_pct" | "apoio_pct" | "desp_pct
   { k: "desp_pct", cat: "desp" }, { k: "none_pct", cat: "none" },
 ];
 
-function EvolucaoPorDia({ dias, selecionado, onSelecionar, trabalhados }: {
-  dias: DiaAnalise[]; selecionado: DiaAnalise | null; onSelecionar: (d: DiaAnalise) => void; trabalhados: DiaAnalise[];
+// Agrega TODOS os dias trabalhados num único "dia sintético" (dia="__agg__"),
+// usado quando nenhum dia está selecionado. Percentuais são média ponderada
+// pelo tempo observado; por_hora e top_acoes somam por hora/ação. A jornada
+// (linha_tempo) é intrinsecamente de UM dia → fica vazia no agregado (o card
+// se esconde). primeira/ultima hora = min/max do período.
+function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
+  if (!dias.length) return null;
+  const tot = dias.reduce((s, d) => s + d.tempo_obs_s, 0) || 1;
+  const wavg = (f: (d: DiaAnalise) => number) => dias.reduce((s, d) => s + f(d) * d.tempo_obs_s, 0) / tot;
+
+  const horaMap = new Map<number, { seg: number; va: number; ap: number; de: number }>();
+  for (const d of dias) for (const h of d.por_hora || []) {
+    const c = horaMap.get(h.hora) || { seg: 0, va: 0, ap: 0, de: 0 };
+    c.seg += h.seg; c.va += h.va_pct * h.seg; c.ap += h.apoio_pct * h.seg; c.de += h.desp_pct * h.seg;
+    horaMap.set(h.hora, c);
+  }
+  const por_hora = [...horaMap.entries()].sort((a, b) => a[0] - b[0]).map(([hora, v]) => ({
+    hora, seg: v.seg,
+    va_pct: v.seg ? v.va / v.seg : 0, apoio_pct: v.seg ? v.ap / v.seg : 0, desp_pct: v.seg ? v.de / v.seg : 0,
+  }));
+
+  const acaoMap = new Map<string, number>();
+  for (const d of dias) for (const a of d.top_acoes || []) acaoMap.set(a.label, (acaoMap.get(a.label) || 0) + a.seg);
+  const top_acoes = [...acaoMap.entries()].map(([label, seg]) => ({ label, seg })).sort((a, b) => b.seg - a.seg).slice(0, 8);
+
+  const primeiras = dias.map((d) => d.primeira_h).filter((x): x is string => !!x);
+  const ultimas = dias.map((d) => d.ultima_h).filter((x): x is string => !!x);
+  return {
+    dia: "__agg__", rot: `${dias.length} dias`, dow: "",
+    tempo_obs_s: dias.reduce((s, d) => s + d.tempo_obs_s, 0),
+    va_pct: wavg((d) => d.va_pct), apoio_pct: wavg((d) => d.apoio_pct),
+    desp_pct: wavg((d) => d.desp_pct), none_pct: wavg((d) => d.none_pct),
+    posto_vazio_s: dias.reduce((s, d) => s + d.posto_vazio_s, 0),
+    posto_vazio_pct: wavg((d) => d.posto_vazio_pct),
+    n_videos: dias.reduce((s, d) => s + d.n_videos, 0),
+    visitas: dias.reduce((s, d) => s + d.visitas, 0),
+    primeira_h: primeiras.length ? primeiras.reduce((a, b) => (a < b ? a : b)) : null,
+    ultima_h: ultimas.length ? ultimas.reduce((a, b) => (a > b ? a : b)) : null,
+    top_acao: top_acoes[0] || null,
+    top_acoes,
+    linha_tempo: [],
+    por_hora,
+    sem_trabalho: null,
+  };
+}
+
+function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, trabalhados }: {
+  dias: DiaAnalise[]; selecionado: DiaAnalise | null; alvo: DiaAnalise | null; ehAgregado: boolean; onSelecionar: (d: DiaAnalise) => void; trabalhados: DiaAnalise[];
 }) {
   const W = 720, H = 220, padT = 8, padB = 26, padL = 8, padR = 8;
   const n = Math.max(1, dias.length);
@@ -203,20 +255,30 @@ function EvolucaoPorDia({ dias, selecionado, onSelecionar, trabalhados }: {
           </span>
         ))}
         <span className="row" style={{ gap: 5 }}><span style={{ color: "var(--faint)" }}>✕</span> sem trabalho</span>
-        <span style={{ marginLeft: "auto" }}>clique num dia para abrir o ritmo dele</span>
+        {selecionado ? (
+          <button
+            onClick={() => onSelecionar(selecionado)}
+            title="Voltar a mostrar o agregado de todos os dias"
+            style={{ marginLeft: "auto", cursor: "pointer", border: "1px solid var(--line)", background: "#fff", borderRadius: 99, padding: "3px 11px", fontSize: 11, fontWeight: 600, color: "var(--text)" }}
+          >
+            ✕ ver agregado (todos os dias)
+          </button>
+        ) : (
+          <span style={{ marginLeft: "auto" }}>mostrando o agregado — clique num dia para ver só ele</span>
+        )}
       </div>
 
-      {/* ── Ritmo + resumão do dia selecionado — DENTRO do mesmo card ── */}
-      {selecionado && (
+      {/* ── Ritmo + resumão — do dia selecionado OU do agregado de tudo ── */}
+      {alvo && (
         <div style={{ marginTop: 18, borderTop: "1px dashed var(--line)", paddingTop: 16 }}>
-          <RitmoDoDiaSelecionado d={selecionado} mediaJanela={mediaJanela} />
+          <RitmoDoDiaSelecionado d={alvo} mediaJanela={mediaJanela} agregado={ehAgregado} />
         </div>
       )}
     </Card>
   );
 }
 
-function RitmoDoDiaSelecionado({ d, mediaJanela }: { d: DiaAnalise; mediaJanela: number }) {
+function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; mediaJanela: number; agregado?: boolean }) {
   if (d.sem_trabalho) {
     return (
       <div className="col" style={{ gap: 6 }}>
@@ -241,13 +303,21 @@ function RitmoDoDiaSelecionado({ d, mediaJanela }: { d: DiaAnalise; mediaJanela:
   return (
     <div className="col" style={{ gap: 12 }}>
       <div className="row gap2 wrap" style={{ alignItems: "baseline" }}>
-        <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>Ritmo de {d.dow} {d.rot}</span>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>o dia do operador, hora a hora</span>
+        <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>
+          {agregado ? "Ritmo médio — todos os dias trabalhados" : `Ritmo de ${d.dow} ${d.rot}`}
+        </span>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>
+          {agregado ? "o dia típico do operador, hora a hora (agregado do período)" : "o dia do operador, hora a hora"}
+        </span>
       </div>
-      {/* Resumão do dia */}
+      {/* Resumão do dia (ou do agregado) */}
       <div className="row gap2 wrap" style={{ fontSize: 12 }}>
         <ChipStat icon="clock" texto={`${fmtDur(d.tempo_obs_s)} observadas em ${d.n_videos} vídeo(s)`} />
-        <ChipStat icon="gauge" texto={`${d.va_pct.toFixed(0)}% produtivo (${delta >= 0 ? "+" : ""}${delta.toFixed(0)} pts vs média do período)`} alerta={delta < -5} />
+        {agregado ? (
+          <ChipStat icon="gauge" texto={`${d.va_pct.toFixed(0)}% produtivo no período`} alerta={d.va_pct < 40} />
+        ) : (
+          <ChipStat icon="gauge" texto={`${d.va_pct.toFixed(0)}% produtivo (${delta >= 0 ? "+" : ""}${delta.toFixed(0)} pts vs média do período)`} alerta={delta < -5} />
+        )}
         {d.posto_vazio_s > 0 && <ChipStat icon="user-x" texto={`posto vazio ${fmtDur(d.posto_vazio_s)}`} alerta={d.posto_vazio_pct >= 20} />}
         {d.visitas > 0 && <ChipStat icon="users" texto={`${d.visitas} visita(s) ao posto`} />}
         {d.primeira_h && d.ultima_h && <ChipStat icon="sunrise" texto={`atividade de ${d.primeira_h} às ${d.ultima_h}`} />}
@@ -453,18 +523,18 @@ function JornadaDoDia({ d }: { d: DiaAnalise }) {
 }
 
 // ═══ Top ações do dia selecionado (mini-pareto do dia) ═══
-function TopAcoesDia({ d }: { d: DiaAnalise }) {
+function TopAcoesDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
   const acoes = d.top_acoes || [];
   const maxSeg = Math.max(1, ...acoes.map((a) => a.seg));
   return (
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
-        titulo={`No que ${d.dow} ${d.rot} foi gasto`}
-        ajuda="As 5 ações que mais consumiram o tempo do dia selecionado."
-        leitura="A ação nº 1 deveria ser a que agrega valor — se não for, o dia contou outra história."
+        titulo={agregado ? "No que o tempo foi gasto — todos os dias" : `No que ${d.dow} ${d.rot} foi gasto`}
+        ajuda={agregado ? "As ações que mais consumiram tempo somando todos os dias trabalhados do período." : "As 5 ações que mais consumiram o tempo do dia selecionado."}
+        leitura="A ação nº 1 deveria ser a que agrega valor — se não for, contou outra história."
       />
       {acoes.length === 0 ? (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>Sem ações registradas neste dia.</p>
+        <p style={{ fontSize: 13, color: "var(--muted)" }}>{agregado ? "Sem ações registradas no período." : "Sem ações registradas neste dia."}</p>
       ) : (
         <ul className="col" style={{ gap: 9, listStyle: "none", padding: 0, margin: 0 }}>
           {acoes.map((a, i) => (
