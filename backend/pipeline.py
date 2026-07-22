@@ -1002,6 +1002,32 @@ def _zona_da_pessoa(pontos: list[tuple[float, float]], rois: dict) -> tuple[str 
     return achado
 
 
+# Fase 44 — MÃOS NA MÁQUINA: a zona 'maquina' (torno) desenhada em cima do
+# equipamento não classifica a pessoa (é cenário), MAS se um PUNHO do operador
+# cai dentro dela, ele está manipulando/operando — mesmo com o TRONCO na zona
+# do posto. Sinal geométrico (pose) que desfaz o falso "esperar_ciclo_maquina".
+_MAOS_KPTS = (9, 10)   # punhos COCO (esquerdo, direito)
+
+
+def _maos_na_maquina(pessoa: dict, rois: dict, w: int, h: int) -> bool:
+    """True se um dos PUNHOS (kpts COCO 9/10) do operador cair em ALGUMA zona
+    com papel 'maquina'. Sem pose ou sem punhos válidos → False (o VLM decide
+    pela imagem, como antes)."""
+    kpts = pessoa.get("kpts")
+    if kpts is None or len(kpts) <= max(_MAOS_KPTS):
+        return False
+    maos = [(float(kpts[i][0]) * w, float(kpts[i][1]) * h)
+            for i in _MAOS_KPTS if kpts[i][0] > 0 and kpts[i][1] > 0]
+    if not maos:
+        return False
+    for info in rois.values():
+        if info.get("papel") == "maquina" and any(
+            _ponto_em_roi(px, py, info["polygon"]) for px, py in maos
+        ):
+            return True
+    return False
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # GROQ CALLS COM RETRY (Retry-After + backoff exponencial + jitter)
 # ═════════════════════════════════════════════════════════════════════════
@@ -1197,6 +1223,7 @@ Descreva em UMA FRASE CURTA (até 10 palavras) o que cada pessoa marcada está f
 
 {bloco_processo}{bloco_vocabulario}REGRAS:
 - DISTINÇÃO CRÍTICA (operar × monitorar): só diga que ele está OPERANDO, manipulando, preparando, ajustando ou medindo se você VÊ as MÃOS dele na máquina, na ferramenta ou na peça, em ação. Se ele está PARADO, de pé, braços ao lado do corpo, apenas OLHANDO/acompanhando a máquina ou a área, é "monitorando o ciclo da máquina" ou "observando a operação" — NÃO é operar. Na dúvida entre operar e monitorar, escolha MONITORAR.
+- EXCEÇÃO (o CONTEXTO manda): se o CONTEXTO abaixo disser que ele está com as MÃOS na máquina/torno, isso vem da posição REAL das mãos dele (sensor) — então ele ESTÁ operando/manipulando/ajustando o equipamento; descreva a ação de OPERAR, mesmo que na imagem o corpo pareça só de pé. Não diga "monitorando" nesse caso.
 - Foque na AÇÃO, não na aparência.
 - Use linguagem operacional clara em português.
 - Se a ação não estiver clara, escreva "ação não identificada".
@@ -1219,6 +1246,7 @@ Descreva em UMA FRASE CURTA (até 10 palavras) o que cada pessoa marcada está f
 
 {bloco_processo}{bloco_vocabulario}REGRAS:
 - DISTINÇÃO CRÍTICA (operar × monitorar): só diga que ele está OPERANDO, manipulando, preparando, ajustando ou medindo se você VÊ as MÃOS dele na máquina, na ferramenta ou na peça, em ação — em QUALQUER um dos dois ângulos. Se, mesmo vendo os dois ângulos, ele está PARADO, de pé, braços ao lado do corpo, apenas OLHANDO/acompanhando a máquina ou a área, é "monitorando o ciclo da máquina" ou "observando a operação" — NÃO é operar. Na dúvida entre operar e monitorar, escolha MONITORAR.
+- EXCEÇÃO (o CONTEXTO manda): se o CONTEXTO abaixo disser que ele está com as MÃOS na máquina/torno, isso vem da posição REAL das mãos dele (sensor) — então ele ESTÁ operando/manipulando/ajustando o equipamento; descreva a ação de OPERAR, mesmo que na imagem o corpo pareça só de pé. Não diga "monitorando" nesse caso.
 - Foque na AÇÃO, não na aparência.
 - Use linguagem operacional clara em português.
 - Os rótulos P1, P2 referem-se SEMPRE às pessoas marcadas na IMAGEM 1.
@@ -1596,6 +1624,9 @@ def etapa_detectar_e_amostrar(
                             pessoa["zona"] = nome_z
                             pessoa["zona_desc"] = desc_z
                             pessoa["_papel_zona"] = papel_z
+                            # Fase 44: punho na zona 'maquina' → mãos no torno
+                            # (operando), mesmo com o tronco no posto.
+                            pessoa["maos_maquina"] = _maos_na_maquina(pessoa, rois, w, h)
                         else:
                             pessoa["zona"] = _zona_contexto(cx, cy, rois)
                         if _GATE_ENABLE:
@@ -1695,8 +1726,14 @@ def _analisar_amostra_vlm(
         zona_txt = p.get("zona_desc") or p.get("zona")
         if zona_txt:
             quem = "o OPERADOR" if p.get("papel") == "operador" else p["rotulo"]
-            contexto_partes.append(f"{p['rotulo']} ({quem}) está em: {zona_txt}"
-                                   if modo_op else f"{p['rotulo']} está em {zona_txt}")
+            linha = (f"{p['rotulo']} ({quem}) está em: {zona_txt}"
+                     if modo_op else f"{p['rotulo']} está em {zona_txt}")
+            # Fase 44: sinal geométrico do pose — punho dentro da zona 'maquina'.
+            # É a posição REAL das mãos dele, então o VLM deve tratar como operar.
+            if p.get("maos_maquina"):
+                linha += (" — e está com as MÃOS na máquina (torno), tocando/"
+                          "manipulando o equipamento (logo, OPERANDO, não apenas monitorando)")
+            contexto_partes.append(linha)
     contexto = ". ".join(contexto_partes) if contexto_partes else "sem zonas pré-definidas"
 
     if tem_operador:
