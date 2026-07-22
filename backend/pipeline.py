@@ -914,6 +914,12 @@ def _zona_contexto(cx: int, cy: int, rois: dict) -> str | None:
 _OPERADOR_FILTRO_ENABLE = os.environ.get("KV_OPERADOR_FILTRO_ENABLE", "on") not in ("off", "0", "false", "False", "")
 _OPERADOR_CONFIRMACAO = os.environ.get("KV_OPERADOR_CONFIRMACAO", "dupla")   # dupla | cam1
 _POSTO_VAZIO_ENABLE = os.environ.get("KV_POSTO_VAZIO_ENABLE", "on") not in ("off", "0", "false", "False", "")
+# Fase 45: RECALL do operador. Ocluso pela máquina/escuro, ele fica com pouca
+# confiança/área no YOLO e some do frame — vira posto_vazio FALSO (o pior erro:
+# marca ausente quem está presente). Em modo operador as zonas já descartam
+# transeuntes, então baixar o corte de detecção só ajuda a NÃO perder o titular.
+_OPERADOR_CONF = float(os.environ.get("KV_OPERADOR_CONF", "0.30"))            # < YOLO_CONF_MIN (0.45)
+_OPERADOR_AREA_MIN_RATIO = float(os.environ.get("KV_OPERADOR_AREA_MIN_RATIO", "0.0015"))  # < AREA_MIN_RATIO (0.005)
 _CAM2_CONF = float(os.environ.get("KV_CAM2_CONF", "0.35"))
 _CAM2_CONFIRM_STRIDE = max(1, int(os.environ.get("KV_CAM2_CONFIRM_STRIDE", "1")))
 # Fase 30: guardrail — se a cam2 negar mais que esta fração dos slots em que a
@@ -1557,10 +1563,13 @@ def etapa_detectar_e_amostrar(
     h = info["altura"]
 
     rois = _build_rois(rois_contexto, w, h)
-    area_min_px = AREA_MIN_RATIO * (w * h)
     # Fase 28: com zona de posto_operador configurada, a análise foca no
     # operador titular — transeuntes (fora das zonas) morrem aqui na raiz.
     modo_op = _modo_operador(rois)
+    # Fase 45: em modo operador, corta MENOS na detecção (recall do titular
+    # ocluso); as zonas já filtram os transeuntes. Fora do modo, corte normal.
+    area_min_px = (_OPERADOR_AREA_MIN_RATIO if modo_op else AREA_MIN_RATIO) * (w * h)
+    conf_deteccao = _OPERADOR_CONF if modo_op else YOLO_CONF_MIN
     presenca_zona: dict[int, int] = {}   # track_id → nº de amostras no posto
     if modo_op:
         log.info("[operador] modo operador ATIVO — zonas: "
@@ -1592,7 +1601,7 @@ def etapa_detectar_e_amostrar(
                 frame,
                 persist=True,
                 classes=[0],
-                conf=YOLO_CONF_MIN,
+                conf=conf_deteccao,
                 tracker=TRACKER_CONFIG,
                 imgsz=imgsz,
                 verbose=False,
