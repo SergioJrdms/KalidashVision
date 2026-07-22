@@ -42,7 +42,7 @@ export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
       <EvolucaoPorDia dias={dias} selecionado={selecionado} alvo={alvo} ehAgregado={ehAgregado} onSelecionar={toggleDia} trabalhados={trabalhados} />
       {alvo && !alvo.sem_trabalho && (alvo.linha_tempo.length > 0 || alvo.top_acoes.length > 0) && (
         <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
-          {alvo.linha_tempo.length > 0 && <div style={{ flex: "1.4 1 420px" }}><JornadaDoDia d={alvo} /></div>}
+          {alvo.linha_tempo.length > 0 && <div style={{ flex: "1.4 1 420px" }}><JornadaDoDia d={alvo} agregado={ehAgregado} /></div>}
           <div style={{ flex: "1 1 300px" }}><TopAcoesDia d={alvo} agregado={ehAgregado} /></div>
         </div>
       )}
@@ -140,11 +140,36 @@ const CATS: Array<{ k: keyof Pick<DiaAnalise, "va_pct" | "apoio_pct" | "desp_pct
   { k: "desp_pct", cat: "desp" }, { k: "none_pct", cat: "none" },
 ];
 
+// "Dia típico": para cada faixa de 15 min do relógio, a categoria que MAIS
+// aparece naquele horário somando todos os dias. Slots sem cobertura em nenhum
+// dia viram buraco (sem faixa), igual ao filme de um dia. Faixas vizinhas de
+// mesma categoria são fundidas.
+function agregarLinhaTempo(dias: DiaAnalise[]): DiaAnalise["linha_tempo"] {
+  const SLOT = 15, N = Math.ceil(1440 / SLOT);
+  const tally: Record<string, number>[] = Array.from({ length: N }, () => ({}));
+  for (const d of dias) for (const f of d.linha_tempo || []) {
+    const s0 = Math.max(0, Math.floor(f.ini_m / SLOT));
+    const s1 = Math.min(N, Math.ceil(f.fim_m / SLOT));
+    for (let s = s0; s < s1; s++) tally[s][f.cat] = (tally[s][f.cat] || 0) + 1;
+  }
+  const faixas: DiaAnalise["linha_tempo"] = [];
+  for (let s = 0; s < N; s++) {
+    const t = tally[s];
+    const keys = Object.keys(t);
+    if (!keys.length) continue;   // horário sem filmagem em nenhum dia = buraco
+    const cat = keys.reduce((a, b) => (t[b] > t[a] ? b : a)) as DiaAnalise["linha_tempo"][number]["cat"];
+    const ini_m = s * SLOT, fim_m = (s + 1) * SLOT;
+    const last = faixas[faixas.length - 1];
+    if (last && last.cat === cat && last.fim_m === ini_m) last.fim_m = fim_m;
+    else faixas.push({ ini_m, fim_m, cat });
+  }
+  return faixas;
+}
+
 // Agrega TODOS os dias trabalhados num único "dia sintético" (dia="__agg__"),
 // usado quando nenhum dia está selecionado. Percentuais são média ponderada
-// pelo tempo observado; por_hora e top_acoes somam por hora/ação. A jornada
-// (linha_tempo) é intrinsecamente de UM dia → fica vazia no agregado (o card
-// se esconde). primeira/ultima hora = min/max do período.
+// pelo tempo observado; por_hora e top_acoes somam por hora/ação; a jornada
+// vira o "dia típico" (agregarLinhaTempo). primeira/ultima hora = min/max.
 function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
   if (!dias.length) return null;
   const tot = dias.reduce((s, d) => s + d.tempo_obs_s, 0) || 1;
@@ -180,7 +205,7 @@ function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
     ultima_h: ultimas.length ? ultimas.reduce((a, b) => (a > b ? a : b)) : null,
     top_acao: top_acoes[0] || null,
     top_acoes,
-    linha_tempo: [],
+    linha_tempo: agregarLinhaTempo(dias),
     por_hora,
     sem_trabalho: null,
   };
@@ -477,7 +502,7 @@ function fmtMin(m: number): string {
   return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(Math.round(m % 60)).padStart(2, "0")}`;
 }
 
-function JornadaDoDia({ d }: { d: DiaAnalise }) {
+function JornadaDoDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
   const faixas = d.linha_tempo || [];
   if (faixas.length === 0) return null;
   const ini = Math.max(0, faixas[0].ini_m - 15);
@@ -488,9 +513,13 @@ function JornadaDoDia({ d }: { d: DiaAnalise }) {
   return (
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
-        titulo={`A jornada de ${d.dow} ${d.rot}`}
-        ajuda="O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produzindo, azul = apoio, vermelho = desperdício, cinza escuro = posto vazio. Buracos em branco = sem filmagem naquele horário."
-        leitura="O filme do dia: dá pra ver quando começou, o almoço, os buracos e onde o dia rendeu."
+        titulo={agregado ? "A jornada típica — todos os dias" : `A jornada de ${d.dow} ${d.rot}`}
+        ajuda={agregado
+          ? "O dia TÍPICO do operador: em cada faixa de 15 min, a categoria que mais apareceu naquele horário somando todos os dias. Verde = produzindo, azul = apoio, vermelho = desperdício, cinza escuro = posto vazio. Buracos em branco = horário sem filmagem em nenhum dia."
+          : "O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produzindo, azul = apoio, vermelho = desperdício, cinza escuro = posto vazio. Buracos em branco = sem filmagem naquele horário."}
+        leitura={agregado
+          ? "O padrão do posto: onde o dia costuma render, o horário do almoço e as folgas típicas."
+          : "O filme do dia: dá pra ver quando começou, o almoço, os buracos e onde o dia rendeu."}
       />
       <div style={{ position: "relative", height: 46, marginTop: 6 }}>
         <div style={{ position: "absolute", inset: "8px 0 14px", background: "var(--soft)", borderRadius: 8, border: "1px solid var(--line-2)" }} />
