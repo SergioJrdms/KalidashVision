@@ -286,18 +286,26 @@ function TendenciaCard({ dias, tendencia }: { dias: DiaAnalise[]; tendencia: Ana
   const n = dias.length;
   const x = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
   const y = (v: number) => padT + (1 - Math.min(100, Math.max(0, v)) / 100) * plotH;
-  const media7 = dias.map((_, i) => {
-    const ini = Math.max(0, i - 6);
-    const fatia = dias.slice(ini, i + 1);
-    return fatia.reduce((s, d) => s + d.va_pct, 0) / fatia.length;
-  });
+  // Reta de TENDÊNCIA = regressão linear da % produtiva pelos dias trabalhados
+  // (a MESMA que a API usa p/ o slope do rodapé). Antes a linha era uma "média
+  // móvel de 7 dias" que, com poucos dias não consecutivos, virava uma média
+  // acumulada presa ao 1º dia (100%) — não passava pelos pontos e enganava.
+  // Agora: pontos = dia real; linha fina liga os pontos; reta tracejada = tendência.
+  const va = dias.map((d) => d.va_pct);
+  const xm = (n - 1) / 2;
+  const ym = va.reduce((s, v) => s + v, 0) / n;
+  const slope = tendencia?.slope_pts_dia ??
+    va.reduce((s, v, i) => s + (i - xm) * (v - ym), 0) /
+      (va.reduce((s, _v, i) => s + (i - xm) ** 2, 0) || 1);
+  const intercept = ym - slope * xm;
+  const yReta = (i: number) => intercept + slope * i;
   const dir = tendencia?.direcao || "estável";
   const cor = dir === "ascendente" ? leanCor("va") : dir === "descendente" ? leanCor("desp") : "#c98a00";
   return (
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
         titulo="Tendência de produtividade"
-        ajuda="A % produtiva de cada dia trabalhado (pontos) e a média móvel de 7 dias (linha). A inclinação diz se o posto está subindo ou caindo — sempre por janela de tempo, nunca um dia isolado."
+        ajuda="A % produtiva de cada dia trabalhado (pontos, ligados pela linha fina) e a reta de tendência (tracejada = regressão linear). A inclinação da reta é o slope do rodapé — sempre por janela de dias trabalhados, nunca um dia isolado."
         leitura={dir === "ascendente" ? "Subindo — é isso que queremos ver." : dir === "descendente" ? "Caindo — vale conversar com o posto." : "Estável."}
       />
       {n < 3 ? (
@@ -311,8 +319,12 @@ function TendenciaCard({ dias, tendencia }: { dias: DiaAnalise[]; tendencia: Ana
                 <text x={padL - 6} y={y(g) + 3} fontSize="8.5" textAnchor="end" fill="var(--faint)" fontFamily="var(--mono)">{g}%</text>
               </g>
             ))}
-            <polyline fill="none" stroke={cor} strokeWidth={2.2} strokeLinejoin="round"
-              points={media7.map((v, i) => `${x(i)},${y(v)}`).join(" ")} opacity={0.95} />
+            {/* caminho real dia a dia — linha fina que LIGA os pontos */}
+            <polyline fill="none" stroke={cor} strokeWidth={1.4} strokeLinejoin="round" opacity={0.3}
+              points={dias.map((d, i) => `${x(i)},${y(d.va_pct)}`).join(" ")} />
+            {/* reta de TENDÊNCIA (regressão) — é a inclinação descrita no rodapé */}
+            <line x1={x(0)} y1={y(yReta(0))} x2={x(n - 1)} y2={y(yReta(n - 1))}
+              stroke={cor} strokeWidth={2.4} strokeDasharray="6 4" opacity={0.95} />
             {dias.map((d, i) => (
               <circle key={d.dia} cx={x(i)} cy={y(d.va_pct)} r={3} fill="#fff" stroke={cor} strokeWidth={1.6}>
                 <title>{`${d.dow} ${d.rot} — ${d.va_pct.toFixed(0)}% produtivo`}</title>
