@@ -727,6 +727,7 @@ def _anexar_segundo_angulo(
         if abs(offset_s) > 0.5:
             log.info(f"[dual-angle] offset de relógio cam1→cam2 = {offset_s:+.0f}s (alinhado pelo nome)")
         rois2 = None
+        rois2_maq = None   # Fase 44: zonas 'maquina' da cam2 (mãos no torno)
         for idx, am in enumerate(amostras):
             alvo_ms = (am.tempo_s + offset_s) * 1000.0
             fora_da_cam2 = alvo_ms < 0 or (bool(dur_ms) and alvo_ms > dur_ms)
@@ -752,10 +753,18 @@ def _anexar_segundo_angulo(
                          if i.get("papel") == "posto_operador"},
                         w2, h2,
                     )
+                    # Fase 44: zonas 'maquina' da cam2 p/ o sinal de mãos no torno
+                    # (vazio = câmera sem zona de máquina desenhada → sinal off).
+                    rois2_maq = _build_rois(
+                        {n2: i for n2, i in posto_sec.items()
+                         if i.get("papel") == "maquina"},
+                        w2, h2,
+                    )
                 res = yolo.predict(
                     frame, classes=[0], conf=_CAM2_CONF, imgsz=416, verbose=False
                 )
                 achou = False
+                maos = False
                 if res and res[0].boxes is not None and len(res[0].boxes) > 0:
                     boxes2 = res[0].boxes.xyxy.cpu().numpy()
                     kpts2 = None
@@ -772,13 +781,16 @@ def _anexar_segundo_angulo(
                             pessoa2["kpts"] = kpts2[j].astype("float32")
                         # Fase 31: qualquer parte do corpo no posto conta.
                         pontos2 = _pontos_da_pessoa(pessoa2, w2, h2)
-                        if any(
+                        if not achou and any(
                             _ponto_em_roi(px, py, i["polygon"])
                             for i in rois2.values() for px, py in pontos2
                         ):
                             achou = True
-                            break
+                        # Fase 44: punho na zona 'maquina' da cam2 = operando.
+                        if rois2_maq and not maos and _maos_na_maquina(pessoa2, rois2_maq, w2, h2):
+                            maos = True
                 am.op_cam2 = achou
+                am.maos_cam2 = maos
             except Exception as e:
                 log.warning(f"[operador] confirmação cam2 falhou no slot {am.tempo_s:.0f}s ({e})")
                 am.op_cam2 = None
@@ -1269,6 +1281,7 @@ Descreva em UMA FRASE CURTA (até 10 palavras) o que o OPERADOR está fazendo (v
 
 {bloco_processo}{bloco_vocabulario}REGRAS:
 - DISTINÇÃO CRÍTICA (operar × monitorar): só diga que ele está OPERANDO, manipulando, preparando, ajustando ou medindo se você VÊ as MÃOS dele na máquina, na ferramenta ou na peça, em ação. Se ele está PARADO, de pé, braços ao lado do corpo, apenas OLHANDO/acompanhando a máquina ou a área, é "monitorando o ciclo da máquina" ou "observando a operação" — NÃO é operar. Na dúvida entre operar e monitorar, escolha MONITORAR.
+- EXCEÇÃO (o CONTEXTO manda): se o CONTEXTO abaixo disser que ele está com as MÃOS na máquina/torno, isso vem da posição REAL das mãos dele (sensor) — então ele ESTÁ operando/manipulando/ajustando o equipamento; descreva a ação de OPERAR, mesmo que na imagem o corpo pareça só de pé. Não diga "monitorando" nesse caso.
 - Foque na AÇÃO do operador (a pessoa junto à máquina, na área de trabalho).
 - Use linguagem operacional clara em português.
 - Se a ação não estiver clara, escreva "ação não identificada".
@@ -1287,13 +1300,20 @@ def _analisar_operador_cam2(
     memoria: dict,
     conhecimento_adquirido: str = "",
     zona_desc: str | None = None,
+    maos_maquina: bool = False,
 ) -> str | None:
     """Fase 33: descreve a ação do operador PELA IMAGEM DA CAM2 (resgate).
-    None em falha (o slot cai para posto_vazio se nada mais o cobrir)."""
+    None em falha (o slot cai para posto_vazio se nada mais o cobrir).
+    Fase 44: `maos_maquina` (punho na zona 'maquina' da cam2) informa ao VLM
+    que ele está OPERANDO, mesmo sem a cam1."""
+    contexto = zona_desc or "área de trabalho do operador, atrás da máquina"
+    if maos_maquina:
+        contexto += (" — e está com as MÃOS na máquina (torno), tocando/"
+                     "manipulando o equipamento (logo, OPERANDO, não apenas monitorando)")
     prompt = PROMPT_VLM_OPERADOR_CAM2.format(
         bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
-        contexto_zonas=(zona_desc or "área de trabalho do operador, atrás da máquina"),
+        contexto_zonas=contexto,
     )
     try:
         resposta = groq_vision_call(
@@ -1401,6 +1421,7 @@ class Amostra:
     pessoas: list
     img_b64_secundario: str | None = None   # 2º ângulo (cam2) no mesmo instante (Fase 6)
     op_cam2: bool | None = None             # Fase 28: operador visto no posto pela cam2
+    maos_cam2: bool = False                  # Fase 44: punho na zona 'maquina' pela cam2
     operador_presente: bool | None = None   # Fase 28: veredito do slot (pós-confirmação)
     operador_ponte: bool = False            # Fase 34: presença por PONTE temporal
 
@@ -1721,6 +1742,9 @@ def _analisar_amostra_vlm(
     modo_op = any(p.get("papel") for p in amostra.pessoas)
     tem_operador = any(p.get("papel") == "operador" for p in amostra.pessoas)
 
+    # Fase 44: mãos na máquina vistas por QUALQUER câmera (cam1 pelo pose do
+    # track; cam2 pela confirmação lateral) — o sinal vale nas duas, sempre.
+    maos_cam2 = getattr(amostra, "maos_cam2", False)
     contexto_partes = []
     for p in amostra.pessoas:
         zona_txt = p.get("zona_desc") or p.get("zona")
@@ -1728,9 +1752,10 @@ def _analisar_amostra_vlm(
             quem = "o OPERADOR" if p.get("papel") == "operador" else p["rotulo"]
             linha = (f"{p['rotulo']} ({quem}) está em: {zona_txt}"
                      if modo_op else f"{p['rotulo']} está em {zona_txt}")
-            # Fase 44: sinal geométrico do pose — punho dentro da zona 'maquina'.
-            # É a posição REAL das mãos dele, então o VLM deve tratar como operar.
-            if p.get("maos_maquina"):
+            # Sinal geométrico do pose — punho dentro da zona 'maquina' (posição
+            # REAL das mãos), na cam1 ou na cam2 → o VLM deve tratar como operar.
+            op_maos = p.get("maos_maquina") or (p.get("papel") == "operador" and maos_cam2)
+            if op_maos:
                 linha += (" — e está com as MÃOS na máquina (torno), tocando/"
                           "manipulando o equipamento (logo, OPERANDO, não apenas monitorando)")
             contexto_partes.append(linha)
@@ -1846,6 +1871,7 @@ def etapa_analise_vlm(
                 desc_cam2 = _analisar_operador_cam2(
                     groq_client, am.img_b64_secundario, descricao_processo,
                     memoria, conhecimento_adquirido, zona_desc=zona_posto,
+                    maos_maquina=getattr(am, "maos_cam2", False),
                 )
                 if desc_cam2:
                     n_completo += 1
