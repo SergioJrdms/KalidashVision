@@ -809,6 +809,34 @@ def listar_cameras(processo_id: str, user: CurrentUser = Depends(get_current_use
     return {"cameras": sorted(cams)}
 
 
+# Fase 48.2: URL assinada (absoluta) de um JPEG já no Storage, para o NAVEGADOR
+# buscar o frame DIRETO do Supabase em vez de o backend baixar e reenviar em
+# base64 — tira o egress dos frames do Render. None se falhar (o chamador cai
+# pro base64, garantindo que nunca quebra). TTL longo (6h) porque o front
+# re-consulta a query e frames de monitoria não são sensíveis.
+_FRAME_URL_TTL = 21600
+
+
+def _url_frame_assinada(sb, bucket: str, key: str, ttl: int = _FRAME_URL_TTL) -> str | None:
+    try:
+        res = sb.storage.from_(bucket).create_signed_url(key, ttl)
+    except Exception:
+        return None
+    url = None
+    if isinstance(res, dict):
+        url = res.get("signedURL") or res.get("signedUrl") or res.get("signed_url") or res.get("url")
+    elif isinstance(res, str):
+        url = res
+    if not url:
+        return None
+    if url.startswith("http"):
+        return url
+    base = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    if url.startswith("/storage/v1"):
+        return f"{base}{url}"
+    return f"{base}/storage/v1{url if url.startswith('/') else '/' + url}"
+
+
 @app.get("/processos/{processo_id}/cameras/{cam_id}/frame-referencia")
 def frame_referencia(
     processo_id: str,
@@ -880,6 +908,7 @@ def frame_referencia(
         jpeg = sb.storage.from_(bucket).download(ref_key) or None
     except Exception:
         jpeg = None
+    frame_no_storage = jpeg is not None   # Fase 48.2: cache hit = já está no Storage
 
     largura = altura = None
     if jpeg is None:
@@ -930,6 +959,7 @@ def frame_referencia(
             sb.storage.from_(bucket).upload(
                 ref_key, jpeg, {"content-type": "image/jpeg", "upsert": "true"}
             )
+            frame_no_storage = True
         except Exception as e:
             log.warning(f"cache do frame de referência falhou (não-fatal): {e}")
 
@@ -945,8 +975,11 @@ def frame_referencia(
         except Exception:
             pass
 
+    # Fase 48.2: se o JPEG está no Storage, serve por URL assinada (navegador
+    # busca direto do Supabase, sem egress do Render). Senão, base64 (nunca quebra).
+    img_url = _url_frame_assinada(sb, bucket, ref_key) if frame_no_storage else None
     return {
-        "img": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii"),
+        "img": img_url or ("data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")),
         "largura": largura,
         "altura": altura,
         "video_nome": video.get("nome"),
@@ -2162,6 +2195,12 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
     try:
         primeiro = sb.storage.from_(bucket).download(frame_keys[0])
         if primeiro:
+            # Fase 48.2: cache existe → serve por URL assinada (navegador busca
+            # direto do Supabase; sem egress do Render). Só a sonda foi baixada.
+            urls = [_url_frame_assinada(sb, bucket, k) for k in frame_keys]
+            if all(urls):
+                return {"frames": urls}
+            # Assinatura falhou → base64 como antes (nunca quebra).
             cached = [primeiro] + [
                 sb.storage.from_(bucket).download(k) for k in frame_keys[1:]
             ]
@@ -2213,15 +2252,22 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
             pass
 
     # 4) Grava no cache para as próximas visualizações (NÃO-FATAL).
+    subiu_ok = True
     for key, jpeg in zip(frame_keys, jpegs):
         try:
             sb.storage.from_(bucket).upload(
                 key, jpeg, {"content-type": "image/jpeg", "upsert": "true"}
             )
         except Exception as e:
+            subiu_ok = False
             log.warning(f"Cache de frame falhou (não-fatal) {key}: {e}")
 
-    # 5) Mesmos bytes da extração → saída byte-idêntica à resposta antiga.
+    # 5) Se subiu tudo, serve por URL assinada (sem egress do Render); senão,
+    #    base64 dos mesmos bytes já extraídos (nunca quebra).
+    if subiu_ok:
+        urls = [_url_frame_assinada(sb, bucket, k) for k in frame_keys]
+        if all(urls):
+            return {"frames": urls}
     return {
         "frames": [
             "data:image/jpeg;base64," + base64.b64encode(j).decode("ascii")
@@ -2271,6 +2317,10 @@ def frames_segmento(
     try:
         primeiro = sb.storage.from_(bucket).download(frame_keys[0])
         if primeiro:
+            # Fase 48.2: cache existe → URL assinada (navegador busca direto do Supabase).
+            urls = [_url_frame_assinada(sb, bucket, k) for k in frame_keys]
+            if all(urls):
+                return {"frames": urls}
             cached = [primeiro] + [sb.storage.from_(bucket).download(k) for k in frame_keys[1:]]
             if all(cached):
                 return {"frames": ["data:image/jpeg;base64," + base64.b64encode(j).decode("ascii") for j in cached]}
@@ -2313,12 +2363,18 @@ def frames_segmento(
     if not jpegs:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Não foi possível extrair frames do segmento")
 
+    subiu_ok = True
     for key, jpeg in zip(frame_keys, jpegs):
         try:
             sb.storage.from_(bucket).upload(key, jpeg, {"content-type": "image/jpeg", "upsert": "true"})
         except Exception as e:
+            subiu_ok = False
             log.warning(f"Cache de frame (segmento) falhou (não-fatal) {key}: {e}")
 
+    if subiu_ok:
+        urls = [_url_frame_assinada(sb, bucket, k) for k in frame_keys]
+        if all(urls):
+            return {"frames": urls}
     return {"frames": ["data:image/jpeg;base64," + base64.b64encode(j).decode("ascii") for j in jpegs]}
 
 
