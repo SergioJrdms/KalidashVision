@@ -201,6 +201,9 @@ class SegmentoRegistrarBody(BaseModel):
     nome: str = Field(min_length=1, max_length=200)
     cam_id: str = Field(min_length=1, max_length=20)
     storage_path: str = Field(min_length=1, max_length=400)
+    # Fase 48: auditoria da seleção top-K do edge (opcionais; upload DIRETO).
+    score: float | None = None
+    selecao: str | None = Field(default=None, max_length=20)
 
 
 PAPEIS_ZONA = ("posto_operador", "maquina", "interacao")
@@ -1273,6 +1276,10 @@ def segmento_registrar(
     gravado_em_efetivo = _parse_gravado_em_nome(body.nome)
     if gravado_em_efetivo:
         linha_seg["gravado_em"] = gravado_em_efetivo
+    if body.score is not None:
+        linha_seg["score"] = body.score
+    if body.selecao:
+        linha_seg["selecao"] = body.selecao
     try:
         sb.table("segmentos").insert(linha_seg).execute()
     except Exception as e:
