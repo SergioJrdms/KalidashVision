@@ -5984,14 +5984,14 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 seg_b = sum(bk.values())
                 if seg_b < 60:            # menos de 1 min no bucket = buraco
                     continue
-                cursor = b * 15.0
+                corte_m = b * 15.0
                 for cat in ORDEM_CAT:
                     s = bk.get(cat, 0.0)
                     if s <= 0:
                         continue
-                    seg_ini = cursor
-                    seg_fim = cursor + 15.0 * (s / seg_b)   # largura proporcional (min)
-                    cursor = seg_fim
+                    seg_ini = corte_m
+                    seg_fim = corte_m + 15.0 * (s / seg_b)   # largura proporcional (min)
+                    corte_m = seg_fim
                     if linha_tempo and linha_tempo[-1]["cat"] == cat \
                             and abs(linha_tempo[-1]["fim_m"] - seg_ini) < 0.02:
                         linha_tempo[-1]["fim_m"] = round(seg_fim, 2)
