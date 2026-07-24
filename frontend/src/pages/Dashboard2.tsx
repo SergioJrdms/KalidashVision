@@ -140,28 +140,40 @@ const CATS: Array<{ k: keyof Pick<DiaAnalise, "va_pct" | "desp_pct" | "none_pct"
   { k: "desp_pct", cat: "desp" }, { k: "none_pct", cat: "none" },
 ];
 
-// "Dia típico": para cada faixa de 15 min do relógio, a categoria que MAIS
-// aparece naquele horário somando todos os dias. Slots sem cobertura em nenhum
-// dia viram buraco (sem faixa), igual ao filme de um dia. Faixas vizinhas de
-// mesma categoria são fundidas.
+// "Dia típico": para cada faixa de 15 min do relógio, a PROPORÇÃO de cada
+// categoria somando todos os dias (por tempo, não por contagem). Fase 50: antes
+// pegava só a categoria dominante do slot, o que escondia minorias (ex.: um
+// desperdício recorrente mas curto sumia). Agora cada slot é fatiado na
+// proporção real. Slots sem cobertura viram buraco; faixas vizinhas de mesma
+// categoria são fundidas.
+const ORDEM_CAT_TIPICO = ["va", "desp", "none", "vazio"] as const;
 function agregarLinhaTempo(dias: DiaAnalise[]): DiaAnalise["linha_tempo"] {
   const SLOT = 15, N = Math.ceil(1440 / SLOT);
+  // minutos de cada categoria por slot, somando a SOBREPOSIÇÃO real de todas as faixas.
   const tally: Record<string, number>[] = Array.from({ length: N }, () => ({}));
   for (const d of dias) for (const f of d.linha_tempo || []) {
     const s0 = Math.max(0, Math.floor(f.ini_m / SLOT));
     const s1 = Math.min(N, Math.ceil(f.fim_m / SLOT));
-    for (let s = s0; s < s1; s++) tally[s][f.cat] = (tally[s][f.cat] || 0) + 1;
+    for (let s = s0; s < s1; s++) {
+      const ov = Math.min(f.fim_m, (s + 1) * SLOT) - Math.max(f.ini_m, s * SLOT);
+      if (ov > 0) tally[s][f.cat] = (tally[s][f.cat] || 0) + ov;
+    }
   }
   const faixas: DiaAnalise["linha_tempo"] = [];
   for (let s = 0; s < N; s++) {
     const t = tally[s];
-    const keys = Object.keys(t);
-    if (!keys.length) continue;   // horário sem filmagem em nenhum dia = buraco
-    const cat = keys.reduce((a, b) => (t[b] > t[a] ? b : a)) as DiaAnalise["linha_tempo"][number]["cat"];
-    const ini_m = s * SLOT, fim_m = (s + 1) * SLOT;
-    const last = faixas[faixas.length - 1];
-    if (last && last.cat === cat && last.fim_m === ini_m) last.fim_m = fim_m;
-    else faixas.push({ ini_m, fim_m, cat });
+    const totalSlot = Object.values(t).reduce((a, b) => a + b, 0);
+    if (totalSlot <= 0) continue;   // horário sem filmagem em nenhum dia = buraco
+    let cursor = s * SLOT;
+    for (const cat of ORDEM_CAT_TIPICO) {
+      const m = t[cat] || 0;
+      if (m <= 0) continue;
+      const ini_m = cursor, fim_m = cursor + SLOT * (m / totalSlot);
+      cursor = fim_m;
+      const last = faixas[faixas.length - 1];
+      if (last && last.cat === cat && Math.abs(last.fim_m - ini_m) < 0.02) last.fim_m = fim_m;
+      else faixas.push({ ini_m, fim_m, cat: cat as DiaAnalise["linha_tempo"][number]["cat"] });
+    }
   }
   return faixas;
 }

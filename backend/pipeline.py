@@ -5971,21 +5971,33 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 {"label": lbl, "seg": round(s, 1)}
                 for lbl, s in sorted(d["acoes"].items(), key=lambda kv: kv[1], reverse=True)[:5]
             ]
-            # Fase 35.2: linha do tempo da JORNADA — categoria dominante por
-            # bucket de 15 min, buckets contíguos iguais fundidos em faixas.
+            # Fase 50: linha do tempo da JORNADA — PROPORCIONAL por bucket de 15
+            # min. Antes pintava só a categoria DOMINANTE de cada bloco, o que
+            # ESCONDIA minorias (um desperdício curto dentro de um bloco quase
+            # todo produtivo sumia, contradizendo o "ritmo por hora"). Agora cada
+            # bloco é fatiado na proporção real de cada categoria (ordem fixa p/
+            # ficar limpo); faixas contíguas de mesma categoria são fundidas.
+            ORDEM_CAT = ("va", "desp", "none", "vazio")
             linha_tempo: list[dict] = []
             for b in sorted(d["buckets"]):
                 bk = d["buckets"][b]
                 seg_b = sum(bk.values())
                 if seg_b < 60:            # menos de 1 min no bucket = buraco
                     continue
-                cat_dom = max(bk.items(), key=lambda kv: kv[1])[0]
-                ini_m, fim_m = b * 15, (b + 1) * 15
-                if linha_tempo and linha_tempo[-1]["cat"] == cat_dom \
-                        and linha_tempo[-1]["fim_m"] == ini_m:
-                    linha_tempo[-1]["fim_m"] = fim_m
-                else:
-                    linha_tempo.append({"ini_m": ini_m, "fim_m": fim_m, "cat": cat_dom})
+                cursor = b * 15.0
+                for cat in ORDEM_CAT:
+                    s = bk.get(cat, 0.0)
+                    if s <= 0:
+                        continue
+                    seg_ini = cursor
+                    seg_fim = cursor + 15.0 * (s / seg_b)   # largura proporcional (min)
+                    cursor = seg_fim
+                    if linha_tempo and linha_tempo[-1]["cat"] == cat \
+                            and abs(linha_tempo[-1]["fim_m"] - seg_ini) < 0.02:
+                        linha_tempo[-1]["fim_m"] = round(seg_fim, 2)
+                    else:
+                        linha_tempo.append({"ini_m": round(seg_ini, 2),
+                                            "fim_m": round(seg_fim, 2), "cat": cat})
             por_hora = []
             for hora in sorted(d["horas"]):
                 h = d["horas"][hora]
