@@ -225,7 +225,7 @@ create table if not exists padroes_processo (
     titulo text,
     descricao text,
     comportamentos_relacionados jsonb,
-    categoria_relacionada text,            -- valor_agregado|apoio|desperdicio|null
+    categoria_relacionada text,            -- valor_agregado|desperdicio|null (Fase 49: binário)
     confianca text,                        -- alta | media | baixa
     relevancia text,                       -- alta | media | info
     recomendacao text,
@@ -283,6 +283,13 @@ update eventos e
    and e.categoria_lean is null;
 
 create index if not exists idx_eventos_categoria_lean on eventos(empresa, comportamento_label);
+
+-- Fase 49: classificação BINÁRIA — 'apoio' foi removido. Zera as decisões
+-- antigas de 'apoio' (passam a "não classificado"; a IA/gestor reclassificam
+-- como produtivo ou desperdício). Idempotente — nada quebra se rodar de novo.
+update comportamentos   set categoria_lean = null, categoria_lean_origem = null where categoria_lean = 'apoio';
+update eventos          set categoria_lean = null, categoria_lean_origem = null where categoria_lean = 'apoio';
+update padroes_processo set categoria_relacionada = null where categoria_relacionada = 'apoio';
 
 -- ════════════════════════════════════════════════════════════════════════
 -- Turnos de gravação por processo (configuração consumida pela borda Pi).
@@ -3144,8 +3151,8 @@ def recomputar_sugestoes_processo(sb: Client, empresa: str, processo: str) -> in
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# CLASSIFICAÇÃO LEAN — IA classifica cada comportamento em
-# valor_agregado | apoio | desperdicio (Lean / análise de valor).
+# CLASSIFICAÇÃO LEAN (BINÁRIA, Fase 49) — IA classifica cada comportamento em
+# valor_agregado (produtivo) | desperdicio (não-produtivo). null = não-classif.
 #
 # Esta é a SEGUNDA MEMÓRIA da plataforma. Distinta da memória de label
 # (carregar_memoria_do_negocio). Aqui aprendemos o VALOR de cada
@@ -3162,7 +3169,13 @@ def recomputar_sugestoes_processo(sb: Client, empresa: str, processo: str) -> in
 # costuma ser estável em toda a empresa), com preferência para a
 # decisão do PRÓPRIO processo quando houver conflito.
 # ═════════════════════════════════════════════════════════════════════════
-CATEGORIAS_LEAN_VALIDAS = {"valor_agregado", "apoio", "desperdicio"}
+# Fase 49: classificação BINÁRIA — produtivo (valor_agregado) × não-produtivo
+# (desperdicio). "apoio" foi removido (a IA decide por ação). "nao_classificado"
+# segue como estado DERIVADO (categoria nula), não atribuível pela IA.
+CATEGORIAS_LEAN_VALIDAS = {"valor_agregado", "desperdicio"}
+# Label da ação que o modelo de visão não conseguiu nomear → fica SEM categoria
+# (não-classificado), nunca vira produtivo nem desperdício por chute.
+LABEL_INDEFINIDA = "acao_indefinida"
 
 
 def carregar_memoria_categoria(
@@ -3226,8 +3239,8 @@ def carregar_memoria_categoria(
     memoria["n_decisoes"] = len(mapa)
     log.info(
         f"Lean memória categoria · {empresa}: {len(mapa)} labels com decisão humana "
-        f"(VA:{len(exemplos['valor_agregado'])}, Apoio:{len(exemplos['apoio'])}, "
-        f"Desp:{len(exemplos['desperdicio'])})"
+        f"(VA:{len(exemplos.get('valor_agregado', []))}, "
+        f"Desp:{len(exemplos.get('desperdicio', []))})"
     )
     return memoria
 
@@ -3242,11 +3255,10 @@ def construir_bloco_categoria_aprendida(memoria_categoria: dict) -> str:
         "CRITÉRIO DE CATEGORIA DESTE CLIENTE (decisões anteriores do gestor — USE como referência: comportamentos semanticamente parecidos a estes provavelmente caem na MESMA categoria):"
     ]
     rotulos = {
-        "valor_agregado": "VALOR AGREGADO (o cliente considera estas como valor):",
-        "apoio": "APOIO (o cliente considera estas como apoio):",
-        "desperdicio": "DESPERDÍCIO (o cliente considera estas como desperdício):",
+        "valor_agregado": "VALOR AGREGADO / PRODUTIVO (o cliente considera estas como valor):",
+        "desperdicio": "NÃO-PRODUTIVO / DESPERDÍCIO (o cliente considera estas como não-produtivas):",
     }
-    for cat in ("valor_agregado", "apoio", "desperdicio"):
+    for cat in ("valor_agregado", "desperdicio"):
         lst = exemplos.get(cat) or []
         if not lst:
             continue
@@ -3263,19 +3275,17 @@ def construir_bloco_categoria_aprendida(memoria_categoria: dict) -> str:
 
 PROMPT_CLASSIFICAR_LEAN = """Você é um especialista em Lean Manufacturing classificando comportamentos observados na operação da empresa "{empresa}" no processo "{processo}".
 
-Classifique CADA comportamento abaixo em UMA destas três categorias:
-- "valor_agregado": a atividade transforma o produto/serviço de modo que o cliente final pagaria por ela (ex.: montar, soldar, embalar a peça que será entregue, executar o serviço contratado).
-- "apoio": atividade necessária para que o valor agregado aconteça, mas que por si só não agrega valor ao cliente (ex.: conferir, registrar, organizar, abastecer, preparar máquina, comunicar).
-- "desperdicio": atividade que consome tempo sem necessidade — espera, ociosidade, deslocamento, retrabalho, movimentação excessiva, busca por itens.
+Classifique CADA comportamento abaixo de forma BINÁRIA — em UMA destas DUAS categorias:
+- "valor_agregado": a atividade AGREGA VALOR — transforma o produto/serviço de modo que o cliente final pagaria por ela (ex.: usinar/operar a peça no torno, montar, soldar, embalar a peça que será entregue, executar o serviço contratado).
+- "desperdicio": a atividade NÃO agrega valor ao cliente. Inclui espera, ociosidade, deslocamento, retrabalho, movimentação excessiva, busca por itens E TAMBÉM as atividades de APOIO que, por si só, não transformam o produto (conferir, registrar, organizar, abastecer, preparar máquina, comunicar).
 
 {bloco_dominio}{bloco_categoria}REGRAS:
-- Decida pela ação MAIS PROVÁVEL dado o vocabulário e o contexto de domínio acima. Se a descrição do processo / conhecimento adquirido descrevem a ação como obrigatória/produtiva, ela tende a ser "valor_agregado" ou "apoio".
-- "acao_indefinida" sempre vira "apoio" (sem informação suficiente para chamar de desperdício).
-- Comportamentos como "operar_computador" geralmente são "apoio" (registro, conferência), a menos que a descrição do processo deixe claro que digitar É o trabalho.
-- Comportamentos como "andar", "esperar", "ocioso", "parado", "buscar" tendem a "desperdicio".
+- Decisão BINÁRIA e sem meio-termo: ou a ação agrega valor DIRETO ao produto/serviço ("valor_agregado"), ou não ("desperdicio"). Não existe categoria intermediária de "apoio".
+- Só use "valor_agregado" quando a ação de fato TRANSFORMA o produto/executa o serviço. Na dúvida entre apoiar e agregar valor, classifique como "desperdicio".
+- Comportamentos como "andar", "esperar", "ocioso", "parado", "buscar", "operar_computador" (registro/conferência), "preparar", "abastecer" tendem a "desperdicio", A MENOS que a descrição do processo deixe claro que aquilo É o trabalho que agrega valor.
 - PRIORIDADE: se o "critério de categoria deste cliente" (acima) cobre o caso, alinhe a essa decisão — esse é o critério REAL do cliente.
 - Responda APENAS um JSON estrito (categoria SEM espaços, snake_case):
-{{"classificacoes": [{{"label": "operar_computador", "categoria": "apoio"}}, ...]}}
+{{"classificacoes": [{{"label": "operar_torno", "categoria": "valor_agregado"}}, ...]}}
 
 COMPORTAMENTOS A CLASSIFICAR:
 {lista_comportamentos}
@@ -3334,6 +3344,18 @@ def classificar_comportamentos_lean(
                     ).eq("id", c["id"]).execute()
                 except Exception as e:
                     log.warning(f"Lean: posto_vazio não atualizado: {e}")
+            continue
+        # Fase 49: ação que a visão não nomeou fica SEM categoria (não-classificado);
+        # não é produtivo nem desperdício por chute. Se ficou 'apoio' de antes,
+        # zera. Sem LLM; o gestor pode reclassificar pela UI.
+        if c.get("label") == LABEL_INDEFINIDA:
+            if c.get("categoria_lean") is not None:
+                try:
+                    sb.table("comportamentos").update(
+                        {"categoria_lean": None, "categoria_lean_origem": None}
+                    ).eq("id", c["id"]).execute()
+                except Exception as e:
+                    log.warning(f"Lean: acao_indefinida não zerada: {e}")
             continue
         # 'aprendido' e 'ia' são candidatos a refinamento se reclassificar_ia
         if c.get("categoria_lean") and origem in ("ia", "aprendido") and not reclassificar_ia:
@@ -3557,7 +3579,7 @@ REGRAS DURAS:
     (a) DESAMBIGUAR comportamentos parecidos (mesmo objeto/ação descritos de formas diferentes; ou labels distintos que talvez sejam o mesmo);
     (b) NOMEAR corretamente ações que ficaram como "acao_indefinida" ou de baixa confiança;
     (c) Entender ORDEM e OBRIGATORIEDADE de passos (ex.: "é obrigatório conferir antes de embalar?");
-    (d) Distinguir o que AGREGA VALOR do que é apoio / verificação / espera.
+    (d) Distinguir o que AGREGA VALOR do que NÃO agrega (preparação / verificação / espera / deslocamento).
 - Gere NO MÁXIMO {max_perguntas} perguntas. Se não há lacuna genuína, devolva uma lista VAZIA. NÃO invente perguntas para preencher cota.
 - NÃO comente o desempenho de pessoas; foque no processo.
 
@@ -4778,7 +4800,7 @@ def agregar_portfolio(
             }
             for lbl, d in top[:5]
         ]
-        soma_cat = {"valor_agregado": 0.0, "apoio": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+        soma_cat = {"valor_agregado": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
         n_comp_local = 0
         n_nao_classif = 0
         for lbl, d in agg.items():
@@ -4894,7 +4916,7 @@ def montar_snapshot_global(
 
     # composição consolidada (recomputa direto pelos % ponderados por tempo)
     total_min = cons["tempo_total_min"] or 1
-    comp_cons = {"valor_agregado": 0.0, "apoio": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+    comp_cons = {"valor_agregado": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
     for nome, st in portfolio.items():
         peso = st["tempo_total_min"]
         for k in comp_cons:
@@ -5222,7 +5244,6 @@ def _fmt_dur_h(seg: float) -> str:
 
 _LEAN_ROTULO = {
     "valor_agregado": "produtivo",
-    "apoio": "apoio",
     "desperdicio": "desperdício",
     "nao_classificado": "não classificado",
 }
@@ -5543,7 +5564,7 @@ def _montar_perguntas_gestor(
             perguntas.append({
                 "texto": f"'{maior_cinza['acao']}' tomou {_fmt_dur_h(maior_cinza['seg'])} "
                          f"({maior_cinza['pct']:.0f}%) e ainda não tem categoria — isso "
-                         "agrega valor, é apoio ou é desperdício? Classifique em 'Tempo "
+                         "agrega valor ou não (desperdício)? Classifique em 'Tempo "
                          "por comportamento' e o placar passa a refletir a realidade.",
                 "contexto": f"{nao_class.get('pct', 0):.0f}% do tempo ainda sem categoria",
             })
@@ -5622,11 +5643,11 @@ def montar_insights_quantitativos(
         tom = "high" if (topo[0].get("categoria") == "desperdicio") else "info"
         frases.append({"texto": "Onde o tempo foi: " + " · ".join(partes) + ".", "tom": tom})
 
-    # 3) Split Lean (produtivo/apoio/desperdício) com tempo absoluto
+    # 3) Split binário (produtivo/desperdício/não-classificado) com tempo absoluto
     por_cat_s = composicao.get("por_categoria_s") or {}
     por_categoria = {}
     partes_lean = []
-    for k in ("valor_agregado", "apoio", "desperdicio", "nao_classificado"):
+    for k in ("valor_agregado", "desperdicio", "nao_classificado"):
         seg = float(por_cat_s.get(k, 0) or 0)
         pct = round(seg / total * 100, 1)
         por_categoria[k] = {"seg": round(seg, 1), "pct": pct}
@@ -5737,12 +5758,10 @@ def montar_insights_quantitativos(
         if dur <= 0:
             continue
         hora = (dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))).hour
-        h = ritmo_agg.setdefault(hora, {"seg": 0.0, "va": 0.0, "apoio": 0.0, "desp": 0.0})
+        h = ritmo_agg.setdefault(hora, {"seg": 0.0, "va": 0.0, "desp": 0.0})
         h["seg"] += dur
         if cat == "valor_agregado":
             h["va"] += dur
-        elif cat == "apoio":
-            h["apoio"] += dur
         elif cat == "desperdicio":
             h["desp"] += dur
     por_hora = []
@@ -5754,7 +5773,6 @@ def montar_insights_quantitativos(
         por_hora.append({
             "hora": hora, "seg": round(s, 1),
             "va_pct": round(h["va"] / s * 100, 1),
-            "apoio_pct": round(h["apoio"] / s * 100, 1),
             "desp_pct": round(h["desp"] / s * 100, 1),
         })
     if len(por_hora) >= 3:
@@ -5797,7 +5815,7 @@ def montar_insights_quantitativos(
 # ═════════════════════════════════════════════════════════════════════════
 def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 30) -> dict:
     """Agrega os eventos por DIA REAL (relógio dos vídeos) e devolve:
-      dias:      [{dia, rot, dow, tempo_obs_s, va/apoio/desp/none_pct,
+      dias:      [{dia, rot, dow, tempo_obs_s, va/desp/none_pct,
                    posto_vazio_s/pct, n_videos, visitas, primeira_h, ultima_h,
                    top_acao, por_hora[], sem_trabalho}]  (calendário contínuo —
                    dia sem vídeo vira sem_trabalho='sem_captura'; dia filmado
@@ -5867,12 +5885,12 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
         dia = inst.date().isoformat()
         d = por_dia.setdefault(dia, {
-            "tot": 0.0, "va": 0.0, "apoio": 0.0, "desp": 0.0,
+            "tot": 0.0, "va": 0.0, "desp": 0.0,
             "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
-            "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "apoio": 0.0, "desp": 0.0}),
+            "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "desp": 0.0}),
             # Fase 35.2: "jornada" — buckets de 15 min do dia (96) com segundos
             # por categoria, p/ desenhar o filme do dia em uma faixa.
-            "buckets": defaultdict(lambda: {"va": 0.0, "apoio": 0.0, "desp": 0.0,
+            "buckets": defaultdict(lambda: {"va": 0.0, "desp": 0.0,
                                             "vazio": 0.0, "none": 0.0}),
             "primeiro": inst, "ultimo": inst,
         })
@@ -5882,8 +5900,6 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             d["vazio"] += dur
         elif cat == "valor_agregado":
             d["va"] += dur
-        elif cat == "apoio":
-            d["apoio"] += dur
         elif cat == "desperdicio":
             d["desp"] += dur
         if e.get("papel_pessoa") == "visitante":
@@ -5896,8 +5912,6 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             pass
         elif cat == "valor_agregado":
             h["va"] += dur
-        elif cat == "apoio":
-            h["apoio"] += dur
         elif cat == "desperdicio":
             h["desp"] += dur
         if inst < d["primeiro"]:
@@ -5909,7 +5923,6 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         # evento no relógio do dia (o "filme" da jornada).
         chave_cat = ("vazio" if eh_vazio else
                      "va" if cat == "valor_agregado" else
-                     "apoio" if cat == "apoio" else
                      "desp" if cat == "desperdicio" else "none")
         m_ini = inst.hour * 60 + inst.minute + inst.second / 60.0
         m_fim = min(1440.0, m_ini + dur / 60.0)
@@ -5936,7 +5949,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         if d is None or d["tot"] <= 0:
             saida_dias.append({
                 "dia": iso, "rot": rot, "dow": dow, "tempo_obs_s": 0.0,
-                "va_pct": 0.0, "apoio_pct": 0.0, "desp_pct": 0.0, "none_pct": 0.0,
+                "va_pct": 0.0, "desp_pct": 0.0, "none_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
                 "top_acoes": [], "linha_tempo": [],
@@ -5947,11 +5960,11 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         else:
             tot = d["tot"]
             vazio_pct = d["vazio"] / tot * 100
-            atividade = d["va"] + d["apoio"] + d["desp"]
+            atividade = d["va"] + d["desp"]
             # Dia filmado mas ~só posto vazio (ou atividade desprezível) =
             # "máquina vazia o dia todo" → o dono precisa VER isso.
             sem_trab = "posto_vazio" if (vazio_pct >= 90 or atividade < 120) else None
-            none_s = max(0.0, tot - d["va"] - d["apoio"] - d["desp"] - d["vazio"])
+            none_s = max(0.0, tot - d["va"] - d["desp"] - d["vazio"])
             top = max(d["acoes"].items(), key=lambda kv: kv[1]) if d["acoes"] else None
             # Fase 35.2: top 5 ações do dia (mini-pareto do dia selecionado).
             top_acoes = [
@@ -5981,14 +5994,12 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 por_hora.append({
                     "hora": hora, "seg": round(h["seg"], 1),
                     "va_pct": round(h["va"] / h["seg"] * 100, 1),
-                    "apoio_pct": round(h["apoio"] / h["seg"] * 100, 1),
                     "desp_pct": round(h["desp"] / h["seg"] * 100, 1),
                 })
             saida_dias.append({
                 "dia": iso, "rot": rot, "dow": dow,
                 "tempo_obs_s": round(tot, 1),
                 "va_pct": round(d["va"] / tot * 100, 1),
-                "apoio_pct": round(d["apoio"] / tot * 100, 1),
                 "desp_pct": round(d["desp"] / tot * 100, 1),
                 "none_pct": round(none_s / tot * 100, 1),
                 "posto_vazio_s": round(d["vazio"], 1),
@@ -6010,7 +6021,6 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         trab = [x for x in ds if not x["sem_trabalho"] and x["tempo_obs_s"] > 0]
         tot = sum(x["tempo_obs_s"] for x in trab)
         va_s = sum(x["tempo_obs_s"] * x["va_pct"] / 100 for x in trab)
-        apoio_s = sum(x["tempo_obs_s"] * x["apoio_pct"] / 100 for x in trab)
         desp_s = sum(x["tempo_obs_s"] * x["desp_pct"] / 100 for x in trab)
         vazio_s = sum(x["posto_vazio_s"] for x in ds)
         return {
@@ -6019,7 +6029,6 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             "dias_sem_trabalho": sum(1 for x in ds if x["sem_trabalho"]),
             "tempo_obs_s": round(tot, 1),
             "va_pct": round(va_s / tot * 100, 1) if tot > 0 else 0.0,
-            "apoio_pct": round(apoio_s / tot * 100, 1) if tot > 0 else 0.0,
             "desp_pct": round(desp_s / tot * 100, 1) if tot > 0 else 0.0,
             "vazio_pct": round(vazio_s / tot * 100, 1) if tot > 0 else 0.0,
             "posto_vazio_s": round(vazio_s, 1),
@@ -6353,7 +6362,7 @@ OS NÚMEROS JÁ ESTÃO CALCULADOS (abaixo, em JSON). Sua tarefa é INTERPRETAR e
 - titulo: curto e direto, com o número-chave (ex.: "Desperdício subindo: 18% → 31% em 6 turnos")
 - descricao: 1-3 frases interpretando o padrão com os NÚMEROS REAIS dos sinais
 - comportamentos_relacionados: lista de labels citados
-- categoria_relacionada: "valor_agregado" | "apoio" | "desperdicio" | null
+- categoria_relacionada: "valor_agregado" | "desperdicio" | null
 - confianca: "alta" | "media" | "baixa" (conforme nº de turnos: poucos turnos = baixa/média)
 - relevancia: "alta" | "media" | "info"
 - recomendacao: ação ancorada NO PADRÃO (ex.: "como o deslocamento vem crescendo, investigar mudança recente de layout") — diferente de sugestão pontual; pode ser null se não houver ação clara

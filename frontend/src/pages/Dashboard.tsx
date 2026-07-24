@@ -89,7 +89,7 @@ function OperacaoEmGraficos({ det, iq, processoId }: { det: DetMock; iq: Insight
   );
 }
 
-// Evolução por vídeo: colunas 100% empilhadas (produtivo/apoio/desperdício/
+// Evolução por vídeo: colunas 100% empilhadas (produtivo/desperdício/
 // não classificado), em ordem cronológica — a história do processo.
 function EvolucaoPanel({ processoId }: { processoId: string }) {
   const q = useQuery({ queryKey: ["serie", processoId], queryFn: () => api.padroes.serie(processoId) });
@@ -107,14 +107,14 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
   const bw = Math.min(30, slot - 6);
   const plotH = H - padT - padB;
   const CATS: Array<{ k: string; cat: LeanShort }> = [
-    { k: "valor_agregado", cat: "va" }, { k: "apoio", cat: "apoio" },
+    { k: "valor_agregado", cat: "va" },
     { k: "desperdicio", cat: "desp" }, { k: "nao_classificado", cat: "none" },
   ];
   return (
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Evolução por vídeo"
-        ajuda="Cada coluna é um vídeo (em ordem cronológica), dividida em produtivo, apoio, desperdício e não classificado. Mostra se a operação está melhorando de um vídeo para o outro."
+        ajuda="Cada coluna é um vídeo (em ordem cronológica), dividida em produtivo, desperdício e não classificado. Mostra se a operação está melhorando de um vídeo para o outro."
         leitura="Verde crescendo = o processo está aprendendo a render."
         right={q.data ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{pontos.length} de {q.data.n_videos}</span> : undefined}
       />
@@ -130,13 +130,12 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
             {pontos.map((p, i) => {
               const sc = p.share_categoria || {};
               const va = Math.max(0, sc["valor_agregado"] || 0);
-              const apoio = Math.max(0, sc["apoio"] || 0);
               const desp = Math.max(0, sc["desperdicio"] || 0);
-              const none = Math.max(0, 100 - va - apoio - desp);
-              const vals: Record<string, number> = { valor_agregado: va, apoio, desperdicio: desp, nao_classificado: none };
+              const none = Math.max(0, 100 - va - desp);
+              const vals: Record<string, number> = { valor_agregado: va, desperdicio: desp, nao_classificado: none };
               const x = padL + i * slot + (slot - bw) / 2;
               let yTopo = H - padB; // empilha de baixo (produtivo) pra cima
-              const tip = `${rotulo(p, i)} — produtivo ${Math.round(va)}% · apoio ${Math.round(apoio)}% · desperdício ${Math.round(desp)}% · não classif. ${Math.round(none)}%`;
+              const tip = `${rotulo(p, i)} — produtivo ${Math.round(va)}% · desperdício ${Math.round(desp)}% · não classif. ${Math.round(none)}%`;
               const passoRotulo = Math.ceil(pontos.length / 6);
               const mostraRotulo = i % passoRotulo === 0;
               return (
@@ -174,7 +173,7 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Ritmo do dia"
-        ajuda="O tempo de cada hora do relógio (somando todos os dias filmados), dividido em produtivo, apoio e desperdício. Revela padrões estruturais: começo de turno lento, queda pós-almoço, fim de dia disperso."
+        ajuda="O tempo de cada hora do relógio (somando todos os dias filmados), dividido em produtivo, desperdício e não classificado. Revela padrões estruturais: começo de turno lento, queda pós-almoço, fim de dia disperso."
         leitura="Procure a hora mais vermelha — é onde a rotina trava todo dia."
       />
       {horas.length < 2 ? (
@@ -183,12 +182,12 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
         <>
           <ul className="col" style={{ gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
             {horas.map((h) => {
-              const none = Math.max(0, 100 - h.va_pct - h.apoio_pct - h.desp_pct);
+              const none = Math.max(0, 100 - h.va_pct - h.desp_pct);
               return (
                 <li key={h.hora} className="row gap2" title={`${h.hora}h — ${fmtDur(h.seg)} de atividade · ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
                   <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
                   <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
-                    <LeanBar va={h.va_pct} apoio={h.apoio_pct} desp={h.desp_pct} none={none} height={10} />
+                    <LeanBar va={h.va_pct} desp={h.desp_pct} none={none} height={10} />
                   </div>
                   <span className="tnum" style={{ width: 52, textAlign: "right", fontSize: 11, color: "var(--muted)", flex: "none" }}>{fmtDur(h.seg)}</span>
                 </li>
@@ -196,7 +195,7 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
             })}
           </ul>
           <div className="row wrap" style={{ gap: 10, fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
-            {(["va", "apoio", "desp", "none"] as LeanShort[]).map((c) => (
+            {(["va", "desp", "none"] as LeanShort[]).map((c) => (
               <span key={c} className="row" style={{ gap: 5 }}>
                 <i style={{ width: 9, height: 9, borderRadius: 3, background: leanCor(c) }} /> {leanLabel(c)}
               </span>
@@ -413,7 +412,7 @@ function PorPosto({ iq }: { iq: InsightsQuantitativos | null }) {
               <span className="grow" />
               <span className="tnum" style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 600 }}>{fmtDur(r.seg)} observadas</span>
             </div>
-            <LeanBar va={r.va_pct} desp={r.desp_pct} apoio={Math.max(0, 100 - r.va_pct - r.desp_pct)} none={0} />
+            <LeanBar va={r.va_pct} desp={r.desp_pct} none={Math.max(0, 100 - r.va_pct - r.desp_pct)} />
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
               <b style={{ color: leanCor("va") }}>{r.va_pct.toFixed(0)}% produtivo</b> · <b style={{ color: leanCor("desp") }}>{r.desp_pct.toFixed(0)}% desperdício</b>
             </div>
@@ -544,7 +543,7 @@ function KpiVA({ det }: { det: DetMock }) {
         Índice de valor agregado <Help text="% do tempo em comportamentos de 'valor agregado' (Lean). A métrica-rainha: quanto da operação entrega o que o cliente paga." width={230} />
       </div>
       <div className="font-display tnum" style={{ fontSize: 30, fontWeight: 700, color: "var(--ink)", marginTop: 4 }}>{s.va}%</div>
-      <div style={{ marginTop: 10 }}><LeanBar va={s.va} apoio={s.apoio} desp={s.desp} none={s.none} showLegend /></div>
+      <div style={{ marginTop: 10 }}><LeanBar va={s.va} desp={s.desp} none={s.none} showLegend /></div>
     </Card>
   );
 }
@@ -701,10 +700,10 @@ function ResumoOportunidades({ det }: { det: DetMock }) {
 
 function ComposicaoPanel({ det }: { det: DetMock }) {
   const s = det.snapshot;
-  const data = [{ v: s.va, c: "var(--va)", n: "Valor agregado" }, { v: s.apoio, c: "var(--apoio)", n: "Apoio" }, { v: s.desp, c: "var(--desp)", n: "Desperdício" }, { v: s.none, c: "var(--none)", n: "Não classificado" }];
+  const data = [{ v: s.va, c: "var(--va)", n: "Produtivo" }, { v: s.desp, c: "var(--desp)", n: "Desperdício" }, { v: s.none, c: "var(--none)", n: "Não classificado" }];
   return (
     <Card style={{ padding: 20 }}>
-      <PanelHead titulo="Composição de valor (Lean)" ajuda="Como o tempo total se distribui entre valor agregado, apoio e desperdício. A categoria vem da IA — você pode reclassificar." leitura="Há espaço claro para mover tempo de Apoio/Desperdício para Valor Agregado." />
+      <PanelHead titulo="Produtivo × não-produtivo" ajuda="Como o tempo total se distribui entre produtivo (valor agregado) e não-produtivo (desperdício + não classificado). A categoria vem da IA — você pode reclassificar." leitura="Há espaço claro para mover tempo de Desperdício para Produtivo." />
       <div className="row gap4" style={{ alignItems: "center", justifyContent: "center" }}>
         <Donut data={data} size={168} thickness={26} centerLabel={`${s.va}%`} centerSub="valor" />
         <ul className="col" style={{ gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
@@ -804,7 +803,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
                 <span className="truncate" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", maxWidth: 180 }}>{d.nome}</span>
                 {editing ? (
                   <span className="row gap1" style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 8, padding: "2px 4px", boxShadow: "var(--glow)" }}>
-                    {(["va", "apoio", "desp"] as LeanShort[]).map((c) => <button key={c} onClick={() => d.id && setCat.mutate({ id: d.id, cat: c })} title={leanLabel(c)} style={{ width: 18, height: 18, borderRadius: 5, border: d.cat === c ? "2px solid var(--ink)" : "none", background: leanCor(c) }} />)}
+                    {(["va", "desp"] as LeanShort[]).map((c) => <button key={c} onClick={() => d.id && setCat.mutate({ id: d.id, cat: c })} title={leanLabel(c)} style={{ width: 18, height: 18, borderRadius: 5, border: d.cat === c ? "2px solid var(--ink)" : "none", background: leanCor(c) }} />)}
                     <button onClick={() => setEdit(null)} className="center" style={{ width: 18, height: 18, border: "none", background: "none", color: "var(--faint)" }}><Icon name="x" size={12} /></button>
                   </span>
                 ) : (

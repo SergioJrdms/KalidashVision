@@ -61,8 +61,8 @@ function Vocabulario() {
     },
     {
       icon: "tag", cor: "var(--va)", termo: "Classificação",
-      def: "Se aquele tempo agrega valor, é apoio, ou é desperdício — a leitura de produtividade.",
-      exemplo: "valor agregado · apoio · desperdício",
+      def: "Se aquele tempo agrega valor (produtivo) ou não (desperdício) — a leitura de produtividade é binária.",
+      exemplo: "produtivo · desperdício",
     },
   ];
   return (
@@ -91,7 +91,7 @@ function Vocabulario() {
           <span className="row gap1">que recebe uma <b style={{ color: "var(--ink)" }}>classificação</b></span>
         </div>
         <div className="row gap2 wrap" style={{ justifyContent: "center", marginTop: 12 }}>
-          {(["va", "apoio", "desp"] as const).map((c) => (
+          {(["va", "desp"] as const).map((c) => (
             <span key={c} className="row gap1" style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", padding: "4px 11px", borderRadius: 99, border: "1px solid var(--line)", background: "#fff" }}>
               <i style={{ width: 9, height: 9, borderRadius: 3, background: leanCor(c) }} /> {leanLabel(c)}
             </span>

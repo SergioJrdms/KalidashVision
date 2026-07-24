@@ -162,7 +162,7 @@ class RespostaPerguntaBody(BaseModel):
 
 
 class CategoriaLeanBody(BaseModel):
-    categoria_lean: str | None = None  # 'valor_agregado' | 'apoio' | 'desperdicio' | None
+    categoria_lean: str | None = None  # 'valor_agregado' | 'desperdicio' | None (Fase 49: binário)
 
 
 class SugestaoAcaoBody(BaseModel):
@@ -1633,8 +1633,9 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         )
     snapshot["distribuicao_comportamentos"] = dist_enriquecida
 
-    # Composição de valor agregada (% sobre o tempo total observado)
-    soma_por_cat = {"valor_agregado": 0.0, "apoio": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+    # Composição de valor agregada (% sobre o tempo total observado). Fase 49:
+    # binário — sem 'apoio' (categoria antiga cai em nao_classificado).
+    soma_por_cat = {"valor_agregado": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
     for d in dist_enriquecida:
         cat = d.get("categoria_lean") or "nao_classificado"
         if cat not in soma_por_cat:
@@ -2609,7 +2610,9 @@ def dispensar_pergunta(
 # ═════════════════════════════════════════════════════════════════════════
 # CLASSIFICAÇÃO LEAN — override do gestor
 # ═════════════════════════════════════════════════════════════════════════
-_CATS_LEAN_VALIDAS = {"valor_agregado", "apoio", "desperdicio"}
+# Fase 49: binário — produtivo (valor_agregado) × não-produtivo (desperdicio);
+# null = não-classificado. "apoio" removido.
+_CATS_LEAN_VALIDAS = {"valor_agregado", "desperdicio"}
 
 
 @app.put("/comportamentos/{comportamento_id}/categoria")
@@ -2622,7 +2625,7 @@ def setar_categoria_lean(
     if cat is not None and cat not in _CATS_LEAN_VALIDAS:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "categoria_lean deve ser uma de: valor_agregado, apoio, desperdicio, ou null.",
+            "categoria_lean deve ser uma de: valor_agregado, desperdicio, ou null.",
         )
     sb = make_supabase_client()
     r = (
@@ -2676,7 +2679,7 @@ def setar_categoria_lean(
 
     # Despeja a categoria nos EVENTOS do comportamento (mesma empresa+label).
     # Cada evento guarda a sua, mas NÃO sobrescrevemos overrides individuais de
-    # humano — assim a decisão de 'andar = apoio' vale como padrão, e um evento
+    # humano — assim a decisão de 'andar = desperdício' vale como padrão, e um evento
     # específico classificado à mão por alguém permanece intacto.
     eventos_atualizados = 0
     if alvo.get("label"):

@@ -326,7 +326,7 @@ function LeanCell({ e, onSet, saving }: { e: EvTabMock; onSet: (cat: LeanShort) 
   return (
     <span className="row gap1" style={{ whiteSpace: "nowrap" }}>
       {chip}
-      {(["va", "apoio", "desp"] as LeanShort[]).map((c) => (
+      {(["va", "desp"] as LeanShort[]).map((c) => (
         <button key={c} type="button" title={leanLabel(c)} onClick={() => { onSet(c); setOpen(false); }}
           style={{ width: 20, height: 20, borderRadius: 5, border: e.cat === c ? "2px solid var(--ink)" : "1px solid var(--line)", background: leanCor(c), cursor: "pointer", flex: "none" }} />
       ))}
@@ -350,7 +350,7 @@ function CorrigirForm({ e, labels, onSalvar, onCancelar }: { e: EvTabMock; label
       <div className="col" style={{ gap: 5 }}>
         <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)" }}>Classificação Lean</span>
         <div className="row gap1 wrap">
-          {(["va", "apoio", "desp"] as LeanShort[]).map((c) => (
+          {(["va", "desp"] as LeanShort[]).map((c) => (
             <button key={c} onClick={() => setCat(c)} className="row gap1" style={{ padding: "5px 11px", borderRadius: 8, fontSize: 12, fontWeight: 600, color: "var(--text)", background: "#fff", border: cat === c ? "2px solid var(--ink)" : "1px solid var(--line)" }}>
               <i style={{ width: 9, height: 9, borderRadius: 2, background: leanCor(c) }} /> {leanLabel(c)}
             </button>

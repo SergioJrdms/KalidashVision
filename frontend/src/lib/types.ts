@@ -1,6 +1,5 @@
 export interface ComposicaoValorLite {
   valor_agregado_pct: number;
-  apoio_pct: number;
   desperdicio_pct: number;
   nao_classificado_pct: number;
 }
@@ -102,7 +101,7 @@ export interface JobStatus {
   resultado?: { n_eventos?: number; n_auto_validados?: number; n_sugestoes?: number } | null;
 }
 
-export type CategoriaLean = "valor_agregado" | "apoio" | "desperdicio";
+export type CategoriaLean = "valor_agregado" | "desperdicio"; // Fase 49: binário
 
 export interface DistribuicaoComportamento {
   comportamento: string;
@@ -119,7 +118,6 @@ export interface DistribuicaoComportamento {
 
 export interface ComposicaoValor {
   valor_agregado_pct: number;
-  apoio_pct: number;
   desperdicio_pct: number;
   nao_classificado_pct: number;
   tempo_total_s: number;
@@ -245,7 +243,7 @@ export interface InsightsQuantitativos {
   por_categoria: Record<string, { seg: number; pct: number }>;
   por_roi: Array<{ zona: string; seg: number; pct: number; va_pct: number; desp_pct: number }>;
   // Fase 21 — ritmo por hora do relógio real (junta todos os dias)
-  por_hora?: Array<{ hora: number; seg: number; va_pct: number; apoio_pct: number; desp_pct: number }>;
+  por_hora?: Array<{ hora: number; seg: number; va_pct: number; desp_pct: number }>;
   periodo: { texto: string; tendencia_desp_pp: number } | null;
   // Fase 19 — placar vs melhor dia + perguntas prontas pro chão de fábrica
   placar?: PlacarProcesso | null;
@@ -463,7 +461,6 @@ export interface DiaHora {
   hora: number;
   seg: number;
   va_pct: number;
-  apoio_pct: number;
   desp_pct: number;
 }
 
@@ -473,7 +470,6 @@ export interface DiaAnalise {
   dow: string; // "sex"
   tempo_obs_s: number;
   va_pct: number;
-  apoio_pct: number;
   desp_pct: number;
   none_pct: number;
   posto_vazio_s: number;
@@ -485,7 +481,7 @@ export interface DiaAnalise {
   top_acao: { label: string; seg: number } | null;
   top_acoes: { label: string; seg: number }[];
   // Fase 35.2: o "filme" do dia — faixas de 15 min com a categoria dominante
-  linha_tempo: { ini_m: number; fim_m: number; cat: "va" | "apoio" | "desp" | "vazio" | "none" }[];
+  linha_tempo: { ini_m: number; fim_m: number; cat: "va" | "desp" | "vazio" | "none" }[];
   por_hora: DiaHora[];
   sem_trabalho: "sem_captura" | "posto_vazio" | null;
 }
@@ -496,7 +492,6 @@ export interface JanelaAgregada {
   dias_sem_trabalho: number;
   tempo_obs_s: number;
   va_pct: number;
-  apoio_pct: number;
   desp_pct: number;
   vazio_pct: number;
   posto_vazio_s: number;

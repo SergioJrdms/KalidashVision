@@ -207,8 +207,8 @@ export function MaturityMeter({ pct, size = 56, compact = false }: { pct: number
 }
 
 // ---- Barra Lean ----
-export function LeanBar({ va, apoio, desp, none, height = 8, showLegend = false }: { va: number; apoio: number; desp: number; none: number; height?: number; showLegend?: boolean }) {
-  const parts: [string, number][] = [["va", va], ["apoio", apoio], ["desp", desp], ["none", none]];
+export function LeanBar({ va, desp, none, height = 8, showLegend = false }: { va: number; desp: number; none: number; height?: number; showLegend?: boolean }) {
+  const parts: [string, number][] = [["va", va], ["desp", desp], ["none", none]];
   return (
     <div className="col" style={{ gap: 6 }}>
       <div className="bar-split" style={{ height }}>

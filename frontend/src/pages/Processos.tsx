@@ -191,9 +191,9 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
       <div style={{ marginTop: 12 }}>
         <div className="row" style={{ justifyContent: "space-between", fontSize: 10.5, color: "var(--muted)", marginBottom: 4 }}>
           <span className="row gap1" style={{ color: nivel.cor, fontWeight: 700 }}><Icon name="sparkles" size={11} /> Prism {nivel.rotulo.toLowerCase()}</span>
-          <span>valor agregado <b className="tnum" style={{ color: "var(--va)" }}>{p.va}%</b></span>
+          <span>produtivo <b className="tnum" style={{ color: "var(--va)" }}>{p.va}%</b></span>
         </div>
-        <LeanBar va={p.va} apoio={p.apoio} desp={p.desp} none={p.none} height={7} />
+        <LeanBar va={p.va} desp={p.desp} none={p.none} height={7} />
       </div>
 
       <div className="row" style={{ gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line-2)" }}>

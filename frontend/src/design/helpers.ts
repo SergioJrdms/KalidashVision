@@ -3,7 +3,9 @@
 // Os dados mock foram substituídos pela camada de API real.
 // ============================================================
 
-export type LeanShort = "va" | "apoio" | "desp" | "none";
+// Fase 49: classificação binária — produtivo (va) × não-produtivo. O
+// não-produtivo ainda se detalha em desperdício (desp) e não-classificado (none).
+export type LeanShort = "va" | "desp" | "none";
 
 // Níveis de maturidade do Prism por processo
 export const NIVEIS = [
@@ -21,8 +23,7 @@ export function nivelDe(pct: number) {
 
 // Lean meta
 export const LEAN: Record<LeanShort, { label: string; cor: string; bg: string }> = {
-  va: { label: "Valor agregado", cor: "var(--va)", bg: "var(--va-bg)" },
-  apoio: { label: "Apoio", cor: "var(--apoio)", bg: "var(--apoio-bg)" },
+  va: { label: "Produtivo", cor: "var(--va)", bg: "var(--va-bg)" },
   desp: { label: "Desperdício", cor: "var(--desp)", bg: "var(--desp-bg)" },
   none: { label: "Não classificado", cor: "var(--none)", bg: "var(--none-bg)" },
 };
@@ -34,17 +35,16 @@ export function leanLabel(c: string) {
   return (LEAN[c as LeanShort] || LEAN.none).label;
 }
 
-/** Mapa categoria do banco (valor_agregado/apoio/desperdicio/null) → short do design. */
+/** Mapa categoria do banco (valor_agregado/desperdicio/null) → short do design.
+ * Fase 49: 'apoio' foi removido; valores desconhecidos caem em não-classificado. */
 export function leanShort(cat: string | null | undefined): LeanShort {
   if (cat === "valor_agregado") return "va";
-  if (cat === "apoio") return "apoio";
   if (cat === "desperdicio") return "desp";
   return "none";
 }
 /** Inverso: short do design → categoria do banco. */
-export function leanLong(c: LeanShort): "valor_agregado" | "apoio" | "desperdicio" | null {
+export function leanLong(c: LeanShort): "valor_agregado" | "desperdicio" | null {
   if (c === "va") return "valor_agregado";
-  if (c === "apoio") return "apoio";
   if (c === "desp") return "desperdicio";
   return null;
 }
