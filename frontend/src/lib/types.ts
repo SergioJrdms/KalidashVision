@@ -460,7 +460,11 @@ export interface ZonaBody {
 // ── Fase 52: saúde da borda (heartbeat do Pi) ────────────────────────────────
 // O estado vem JÁ INTERPRETADO do backend (observado × esperado pelo turno).
 // A tela só pinta — nenhum cálculo de "está online?" no frontend.
-export type EstadoSaude = "capturando" | "em_repouso" | "sem_sinal" | "sem_dados";
+// `sem_captura` = o Pi está VIVO (mandando pulso) mas não está gravando dentro
+// do turno — ffmpeg morto, timer que não disparou. Só existe porque o Pi manda
+// pulso 24/7; sem isso, esse caso se disfarçaria de "capturando".
+export type EstadoSaude =
+  | "capturando" | "em_repouso" | "sem_sinal" | "sem_captura" | "sem_dados";
 
 export interface SaudeCamera {
   cam_id: string;

@@ -200,7 +200,25 @@ r = rodar([hb(1, [cam("cam1", "f", True)], disco=20.0),
            hb(23 * 60, [cam("cam1", "f", True)], disco=20.0)], turno_cobrindo_agora())
 check("disco estável → sem projeção inventada", r["disco"]["dias_restantes"] is None, r["disco"])
 
-print("\n[9] helpers de turno")
+print("\n[9] Pulso 24/7 — Pi vivo mas NÃO gravando dentro do turno")
+# Só existe porque o --heartbeat manda pulso o tempo todo. Sem este estado, um
+# ffmpeg morto continuaria mostrando "Capturando agora".
+r = rodar([hb(1, [cam("cam1", "posto-1-cam-frontal", False, seg_min_atras=90)],
+               estado="ocioso")], turno_cobrindo_agora())
+check("pulso fresco + runner ocioso dentro do turno = sem_captura",
+      r["estado"] == "sem_captura", r["estado"])
+check("câmera parada aparece como sem_sinal", r["cameras"][0]["estado"] == "sem_sinal")
+r = rodar([hb(1, [cam("cam1", "f", True)], estado="capturando")], turno_cobrindo_agora())
+check("runner capturando = capturando", r["estado"] == "capturando")
+r = rodar([hb(1, [cam("cam1", "f", True)], estado="processando")], turno_cobrindo_agora())
+check("runner processando NÃO vira sem_captura", r["estado"] == "capturando", r["estado"])
+r = rodar([hb(1, [cam("cam1", "f", False)], estado="fora_de_turno")], turno_fora_de_agora())
+check("pulso fora do turno segue em_repouso (sem alarme)", r["estado"] == "em_repouso")
+r = rodar([hb(90, [cam("cam1", "f", False)], estado="ocioso")], turno_cobrindo_agora())
+check("pulso VELHO tem prioridade: sem_sinal, não sem_captura",
+      r["estado"] == "sem_sinal", r["estado"])
+
+print("\n[10] helpers de turno")
 j = M._turno_janelas_do_dia(
     [{"nome": "T", "intervalos": [{"inicio": "06:00", "fim": "11:30"},
                                   {"inicio": "12:30", "fim": "15:48"}],

@@ -824,10 +824,16 @@ def saude_edge(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     idade_s = (agora - ultimo_em).total_seconds() if ultimo_em else None
 
     # ── Estado geral: observado × esperado ──
+    # `sem_captura` só existe porque o Pi manda pulso 24/7 (--heartbeat): sem
+    # essa distinção, um ffmpeg morto DENTRO do turno continuaria mostrando
+    # "Capturando agora" — falsamente tranquilizador, pior que não ter painel.
+    estado_runner_ult = (ultimo or {}).get("estado")
     if ultimo is None:
         estado, desde_ts = "sem_dados", None
     elif ativa and (idade_s is None or idade_s > stale_s):
         estado, desde_ts = "sem_sinal", ultimo_em
+    elif ativa and estado_runner_ult not in ("capturando", "processando"):
+        estado, desde_ts = "sem_captura", ultimo_em
     elif ativa:
         estado, desde_ts = "capturando", ultimo_em
     else:

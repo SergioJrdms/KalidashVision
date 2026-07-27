@@ -22,6 +22,7 @@ const TOM: Record<EstadoSaude, { cor: string; bg: string; icone: string }> = {
   capturando: { cor: "var(--va)", bg: "var(--va-bg)", icone: "video" },
   em_repouso: { cor: "var(--accent)", bg: "var(--accent-soft)", icone: "moon" },
   sem_sinal: { cor: "var(--desp)", bg: "var(--desp-bg)", icone: "alert-triangle" },
+  sem_captura: { cor: "var(--desp)", bg: "var(--desp-bg)", icone: "video-off" },
   sem_dados: { cor: "var(--muted)", bg: "var(--soft)", icone: "plug" },
 };
 
@@ -160,6 +161,14 @@ function Destaque({ s, tom }: { s: SaudeEdge; tom: { cor: string; bg: string; ic
       : s.turno.configurado
         ? "Fora do horário de captura — nada a fazer"
         : "Nenhum turno configurado. Cadastre um abaixo para o Pi saber quando gravar.";
+  } else if (s.estado === "sem_captura") {
+    // O Pi responde, mas não está gravando. Problema DIFERENTE de "sem sinal":
+    // o aparelho está de pé, quem morreu foi a gravação.
+    frase = "Parado dentro do turno";
+    contexto = s.turno.ativa
+      ? `O Pi está respondendo, mas não está gravando (janela ${s.turno.ativa.inicio}–${s.turno.ativa.fim}). ` +
+        "Reinicie a captura no aparelho."
+      : "O Pi está respondendo, mas a gravação não está rodando.";
   } else {
     frase = `Sem sinal há ${duracaoLonga(s.idade_s)}`;
     contexto = s.turno.ativa
@@ -218,7 +227,8 @@ function Cameras({ cameras }: { cameras: SaudeCamera[] }) {
           const rotulo =
             c.estado === "capturando" ? "Gravando"
               : c.estado === "em_repouso" ? "Em repouso"
-                : c.estado === "sem_dados" ? "Sem dados" : "Sem sinal";
+                : c.estado === "sem_dados" ? "Sem dados"
+                  : c.estado === "sem_captura" ? "Parada" : "Sem sinal";
           return (
             <div
               key={c.cam_id}
