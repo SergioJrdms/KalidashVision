@@ -7,7 +7,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapDashboard, type DetMock, type CompMock, type ProcHeaderMock, type SugMock } from "../lib/adapt";
-import { leanCor, leanLabel, leanLong, leanShort, fmtSeg, fmtDur, type LeanShort } from "../design/helpers";
+import { leanCor, leanLabel, leanLong, leanShort, fmtDur, type LeanShort } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, Ring, toast } from "../design/ui";
 import type { Go } from "../design/Shell";
 import type { AcaoSugestao, InsightsQuantitativos, PerguntaGestor, PlacarProcesso } from "../lib/types";
@@ -60,7 +60,6 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
           demais óticas visuais, para quem quer se aprofundar. */}
       <OperacaoEmGraficos det={det} iq={det.insights} processoId={proc.id} />
 
-      <VideosRodape det={det} />
     </div>
   );
 }
@@ -116,7 +115,6 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
         titulo="Evolução por vídeo"
         ajuda="Cada coluna é um vídeo (em ordem cronológica), dividida em produtivo, desperdício e não classificado. Mostra se a operação está melhorando de um vídeo para o outro."
         leitura="Verde crescendo = o processo está aprendendo a render."
-        right={q.data ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{pontos.length} de {q.data.n_videos}</span> : undefined}
       />
       {pontos.length < 2 ? (
         <p style={{ fontSize: 13, color: "var(--muted)" }}>Precisa de pelo menos 2 vídeos para mostrar a evolução.</p>
@@ -184,12 +182,11 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
             {horas.map((h) => {
               const none = Math.max(0, 100 - h.va_pct - h.desp_pct);
               return (
-                <li key={h.hora} className="row gap2" title={`${h.hora}h — ${fmtDur(h.seg)} de atividade · ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
+                <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
                   <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
                   <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
                     <LeanBar va={h.va_pct} desp={h.desp_pct} none={none} height={10} />
                   </div>
-                  <span className="tnum" style={{ width: 52, textAlign: "right", fontSize: 11, color: "var(--muted)", flex: "none" }}>{fmtDur(h.seg)}</span>
                 </li>
               );
             })}
@@ -238,7 +235,7 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
               Placar do processo <Help text={`Ainda não há histórico suficiente para comparar ${unis}. Esta primeira medição vira a linha de base — os próximos ${unis} serão pontuados contra ela.`} width={250} />
             </div>
             <p style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", margin: 0 }}>
-              Linha de base: <span style={{ color: cor }}>{va.toFixed(0)}% produtivo</span> em {fmtDur(p.dia_atual.seg)}.
+              Linha de base: <span style={{ color: cor }}>{va.toFixed(0)}% produtivo</span>.
             </p>
             <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
               Primeira medição do processo. A partir dela, cada {uni} novo é comparado com o melhor já observado.
@@ -268,7 +265,7 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
           </div>
           {p.eh_melhor ? (
             <p style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", margin: 0 }}>
-              {p.dia_atual.dia} é {uni === "dia" ? "o melhor dia" : "a melhor sessão"} <span style={{ color: leanCor("va") }}>já observado</span> — {p.dia_atual.va_pct.toFixed(0)}% produtivo em {fmtDur(p.dia_atual.seg)}.
+              {p.dia_atual.dia} é {uni === "dia" ? "o melhor dia" : "a melhor sessão"} <span style={{ color: leanCor("va") }}>já observado</span> — {p.dia_atual.va_pct.toFixed(0)}% produtivo.
             </p>
           ) : (
             <p style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", margin: 0 }}>
@@ -277,7 +274,7 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
           )}
           {!p.eh_melhor && (
             <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
-              {p.dia_atual.dia}: <b style={{ color: "var(--text)" }}>{p.dia_atual.va_pct.toFixed(0)}% produtivo</b> ({fmtDur(p.dia_atual.seg)} observadas) · melhor {uni} {p.dia_melhor.dia}: <b style={{ color: "var(--text)" }}>{p.dia_melhor.va_pct.toFixed(0)}% produtivo</b>
+              {p.dia_atual.dia}: <b style={{ color: "var(--text)" }}>{p.dia_atual.va_pct.toFixed(0)}% produtivo</b> · melhor {uni} {p.dia_melhor.dia}: <b style={{ color: "var(--text)" }}>{p.dia_melhor.va_pct.toFixed(0)}% produtivo</b>
             </p>
           )}
           {p.ganho && (
@@ -324,7 +321,7 @@ function ProximoPasso({ det, proc, go }: { det: DetMock; proc: ProcHeaderMock; g
   if (nonePct >= 15 && topCinza) {
     passo = {
       titulo: "Classifique o tempo sem categoria",
-      desc: `${Math.round(nonePct)}% do tempo (${fmtDur(none?.seg ?? topCinza.seg)}) ainda é cinza — comece por '${topCinza.nome}' (${fmtDur(topCinza.seg)}). Toque no chip de categoria e diga se agrega valor, apoia ou desperdiça. O placar fica real na hora.`,
+      desc: `${Math.round(nonePct)}% do tempo ainda é cinza — comece por '${topCinza.nome}'. Toque no chip de categoria e diga se agrega valor, apoia ou desperdiça. O placar fica real na hora.`,
       cta: "Classificar agora",
       onClick: () => document.getElementById("painel-tempo-comportamento")?.scrollIntoView({ behavior: "smooth", block: "start" }),
     };
@@ -338,7 +335,7 @@ function ProximoPasso({ det, proc, go }: { det: DetMock; proc: ProcHeaderMock; g
   } else if ((desp?.pct ?? 0) >= 15) {
     passo = {
       titulo: "Ataque o desperdício",
-      desc: `${Math.round(desp!.pct)}% do tempo (${fmtDur(desp!.seg)}) é desperdício. As perguntas e sugestões abaixo mostram por onde começar.`,
+      desc: `${Math.round(desp!.pct)}% do tempo é desperdício. As perguntas e sugestões abaixo mostram por onde começar.`,
       cta: "Ver o que fazer",
       onClick: () => document.getElementById("painel-sugestoes")?.scrollIntoView({ behavior: "smooth", block: "start" }),
     };
@@ -410,7 +407,7 @@ function PorPosto({ iq }: { iq: InsightsQuantitativos | null }) {
             <div className="row gap2" style={{ marginBottom: 4 }}>
               <span className="truncate" style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{r.zona}</span>
               <span className="grow" />
-              <span className="tnum" style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 600 }}>{fmtDur(r.seg)} observadas</span>
+              
             </div>
             <LeanBar va={r.va_pct} desp={r.desp_pct} none={Math.max(0, 100 - r.va_pct - r.desp_pct)} />
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
@@ -436,8 +433,6 @@ function KpisExecutivos({ det }: { det: DetMock }) {
   const va = cat["valor_agregado"];
   const despPct = desp ? Math.round(desp.pct) : s.desp;
   const vaPct = va ? Math.round(va.pct) : s.va;
-  const despSub = desp ? fmtDur(desp.seg) : `${s.videos} vídeos`;
-  const vaSub = va ? fmtDur(va.seg) : `${s.videos} vídeos`;
   const trend = iq?.periodo?.tendencia_desp_pp ?? null;
 
   return (
@@ -445,7 +440,6 @@ function KpisExecutivos({ det }: { det: DetMock }) {
       <KpiHero
         label="Tempo desperdiçado"
         valor={`${despPct}%`}
-        sub={despSub}
         icon="alert-triangle"
         cor={leanCor("desp")}
         ajuda="Parte do tempo observado classificada como desperdício (Lean). É o número a atacar primeiro — cada ponto aqui é tempo que não vira valor."
@@ -453,7 +447,6 @@ function KpisExecutivos({ det }: { det: DetMock }) {
       <KpiHero
         label="Tempo produtivo"
         valor={`${vaPct}%`}
-        sub={vaSub}
         icon="check-circle"
         cor={leanCor("va")}
         ajuda="Parte do tempo em comportamentos de valor agregado — o que o cliente efetivamente paga."
@@ -813,7 +806,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
                   </button>
                 )}
                 <span className="grow" />
-                <span className="tnum" style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>{d.pct}% · {fmtSeg(d.seg)}</span>
+                <span className="tnum" style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>{d.pct}%</span>
               </div>
               <div className="track" style={{ height: 7 }}><i style={{ width: `${Math.max(2, d.pct)}%`, background: leanCor(d.cat) }} /></div>
             </li>
@@ -850,25 +843,6 @@ function FluxoPanel({ det }: { det: DetMock }) {
           ))}
         </div>
       )}
-    </Card>
-  );
-}
-
-function VideosRodape({ det }: { det: DetMock }) {
-  return (
-    <Card style={{ padding: 20 }}>
-      <PanelHead titulo="Vídeos processados" ajuda="Cada novo vídeo enriquece a base e melhora as sugestões." right={<span style={{ fontSize: 12, color: "var(--muted)" }}>{det.videos.length} no total · {det.snapshot.tempoObservadoMin} min</span>} />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: "4px 24px" }}>
-        {det.videos.map((v) => (
-          <div key={v.id} className="row gap2" style={{ padding: "9px 0", borderBottom: "1px solid var(--line-2)" }}>
-            <span className="center" style={{ width: 30, height: 30, borderRadius: 8, background: "var(--soft)", color: "var(--accent)", flex: "none" }}><Icon name="film" size={14} /></span>
-            <div className="grow" style={{ minWidth: 0 }}>
-              <div className="truncate font-mono" style={{ fontSize: 11.5, color: "var(--text)" }}>{v.nome}</div>
-              <div style={{ fontSize: 10.5, color: "var(--faint)" }}>{v.quando} · {v.eventos} eventos · {fmtSeg(v.dur)}</div>
-            </div>
-          </div>
-        ))}
-      </div>
     </Card>
   );
 }

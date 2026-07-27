@@ -8,7 +8,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, PanelHead, Ring, Icon, Empty, LeanBar } from "../design/ui";
-import { leanCor, leanLabel, fmtDur, type LeanShort } from "../design/helpers";
+import { leanCor, leanLabel, type LeanShort } from "../design/helpers";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { Go } from "../design/Shell";
 import type { AnaliseDiaria, DiaAnalise, JanelaAgregada } from "../lib/types";
@@ -33,7 +33,7 @@ export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
 
   if (q.isLoading) return <Empty icon="loader" title="Montando o dia a dia…" />;
   if (!dados || dias.length === 0 || trabalhados.length === 0) {
-    return <Empty icon="calendar-days" title="Ainda não há dias analisados" desc="Assim que os primeiros vídeos com data real forem processados, o dia a dia do operador aparece aqui." />;
+    return <Empty icon="calendar-days" title="Ainda não há dias analisados" desc="Assim que as primeiras capturas com data real forem processadas, o dia a dia do operador aparece aqui." />;
   }
 
   return (
@@ -52,7 +52,6 @@ export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
       </div>
       <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
         <div style={{ flex: "1 1 360px" }}><JanelasComparador dados={dados} /></div>
-        <div style={{ flex: "1 1 340px" }}><HorasUteisCard dias={trabalhados} /></div>
       </div>
       <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
         <div style={{ flex: "1 1 340px" }}><PresencaCard dias={dias} /></div>
@@ -96,10 +95,9 @@ function VereditoHero({ dados }: { dados: AnaliseDiaria }) {
             )}
           </p>
           <div className="row gap2 wrap" style={{ fontSize: 12, color: "var(--muted)" }}>
-            <ChipStat icon="clock" texto={`${sem.atual.horas_produtivas_dia.toFixed(1)}h produtivas/dia`} />
             <ChipStat icon="calendar-check" texto={`${sem.atual.dias_trabalhados} dia(s) trabalhados`} />
             <ChipStat icon="calendar-x" texto={`${sem.atual.dias_sem_trabalho} sem trabalho`} alerta={sem.atual.dias_sem_trabalho > 0} />
-            {sem.atual.posto_vazio_s > 0 && <ChipStat icon="user-x" texto={`posto vazio ${fmtDur(sem.atual.posto_vazio_s)}`} alerta />}
+            {sem.atual.vazio_pct > 0 && <ChipStat icon="user-x" texto={`posto vazio ${sem.atual.vazio_pct.toFixed(0)}%`} alerta />}
           </div>
         </div>
         <JanelaMini titulo="Últimos 30 dias" j={mes.atual} delta={mes.delta_va_pp} />
@@ -270,7 +268,7 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
             none_pct: Math.max(0, 100 - d.va_pct - d.desp_pct),
           };
           let yTopo = H - padB;
-          const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · desperdício ${Math.round(d.desp_pct)}% · ${fmtDur(d.tempo_obs_s)} observadas`;
+          const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · desperdício ${Math.round(d.desp_pct)}%`;
           return (
             <g key={d.dia} onClick={() => onSelecionar(d)} style={{ cursor: "pointer" }}>
               {sel && <rect x={x - 3} y={padT - 3} width={bw + 6} height={plotH + 6} rx="5" fill="none" stroke="var(--accent)" strokeWidth={1.6} />}
@@ -326,8 +324,8 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; me
         </span>
         <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
           {d.sem_trabalho === "posto_vazio"
-            ? `As câmeras filmaram (${d.n_videos} vídeo(s), ${fmtDur(d.posto_vazio_s)} de posto vazio), mas o operador não trabalhou no posto.`
-            : "Nenhum vídeo chegou deste dia — captura desligada, feriado ou falha do Pi."}
+            ? "As câmeras filmaram, mas o operador não trabalhou no posto — o dia inteiro ficou como posto vazio."
+            : "Nenhuma captura chegou deste dia — câmera desligada, feriado ou falha no Pi."}
         </p>
       </div>
     );
@@ -349,16 +347,15 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; me
       </div>
       {/* Resumão do dia (ou do agregado) */}
       <div className="row gap2 wrap" style={{ fontSize: 12 }}>
-        <ChipStat icon="clock" texto={`${fmtDur(d.tempo_obs_s)} observadas em ${d.n_videos} vídeo(s)`} />
         {agregado ? (
           <ChipStat icon="gauge" texto={`${d.va_pct.toFixed(0)}% produtivo no período`} alerta={d.va_pct < 40} />
         ) : (
           <ChipStat icon="gauge" texto={`${d.va_pct.toFixed(0)}% produtivo (${delta >= 0 ? "+" : ""}${delta.toFixed(0)} pts vs média do período)`} alerta={delta < -5} />
         )}
-        {d.posto_vazio_s > 0 && <ChipStat icon="user-x" texto={`posto vazio ${fmtDur(d.posto_vazio_s)}`} alerta={d.posto_vazio_pct >= 20} />}
+        {d.posto_vazio_s > 0 && <ChipStat icon="user-x" texto={`posto vazio ${d.posto_vazio_pct.toFixed(0)}%`} alerta={d.posto_vazio_pct >= 20} />}
         {d.visitas > 0 && <ChipStat icon="users" texto={`${d.visitas} visita(s) ao posto`} />}
         {d.primeira_h && d.ultima_h && <ChipStat icon="sunrise" texto={`atividade de ${d.primeira_h} às ${d.ultima_h}`} />}
-        {d.top_acao && <ChipStat icon="star" texto={`mais tempo em "${d.top_acao.label}" (${fmtDur(d.top_acao.seg)})`} />}
+        {d.top_acao && <ChipStat icon="star" texto={`mais tempo em "${d.top_acao.label}"`} />}
         {pico && vale && pico.hora !== vale.hora && (
           <ChipStat icon="trending-up" texto={`pico ${String(pico.hora).padStart(2, "0")}h (${pico.va_pct.toFixed(0)}%) · vale ${String(vale.hora).padStart(2, "0")}h (${vale.va_pct.toFixed(0)}%)`} />
         )}
@@ -369,12 +366,11 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; me
           {horas.map((h) => {
             const none = Math.max(0, 100 - h.va_pct - h.desp_pct);
             return (
-              <li key={h.hora} className="row gap2" title={`${h.hora}h — ${fmtDur(h.seg)} · ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
+              <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
                 <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
                 <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
                   <LeanBar va={h.va_pct} desp={h.desp_pct} none={none} height={10} />
                 </div>
-                <span className="tnum" style={{ width: 52, textAlign: "right", fontSize: 11, color: "var(--muted)", flex: "none" }}>{fmtDur(h.seg)}</span>
               </li>
             );
           })}
@@ -567,6 +563,11 @@ function JornadaDoDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
 function TopAcoesDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
   const acoes = d.top_acoes || [];
   const maxSeg = Math.max(1, ...acoes.map((a) => a.seg));
+  // Fase 53: a tela fala em PROPORÇÃO, nunca em minutos de vídeo. Com a
+  // amostragem sistemática, a duração absoluta é a do recorte amostrado — a
+  // fatia do tempo é a leitura correta e a única que não engana.
+  const base = d.tempo_obs_s || acoes.reduce((t, a) => t + a.seg, 0) || 1;
+  const pctDoTempo = (seg: number) => `${Math.round((seg / base) * 100)}%`;
   return (
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
@@ -582,7 +583,7 @@ function TopAcoesDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
             <li key={a.label} className="col" style={{ gap: 3 }}>
               <div className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
                 <code className="font-mono" style={{ background: "var(--line-2)", padding: "1px 7px", borderRadius: 5, fontSize: 11 }}>{i + 1}. {a.label}</code>
-                <span className="tnum" style={{ color: "var(--muted)" }}>{fmtDur(a.seg)}</span>
+                <span className="tnum" style={{ color: "var(--muted)" }}>{pctDoTempo(a.seg)}</span>
               </div>
               <div className="track" style={{ height: 7 }}>
                 <i style={{ width: `${(a.seg / maxSeg) * 100}%`, background: "var(--grad-cta)", display: "block", height: "100%", borderRadius: 99 }} />
@@ -642,7 +643,7 @@ function HeatmapQuinzena({ dias, onSelecionar }: { dias: DiaAnalise[]; onSelecio
                 if (!hd) return <span key={h} style={{ flex: 1, height: 16, borderRadius: 3, background: "var(--soft)", border: "1px solid var(--line-2)" }} />;
                 return (
                   <span key={h}
-                    title={`${d.dow} ${d.rot} ${h}h — ${Math.round(hd.va_pct)}% produtivo · ${fmtDur(hd.seg)}`}
+                    title={`${d.dow} ${d.rot} ${h}h — ${Math.round(hd.va_pct)}% produtivo`}
                     style={{ flex: 1, height: 16, borderRadius: 3, background: corCelula(hd.va_pct), opacity: 0.35 + 0.65 * (hd.seg / maxSeg) }} />
                 );
               })}
@@ -701,37 +702,6 @@ function JanelasComparador({ dados }: { dados: AnaliseDiaria }) {
         })}
       </ul>
       <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 10 }}>barra forte = últimos 7 dias · barra clara = 7 dias anteriores</p>
-    </Card>
-  );
-}
-
-// ═══ Horas úteis por dia: o dono pensa em HORAS, não em % ═══
-function HorasUteisCard({ dias }: { dias: DiaAnalise[] }) {
-  const ultimos = dias.slice(-10);
-  const horasDia = ultimos.map((d) => ({ d, h: (d.tempo_obs_s * d.va_pct) / 100 / 3600 }));
-  const media = horasDia.length ? horasDia.reduce((s, x) => s + x.h, 0) / horasDia.length : 0;
-  const maxH = Math.max(0.5, ...horasDia.map((x) => x.h));
-  return (
-    <Card style={{ padding: 20, height: "100%" }}>
-      <PanelHead
-        titulo="Horas úteis por dia"
-        ajuda="Horas de trabalho PRODUTIVO entregues em cada dia (tempo observado × % produtivo). A linha pontilhada é a média do período."
-        leitura="A pergunta em horas: quantas horas de valor o posto entrega por dia?"
-      />
-      <div className="row" style={{ gap: 6, alignItems: "flex-end", height: 120, position: "relative", marginTop: 6 }}>
-        <div style={{ position: "absolute", left: 0, right: 0, bottom: `${(media / maxH) * 100}%`, borderTop: "2px dashed var(--accent)", opacity: 0.6 }} title={`média ${media.toFixed(1)}h/dia`} />
-        {horasDia.map(({ d, h }) => (
-          <div key={d.dia} className="col" style={{ flex: 1, alignItems: "center", gap: 3, height: "100%", justifyContent: "flex-end" }}
-            title={`${d.dow} ${d.rot} — ${h.toFixed(1)}h produtivas de ${fmtDur(d.tempo_obs_s)} observadas`}>
-            <span className="tnum" style={{ fontSize: 9.5, color: "var(--muted)" }}>{h.toFixed(1)}</span>
-            <div style={{ width: "70%", height: `${(h / maxH) * 82}%`, minHeight: 2, background: leanCor("va"), borderRadius: 4, opacity: 0.9 }} />
-            <span style={{ fontSize: 8.5, color: "var(--faint)", fontFamily: "var(--mono)" }}>{d.rot}</span>
-          </div>
-        ))}
-      </div>
-      <p style={{ fontSize: 12, color: "var(--text)", marginTop: 10 }}>
-        Média do período: <b>{media.toFixed(1)}h produtivas/dia</b>.
-      </p>
     </Card>
   );
 }

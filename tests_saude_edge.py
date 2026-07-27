@@ -89,19 +89,21 @@ def cam(cid, nome, gravando, seg_min_atras=1, falhas=0):
             "ultimo_segmento_bytes": 12345, "falhas": falhas}
 
 
+# Janelas ANCORADAS no dia, não relativas a "agora": construir com
+# AGORA±2h fazia o teste falhar quando rodava perto da meia-noite (a janela
+# cruzava o dia, e turno que cruza meia-noite é rejeitado de propósito).
 def turno_cobrindo_agora():
-    """Turno cujo intervalo CONTÉM o instante atual (janela ampla)."""
-    ini = (AGORA - timedelta(hours=2)).strftime("%H:%M")
-    fim = (AGORA + timedelta(hours=2)).strftime("%H:%M")
-    return [{"nome": "Turno 1", "intervalos": [{"inicio": ini, "fim": fim}],
+    """Turno que CONTÉM qualquer instante do dia."""
+    return [{"nome": "Turno 1", "intervalos": [{"inicio": "00:00", "fim": "23:59"}],
              "dias_semana": [1, 2, 3, 4, 5, 6, 7], "ativo": True}]
 
 
 def turno_fora_de_agora():
-    """Turno que NÃO contém agora (janela de 2h atrás até 1h atrás)."""
-    ini = (AGORA - timedelta(hours=2)).strftime("%H:%M")
-    fim = (AGORA - timedelta(hours=1)).strftime("%H:%M")
-    return [{"nome": "Turno 1", "intervalos": [{"inicio": ini, "fim": fim}],
+    """Turno de 1h que NUNCA contém o instante atual (escolhido no hemisfério
+    oposto do relógio)."""
+    ini_h = (AGORA.hour + 12) % 24
+    return [{"nome": "Turno 1",
+             "intervalos": [{"inicio": f"{ini_h:02d}:00", "fim": f"{ini_h:02d}:59"}],
              "dias_semana": [1, 2, 3, 4, 5, 6, 7], "ativo": True}]
 
 

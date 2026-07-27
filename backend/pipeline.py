@@ -5520,7 +5520,7 @@ def _montar_perguntas_gestor(
             if dt0 else "num trecho contínuo"
         )
         perguntas.append({
-            "texto": f"Houve {_fmt_dur_h(dur)} seguidos de '{label}' {quando} — "
+            "texto": f"Houve uma parada contínua de '{label}' {quando} — "
                      "o que travou o processo nesse horário?",
             "contexto": "maior parada contínua observada",
         })
@@ -5543,8 +5543,7 @@ def _montar_perguntas_gestor(
         if r.get("desp_pct", 0) >= 35 and r.get("seg", 0) >= 600:
             perguntas.append({
                 "texto": f"O posto '{r['zona']}' passou {r['desp_pct']:.0f}% do tempo em "
-                         f"desperdício ({_fmt_dur_h(r['seg'] * r['desp_pct'] / 100)}) — "
-                         "falta material, equipamento ou instrução ali?",
+                         "desperdício — falta material, equipamento ou instrução ali?",
                 "contexto": "posto com maior desperdício",
             })
             break
@@ -5562,8 +5561,8 @@ def _montar_perguntas_gestor(
         )
         if maior_cinza:
             perguntas.append({
-                "texto": f"'{maior_cinza['acao']}' tomou {_fmt_dur_h(maior_cinza['seg'])} "
-                         f"({maior_cinza['pct']:.0f}%) e ainda não tem categoria — isso "
+                "texto": f"'{maior_cinza['acao']}' tomou {maior_cinza['pct']:.0f}% do "
+                         "tempo e ainda não tem categoria — isso "
                          "agrega valor ou não (desperdício)? Classifique em 'Tempo "
                          "por comportamento' e o placar passa a refletir a realidade.",
                 "contexto": f"{nao_class.get('pct', 0):.0f}% do tempo ainda sem categoria",
@@ -5573,9 +5572,8 @@ def _montar_perguntas_gestor(
     for a in tempo_por_acao or []:
         if a.get("categoria") == "desperdicio" and a.get("pct", 0) >= 15:
             perguntas.append({
-                "texto": f"'{a['acao']}' consumiu {_fmt_dur_h(a['seg'])} "
-                         f"({a['pct']:.0f}%) do tempo observado — essa espera é evitável "
-                         "ou faz parte do ciclo?",
+                "texto": f"'{a['acao']}' consumiu {a['pct']:.0f}% do tempo observado "
+                         "— essa espera é evitável ou faz parte do ciclo?",
                 "contexto": "ação que mais consome tempo sem agregar valor",
             })
             break
@@ -5612,25 +5610,15 @@ def montar_insights_quantitativos(
         float(sum(d.get("tempo_total_s", 0) for d in (dist or []))) or 1.0
     frases: list[dict] = []
 
-    # 1) Atividade analisada vs filmagem bruta (Fase 20 — duas réguas, ditas
-    #    com honestidade: as % do dashboard são sobre o tempo de ATIVIDADE).
-    n_videos = len({v.get("id") for v in (videos or []) if v.get("id")})
-    filmagem_s = sum(float(v.get("duracao_s") or 0) for v in (videos or []))
-    if filmagem_s > total * 1.15:
-        frases.append({
-            "texto": f"Atividade analisada: {_fmt_dur_h(total)} em {n_videos} vídeo(s) "
-                     f"({_fmt_dur_h(filmagem_s)} de filmagem — o restante é tempo sem "
-                     "ação detectada em cena).",
-            "tom": "info",
-        })
-    else:
-        frases.append({
-            "texto": f"Atividade analisada: {_fmt_dur_h(total)} em {n_videos} vídeo(s).",
-            "tom": "info",
-        })
+    # Fase 53: NADA de minutagem de vídeo no dashboard. O cliente gerencia um
+    # posto de trabalho, não um acervo de gravações — dizer "40min em 9 vídeos"
+    # não o ajuda a decidir nada e ainda confunde. Pior: com a amostragem
+    # sistemática (Fase 51) a duração absoluta é a do RECORTE amostrado, não a
+    # do turno, então exibi-la seria enganoso. As PROPORÇÕES são a leitura
+    # correta e continuam todas aqui.
 
-    # 2) Onde o tempo foi (top ações) — % recalculada sobre a MESMA régua do
-    #    total acima (tempo de atividade), independente da base do `dist`.
+    # 1) Onde o tempo foi (top ações) — % recalculada sobre a MESMA régua do
+    #    tempo de atividade, independente da base do `dist`.
     tempo_por_acao = [
         {"acao": d.get("comportamento"), "seg": round(d.get("tempo_total_s", 0), 1),
          "pct": round(float(d.get("tempo_total_s", 0)) / total * 100, 1),
@@ -5639,7 +5627,7 @@ def montar_insights_quantitativos(
     ]
     if tempo_por_acao:
         topo = tempo_por_acao[:3]
-        partes = [f"{a['acao']} {_fmt_dur_h(a['seg'])} ({a['pct']:.0f}%)" for a in topo]
+        partes = [f"{a['acao']} {a['pct']:.0f}%" for a in topo]
         tom = "high" if (topo[0].get("categoria") == "desperdicio") else "info"
         frases.append({"texto": "Onde o tempo foi: " + " · ".join(partes) + ".", "tom": tom})
 
@@ -5652,7 +5640,7 @@ def montar_insights_quantitativos(
         pct = round(seg / total * 100, 1)
         por_categoria[k] = {"seg": round(seg, 1), "pct": pct}
         if seg > 0:
-            partes_lean.append(f"{_LEAN_ROTULO[k]} {_fmt_dur_h(seg)} ({pct:.0f}%)")
+            partes_lean.append(f"{_LEAN_ROTULO[k]} {pct:.0f}%")
     desp_pct = por_categoria["desperdicio"]["pct"]
     if partes_lean:
         tom = "high" if desp_pct >= 40 else ("warn" if desp_pct >= 25 else "ok")
@@ -5667,8 +5655,8 @@ def montar_insights_quantitativos(
     if vazio_s > 0:
         vazio_pct = round(vazio_s / total * 100, 1)
         frases.append({
-            "texto": f"Posto vazio (operador ausente) por {_fmt_dur_h(vazio_s)} "
-                     f"({vazio_pct:.0f}% do tempo observado).",
+            "texto": f"Posto vazio (operador ausente) em {vazio_pct:.0f}% do "
+                     "tempo observado.",
             "tom": "high" if vazio_pct >= 20 else "warn",
         })
 
@@ -5700,7 +5688,7 @@ def montar_insights_quantitativos(
         })
     if len(por_roi) > 1:
         partes_roi = [
-            f"ROI '{r['zona']}': {_fmt_dur_h(r['seg'])} ({r['va_pct']:.0f}% produtivo, {r['desp_pct']:.0f}% desperdício)"
+            f"ROI '{r['zona']}': {r['va_pct']:.0f}% produtivo, {r['desp_pct']:.0f}% desperdício"
             for r in por_roi[:3]
         ]
         frases.append({"texto": " · ".join(partes_roi) + ".", "tom": "info"})
