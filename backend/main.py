@@ -7,6 +7,7 @@ import os
 import re
 import unicodedata
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import (
@@ -189,6 +190,34 @@ class TurnoBody(BaseModel):
     intervalos: list[IntervaloTurnoBody] = Field(default_factory=list)
     dias_semana: list[int] = Field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7])
     ativo: bool = True
+
+
+class HeartbeatCameraBody(BaseModel):
+    """Saúde de UMA câmera. `gravando` NÃO é "o RTSP respondeu" — é "o segmento
+    está crescendo no disco". Um Hikvision pode responder no socket e entregar
+    imagem preta/congelada; só o arquivo crescendo prova que há captura."""
+    cam_id: str = Field(max_length=40)
+    nome: str | None = Field(default=None, max_length=120)
+    gravando: bool = False
+    ultimo_segmento_em: str | None = None      # ISO 8601
+    ultimo_segmento_bytes: int | None = None
+    falhas: int = 0                            # falhas de conexão desde o último envio
+
+
+class HeartbeatBody(BaseModel):
+    """Fase 52: pulso do Pi. Tudo opcional além do essencial — um runner antigo
+    ou um campo que o SO não expõe (temperatura) nunca pode derrubar o envio."""
+    processo_id: str = Field(min_length=1, max_length=64)
+    device_id: str = Field(min_length=1, max_length=120)
+    runner_versao: str | None = Field(default=None, max_length=40)
+    estado: str = Field(max_length=24)         # capturando|processando|ocioso|fora_de_turno
+    cameras: list[HeartbeatCameraBody] = Field(default_factory=list)
+    disco_livre_gb: float | None = None
+    disco_uso_pct: float | None = None
+    cpu_temp_c: float | None = None
+    uptime_s: int | None = None
+    turno_janela: str | None = Field(default=None, max_length=40)
+    turno_deadline: str | None = None          # ISO 8601
 
 
 class SegmentoUploadUrlBody(BaseModel):
@@ -635,6 +664,300 @@ def excluir_turno(turno_id: str, user: CurrentUser = Depends(get_current_user)):
     _carregar_turno_proprio(sb, user, turno_id)
     sb.table("turnos_processo").delete().eq("id", turno_id).execute()
     return {"ok": True}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 52 — SAÚDE DA BORDA (heartbeat do Pi)
+#
+# A ideia que organiza tudo: OFFLINE NÃO É SEMPRE PROBLEMA. Às 22h, no
+# domingo ou no almoço, o Pi DEVE estar parado. Um painel que pisca vermelho
+# fora do turno ensina o cliente a ignorar o alerta — e aí ele ignora o
+# alerta de verdade. Então o estado nunca é "online/offline": é sempre o
+# OBSERVADO contra o ESPERADO, e o esperado vem de `turnos_processo`.
+#
+# Todo o cálculo mora AQUI. A tela só pinta o que este endpoint decidiu.
+# ═════════════════════════════════════════════════════════════════════════
+def _parse_iso_utc(s):
+    """ISO 8601 (com ou sem tz) → datetime AWARE em UTC. None se não parsear.
+    O Postgres devolve com 'Z' ou offset; o Pi manda com o offset local."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+HEARTBEAT_INTERVALO_MIN = float(os.environ.get("KV_HEARTBEAT_INTERVALO_MIN", "5"))
+# "Sem sinal" = último pulso mais velho que N× o intervalo de envio E dentro
+# de uma janela do turno. 3× dá folga para um envio perdido sem alarme falso.
+SAUDE_STALE_FATOR = float(os.environ.get("KV_SAUDE_STALE_FATOR", "3"))
+SAUDE_RETENCAO_DIAS = int(os.environ.get("KV_SAUDE_RETENCAO_DIAS", "7"))
+_ULTIMA_LIMPEZA_HB = {"ts": 0.0}
+
+
+def _limpar_heartbeats_antigos(sb) -> None:
+    """Retenção de 7 dias, com throttle de 1×/hora. Roda no POST porque
+    heartbeat é frequente e garantido — não precisa de thread nem de cron."""
+    import time as _t
+    agora = _t.time()
+    if agora - _ULTIMA_LIMPEZA_HB["ts"] < 3600:
+        return
+    _ULTIMA_LIMPEZA_HB["ts"] = agora
+    corte = (datetime.now(timezone.utc) - timedelta(days=SAUDE_RETENCAO_DIAS)).isoformat()
+    try:
+        sb.table("heartbeats_edge").delete().lt("recebido_em", corte).execute()
+    except Exception as e:                        # nunca derruba o POST
+        log.warning(f"[saude] limpeza de heartbeats falhou (não-fatal): {e}")
+
+
+@app.post("/edge/heartbeat")
+def receber_heartbeat(body: HeartbeatBody, user: CurrentUser = Depends(get_current_user)):
+    """Recebe o pulso do Pi. Autenticado como o runner já se autentica hoje."""
+    sb = make_supabase_client()
+    processo_nome = _processo_nome(sb, user, body.processo_id)
+    linha = {
+        "empresa": user.empresa,
+        "processo": processo_nome,
+        "device_id": body.device_id.strip(),
+        "runner_versao": body.runner_versao,
+        "estado": body.estado.strip().lower(),
+        "cameras": [c.model_dump() for c in body.cameras],
+        "disco_livre_gb": body.disco_livre_gb,
+        "disco_uso_pct": body.disco_uso_pct,
+        "cpu_temp_c": body.cpu_temp_c,
+        "uptime_s": body.uptime_s,
+        "turno_janela": body.turno_janela,
+        "turno_deadline": body.turno_deadline,
+    }
+    try:
+        sb.table("heartbeats_edge").insert(linha).execute()
+    except Exception as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            f"Falha ao gravar heartbeat: {e}")
+    _limpar_heartbeats_antigos(sb)
+    return {"ok": True}
+
+
+def _turno_janelas_do_dia(turnos: list, quando: datetime) -> list:
+    """[(inicio_dt, fim_dt, nome)] das janelas ATIVAS no dia de `quando`.
+    Um turno vale no dia se `dias_semana` contém o ISO weekday."""
+    dow = quando.isoweekday()
+    janelas = []
+    for t in turnos:
+        if not t.get("ativo", True):
+            continue
+        if dow not in (t.get("dias_semana") or []):
+            continue
+        for iv in (t.get("intervalos") or []):
+            try:
+                hi, mi = [int(x) for x in str(iv["inicio"]).split(":")[:2]]
+                hf, mf = [int(x) for x in str(iv["fim"]).split(":")[:2]]
+            except Exception:
+                continue
+            ini = quando.replace(hour=hi, minute=mi, second=0, microsecond=0)
+            fim = quando.replace(hour=hf, minute=mf, second=0, microsecond=0)
+            if fim <= ini:            # intervalo inválido/cruzando meia-noite: ignora
+                continue
+            janelas.append((ini, fim, t.get("nome") or "Turno"))
+    janelas.sort(key=lambda j: j[0])
+    return janelas
+
+
+def _dentro_de_janela(janelas: list, quando: datetime):
+    for ini, fim, nome in janelas:
+        if ini <= quando < fim:
+            return (ini, fim, nome)
+    return None
+
+
+@app.get("/processos/{processo_id}/saude")
+def saude_edge(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Estado JÁ INTERPRETADO da borda — o frontend não recalcula nada."""
+    sb = make_supabase_client()
+    processo_nome = _processo_nome(sb, user, processo_id)
+    agora = datetime.now(timezone.utc)
+    desde = (agora - timedelta(hours=24)).isoformat()
+
+    try:
+        hbs = (
+            sb.table("heartbeats_edge")
+            .select("device_id, runner_versao, estado, cameras, disco_livre_gb, "
+                    "disco_uso_pct, cpu_temp_c, uptime_s, turno_janela, "
+                    "turno_deadline, recebido_em")
+            .eq("empresa", user.empresa)
+            .eq("processo", processo_nome)
+            .gte("recebido_em", desde)
+            .order("recebido_em", desc=True)
+            .limit(2000)
+            .execute()
+            .data
+        ) or []
+    except Exception as e:
+        log.warning(f"[saude] leitura de heartbeats falhou: {e}")
+        hbs = []
+
+    try:
+        turnos = (
+            sb.table("turnos_processo")
+            .select("nome, intervalos, dias_semana, ativo")
+            .eq("empresa", user.empresa)
+            .eq("processo", processo_nome)
+            .execute()
+            .data
+        ) or []
+    except Exception:
+        turnos = []
+
+    # O Pi grava no fuso local dele; o painel fala do turno do cliente. Usamos
+    # o fuso do servidor como referência do "relógio de parede" da fábrica.
+    local = datetime.now().astimezone()
+    janelas = _turno_janelas_do_dia(turnos, local)
+    ativa = _dentro_de_janela(janelas, local)
+    stale_s = HEARTBEAT_INTERVALO_MIN * 60 * SAUDE_STALE_FATOR
+
+    ultimo = hbs[0] if hbs else None
+    ultimo_em = _parse_iso_utc(ultimo.get("recebido_em")) if ultimo else None
+    idade_s = (agora - ultimo_em).total_seconds() if ultimo_em else None
+
+    # ── Estado geral: observado × esperado ──
+    if ultimo is None:
+        estado, desde_ts = "sem_dados", None
+    elif ativa and (idade_s is None or idade_s > stale_s):
+        estado, desde_ts = "sem_sinal", ultimo_em
+    elif ativa:
+        estado, desde_ts = "capturando", ultimo_em
+    else:
+        estado, desde_ts = "em_repouso", ultimo_em
+
+    # ── Câmeras: mesmo tratamento, uma a uma ──
+    cams_out = []
+    vistas = {}
+    for hb in hbs:                     # do mais recente para o mais antigo
+        for c in (hb.get("cameras") or []):
+            cid = c.get("cam_id")
+            if cid and cid not in vistas:
+                vistas[cid] = (c, hb.get("recebido_em"))
+    for cid, (c, quando) in sorted(vistas.items()):
+        ult = c.get("ultimo_segmento_em")
+        ult_dt = _parse_iso_utc(ult)
+        idade_cam = (agora - ult_dt).total_seconds() if ult_dt else None
+        if estado == "sem_dados":
+            cam_estado = "sem_dados"
+        elif not ativa:
+            cam_estado = "em_repouso"
+        elif estado == "sem_sinal":
+            # O Pi parou de reportar: `gravando` deste payload é uma afirmação
+            # VELHA e não vale nada. Sem informação fresca, nenhuma câmera pode
+            # ser dada como saudável.
+            cam_estado = "sem_sinal"
+        # Pulso fresco: a IDADE DO SEGMENTO é o sinal primário (um stream
+        # congelado para de atualizar o mtime) e `gravando` (bytes crescendo)
+        # corrobora. OR, não AND: um pulso perdido não pode virar alarme falso.
+        elif (idade_cam is not None and idade_cam <= stale_s) or c.get("gravando"):
+            cam_estado = "capturando"
+        else:
+            cam_estado = "sem_sinal"
+        cams_out.append({
+            "cam_id": cid,
+            "nome": c.get("nome") or cid,
+            "estado": cam_estado,
+            "gravando": bool(c.get("gravando")),
+            "ultimo_segmento_em": ult,
+            "falhas": c.get("falhas") or 0,
+            "visto_em": quando,
+        })
+
+    # ── Disco: GB livres + projeção de dias no ritmo atual ──
+    disco = None
+    if ultimo and ultimo.get("disco_livre_gb") is not None:
+        livre = float(ultimo["disco_livre_gb"])
+        dias_rest = None
+        # Ritmo real medido entre o pulso mais antigo (24h) e o mais novo. Se o
+        # disco NÃO está caindo (a limpeza dá conta), não inventamos projeção.
+        antigos = [h for h in hbs if h.get("disco_livre_gb") is not None]
+        if len(antigos) >= 2:
+            velho = antigos[-1]
+            t0 = _parse_iso_utc(velho.get("recebido_em"))
+            if t0 and ultimo_em:
+                horas = (ultimo_em - t0).total_seconds() / 3600.0
+                queda = float(velho["disco_livre_gb"]) - livre
+                if horas >= 1 and queda > 0.05:
+                    dias_rest = round(livre / (queda / horas * 24), 1)
+        disco = {
+            "livre_gb": round(livre, 1),
+            "uso_pct": (round(float(ultimo["disco_uso_pct"]), 1)
+                        if ultimo.get("disco_uso_pct") is not None else None),
+            "dias_restantes": dias_rest,
+        }
+
+    # ── Turno de hoje: janelas + qual está ativa + falta quanto p/ a próxima ──
+    proxima = next((j for j in janelas if j[0] > local), None)
+    turno_out = {
+        "janelas": [{"inicio": i.strftime("%H:%M"), "fim": f.strftime("%H:%M"),
+                     "nome": n, "ativa": bool(ativa and ativa[0] == i)}
+                    for i, f, n in janelas],
+        "ativa": ({"inicio": ativa[0].strftime("%H:%M"), "fim": ativa[1].strftime("%H:%M"),
+                   "nome": ativa[2]} if ativa else None),
+        "proxima": ({"inicio": proxima[0].strftime("%H:%M"),
+                     "fim": proxima[1].strftime("%H:%M"),
+                     "em_min": int((proxima[0] - local).total_seconds() // 60)}
+                    if proxima else None),
+        "configurado": bool(janelas) or bool(turnos),
+    }
+
+    # ── Cobertura das últimas 24h em blocos de 15 min ──
+    # `esperado` vem do turno (o fundo da faixa); `houve` vem dos pulsos (o
+    # preenchimento). Buraco DENTRO do esperado = falha visível.
+    BLOCO_MIN = 15
+    n_blocos = (24 * 60) // BLOCO_MIN
+    # Ancora no FIM (agora, arredondado para CIMA no bloco) e volta 24h. Ancorar
+    # no início e arredondar para baixo deixava o bloco de AGORA fora do array —
+    # o pulso mais recente não aparecia na faixa, que é justamente o que o
+    # cliente olha primeiro.
+    fim_faixa = local.replace(second=0, microsecond=0)
+    resto = fim_faixa.minute % BLOCO_MIN
+    fim_faixa += timedelta(minutes=(BLOCO_MIN - resto) if resto else BLOCO_MIN)
+    ini_faixa = fim_faixa - timedelta(minutes=n_blocos * BLOCO_MIN)
+    marcados = set()
+    for h in hbs:
+        t = _parse_iso_utc(h.get("recebido_em"))
+        if not t:
+            continue
+        delta = (t.astimezone(local.tzinfo) - ini_faixa).total_seconds()
+        if delta >= 0:
+            idx = int(delta // (BLOCO_MIN * 60))
+            if 0 <= idx < n_blocos:
+                marcados.add(idx)
+    cobertura = []
+    for i in range(n_blocos):
+        t_ini = ini_faixa + timedelta(minutes=i * BLOCO_MIN)
+        jan_dia = _turno_janelas_do_dia(turnos, t_ini)
+        cobertura.append({
+            "inicio": t_ini.isoformat(),
+            "esperado": bool(_dentro_de_janela(jan_dia, t_ini)),
+            "houve": i in marcados,
+        })
+
+    return {
+        "estado": estado,
+        "desde": desde_ts.isoformat() if desde_ts else None,
+        "ultimo_heartbeat_em": ultimo.get("recebido_em") if ultimo else None,
+        "idade_s": int(idade_s) if idade_s is not None else None,
+        "device_id": ultimo.get("device_id") if ultimo else None,
+        "runner_versao": ultimo.get("runner_versao") if ultimo else None,
+        "estado_runner": ultimo.get("estado") if ultimo else None,
+        "cpu_temp_c": ultimo.get("cpu_temp_c") if ultimo else None,
+        "uptime_s": ultimo.get("uptime_s") if ultimo else None,
+        "cameras": cams_out,
+        "disco": disco,
+        "turno": turno_out,
+        "cobertura_24h": cobertura,
+        "intervalo_min": HEARTBEAT_INTERVALO_MIN,
+    }
 
 
 # ═════════════════════════════════════════════════════════════════════════

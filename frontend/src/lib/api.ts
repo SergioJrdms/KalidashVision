@@ -27,6 +27,7 @@ import type {
   ZonaBody,
   FrameReferencia,
   AnaliseDiaria,
+  SaudeEdge,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -252,6 +253,11 @@ export const api = {
     // Fase 35: análise diária (evolução por dia, janelas 7/30, tendência).
     analise: (processoId: string, dias = 30) =>
       req<AnaliseDiaria>(`/processos/${processoId}/dias?dias=${dias}`),
+  },
+  saude: {
+    // Fase 52: estado da borda JÁ INTERPRETADO (observado × turno esperado).
+    obter: (processoId: string) =>
+      req<SaudeEdge>(`/processos/${processoId}/saude`),
   },
   cameras: {
     listar: (processoId: string) =>

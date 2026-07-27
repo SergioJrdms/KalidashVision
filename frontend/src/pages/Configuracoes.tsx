@@ -11,6 +11,7 @@ import type { Go } from "../design/Shell";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { TurnoProcesso, IntervaloTurno } from "../lib/types";
 import { ZonasBloco } from "./ConfiguracoesZonas";
+import { SaudeBloco } from "./ConfiguracoesSaude";
 
 const DIAS = [
   { n: 1, abrev: "Seg", longo: "Segunda" },
@@ -45,6 +46,9 @@ export default function Configuracoes({ proc }: { proc: ProcHeaderMock; go: Go }
         </p>
       </div>
 
+      {/* Fase 52: saúde da borda vem PRIMEIRO — é a pergunta que o cliente
+          faz ao abrir esta tela ("meu sistema está de pé?"). */}
+      <SaudeBloco proc={proc} />
       <TurnosBloco proc={proc} />
       <ZonasBloco proc={proc} />
     </div>

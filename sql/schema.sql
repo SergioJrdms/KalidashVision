@@ -364,3 +364,64 @@ end $$;
 -- ════════════════════════════════════════════════════════════════════════
 -- insert into storage.buckets (id, name, public) values ('videos','videos', false)
 --   on conflict (id) do nothing;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 52 — HEARTBEAT DA BORDA (saúde do Pi)
+--
+-- O Pi roda sozinho dentro da fábrica numa campanha de 30 dias. Sem isto,
+-- uma câmera caída / ffmpeg morto / cartão cheio só aparece dias depois como
+-- BURACO no dashboard. Esta tabela é o "pulso" que o runner manda; a leitura
+-- (GET /processos/{id}/saude) cruza o pulso com `turnos_processo` para
+-- distinguir "parado porque é 22h" de "parado porque quebrou".
+--
+-- Escreve MUITO e lê pouco → retenção agressiva de 7 dias (ver o delete no
+-- fim do bloco). O banco free tem 500MB e é para os dados da campanha, não
+-- para log de saúde.
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists heartbeats_edge (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    device_id text not null,               -- estável por Pi (serial ou UUID em disco)
+    runner_versao text,
+    estado text not null,                  -- capturando|processando|ocioso|fora_de_turno
+    -- [{cam_id, nome, gravando, ultimo_segmento_em, ultimo_segmento_bytes, falhas}]
+    -- `gravando` = SEGMENTO CRESCENDO no disco, não "o RTSP respondeu": um
+    -- Hikvision pode responder no socket e entregar imagem preta/congelada.
+    cameras jsonb not null default '[]'::jsonb,
+    disco_livre_gb numeric,
+    disco_uso_pct numeric,
+    cpu_temp_c numeric,
+    uptime_s bigint,
+    turno_janela text,                     -- "06:00-11:30" (janela ativa no envio)
+    turno_deadline timestamptz,
+    recebido_em timestamptz not null default now()
+);
+
+-- Leitura é sempre "os últimos N deste processo" → índice casa exatamente.
+create index if not exists idx_hb_ctx on heartbeats_edge(empresa, processo, recebido_em desc);
+create index if not exists idx_hb_proc_recente on heartbeats_edge(processo, recebido_em desc);
+-- Suporte à limpeza por idade.
+create index if not exists idx_hb_recebido on heartbeats_edge(recebido_em);
+
+alter table heartbeats_edge enable row level security;
+
+drop policy if exists heartbeats_edge_select on heartbeats_edge;
+drop policy if exists heartbeats_edge_modify on heartbeats_edge;
+create policy heartbeats_edge_select on heartbeats_edge
+    for select using (empresa = auth_empresa());
+create policy heartbeats_edge_modify on heartbeats_edge
+    for all using (empresa = auth_empresa())
+    with check (empresa = auth_empresa());
+
+-- ⚠️ GRANT EXPLÍCITO — obrigatório para projetos criados depois de 30/05/2026,
+-- quando o Supabase parou de expor as tabelas de `public` automaticamente à
+-- Data API. SEM ISTO a tabela responde VAZIO, sem erro (o pior modo de falha).
+grant select, insert, update, delete on table heartbeats_edge to service_role;
+grant select on table heartbeats_edge to authenticated;
+
+-- Retenção: 7 dias. O backend também roda este delete periodicamente
+-- (throttle de 1x/hora em POST /edge/heartbeat), mas deixamos aqui para poder
+-- limpar na mão / agendar via pg_cron se um dia fizer sentido.
+delete from heartbeats_edge where recebido_em < now() - interval '7 days';

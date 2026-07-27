@@ -457,6 +457,49 @@ export interface ZonaBody {
 }
 
 // ── Análise diária "Dia a dia" (Fase 35) ────────────────────
+// ── Fase 52: saúde da borda (heartbeat do Pi) ────────────────────────────────
+// O estado vem JÁ INTERPRETADO do backend (observado × esperado pelo turno).
+// A tela só pinta — nenhum cálculo de "está online?" no frontend.
+export type EstadoSaude = "capturando" | "em_repouso" | "sem_sinal" | "sem_dados";
+
+export interface SaudeCamera {
+  cam_id: string;
+  nome: string;
+  estado: EstadoSaude;
+  gravando: boolean;
+  ultimo_segmento_em: string | null;
+  falhas: number;
+  visto_em: string | null;
+}
+
+export interface SaudeBlocoCobertura {
+  inicio: string;      // ISO
+  esperado: boolean;   // dentro de uma janela do turno
+  houve: boolean;      // chegou heartbeat neste bloco
+}
+
+export interface SaudeEdge {
+  estado: EstadoSaude;
+  desde: string | null;
+  ultimo_heartbeat_em: string | null;
+  idade_s: number | null;
+  device_id: string | null;
+  runner_versao: string | null;
+  estado_runner: string | null;
+  cpu_temp_c: number | null;
+  uptime_s: number | null;
+  cameras: SaudeCamera[];
+  disco: { livre_gb: number; uso_pct: number | null; dias_restantes: number | null } | null;
+  turno: {
+    janelas: { inicio: string; fim: string; nome: string; ativa: boolean }[];
+    ativa: { inicio: string; fim: string; nome: string } | null;
+    proxima: { inicio: string; fim: string; em_min: number } | null;
+    configurado: boolean;
+  };
+  cobertura_24h: SaudeBlocoCobertura[];
+  intervalo_min: number;
+}
+
 export interface DiaHora {
   hora: number;
   seg: number;
