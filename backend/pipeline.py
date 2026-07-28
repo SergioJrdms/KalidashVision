@@ -22,7 +22,7 @@ except ImportError:
     pass
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -4075,6 +4075,76 @@ def frame_para_jpeg_bytes(frame_bgr: np.ndarray, qualidade: int = 85) -> bytes:
     return buf.tobytes()
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 54 — CACHE DE FRAMES + EXPIRAÇÃO DO VÍDEO
+#
+# A campanha de 30 dias roda no free tier do Supabase (1GB de Storage). O vídeo
+# nunca era apagado → o bucket estourava em ~2 dias e a coleta morria.
+#
+# Não dá pra simplesmente apagar: a tela de eventos extraía os frames de forma
+# PREGUIÇOSA, baixando o vídeo inteiro no 1º acesso. A ordem certa é inverter —
+# AQUECER o cache no fim do processamento (o vídeo ainda está no disco local do
+# worker, egress adicional = ZERO) e só então apagar o binário.
+#
+# ⚠️ A limpeza SEMPRE opera sobre caminhos REGISTRADOS no banco (videos.caminho
+# / segmentos.storage_path). NUNCA listar o bucket e apagar por prefixo: os
+# JPEGs de __frames/ moram no mesmo bucket e são a evidência PERMANENTE — sem
+# o vídeo de origem, não há como regenerá-los.
+# ═════════════════════════════════════════════════════════════════════════
+# Versão do formato dos frames. FONTE ÚNICA: quem grava (pré-extração) e quem lê
+# (GET /eventos/{id}/frames) importam esta constante. Hardcodar "v2" nos dois
+# lados faria o cache silenciosamente deixar de casar no dia em que mudasse.
+FRAMES_VER = "v2"
+
+# 0 = apaga o binário assim que o processamento confirma; >0 = o vídeo sobrevive
+# N horas e a varredura o remove depois. Começa em 0 p/ caber no free tier.
+RETER_VIDEO_HORAS = float(os.environ.get("KV_RETER_VIDEO_HORAS", "0"))
+
+
+def _prefixo_frames(caminho: str) -> str:
+    """__frames/ ao lado do objeto — mesmo prefixo usado pelos endpoints."""
+    import posixpath
+    return posixpath.dirname(caminho) + "/__frames"
+
+
+def chave_frame_evento(caminho: str, evento_id: str, k: int) -> str:
+    """Chave do k-ésimo frame de um evento. Usada nos DOIS caminhos."""
+    return f"{_prefixo_frames(caminho)}/{evento_id}_{FRAMES_VER}_{k}.jpg"
+
+
+def chave_frame_segmento(caminho_seg: str, segmento_id: str,
+                         ini_s: float, fim_s: float, k: int) -> str:
+    """Chave do k-ésimo frame de uma JANELA de tempo do segmento (2º ângulo).
+    O arredondamento tem que ser idêntico ao do endpoint, senão o pré-aquecido
+    nunca é encontrado."""
+    chave_t = f"{int(round(ini_s))}_{int(round(fim_s))}"
+    return f"{_prefixo_frames(caminho_seg)}/seg_{segmento_id}_{chave_t}_{k}.jpg"
+
+
+def _nomes_no_prefixo(sb: Client, bucket: str, prefixo: str) -> set:
+    """Nomes já existentes no prefixo — UMA chamada de METADADOS (não baixa
+    arquivo, logo não gera egress). Serve à idempotência: chave que já existe
+    não é reescrita."""
+    try:
+        itens = sb.storage.from_(bucket).list(prefixo) or []
+        return {i.get("name") for i in itens if i.get("name")}
+    except Exception:
+        return set()          # sem listagem, seguimos gravando (upsert)
+
+
+def _tamanho_objeto(sb: Client, bucket: str, caminho: str) -> float:
+    """Tamanho em MB pelo METADADO da listagem (sem baixar). 0 se indisponível."""
+    import posixpath
+    try:
+        pasta, nome = posixpath.dirname(caminho), posixpath.basename(caminho)
+        for i in (sb.storage.from_(bucket).list(pasta) or []):
+            if i.get("name") == nome:
+                return float(((i.get("metadata") or {}).get("size") or 0)) / 1e6
+    except Exception:
+        pass
+    return 0.0
+
+
 def pre_extrair_frames(
     sb: Client,
     caminho_storage: str | None,
@@ -4098,16 +4168,28 @@ def pre_extrair_frames(
     (grátis). Tudo não-fatal. KV_PREEXTRAIR_FRAMES=off desliga."""
     import posixpath
 
-    stats = {"eventos": 0, "cam2": 0, "refs": 0, "falhas": 0}
+    stats = {"eventos": 0, "cam2": 0, "refs": 0, "falhas": 0, "pulados": 0}
     if os.environ.get("KV_PREEXTRAIR_FRAMES", "on") in ("off", "0", "false", "False"):
         return stats
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
 
+    import posixpath as _pp
+    _ja_tem: dict = {}          # prefixo → nomes existentes (1 listagem por prefixo)
+
     def _up(key: str, jpeg: bytes) -> None:
+        # Idempotente: chave que já existe NÃO é reescrita (reprocessar um vídeo
+        # não deve gastar ingress nem invalidar o que a tela já mostra).
+        pasta, nome = _pp.dirname(key), _pp.basename(key)
+        if pasta not in _ja_tem:
+            _ja_tem[pasta] = _nomes_no_prefixo(sb, bucket, pasta)
+        if nome in _ja_tem[pasta]:
+            stats["pulados"] += 1
+            return
         try:
             sb.storage.from_(bucket).upload(
                 key, jpeg, {"content-type": "image/jpeg", "upsert": "true"}
             )
+            _ja_tem[pasta].add(nome)
         except Exception as e:
             stats["falhas"] += 1
             log.warning(f"[pre-frames] upload falhou {key}: {e}")
@@ -4122,7 +4204,7 @@ def pre_extrair_frames(
                 jpegs = [frame_para_jpeg_bytes(c)
                          for c in extrair_3_frames_evento(ev, video_path_local)]
                 for k, j in enumerate(jpegs):
-                    _up(f"{prefix1}/{eid}_v2_{k}.jpg", j)
+                    _up(chave_frame_evento(caminho_storage, eid, k), j)
                 stats["eventos"] += 1
             except Exception as e:
                 stats["falhas"] += 1
@@ -4152,11 +4234,11 @@ def pre_extrair_frames(
             try:
                 ini_c = max(0.0, float(ev.get("tempo_inicio_s") or 0) + offset_s)
                 fim_c = max(0.0, float(ev.get("tempo_fim_s") or 0) + offset_s)
-                chave_t = f"{int(round(ini_c))}_{int(round(fim_c))}"
                 jpegs = [frame_para_jpeg_bytes(c)
                          for c in extrair_3_frames_tempo(video_path_sec, ini_c, fim_c)]
                 for k, j in enumerate(jpegs):
-                    _up(f"{prefix2}/seg_{segmento_id_sec}_{chave_t}_{k}.jpg", j)
+                    _up(chave_frame_segmento(storage_path_sec, segmento_id_sec,
+                                             ini_c, fim_c, k), j)
                 stats["cam2"] += 1
             except Exception as e:
                 stats["falhas"] += 1
@@ -4179,11 +4261,152 @@ def pre_extrair_frames(
                 log.warning(f"[pre-frames] ref {cam_id_sec}: {e}")
 
     log.info(
-        "[pre-frames] %d evento(s), %d strip(s) cam2, %d referência(s), %d falha(s) "
-        "— visualização servida do cache (egress ~zero)",
-        stats["eventos"], stats["cam2"], stats["refs"], stats["falhas"],
+        "[pre-frames] %d evento(s), %d strip(s) cam2, %d referência(s), "
+        "%d já existiam, %d falha(s) — visualização servida do cache (egress ~zero)",
+        stats["eventos"], stats["cam2"], stats["refs"], stats["pulados"], stats["falhas"],
     )
+    # `ok` é o portão da remoção do binário: UMA falha de upload já basta para
+    # segurar o vídeo. Bucket que cresce é problema visível; evento sem
+    # evidência é dado perdido e irrecuperável.
+    stats["ok"] = stats["falhas"] == 0
     return stats
+
+
+def _remover_objeto(sb: Client, bucket: str, caminho: str) -> float:
+    """Apaga UM objeto pelo caminho REGISTRADO. Devolve os MB liberados
+    (0 se já não existia). Nunca levanta."""
+    mb = _tamanho_objeto(sb, bucket, caminho)
+    try:
+        sb.storage.from_(bucket).remove([caminho])
+        return mb
+    except Exception as e:
+        log.warning(f"[retencao] falha ao remover {caminho}: {e}")
+        return 0.0
+
+
+def expirar_binarios_do_video(
+    sb: Client,
+    video_id: str,
+    caminho_storage: str | None,
+    *,
+    frames_ok: bool,
+    storage_path_sec: str | None = None,
+    segmento_id_sec: str | None = None,
+) -> dict:
+    """Fase 54 — apaga os BINÁRIOS (vídeo da cam1 + segmento da cam2) depois do
+    processamento confirmado, mantendo a LINHA em `videos` intacta.
+
+    Só apaga com as três condições verdadeiras:
+      1) o processamento chegou até aqui (sucesso, não parcial);
+      2) o aquecimento do cache terminou SEM falha (`frames_ok`);
+      3) as colunas de rastreio foram atualizadas.
+    Qualquer uma falhando: não apaga, loga warning e segue.
+
+    Com KV_RETER_VIDEO_HORAS > 0 apenas CARIMBA `frames_aquecidos_em` — quem
+    apaga depois do prazo é a varredura (`varrer_videos_expirados`)."""
+    resultado = {"removido": False, "mb": 0.0, "motivo": ""}
+    if not caminho_storage or caminho_storage.startswith(("/", "\\")):
+        resultado["motivo"] = "sem caminho no Storage (upload legado/local)"
+        return resultado
+    if not frames_ok:
+        resultado["motivo"] = "cache de frames incompleto"
+        log.warning("[retencao] vídeo %s MANTIDO: %s — sem os JPEGs, apagar o "
+                    "binário destruiria a evidência.", video_id, resultado["motivo"])
+        return resultado
+
+    agora = datetime.now(timezone.utc).isoformat()
+    try:
+        sb.table("videos").update({"frames_aquecidos_em": agora}).eq("id", video_id).execute()
+    except Exception as e:
+        resultado["motivo"] = f"não consegui carimbar frames_aquecidos_em ({e})"
+        log.warning("[retencao] vídeo %s MANTIDO: %s", video_id, resultado["motivo"])
+        return resultado
+
+    if RETER_VIDEO_HORAS > 0:
+        resultado["motivo"] = f"retenção de {RETER_VIDEO_HORAS:.0f}h ativa"
+        log.info("[retencao] vídeo %s fica no Storage por %.0fh (a varredura "
+                 "remove depois).", video_id, RETER_VIDEO_HORAS)
+        return resultado
+
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    mb = _remover_objeto(sb, bucket, caminho_storage)
+    # O 2º ângulo é outro objeto e NÃO tem linha em `videos` — sem removê-lo
+    # aqui, metade do bucket continuaria crescendo num setup de 2 câmeras.
+    if storage_path_sec:
+        mb += _remover_objeto(sb, bucket, storage_path_sec)
+    try:
+        sb.table("videos").update({"video_removido_em": agora}).eq("id", video_id).execute()
+    except Exception as e:
+        log.warning("[retencao] binário apagado mas video_removido_em não gravou "
+                    "(%s) — a varredura reconcilia depois.", e)
+    if segmento_id_sec:
+        try:
+            sb.table("segmentos").update({"storage_removido_em": agora}).eq(
+                "id", segmento_id_sec).execute()
+        except Exception:
+            pass          # coluna opcional; a evidência já está no cache
+    resultado.update({"removido": True, "mb": round(mb, 2), "motivo": "ok"})
+    log.info("[retencao] vídeo %s: binário removido (%.1f MB liberados) — os "
+             "frames seguem no cache.", video_id, mb)
+    return resultado
+
+
+def varrer_videos_expirados(sb: Client, empresa: str | None = None,
+                            limite: int = 500) -> dict:
+    """Fase 54 — rede de segurança: acha vídeos JÁ processados, com frames
+    aquecidos e binário ainda no Storage, e os apaga. Seguro rodar N vezes
+    (a 2ª passada não encontra nada, porque `video_removido_em` já está
+    preenchido). Respeita KV_RETER_VIDEO_HORAS."""
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    corte = datetime.now(timezone.utc) - timedelta(hours=max(0.0, RETER_VIDEO_HORAS))
+    try:
+        q = (
+            sb.table("videos")
+            .select("id, caminho, empresa, processado_em, frames_aquecidos_em")
+            .is_("video_removido_em", "null")
+            .not_.is_("frames_aquecidos_em", "null")
+            .limit(limite)
+        )
+        if empresa:
+            q = q.eq("empresa", empresa)
+        candidatos = q.execute().data or []
+    except Exception as e:
+        log.warning(f"[varredura] leitura falhou: {e}")
+        return {"apagados": 0, "mb": 0.0, "erro": str(e)}
+
+    apagados, mb_total, pulados = 0, 0.0, 0
+    for v in candidatos:
+        caminho = v.get("caminho")
+        if not caminho or str(caminho).startswith(("/", "\\")):
+            pulados += 1
+            continue                      # upload legado com path local
+        aquecido = _parse_iso_utc_pipe(v.get("frames_aquecidos_em"))
+        if RETER_VIDEO_HORAS > 0 and aquecido and aquecido > corte:
+            pulados += 1
+            continue                      # ainda dentro da janela de retenção
+        mb = _remover_objeto(sb, bucket, caminho)
+        try:
+            sb.table("videos").update({
+                "video_removido_em": datetime.now(timezone.utc).isoformat()
+            }).eq("id", v["id"]).execute()
+            apagados += 1
+            mb_total += mb
+        except Exception as e:
+            log.warning(f"[varredura] {v['id']}: removeu o objeto mas não carimbou ({e})")
+    log.info("[varredura] %d vídeo(s) apagado(s) · %.1f MB liberados · %d dentro "
+             "da retenção/ignorados", apagados, mb_total, pulados)
+    return {"apagados": apagados, "mb": round(mb_total, 2), "pulados": pulados}
+
+
+def _parse_iso_utc_pipe(s):
+    """ISO → datetime aware em UTC (None se não parsear)."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
 def extrair_3_frames_tempo(video_path: str, ini_s: float, fim_s: float) -> list[np.ndarray]:
@@ -6781,8 +7004,9 @@ def processar_video(
     # strips da cam2 e frames de referência) enquanto os vídeos ainda estão no
     # DISCO LOCAL — ver um evento depois custa ~50KB de egress, não o vídeo
     # inteiro (era a maior fonte de egress do Storage). Não-fatal.
+    frames_stats = {"ok": False}
     try:
-        pre_extrair_frames(
+        frames_stats = pre_extrair_frames(
             sb, caminho_storage, video_path, eventos, ids_principais,
             video_id, cam_id,
             video_path_sec=video_path_secundario,
@@ -6793,6 +7017,20 @@ def processar_video(
         )
     except Exception as e:  # noqa: BLE001
         log.warning(f"[pre-frames] pré-extração falhou (não-fatal): {e}")
+
+    # Fase 54: com o cache aquecido, o BINÁRIO do vídeo já cumpriu seu papel —
+    # apagá-lo é o que mantém a campanha de 30 dias dentro de 1GB. A linha em
+    # `videos` e os JPEGs de __frames/ permanecem. Não-fatal: falhar aqui só
+    # significa bucket maior, nunca dado perdido.
+    try:
+        expirar_binarios_do_video(
+            sb, video_id, caminho_storage,
+            frames_ok=bool(frames_stats.get("ok")),
+            storage_path_sec=storage_path_secundario,
+            segmento_id_sec=segmento_id_secundario,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[retencao] expiração do binário falhou (não-fatal): {e}")
 
     # Fase 18: as sugestões NÃO são mais geradas por vídeo (isso empilhava — 47
     # p/ 24 vídeos). O debouncer as recomputa 1× por rajada, sobre o AGREGADO,

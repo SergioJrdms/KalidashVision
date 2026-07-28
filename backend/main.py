@@ -53,6 +53,10 @@ from .pipeline import (
     evento_relevante_para_validacao,
     _parse_gravado_em_nome,
     _seg_token_nome,
+    FRAMES_VER,
+    chave_frame_evento,
+    chave_frame_segmento,
+    varrer_videos_expirados,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -712,6 +716,26 @@ def _limpar_heartbeats_antigos(sb) -> None:
         sb.table("heartbeats_edge").delete().lt("recebido_em", corte).execute()
     except Exception as e:                        # nunca derruba o POST
         log.warning(f"[saude] limpeza de heartbeats falhou (não-fatal): {e}")
+
+
+@app.post("/manutencao/videos/expirar")
+def expirar_videos(
+    todos: bool = Query(False, description="varre a empresa inteira (default: sim)"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 54 — varredura de segurança: acha vídeos JÁ processados, com frames
+    aquecidos e binário ainda no Storage, e os apaga.
+
+    É a rede contra o pipeline falhar em silêncio no meio da campanha de 30
+    dias. IDEMPOTENTE: rodar duas vezes seguidas não apaga nada na segunda
+    (quem já foi apagado tem `video_removido_em` preenchido e sai do filtro).
+
+    ⚠️ Opera SOMENTE sobre `videos.caminho` — nunca lista o bucket por prefixo.
+    Os JPEGs de `__frames/` moram no mesmo bucket e são a evidência permanente:
+    sem o vídeo de origem, não há como regenerá-los."""
+    sb = make_supabase_client()
+    r = varrer_videos_expirados(sb, empresa=None if todos else user.empresa)
+    return {"ok": True, **r}
 
 
 @app.post("/edge/heartbeat")
@@ -2491,10 +2515,13 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
         raise HTTPException(status.HTTP_403_FORBIDDEN)
 
     # Baixa o vídeo do Storage
-    vid = sb.table("videos").select("caminho, nome").eq("id", ev["video_id"]).execute().data
+    vid = (sb.table("videos")
+             .select("caminho, nome, video_removido_em")
+             .eq("id", ev["video_id"]).execute().data)
     if not vid:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Vídeo do evento não encontrado")
     caminho = vid[0]["caminho"]  # storage_path original
+    ev_video_removido = bool(vid[0].get("video_removido_em"))
     import tempfile
     from pathlib import Path
 
@@ -2513,12 +2540,11 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
     # Cache determinístico de frames já extraídos (JPEGs pequenos), ao lado do
     # vídeo no Storage. Evita rebaixar o vídeo inteiro a cada visualização
     # (causa do OOM ao navegar na Validação).
-    # O sufixo de VERSÃO (_v2) invalida caches antigos quando mudamos os
-    # parâmetros de extração (resolução/qualidade). Bump aqui sempre que o
-    # formato do frame mudar.
-    _FRAMES_VER = "v2"
+    # A VERSÃO do formato vem de pipeline.FRAMES_VER — FONTE ÚNICA, dividida com
+    # quem GRAVA o cache (pre_extrair_frames). Hardcodar "v2" aqui faria o cache
+    # deixar de casar em silêncio no dia em que o formato mudasse.
     frames_prefix = posixpath.dirname(caminho) + "/__frames"
-    frame_keys = [f"{frames_prefix}/{evento_id}_{_FRAMES_VER}_{k}.jpg" for k in (0, 1, 2)]
+    frame_keys = [chave_frame_evento(caminho, evento_id, k) for k in (0, 1, 2)]
 
     # 1) Tenta servir do cache. Para não fazer 3 round-trips num miss, sonda só
     #    o primeiro; se existir, baixa os 3 (cache foi escrito atômico junto).
@@ -2543,6 +2569,19 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
                 }
     except Exception:
         pass  # cache miss → extrai abaixo
+
+    # Fase 54: cache miss COM o binário já expirado. Não adianta (nem pode)
+    # tentar baixar — o objeto não existe mais. Degrada com motivo explícito em
+    # vez de estourar 500. Na prática isto quase nunca acontece: o cache é
+    # aquecido no fim do processamento, antes de o vídeo ser apagado.
+    if ev_video_removido:
+        return {
+            "frames": [],
+            "motivo": "video_expirado",
+            "detalhe": ("O vídeo original foi removido do armazenamento após o "
+                        "processamento. Os frames deste evento não foram "
+                        "encontrados no cache."),
+        }
 
     # 2) Cache miss: baixa o vídeo via STREAMING pro disco (pico de RAM ≈ 1 chunk
     #    de 64 KB), NUNCA com .download() (que carrega o arquivo todo na RAM).
@@ -2621,7 +2660,7 @@ def frames_segmento(
     sb = make_supabase_client()
     r = (
         sb.table("segmentos")
-        .select("empresa, storage_path")
+        .select("empresa, storage_path, storage_removido_em")
         .eq("id", segmento_id)
         .execute()
     )
@@ -2631,6 +2670,7 @@ def frames_segmento(
     if seg.get("empresa") != user.empresa:
         raise HTTPException(status.HTTP_403_FORBIDDEN)
     caminho = seg.get("storage_path")
+    seg_removido = bool(seg.get("storage_removido_em"))
     if not caminho:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Segmento sem caminho no storage")
 
@@ -2641,9 +2681,8 @@ def frames_segmento(
 
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
     # Cache determinístico (JPEGs pequenos) ao lado do segmento no Storage.
-    chave_t = f"{int(round(ini))}_{int(round(fim))}"
     frames_prefix = posixpath.dirname(caminho) + "/__frames"
-    frame_keys = [f"{frames_prefix}/seg_{segmento_id}_{chave_t}_{k}.jpg" for k in (0, 1, 2)]
+    frame_keys = [chave_frame_segmento(caminho, segmento_id, ini, fim, k) for k in (0, 1, 2)]
     try:
         primeiro = sb.storage.from_(bucket).download(frame_keys[0])
         if primeiro:
@@ -2656,6 +2695,18 @@ def frames_segmento(
                 return {"frames": ["data:image/jpeg;base64," + base64.b64encode(j).decode("ascii") for j in cached]}
     except Exception:
         pass
+
+    # Fase 54: o segmento da cam2 também é expirado após o processamento. As
+    # janelas que a tela realmente pede (a de cada evento) foram pré-aquecidas;
+    # uma janela ARBITRÁRIA fora dessas, com o binário já apagado, degrada aqui.
+    if seg_removido:
+        return {
+            "frames": [],
+            "motivo": "video_expirado",
+            "detalhe": ("O segmento original foi removido do armazenamento após "
+                        "o processamento. Só as janelas pré-extraídas dos "
+                        "eventos continuam disponíveis."),
+        }
 
     # Cache miss: streaming download → extrai por tempo.
     import httpx

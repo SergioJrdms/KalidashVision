@@ -425,3 +425,35 @@ grant select on table heartbeats_edge to authenticated;
 -- (throttle de 1x/hora em POST /edge/heartbeat), mas deixamos aqui para poder
 -- limpar na mão / agendar via pg_cron se um dia fizer sentido.
 delete from heartbeats_edge where recebido_em < now() - interval '7 days';
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 54 — EXPIRAÇÃO DO BINÁRIO DE VÍDEO (cache de frames aquecido antes)
+--
+-- A campanha de 30 dias roda no free tier (1GB de Storage). O vídeo nunca era
+-- apagado → o bucket estourava em ~2 dias. Agora o cache de frames é AQUECIDO
+-- no fim do processamento (com o arquivo ainda no disco do worker, egress
+-- adicional = ZERO) e só então o binário é removido. A LINHA em `videos`
+-- permanece: some o arquivo, não o dado.
+--
+-- ⚠️ NUNCA apagar por prefixo de diretório: os JPEGs de `__frames/` moram no
+-- MESMO bucket e são a evidência permanente. Toda limpeza opera sobre os
+-- caminhos REGISTRADOS (videos.caminho / segmentos.storage_path).
+-- ════════════════════════════════════════════════════════════════════════
+alter table videos    add column if not exists frames_aquecidos_em timestamptz;
+alter table videos    add column if not exists video_removido_em   timestamptz;
+-- O 2º ângulo (cam2) é outro objeto e NÃO tem linha em `videos`; sem este
+-- carimbo, metade do bucket continuaria crescendo num setup de 2 câmeras.
+alter table segmentos add column if not exists storage_removido_em timestamptz;
+
+-- A varredura filtra por estas colunas — sem índice ela varre a tabela inteira.
+create index if not exists idx_videos_expirar
+    on videos(empresa, video_removido_em, frames_aquecidos_em);
+
+-- ⚠️ GRANT EXPLÍCITO (projeto criado depois de 30/05/2026, quando o Supabase
+-- parou de expor `public` automaticamente à Data API). Sem grant, a leitura
+-- volta VAZIA e sem erro — o pior modo de falha possível.
+grant select, insert, update, delete on table videos    to service_role;
+grant select, insert, update, delete on table segmentos to service_role;
+grant select on table videos    to authenticated;
+grant select on table segmentos to authenticated;
