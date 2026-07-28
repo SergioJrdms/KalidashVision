@@ -500,3 +500,63 @@ grant select, insert, update, delete on table eventos         to service_role;
 grant select, insert, update, delete on table comportamentos  to service_role;
 grant select on table eventos        to authenticated;
 grant select on table comportamentos to authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 57 — CAMADAS DE DÚVIDA (regras declarativas) + PLACAR POR CAMADA
+--
+-- Verificações determinísticas e baratas (CPU, ZERO chamada extra ao VLM) que
+-- confrontam o rótulo com o que a cena mostra. Quando contradizem, o evento
+-- NÃO é corrigido — é marcado como DÚVIDA. A máquina não sabe qual lado está
+-- certo; quem sabe é o humano.
+--
+-- ⚠️ As camadas são DADOS, não código: o dono do processo escreve a décima
+-- regra sem deploy. Se cada regra exigisse mexer em Python, o desenvolvedor
+-- vira gargalo e o mecanismo morre por atrito.
+--
+-- MODO SOMBRA: a camada roda e CONTA quantas vezes dispararia, sem marcar
+-- dúvida nenhuma. É o que permite propor uma regra e medir o impacto ANTES de
+-- ligar, sem contaminar a campanha de 30 dias em andamento.
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists camadas_duvida (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    nome text not null,                     -- identificador legível, único por processo
+    -- Lista de rótulos em que a camada se aplica. ["*"] = todos.
+    quando_rotulo jsonb not null default '["*"]'::jsonb,
+    -- Condição declarativa. Objeto simples = AND entre as chaves; combinadores
+    -- "e" / "ou" / "nao" aninháveis. Ex.: {"pessoas_na_cena": {"<=": 1}}
+    se jsonb not null,
+    entao text not null default 'duvida',   -- só 'duvida' por ora (nunca corrige sozinha)
+    motivo text,                            -- texto mostrado ao validador
+    modo text not null default 'sombra',    -- 'ativa' | 'sombra' | 'off'
+    ordem int not null default 100,
+    criado_em timestamptz default now(),
+    atualizado_em timestamptz default now(),
+    constraint camadas_duvida_modo_chk check (modo in ('ativa','sombra','off')),
+    constraint camadas_duvida_entao_chk check (entao in ('duvida'))
+);
+create unique index if not exists idx_camadas_nome on camadas_duvida(empresa, processo, nome);
+create index if not exists idx_camadas_ctx on camadas_duvida(empresa, processo, modo);
+
+-- O evento carrega QUAIS camadas levantaram a dúvida — sem isso não há placar,
+-- e na vigésima camada ninguém sabe quais valem a pena.
+-- Formato: [{"nome": "...", "modo": "ativa|sombra", "motivo": "..."}]
+alter table eventos add column if not exists camadas_disparadas jsonb;
+alter table eventos add column if not exists em_duvida boolean not null default false;
+alter table eventos add column if not exists duvida_motivo text;
+create index if not exists idx_eventos_duvida on eventos(empresa, processo, em_duvida);
+
+alter table camadas_duvida enable row level security;
+drop policy if exists camadas_duvida_select on camadas_duvida;
+drop policy if exists camadas_duvida_modify on camadas_duvida;
+create policy camadas_duvida_select on camadas_duvida
+    for select using (empresa = auth_empresa());
+create policy camadas_duvida_modify on camadas_duvida
+    for all using (empresa = auth_empresa()) with check (empresa = auth_empresa());
+
+-- ⚠️ GRANT EXPLÍCITO (projeto pós-30/05/2026: sem grant a Data API devolve
+-- VAZIO e sem erro — o pior modo de falha).
+grant select, insert, update, delete on table camadas_duvida to service_role;
+grant select on table camadas_duvida to authenticated;

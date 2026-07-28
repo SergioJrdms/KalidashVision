@@ -59,6 +59,7 @@ from .pipeline import (
     varrer_videos_expirados,
     propagar_categoria_para_eventos,
     relatorio_propagacao_lean,
+    placar_camadas,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -718,6 +719,91 @@ def _limpar_heartbeats_antigos(sb) -> None:
         sb.table("heartbeats_edge").delete().lt("recebido_em", corte).execute()
     except Exception as e:                        # nunca derruba o POST
         log.warning(f"[saude] limpeza de heartbeats falhou (não-fatal): {e}")
+
+
+class CamadaDuvidaBody(BaseModel):
+    """Fase 57 — camada de dúvida DECLARATIVA (dados, não código)."""
+    nome: str = Field(min_length=1, max_length=80)
+    quando_rotulo: list[str] = Field(default_factory=lambda: ["*"])
+    se: dict = Field(default_factory=dict)
+    motivo: str | None = Field(default=None, max_length=400)
+    # `sombra` é o DEFAULT de propósito: regra nova entra medindo, não marcando.
+    modo: str = "sombra"
+    ordem: int = 100
+
+
+@app.get("/processos/{processo_id}/camadas")
+def listar_camadas(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = (
+        sb.table("camadas_duvida")
+        .select("id, nome, quando_rotulo, se, entao, motivo, modo, ordem, criado_em")
+        .eq("empresa", user.empresa).eq("processo", nome)
+        .order("ordem").execute()
+    )
+    return r.data or []
+
+
+@app.put("/processos/{processo_id}/camadas/{nome}")
+def salvar_camada(
+    processo_id: str, nome: str, body: CamadaDuvidaBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Cria ou atualiza uma camada. Vale no PRÓXIMO processamento — sem deploy."""
+    if body.modo not in ("ativa", "sombra", "off"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "modo deve ser 'ativa', 'sombra' ou 'off'.")
+    if not body.se:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "a condição 'se' não pode ser vazia.")
+    sb = make_supabase_client()
+    proc = _processo_nome(sb, user, processo_id)
+    linha = {
+        "empresa": user.empresa, "processo": proc, "nome": nome,
+        "quando_rotulo": body.quando_rotulo or ["*"], "se": body.se,
+        "entao": "duvida", "motivo": body.motivo, "modo": body.modo,
+        "ordem": body.ordem,
+        "atualizado_em": datetime.now(timezone.utc).isoformat(),
+    }
+    existe = (
+        sb.table("camadas_duvida").select("id")
+        .eq("empresa", user.empresa).eq("processo", proc).eq("nome", nome)
+        .execute().data
+    )
+    try:
+        if existe:
+            sb.table("camadas_duvida").update(linha).eq("id", existe[0]["id"]).execute()
+        else:
+            sb.table("camadas_duvida").insert(linha).execute()
+    except Exception as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Falha ao salvar: {e}")
+    return {"ok": True, "nome": nome, "modo": body.modo}
+
+
+@app.delete("/processos/{processo_id}/camadas/{nome}")
+def excluir_camada(processo_id: str, nome: str,
+                   user: CurrentUser = Depends(get_current_user)):
+    sb = make_supabase_client()
+    proc = _processo_nome(sb, user, processo_id)
+    sb.table("camadas_duvida").delete().eq("empresa", user.empresa).eq(
+        "processo", proc).eq("nome", nome).execute()
+    return {"ok": True}
+
+
+@app.get("/processos/{processo_id}/camadas/placar")
+def placar_das_camadas(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Fase 57 — quantas vezes cada camada disparou, quantos minutos colocou em
+    dúvida e a TAXA DE ACERTO (o humano mudou o rótulo × confirmou o original).
+
+    Camada que dispara muito e sempre confirma gera trabalho sem gerar
+    informação — e aqui está a evidência para desligá-la."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = placar_camadas(sb, user.empresa, nome)
+    if "erro" in r:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, r["erro"])
+    return {"ok": True, **r}
 
 
 @app.post("/processos/{processo_id}/manutencao/lean/propagar")

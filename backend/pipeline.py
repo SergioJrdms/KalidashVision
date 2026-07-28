@@ -2259,6 +2259,7 @@ def etapa_consolidar_principais(
     eventos_crus: list[dict],
     catalogo: dict[str, str],
     duracao_s: float,
+    camadas: list | None = None,
 ) -> list[dict]:
     """Fase 16: reduz os ~100 eventos crus a ~1 evento PRINCIPAL por minuto — a
     ação que RESUME o minuto. Por minuto, escolhe o rótulo DOMINANTE (o que mais
@@ -2328,12 +2329,259 @@ def etapa_consolidar_principais(
             "decidido_por_ia": escolhido != top_label,
             "principal": True,
         })
+        # Fase 57: CAMADAS DE DÚVIDA — determinísticas, em CPU, ZERO chamada
+        # extra ao VLM. Camada nunca corrige o rótulo: só marca dúvida.
+        if camadas:
+            fato = montar_fato_evento(principais[-1], no_bucket, share, len(dur_por_label))
+            em_duvida, disparos = avaliar_camadas(fato, escolhido, camadas)
+            if disparos:
+                principais[-1]["camadas_disparadas"] = disparos
+                principais[-1]["em_duvida"] = em_duvida
+                # Só as ATIVAS explicam a dúvida ao validador; as em sombra
+                # entram no placar sem aparecer na fila.
+                motivos = [d["motivo"] for d in disparos
+                           if d["modo"] == "ativa" and d.get("motivo")]
+                if motivos:
+                    principais[-1]["duvida_motivo"] = " · ".join(motivos)
+            principais[-1]["_fato"] = fato
     return principais
 
 
 # ═════════════════════════════════════════════════════════════════════════
 # ETAPA 5 · Persistência
 # ═════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 57 — CAMADAS DE DÚVIDA: regras declarativas, sombra e placar
+#
+# Camada NUNCA corrige o rótulo — só marca DÚVIDA. A máquina não sabe qual
+# lado está certo; quem sabe é o humano.
+#
+# Tudo aqui é determinístico e roda em CPU: ZERO chamada extra ao VLM.
+# ═════════════════════════════════════════════════════════════════════════
+# Deslocamento é normalizado pela ALTURA DA BBOX (alturas-de-corpo por segundo),
+# não em pixels. Pixel depende de resolução e distância da câmera — o mesmo
+# operador andando geraria números diferentes em cada câmera, e a décima regra
+# viraria adivinhação. Em alturas-de-corpo o número é comparável entre câmeras
+# e praticamente não precisa de calibração.
+MOV_LIMIAR_PADRAO = float(os.environ.get("KV_MOV_LIMIAR", "0.15"))
+
+_OPS = {
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "em": lambda a, b: a in (b or []),
+    "contem": lambda a, b: b in (a or []),
+}
+
+
+def _avaliar_condicao(cond, fato: dict) -> bool:
+    '''Condição declarativa → bool. Objeto simples = E entre as chaves;
+    combinadores "e" / "ou" / "nao" aninháveis.
+
+    SINAL AUSENTE NUNCA DISPARA: se o processo não tem zona de máquina, a regra
+    que fala de mão-na-máquina fica quieta. Falta de dado não é dúvida.'''
+    if not isinstance(cond, dict):
+        return False
+    for chave, valor in cond.items():
+        if chave == "e":
+            if not all(_avaliar_condicao(c, fato) for c in (valor or [])):
+                return False
+            continue
+        if chave == "ou":
+            if not any(_avaliar_condicao(c, fato) for c in (valor or [])):
+                return False
+            continue
+        if chave == "nao":
+            if _avaliar_condicao(valor, fato):
+                return False
+            continue
+        if chave not in fato or fato[chave] is None:
+            return False                      # sinal indisponível → não dispara
+        atual = fato[chave]
+        if not isinstance(valor, dict):       # açúcar: {"maos_na_maquina": false}
+            valor = {"==": valor}
+        for op, esperado in valor.items():
+            fn = _OPS.get(op)
+            if fn is None:
+                log.warning("[camadas] operador desconhecido %r — regra ignorada", op)
+                return False
+            try:
+                if not fn(atual, esperado):
+                    return False
+            except TypeError:
+                return False                  # tipos incompatíveis → não dispara
+    return True
+
+
+def _rotulo_casa(quando, label: str) -> bool:
+    """`quando_rotulo` é sempre LISTA. ['*'] vale para todos os rótulos."""
+    lista = quando if isinstance(quando, list) else [quando]
+    return "*" in lista or label in lista
+
+
+def avaliar_camadas(fato: dict, label: str, camadas: list) -> tuple:
+    '''(em_duvida, disparos) — FUNÇÃO PURA, testável sem banco.
+
+    `em_duvida` só considera camadas ATIVAS. As em SOMBRA entram em `disparos`
+    (para o placar contar) mas não marcam o evento: é assim que o dono do
+    processo mede o impacto de uma regra nova antes de ligá-la.'''
+    disparos, em_duvida = [], False
+    for c in sorted(camadas or [], key=lambda x: x.get("ordem", 100)):
+        modo = (c.get("modo") or "sombra").lower()
+        if modo == "off":
+            continue
+        if not _rotulo_casa(c.get("quando_rotulo") or ["*"], label):
+            continue
+        try:
+            if not _avaliar_condicao(c.get("se") or {}, fato):
+                continue
+        except Exception as e:
+            log.warning("[camadas] %s falhou ao avaliar (ignorada): %s", c.get("nome"), e)
+            continue
+        disparos.append({"nome": c.get("nome"), "modo": modo,
+                         "motivo": c.get("motivo") or ""})
+        if modo == "ativa":
+            em_duvida = True
+    return em_duvida, disparos
+
+
+def montar_fato_evento(rep: dict, no_bucket: list, share: float,
+                       n_rotulos: int, mov_limiar: float = None) -> dict:
+    '''Sinais da cena para UM evento principal, montados do que a detecção já
+    produziu. Nada aqui custa inferência nova.'''
+    limiar = MOV_LIMIAR_PADRAO if mov_limiar is None else mov_limiar
+    eventos = [e for e, _ in no_bucket]
+    pessoas = {e.get("pessoa_track_id") for e in eventos if e.get("pessoa_track_id") is not None}
+    zonas = {e.get("zona_contexto") for e in eventos if e.get("zona_contexto")}
+    no_posto = {e.get("pessoa_track_id") for e in eventos
+                if e.get("papel_pessoa") == "operador"}
+
+    # Deslocamento em ALTURAS-DE-CORPO por segundo (invariante de escala).
+    desloc_rel = None
+    try:
+        centros = []
+        for e in eventos:
+            b = e.get("bbox_inicio")
+            if not b or len(b) < 4:
+                continue
+            x1, y1, x2, y2 = (float(v) for v in b[:4])
+            alt = max(1.0, y2 - y1)
+            centros.append((((x1 + x2) / 2), ((y1 + y2) / 2), alt, e.get("tempo_inicio_s") or 0))
+        if len(centros) >= 2:
+            centros.sort(key=lambda c: c[3])
+            (ax, ay, aalt, at), (bx, by, balt, bt) = centros[0], centros[-1]
+            dt = max(0.5, float(bt) - float(at))
+            dist = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+            desloc_rel = round(dist / max(1.0, (aalt + balt) / 2) / dt, 3)
+    except Exception:
+        desloc_rel = None
+
+    fato = {
+        "pessoas_na_cena": len(pessoas),
+        "pessoas_no_posto": len(no_posto),
+        "zonas_ocupadas": sorted(z for z in zonas),
+        "concordancia": round(float(share), 2),
+        "n_rotulos_no_minuto": int(n_rotulos),
+        "duracao_s": round(float(rep.get("tempo_fim_s") or 0)
+                           - float(rep.get("tempo_inicio_s") or 0), 1),
+    }
+    if desloc_rel is not None:
+        fato["deslocamento_rel"] = desloc_rel
+        # Abstração de chão de fábrica: quem escreve a regra pensa em "parado"
+        # ou "andando", não em pixels.
+        fato["movimento"] = "andando" if desloc_rel >= limiar else "parado"
+    # `maos_na_maquina` só existe quando há zona 'maquina' desenhada (Fase 44).
+    maos = [e.get("maos_maquina") for e in eventos if e.get("maos_maquina") is not None]
+    if maos:
+        fato["maos_na_maquina"] = any(maos)
+    return fato
+
+
+def carregar_camadas_duvida(sb: Client, empresa: str, processo: str) -> list:
+    """Camadas do processo (ativas + sombra). Falha → lista vazia: sem camada,
+    o pipeline segue exatamente como antes."""
+    try:
+        return (
+            sb.table("camadas_duvida")
+            .select("nome, quando_rotulo, se, entao, motivo, modo, ordem")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .neq("modo", "off")
+            .execute().data
+        ) or []
+    except Exception as e:
+        log.warning("[camadas] não carregadas (%s) — seguindo sem camadas.", e)
+        return []
+
+
+def placar_camadas(sb: Client, empresa: str, processo: str) -> dict:
+    '''Fase 57 — PLACAR POR CAMADA: quantas vezes disparou, quantos minutos
+    colocou em dúvida e a TAXA DE ACERTO.
+
+    Acerto = o humano mudou o rótulo (corrigiu) ou descartou o evento.
+    Falso alarme = o humano CONFIRMOU o rótulo original — a camada gerou
+    trabalho sem gerar informação.
+
+    Camada que dispara muito e sempre confirma precisa ser desligada COM
+    EVIDÊNCIA. Sem este placar, na vigésima camada a fila enche de alarme falso
+    e o mecanismo morre por descrédito.'''
+    def _fab():
+        return (
+            sb.table("eventos")
+            .select("id, camadas_disparadas, tempo_inicio_s, tempo_fim_s, "
+                    "validado_humano, validacao_correto, label_corrigido")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .not_.is_("camadas_disparadas", "null")
+            .order("id")
+        )
+    try:
+        eventos = _scan_todos(_fab)
+    except Exception as e:
+        return {"erro": f"leitura falhou: {e}", "camadas": []}
+
+    agg: dict = {}
+    for e in eventos:
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        validado = bool(e.get("validado_humano"))
+        # confirmou o rótulo original = falso alarme da camada
+        confirmou = validado and e.get("validacao_correto") is True and not e.get("label_corrigido")
+        acertou = validado and not confirmou
+        for d in (e.get("camadas_disparadas") or []):
+            nome = d.get("nome")
+            if not nome:
+                continue
+            a = agg.setdefault(nome, {"nome": nome, "modo": d.get("modo"), "disparos": 0,
+                                      "segundos": 0.0, "validados": 0, "acertos": 0,
+                                      "falsos_alarmes": 0})
+            a["disparos"] += 1
+            a["segundos"] += dur
+            a["modo"] = d.get("modo") or a["modo"]
+            if validado:
+                a["validados"] += 1
+                a["acertos"] += 1 if acertou else 0
+                a["falsos_alarmes"] += 0 if acertou else 1
+
+    saida = []
+    for a in agg.values():
+        saida.append({
+            "nome": a["nome"], "modo": a["modo"],
+            "disparos": a["disparos"],
+            "minutos_em_duvida": round(a["segundos"] / 60, 1),
+            "validados": a["validados"],
+            "acertos": a["acertos"],
+            "falsos_alarmes": a["falsos_alarmes"],
+            # None enquanto ninguém validou — não inventamos taxa sem amostra.
+            "taxa_acerto": (round(a["acertos"] / a["validados"] * 100, 1)
+                            if a["validados"] else None),
+        })
+    saida.sort(key=lambda x: -x["minutos_em_duvida"])
+    return {"camadas": saida, "total_disparos": sum(c["disparos"] for c in saida)}
+
+
 def etapa_persistir(
     sb: Client,
     empresa: str,
@@ -2485,6 +2733,12 @@ def etapa_persistir(
             # (comportamento antigo — o filtro downstream mantém True + None).
             "principal": e.get("principal"),
         }
+        # Fase 57: dúvida levantada pelas camadas (o placar depende disto).
+        if e.get("camadas_disparadas"):
+            row["camadas_disparadas"] = e["camadas_disparadas"]
+            row["em_duvida"] = bool(e.get("em_duvida"))
+            if e.get("duvida_motivo"):
+                row["duvida_motivo"] = e["duvida_motivo"]
         _cat_h = cat_ingestao.get(e["comportamento_label"])
         if _cat_h:
             row["categoria_lean"] = _cat_h
@@ -7235,8 +7489,11 @@ def processar_video(
     principais: list[dict] = []
     if os.environ.get("KV_PRINCIPAL_ENABLE", "on") not in ("off", "0", "false", "False"):
         try:
+            # Fase 57: camadas de dúvida carregadas do banco — DADOS, não
+            # código. O dono do processo escreve a décima regra sem deploy.
             principais = etapa_consolidar_principais(
-                eventos_crus, catalogo, info_video["duracao_s"]
+                eventos_crus, catalogo, info_video["duracao_s"],
+                camadas=carregar_camadas_duvida(sb, empresa, processo),
             )
         except Exception as e:  # noqa: BLE001
             log.warning(f"[principal] consolidação falhou (não-fatal): {e}")
