@@ -45,7 +45,7 @@ export interface ProcHeaderMock {
 export interface CompMock { id: string; nome: string; pct: number; seg: number; cat: LeanShort; origem: string | null }
 export interface SugMock { id: string; prioridade: string; area: string; sugestao: string; impacto: string; situacao: string; causa: string; comportamentos: string[]; voltou: boolean }
 export interface DetMock {
-  snapshot: { va: number; desp: number; none: number; tempoObservadoMin: number; videos: number; validadoPct: number; topComportamento: { nome: string; pct: number } };
+  snapshot: { va: number; desp: number; vazio: number; none: number; tempoObservadoMin: number; videos: number; validadoPct: number; topComportamento: { nome: string; pct: number } };
   comportamentos: CompMock[];
   pareto: { nome: string; pct: number; acc: number; cat: LeanShort }[];
   transicoes: { de: string; para: string; vezes: number }[];
@@ -145,6 +145,7 @@ export function mapDashboard(d: DashboardData): DetMock {
     snapshot: {
       va: Math.round(cv.valor_agregado_pct),
       desp: Math.round(cv.desperdicio_pct),
+      vazio: Math.round(cv.posto_vazio_pct || 0),
       none: Math.round(cv.nao_classificado_pct),
       tempoObservadoMin: s.tempo_total_observado_min,
       videos: s.videos_analisados,

@@ -118,7 +118,11 @@ export interface DistribuicaoComportamento {
 
 export interface ComposicaoValor {
   valor_agregado_pct: number;
+  // Inclui posto_vazio (o card não muda de número). `posto_vazio_pct` abaixo é
+  // a parcela dele, para a tela mostrar a fatia e a decomposição.
   desperdicio_pct: number;
+  posto_vazio_pct?: number;
+  posto_vazio_s?: number;
   nao_classificado_pct: number;
   tempo_total_s: number;
   por_categoria_s: Record<string, number>;

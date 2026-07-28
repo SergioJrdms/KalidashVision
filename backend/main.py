@@ -2026,6 +2026,15 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     }
     composicao_valor["tempo_total_s"] = round(total_tempo, 1)
     composicao_valor["por_categoria_s"] = {k: round(v, 1) for k, v in soma_por_cat.items()}
+    # Fase 56: `posto_vazio` (operador AUSENTE) segue contando DENTRO de
+    # desperdicio_pct — o número do card não muda —, mas vai separado aqui para
+    # a tela poder mostrar a fatia e dizer "dos quais X pts são posto vazio".
+    # Sem isso, "operador ausente" e "operador presente sem agregar valor" —
+    # problemas com causas e ações completamente diferentes — viram um número só.
+    _vazio_s = sum(d.get("tempo_total_s", 0) for d in dist_enriquecida
+                   if d.get("comportamento") == "posto_vazio")
+    composicao_valor["posto_vazio_pct"] = round(_vazio_s / total_tempo * 100, 1)
+    composicao_valor["posto_vazio_s"] = round(_vazio_s, 1)
 
     # Pareto: top comportamentos com acumulado
     pareto = [

@@ -432,6 +432,7 @@ function KpisExecutivos({ det }: { det: DetMock }) {
   const desp = cat["desperdicio"];
   const va = cat["valor_agregado"];
   const despPct = desp ? Math.round(desp.pct) : s.desp;
+  const vazioPct = Math.round(s.vazio || 0);
   const vaPct = va ? Math.round(va.pct) : s.va;
   const trend = iq?.periodo?.tendencia_desp_pp ?? null;
 
@@ -440,9 +441,13 @@ function KpisExecutivos({ det }: { det: DetMock }) {
       <KpiHero
         label="Tempo desperdiçado"
         valor={`${despPct}%`}
+        // Fase 56: o TOTAL não muda — posto vazio segue somando aqui. O
+        // subtítulo separa "operador ausente" de "operador presente sem agregar
+        // valor": são problemas com causas e ações diferentes.
+        sub={vazioPct > 0 ? `${vazioPct} pts são posto vazio` : undefined}
         icon="alert-triangle"
         cor={leanCor("desp")}
-        ajuda="Parte do tempo observado classificada como desperdício (Lean). É o número a atacar primeiro — cada ponto aqui é tempo que não vira valor."
+        ajuda="Parte do tempo observado classificada como desperdício (Lean). Inclui o posto vazio (operador ausente), destacado à parte porque a ação para resolver é outra."
       />
       <KpiHero
         label="Tempo produtivo"
@@ -536,7 +541,7 @@ function KpiVA({ det }: { det: DetMock }) {
         Índice de valor agregado <Help text="% do tempo em comportamentos de 'valor agregado' (Lean). A métrica-rainha: quanto da operação entrega o que o cliente paga." width={230} />
       </div>
       <div className="font-display tnum" style={{ fontSize: 30, fontWeight: 700, color: "var(--ink)", marginTop: 4 }}>{s.va}%</div>
-      <div style={{ marginTop: 10 }}><LeanBar va={s.va} desp={s.desp} none={s.none} showLegend /></div>
+      <div style={{ marginTop: 10 }}><LeanBar va={s.va} desp={Math.max(0, s.desp - (s.vazio || 0))} vazio={s.vazio || 0} none={s.none} showLegend /></div>
     </Card>
   );
 }
@@ -693,7 +698,12 @@ function ResumoOportunidades({ det }: { det: DetMock }) {
 
 function ComposicaoPanel({ det }: { det: DetMock }) {
   const s = det.snapshot;
-  const data = [{ v: s.va, c: "var(--va)", n: "Produtivo" }, { v: s.desp, c: "var(--desp)", n: "Desperdício" }, { v: s.none, c: "var(--none)", n: "Não classificado" }];
+  const data = [
+    { v: s.va, c: "var(--va)", n: "Produtivo" },
+    { v: Math.max(0, s.desp - (s.vazio || 0)), c: "var(--desp)", n: "Desperdício" },
+    { v: s.vazio || 0, c: "#8a8598", n: "Posto vazio" },
+    { v: s.none, c: "var(--none)", n: "Não classificado" },
+  ];
   return (
     <Card style={{ padding: 20 }}>
       <PanelHead titulo="Produtivo × não-produtivo" ajuda="Como o tempo total se distribui entre produtivo (valor agregado) e não-produtivo (desperdício + não classificado). A categoria vem da IA — você pode reclassificar." leitura="Há espaço claro para mover tempo de Desperdício para Produtivo." />
