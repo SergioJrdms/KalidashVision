@@ -457,3 +457,46 @@ grant select, insert, update, delete on table videos    to service_role;
 grant select, insert, update, delete on table segmentos to service_role;
 grant select on table videos    to authenticated;
 grant select on table segmentos to authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 55 — PROPAGAÇÃO da categoria Lean: comportamento → eventos
+--
+-- A categoria nasce no COMPORTAMENTO (IA ou gestor) e precisa descer para os
+-- EVENTOS. Antes isso só acontecia no caminho humano, e mesmo lá com escopo
+-- errado — a IA classificava depois dos eventos existirem e eles ficavam para
+-- trás (336 eventos de `operar_torno` sem categoria, por exemplo).
+--
+-- PRECEDÊNCIA (inviolável):  humano (no evento) > aprendido > herdado
+-- Só recebem escrita eventos com categoria_lean NULL ou origem 'herdado'.
+-- ════════════════════════════════════════════════════════════════════════
+-- A propagação filtra por (empresa, processo, label efetivo). O índice antigo
+-- não tinha `processo` e a busca por `label_corrigido` não tinha índice nenhum
+-- — numa tabela recebendo escrita da campanha, isso é varredura cara.
+create index if not exists idx_eventos_lean_prop
+    on eventos(empresa, processo, comportamento_label);
+create index if not exists idx_eventos_lean_prop_corrigido
+    on eventos(empresa, processo, label_corrigido)
+    where label_corrigido is not null;
+
+-- Backfill idempotente (o endpoint POST .../manutencao/lean/propagar faz o
+-- mesmo, com relatório e dry-run). Respeita a precedência: nunca toca em
+-- evento com origem 'humano' ou 'aprendido'.
+update eventos e
+   set categoria_lean        = c.categoria_lean,
+       categoria_lean_origem = 'herdado'
+  from comportamentos c
+ where c.empresa  = e.empresa
+   and c.processo = e.processo
+   and c.label    = coalesce(e.label_corrigido, e.comportamento_label)
+   and c.categoria_lean is not null
+   and (e.categoria_lean is null or e.categoria_lean_origem = 'herdado')
+   and (e.categoria_lean is distinct from c.categoria_lean
+        or e.categoria_lean_origem is distinct from 'herdado');
+
+-- ⚠️ GRANT EXPLÍCITO (projeto pós-30/05/2026: `public` não é mais exposto
+-- automaticamente à Data API — sem grant a leitura volta VAZIA e sem erro).
+grant select, insert, update, delete on table eventos         to service_role;
+grant select, insert, update, delete on table comportamentos  to service_role;
+grant select on table eventos        to authenticated;
+grant select on table comportamentos to authenticated;

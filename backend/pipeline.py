@@ -2408,6 +2408,26 @@ def etapa_persistir(
                 }
             ).execute()
 
+    # Fase 55 — HERANÇA NA INGESTÃO: se o comportamento já tem categoria, o
+    # evento NASCE com ela (origem 'herdado'). Sem isto, todo vídeo novo
+    # reacumula cinza que a propagação teria de limpar depois.
+    # Rótulo sem categoria (ex.: `acao_indefinida`, que fica sem categoria de
+    # propósito desde a Fase 49) simplesmente não entra no mapa — nunca é chutado.
+    cat_ingestao: dict[str, str] = {}
+    try:
+        _cats = (
+            sb.table("comportamentos")
+            .select("label, categoria_lean")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .execute()
+            .data
+        ) or []
+        cat_ingestao = {c["label"]: c["categoria_lean"]
+                        for c in _cats if c.get("categoria_lean")}
+    except Exception as e:
+        log.warning(f"[lean] herança na ingestão indisponível (não-fatal): {e}")
+
     linhas_eventos: list[dict] = []
     n_auto_validados = 0
     for e in eventos:
@@ -2447,6 +2467,10 @@ def etapa_persistir(
             # (comportamento antigo — o filtro downstream mantém True + None).
             "principal": e.get("principal"),
         }
+        _cat_h = cat_ingestao.get(e["comportamento_label"])
+        if _cat_h:
+            row["categoria_lean"] = _cat_h
+            row["categoria_lean_origem"] = "herdado"
         if auto_validado:
             row["validacao_correto"] = True
             row["validado_em"] = datetime.utcnow().isoformat()
@@ -2477,6 +2501,9 @@ def etapa_persistir(
             # filtro em memória `principal is not False`.
             "validado_humano": True,
             "principal": False,
+            **({"categoria_lean": cat_ingestao[e["comportamento_label"]],
+                "categoria_lean_origem": "herdado"}
+               if cat_ingestao.get(e["comportamento_label"]) else {}),
         })
 
     CHUNK = 100
@@ -3178,6 +3205,185 @@ CATEGORIAS_LEAN_VALIDAS = {"valor_agregado", "desperdicio"}
 LABEL_INDEFINIDA = "acao_indefinida"
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 55 — PROPAGAÇÃO da categoria Lean: comportamento → eventos
+#
+# PRECEDÊNCIA (a regra que não se quebra):
+#     humano (no evento)  >  aprendido  >  herdado (do comportamento)
+#
+# Só são elegíveis para escrita eventos com `categoria_lean IS NULL` OU
+# `categoria_lean_origem = 'herdado'`. Um evento marcado à mão pelo gestor é
+# INVIOLÁVEL: sobrescrevê-lo destrói a confiança no produto e é pior que o cinza.
+#
+# `acao_indefinida` (e qualquer rótulo cujo comportamento esteja com categoria
+# NULA de propósito) fica de fora automaticamente: a propagação só copia
+# categoria EXISTENTE, nunca inventa uma.
+# ═════════════════════════════════════════════════════════════════════════
+def propagar_categoria_para_eventos(
+    sb: Client, empresa: str, processo: str, label: str, categoria: str | None,
+    *, dry_run: bool = False,
+) -> int:
+    """Desce a categoria do comportamento para os eventos ELEGÍVEIS daquele
+    (empresa, processo, label). Retorna quantos eventos foram (ou seriam)
+    afetados. Não-fatal: falha aqui nunca derruba quem chamou.
+
+    Casa pelo label EFETIVO — `label_corrigido` quando existe, senão
+    `comportamento_label`. Filtrar só por `comportamento_label` deixaria de
+    fora justamente os eventos que o gestor renomeou na validação, que são os
+    que ele mais espera ver classificados.
+
+    `categoria=None` NÃO limpa evento nenhum: liberar o comportamento para a IA
+    reclassificar não pode apagar o que já foi herdado."""
+    if not categoria or not label:
+        return 0
+
+    def _aplica(coluna_filtro: str, so_sem_correcao: bool) -> int:
+        try:
+            q = (
+                sb.table("eventos")
+                .select("id") if dry_run else sb.table("eventos").update(
+                    {"categoria_lean": categoria, "categoria_lean_origem": "herdado"}
+                )
+            )
+            q = q.eq("empresa", empresa).eq("processo", processo)
+            q = q.eq(coluna_filtro, label)
+            if so_sem_correcao:
+                q = q.is_("label_corrigido", "null")
+            # PRECEDÊNCIA: só NULL ou já-herdado. 'humano' e 'aprendido' ficam.
+            q = q.or_("categoria_lean.is.null,categoria_lean_origem.eq.herdado")
+            return len(q.execute().data or [])
+        except Exception as e:
+            log.warning("[lean] propagação %s=%s falhou (não-fatal): %s",
+                        coluna_filtro, label, e)
+            return 0
+
+    # Dois passes em vez de um OR aninhado: o PostgREST aceita, mas a forma
+    # aninhada é frágil e um erro de sintaxe aqui passaria despercebido.
+    n = _aplica("comportamento_label", so_sem_correcao=True)
+    n += _aplica("label_corrigido", so_sem_correcao=False)
+    return n
+
+
+def relatorio_propagacao_lean(
+    sb: Client, empresa: str, processo: str, *, dry_run: bool = True,
+) -> dict:
+    """Fase 55 — backfill idempotente + diagnóstico do tempo cinza.
+
+    `dry_run=True` calcula e devolve o relatório SEM escrever nada.
+
+    Devolve duas coisas bem diferentes, e a distinção importa:
+      • `propagacao`  — eventos cuja categoria JÁ EXISTE no comportamento e só
+        não desceu. É o que este backfill resolve.
+      • `cinza_real`  — rótulos com tempo observado cujo COMPORTAMENTO está sem
+        categoria. Esses NÃO são resolvidos por propagação nenhuma: alguém (IA
+        ou gestor) precisa classificar o comportamento. É daqui que sai o
+        "não classificado" do dashboard.
+    """
+    def _fab_ev():
+        return (
+            sb.table("eventos")
+            .select("id, comportamento_label, label_corrigido, tempo_inicio_s, "
+                    "tempo_fim_s, categoria_lean, categoria_lean_origem, principal, "
+                    "validacao_correto")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .order("id")
+        )
+
+    try:
+        eventos = _scan_todos(_fab_ev)
+    except Exception as e:
+        return {"erro": f"leitura de eventos falhou: {e}"}
+    try:
+        comps = (
+            sb.table("comportamentos")
+            .select("label, categoria_lean, categoria_lean_origem")
+            .eq("empresa", empresa)
+            .eq("processo", processo)
+            .execute().data
+        ) or []
+    except Exception as e:
+        return {"erro": f"leitura de comportamentos falhou: {e}"}
+    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+
+    def _dur(e):
+        return max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+
+    elegiveis: dict = {}                 # label → {n, seg, categoria}
+    fora = {"override_humano": {"n": 0, "seg": 0.0},
+            "ja_classificado": {"n": 0, "seg": 0.0},
+            "sem_categoria_no_comportamento": {"n": 0, "seg": 0.0},
+            "rotulo_sem_comportamento": {"n": 0, "seg": 0.0}}
+    cinza: dict = {}                     # label → {n, seg}
+
+    for e in eventos:
+        label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
+        seg = _dur(e)
+        cat_comp = cat_por_label.get(label)
+        origem_ev = e.get("categoria_lean_origem")
+
+        if not cat_comp:
+            # A resposta NÃO está no banco: é cinza de verdade.
+            chave = ("sem_categoria_no_comportamento" if label in cat_por_label
+                     else "rotulo_sem_comportamento")
+            fora[chave]["n"] += 1
+            fora[chave]["seg"] += seg
+            # Só conta no diagnóstico o que pesa no dashboard (principal, não refutado).
+            if e.get("principal") is not False and e.get("validacao_correto") is not False:
+                c = cinza.setdefault(label, {"n": 0, "seg": 0.0})
+                c["n"] += 1
+                c["seg"] += seg
+            continue
+
+        if origem_ev == "humano":
+            fora["override_humano"]["n"] += 1
+            fora["override_humano"]["seg"] += seg
+            continue
+        # PRECEDÊNCIA: elegível = sem categoria OU já herdado.
+        if e.get("categoria_lean") and origem_ev != "herdado":
+            fora["ja_classificado"]["n"] += 1
+            fora["ja_classificado"]["seg"] += seg
+            continue
+        if e.get("categoria_lean") == cat_comp and origem_ev == "herdado":
+            continue                     # já está certo → idempotência
+        d = elegiveis.setdefault(label, {"n": 0, "seg": 0.0, "categoria": cat_comp})
+        d["n"] += 1
+        d["seg"] += seg
+
+    escritos = 0
+    if not dry_run:
+        for label, d in elegiveis.items():
+            escritos += propagar_categoria_para_eventos(
+                sb, empresa, processo, label, d["categoria"])
+
+    def _fmt(m: dict) -> list:
+        return sorted(
+            ({"label": k, "eventos": v["n"], "minutos": round(v["seg"] / 60, 1),
+              **({"categoria": v["categoria"]} if "categoria" in v else {})}
+             for k, v in m.items()),
+            key=lambda x: -x["minutos"],
+        )
+
+    return {
+        "dry_run": dry_run,
+        "processo": processo,
+        "propagacao": {
+            "por_rotulo": _fmt(elegiveis),
+            "eventos": sum(v["n"] for v in elegiveis.values()),
+            "minutos": round(sum(v["seg"] for v in elegiveis.values()) / 60, 1),
+            "escritos": escritos,
+        },
+        "fora": {k: {"eventos": v["n"], "minutos": round(v["seg"] / 60, 1)}
+                 for k, v in fora.items()},
+        # ⚠️ O que REALMENTE vira "não classificado" no dashboard — a propagação
+        # não resolve isto; precisa alguém classificar o COMPORTAMENTO.
+        "cinza_real": {
+            "por_rotulo": _fmt(cinza),
+            "minutos": round(sum(v["seg"] for v in cinza.values()) / 60, 1),
+        },
+    }
+
+
 def carregar_memoria_categoria(
     sb: Client, empresa: str, processo: str | None = None
 ) -> dict:
@@ -3342,6 +3548,8 @@ def classificar_comportamentos_lean(
                     sb.table("comportamentos").update(
                         {"categoria_lean": "desperdicio", "categoria_lean_origem": "ia"}
                     ).eq("id", c["id"]).execute()
+                    propagar_categoria_para_eventos(
+                        sb, empresa, processo, POSTO_VAZIO_LABEL, "desperdicio")
                 except Exception as e:
                     log.warning(f"Lean: posto_vazio não atualizado: {e}")
             continue
@@ -3380,6 +3588,9 @@ def classificar_comportamentos_lean(
                     {"categoria_lean": cat, "categoria_lean_origem": "aprendido"}
                 ).eq("id", c["id"]).execute()
                 aprendidos += 1
+                # Fase 55: desce na hora para os eventos já existentes deste
+                # rótulo — sem isto, o cinza volta a se acumular a cada rodada.
+                propagar_categoria_para_eventos(sb, empresa, processo, lbl, cat)
             except Exception as e:
                 log.warning(f"Lean: falha ao aplicar match aprendido em {lbl}: {e}")
         else:
@@ -3441,6 +3652,9 @@ def classificar_comportamentos_lean(
                 {"categoria_lean": cat, "categoria_lean_origem": "ia"}
             ).eq("id", por_label[label]).execute()
             atualizados_ia += 1
+            # Fase 55: a IA classifica DEPOIS dos eventos existirem — era aqui
+            # que os 336 eventos de `operar_torno` ficavam para trás.
+            propagar_categoria_para_eventos(sb, empresa, processo, label, cat)
         except Exception as e:
             log.warning(f"Lean: falha ao atualizar {label}: {e}")
 

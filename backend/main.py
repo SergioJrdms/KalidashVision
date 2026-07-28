@@ -57,6 +57,8 @@ from .pipeline import (
     chave_frame_evento,
     chave_frame_segmento,
     varrer_videos_expirados,
+    propagar_categoria_para_eventos,
+    relatorio_propagacao_lean,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -716,6 +718,31 @@ def _limpar_heartbeats_antigos(sb) -> None:
         sb.table("heartbeats_edge").delete().lt("recebido_em", corte).execute()
     except Exception as e:                        # nunca derruba o POST
         log.warning(f"[saude] limpeza de heartbeats falhou (não-fatal): {e}")
+
+
+@app.post("/processos/{processo_id}/manutencao/lean/propagar")
+def propagar_lean(
+    processo_id: str,
+    dry_run: bool = Query(True, description="true (default) = só relatório, não escreve"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 55 — backfill idempotente da categoria Lean: comportamento → eventos.
+
+    Escopado por (empresa, processo) — nunca um update global.
+
+    `dry_run=true` (o DEFAULT, de propósito) calcula e devolve o relatório sem
+    escrever nada: dá para ver o impacto antes de aplicar.
+
+    Além do que migra, o relatório separa o `cinza_real` — rótulos com tempo
+    observado cujo COMPORTAMENTO está sem categoria. Esses não são resolvidos
+    por propagação nenhuma; é o que de fato aparece como "não classificado" no
+    dashboard, e só sai de lá quando alguém classificar o comportamento."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    rel = relatorio_propagacao_lean(sb, user.empresa, nome, dry_run=dry_run)
+    if "erro" in rel:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
+    return {"ok": True, **rel}
 
 
 @app.post("/manutencao/videos/expirar")
@@ -3034,11 +3061,12 @@ def setar_categoria_lean(
     # como 'aprendido'. Nunca toca em 'humano' (cada processo pode ter
     # decisão própria de propósito).
     propagados = 0
+    processos_irmaos: set = set()
     if cat is not None and alvo.get("label"):
         try:
             r2 = (
                 sb.table("comportamentos")
-                .select("id, categoria_lean_origem")
+                .select("id, processo, categoria_lean_origem")
                 .eq("empresa", user.empresa)
                 .eq("label", alvo["label"])
                 .neq("id", comportamento_id)
@@ -3052,34 +3080,33 @@ def setar_categoria_lean(
                         {"categoria_lean": cat, "categoria_lean_origem": "aprendido"}
                     ).eq("id", c["id"]).execute()
                     propagados += 1
+                    if c.get("processo"):
+                        processos_irmaos.add(c["processo"])
                 except Exception as e:
                     log.warning(f"Lean: falha ao propagar p/ {c['id']}: {e}")
         except Exception as e:
             log.warning(f"Lean: falha ao listar comportamentos para propagação: {e}")
 
-    # Despeja a categoria nos EVENTOS do comportamento (mesma empresa+label).
-    # Cada evento guarda a sua, mas NÃO sobrescrevemos overrides individuais de
-    # humano — assim a decisão de 'andar = desperdício' vale como padrão, e um evento
-    # específico classificado à mão por alguém permanece intacto.
+    # Fase 55 — desce a categoria para os EVENTOS. Três correções sobre a
+    # versão anterior, todas com consequência real:
+    #  1) ESCOPO: antes filtrava só por empresa, então a decisão de um processo
+    #     vazava para os eventos de TODOS os processos da mesma empresa. Agora
+    #     é (empresa, processo) — e a propagação cross-processo acima, que é
+    #     deliberada, roda com o processo de cada comportamento irmão.
+    #  2) LABEL EFETIVO: antes casava só por `comportamento_label`, deixando de
+    #     fora os eventos que o gestor RENOMEOU na validação (label_corrigido) —
+    #     justo os que ele mais espera ver classificados.
+    #  3) PRECEDÊNCIA: elegível é só `categoria_lean IS NULL` ou origem
+    #     'herdado'. Antes, `neq('humano')` também sobrescrevia 'aprendido'.
     eventos_atualizados = 0
-    if alvo.get("label"):
-        try:
-            upd = (
-                sb.table("eventos")
-                .update(
-                    {
-                        "categoria_lean": cat,
-                        "categoria_lean_origem": "aprendido" if cat else None,
-                    }
-                )
-                .eq("empresa", user.empresa)
-                .eq("comportamento_label", alvo["label"])
-                .or_("categoria_lean_origem.is.null,categoria_lean_origem.neq.humano")
-                .execute()
-            )
-            eventos_atualizados = len(upd.data or [])
-        except Exception as e:
-            log.warning(f"Lean: falha ao despejar categoria nos eventos: {e}")
+    if alvo.get("label") and cat:
+        eventos_atualizados = propagar_categoria_para_eventos(
+            sb, user.empresa, alvo["processo"], alvo["label"], cat)
+        # Os comportamentos irmãos (mesmo label, outros processos) recebem a
+        # categoria como 'aprendido' — os eventos deles também descem.
+        for proc_irmao in processos_irmaos:
+            eventos_atualizados += propagar_categoria_para_eventos(
+                sb, user.empresa, proc_irmao, alvo["label"], cat)
 
     return {
         "ok": True,
