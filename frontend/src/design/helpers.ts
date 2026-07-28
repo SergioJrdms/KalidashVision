@@ -5,7 +5,7 @@
 
 // Fase 49: classificação binária — produtivo (va) × não-produtivo. O
 // não-produtivo ainda se detalha em desperdício (desp) e não-classificado (none).
-export type LeanShort = "va" | "desp" | "none";
+export type LeanShort = "va" | "desp" | "vazio" | "none";
 
 // Níveis de maturidade do Prism por processo
 export const NIVEIS = [
@@ -25,6 +25,7 @@ export function nivelDe(pct: number) {
 export const LEAN: Record<LeanShort, { label: string; cor: string; bg: string }> = {
   va: { label: "Produtivo", cor: "var(--va)", bg: "var(--va-bg)" },
   desp: { label: "Desperdício", cor: "var(--desp)", bg: "var(--desp-bg)" },
+  vazio: { label: "Posto vazio", cor: "#8a8598", bg: "var(--none-bg)" },
   none: { label: "Não classificado", cor: "var(--none)", bg: "var(--none-bg)" },
 };
 

@@ -133,9 +133,11 @@ function JanelaMini({ titulo, j, delta }: { titulo: string; j: JanelaAgregada; d
 }
 
 // ═══ 2) OBRIGATÓRIA — Evolução por dia + ritmo/resumão do dia (mesmo card) ═══
-const CATS: Array<{ k: keyof Pick<DiaAnalise, "va_pct" | "desp_pct" | "none_pct">; cat: LeanShort }> = [
-  { k: "va_pct", cat: "va" },
-  { k: "desp_pct", cat: "desp" }, { k: "none_pct", cat: "none" },
+const CATS: Array<{ k: keyof Pick<DiaAnalise, "va_pct" | "desp_pct" | "vazio_pct" | "none_pct">; cat: LeanShort }> = [
+  { k: "va_pct", cat: "va" }, { k: "desp_pct", cat: "desp" },
+  // Fase 56: posto vazio é fatia PRÓPRIA. Antes caía no "não classificado" e
+  // inflava o cinza sem ser dúvida nenhuma.
+  { k: "vazio_pct", cat: "vazio" }, { k: "none_pct", cat: "none" },
 ];
 
 // "Dia típico": para cada faixa de 15 min do relógio, a PROPORÇÃO de cada
@@ -185,15 +187,17 @@ function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
   const tot = dias.reduce((s, d) => s + d.tempo_obs_s, 0) || 1;
   const wavg = (f: (d: DiaAnalise) => number) => dias.reduce((s, d) => s + f(d) * d.tempo_obs_s, 0) / tot;
 
-  const horaMap = new Map<number, { seg: number; va: number; de: number }>();
+  const horaMap = new Map<number, { seg: number; va: number; de: number; vz: number }>();
   for (const d of dias) for (const h of d.por_hora || []) {
-    const c = horaMap.get(h.hora) || { seg: 0, va: 0, de: 0 };
+    const c = horaMap.get(h.hora) || { seg: 0, va: 0, de: 0, vz: 0 };
     c.seg += h.seg; c.va += h.va_pct * h.seg; c.de += h.desp_pct * h.seg;
+    c.vz += (h.vazio_pct || 0) * h.seg;
     horaMap.set(h.hora, c);
   }
   const por_hora = [...horaMap.entries()].sort((a, b) => a[0] - b[0]).map(([hora, v]) => ({
     hora, seg: v.seg,
     va_pct: v.seg ? v.va / v.seg : 0, desp_pct: v.seg ? v.de / v.seg : 0,
+    vazio_pct: v.seg ? v.vz / v.seg : 0,
   }));
 
   const acaoMap = new Map<string, number>();
@@ -205,7 +209,7 @@ function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
   return {
     dia: "__agg__", rot: `${dias.length} dias`, dow: "",
     tempo_obs_s: dias.reduce((s, d) => s + d.tempo_obs_s, 0),
-    va_pct: wavg((d) => d.va_pct),
+    va_pct: wavg((d) => d.va_pct), vazio_pct: wavg((d) => d.vazio_pct || 0),
     desp_pct: wavg((d) => d.desp_pct), none_pct: wavg((d) => d.none_pct),
     posto_vazio_s: dias.reduce((s, d) => s + d.posto_vazio_s, 0),
     posto_vazio_pct: wavg((d) => d.posto_vazio_pct),
@@ -265,7 +269,8 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
           const vals: Record<string, number> = {
             va_pct: Math.max(0, d.va_pct),
             desp_pct: Math.max(0, d.desp_pct),
-            none_pct: Math.max(0, 100 - d.va_pct - d.desp_pct),
+            vazio_pct: Math.max(0, d.vazio_pct || 0),
+            none_pct: Math.max(0, 100 - d.va_pct - d.desp_pct - (d.vazio_pct || 0)),
           };
           let yTopo = H - padB;
           const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · desperdício ${Math.round(d.desp_pct)}%`;
@@ -364,12 +369,12 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; me
       {horas.length >= 2 ? (
         <ul className="col" style={{ gap: 8, listStyle: "none", padding: 0, margin: 0 }}>
           {horas.map((h) => {
-            const none = Math.max(0, 100 - h.va_pct - h.desp_pct);
+            const none = Math.max(0, 100 - h.va_pct - h.desp_pct - (h.vazio_pct || 0));
             return (
               <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
                 <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
                 <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
-                  <LeanBar va={h.va_pct} desp={h.desp_pct} none={none} height={10} />
+                  <LeanBar va={h.va_pct} desp={h.desp_pct} vazio={h.vazio_pct || 0} none={none} height={10} />
                 </div>
               </li>
             );

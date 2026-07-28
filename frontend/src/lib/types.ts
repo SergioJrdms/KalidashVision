@@ -509,6 +509,9 @@ export interface DiaHora {
   seg: number;
   va_pct: number;
   desp_pct: number;
+  // Fase 56: posto vazio é CATEGORIA própria — antes inflava o denominador da
+  // hora sem entrar em fatia nenhuma e aparecia como "não classificado".
+  vazio_pct: number;
 }
 
 export interface DiaAnalise {
@@ -518,6 +521,7 @@ export interface DiaAnalise {
   tempo_obs_s: number;
   va_pct: number;
   desp_pct: number;
+  vazio_pct: number;
   none_pct: number;
   posto_vazio_s: number;
   posto_vazio_pct: number;

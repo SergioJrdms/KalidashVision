@@ -2307,7 +2307,25 @@ def etapa_consolidar_principais(
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": rep.get("papel_pessoa"),
             "n_amostras": sum(e["n_amostras"] for e, _ in no_bucket),
-            "confianca": rep.get("confianca", 0.7),
+            # Fase 56 (B1) — CONFIANÇA = CONCORDÂNCIA entre as amostras do minuto.
+            #
+            # A fórmula antiga era `min(0.95, 0.6 + 0.05*n_amostras)`: contagem
+            # de amostras vestida de certeza. Por construção nada ficava abaixo
+            # de 0.6 e o mínimo observado era 0.65 em TODOS os rótulos — um
+            # número que não media nada.
+            #
+            # `share` é a fração do minuto ocupada pelo rótulo vencedor e JÁ era
+            # calculada aqui, só que descartada. É a medida de incerteza mais
+            # honesta disponível e não custa nenhuma chamada a mais:
+            #   4 amostras concordantes → share 1.00
+            #   2 contra 2             → share 0.50 (moeda ao ar)
+            "confianca": round(share, 2),
+            # Guardados à parte porque explicam a confiança na fila de dúvida —
+            # e porque n_amostras é informação útil, só não é confiança.
+            "concordancia": round(share, 2),
+            "n_rotulos_no_minuto": len(dur_por_label),
+            "rotulos_competindo": sorted(dur_por_label, key=dur_por_label.get, reverse=True)[:4],
+            "decidido_por_ia": escolhido != top_label,
             "principal": True,
         })
     return principais
@@ -5698,6 +5716,42 @@ def _inicio_video_dt(v: dict) -> datetime | None:
         return None
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 56 (Parte A) — DENOMINADOR HONESTO: um só helper para toda métrica
+#
+# O denominador NUNCA é o relógio de parede — é o TEMPO OBSERVADO (a soma das
+# durações dos eventos daquele recorte). Com a amostragem sistemática (5 min
+# gravando, 5 pulando) só existe vídeo para ~metade da hora; dividir por 60 min
+# transformaria a metade não gravada numa faixa cinza indistinguível de dúvida
+# real — e, como a amostragem é permanente, esse cinza jamais cairia.
+#
+# `posto_vazio` é uma CATEGORIA PRÓPRIA, não cinza. Ele já vinha somando ao
+# denominador sem entrar em nenhuma fatia, então aparecia como "não
+# classificado" nas barras — falso cinza que este helper elimina.
+#
+# Todas as agregações (dia, hora, dashboard) passam por aqui: era a divergência
+# entre caminhos de cálculo que fazia a tela principal e os gráficos discordarem.
+# ═════════════════════════════════════════════════════════════════════════
+def compor_tempo_observado(va_s: float, desp_s: float, vazio_s: float,
+                           total_s: float) -> dict:
+    """Percentuais sobre o TEMPO OBSERVADO. As quatro fatias sempre fecham 100%
+    (o resto é o cinza REAL: tempo observado sem categoria)."""
+    tot = float(total_s or 0)
+    if tot <= 0:
+        return {"va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0,
+                "none_pct": 0.0, "observado_s": 0.0}
+    va = max(0.0, float(va_s)); desp = max(0.0, float(desp_s))
+    vazio = max(0.0, float(vazio_s))
+    none_s = max(0.0, tot - va - desp - vazio)
+    return {
+        "va_pct": round(va / tot * 100, 1),
+        "desp_pct": round(desp / tot * 100, 1),
+        "vazio_pct": round(vazio / tot * 100, 1),
+        "none_pct": round(none_s / tot * 100, 1),
+        "observado_s": round(tot, 1),
+    }
+
+
 def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
     """(label efetivo, categoria lean, duração) de um evento principal."""
     label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
@@ -6312,7 +6366,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         d = por_dia.setdefault(dia, {
             "tot": 0.0, "va": 0.0, "desp": 0.0,
             "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
-            "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "desp": 0.0}),
+            "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "desp": 0.0,
+                                          "vazio": 0.0}),
             # Fase 35.2: "jornada" — buckets de 15 min do dia (96) com segundos
             # por categoria, p/ desenhar o filme do dia em uma faixa.
             "buckets": defaultdict(lambda: {"va": 0.0, "desp": 0.0,
@@ -6334,7 +6389,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         h = d["horas"][inst.hour]
         h["seg"] += dur
         if eh_vazio:
-            pass
+            h["vazio"] += dur          # categoria própria, NUNCA cinza
         elif cat == "valor_agregado":
             h["va"] += dur
         elif cat == "desperdicio":
@@ -6374,7 +6429,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         if d is None or d["tot"] <= 0:
             saida_dias.append({
                 "dia": iso, "rot": rot, "dow": dow, "tempo_obs_s": 0.0,
-                "va_pct": 0.0, "desp_pct": 0.0, "none_pct": 0.0,
+                "va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0, "none_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
                 "top_acoes": [], "linha_tempo": [],
@@ -6430,15 +6485,12 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                     continue
                 por_hora.append({
                     "hora": hora, "seg": round(h["seg"], 1),
-                    "va_pct": round(h["va"] / h["seg"] * 100, 1),
-                    "desp_pct": round(h["desp"] / h["seg"] * 100, 1),
+                    **compor_tempo_observado(h["va"], h["desp"], h["vazio"], h["seg"]),
                 })
             saida_dias.append({
                 "dia": iso, "rot": rot, "dow": dow,
                 "tempo_obs_s": round(tot, 1),
-                "va_pct": round(d["va"] / tot * 100, 1),
-                "desp_pct": round(d["desp"] / tot * 100, 1),
-                "none_pct": round(none_s / tot * 100, 1),
+                **compor_tempo_observado(d["va"], d["desp"], d["vazio"], tot),
                 "posto_vazio_s": round(d["vazio"], 1),
                 "posto_vazio_pct": round(vazio_pct, 1),
                 "n_videos": len(videos_por_dia.get(iso, ())),
