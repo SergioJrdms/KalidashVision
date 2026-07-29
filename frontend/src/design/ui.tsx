@@ -210,9 +210,13 @@ export function MaturityMeter({ pct, size = 56, compact = false }: { pct: number
 // Fase 63: duas fatias fecham 100% (produtivo × não-produtivo). `vazio` é um
 // pedaço DO não-produtivo, desenhado com cor própria dentro dele.
 export function LeanBar({ va, desp, vazio = 0, height = 8, showLegend = false }: { va: number; desp: number; vazio?: number; height?: number; showLegend?: boolean }) {
-  // Fase 56: `vazio` (posto sem operador) é fatia PRÓPRIA. Sem ela, esse tempo
-  // é desenhado dentro do não-produtivo, com cor própria.
-  const parts: [string, number][] = [["va", va], ["desp", desp], ["vazio", vazio]];
+  // `desp` que chega aqui é o NÃO-PRODUTIVO INTEIRO — `vazio` está dentro dele.
+  // Empilhar os dois como vieram somaria 100 + vazio e estouraria a barra.
+  // Descontar aqui, num lugar só, evita que cada chamador tenha de lembrar.
+  const vazioReal = Math.min(Math.max(0, vazio), Math.max(0, desp));
+  const parts: [string, number][] = [
+    ["va", va], ["desp", Math.max(0, desp - vazioReal)], ["vazio", vazioReal],
+  ];
   return (
     <div className="col" style={{ gap: 6 }}>
       <div className="bar-split" style={{ height }}>

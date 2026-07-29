@@ -272,10 +272,14 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
               </g>
             );
           }
+          // `desp_pct` é o NÃO-PRODUTIVO INTEIRO e já contém `vazio_pct`.
+          // Empilhar os três como vêm somava 100 + vazio e a coluna passava do
+          // topo do gráfico. O posto vazio é desenhado DENTRO do não-produtivo.
+          const vazioDia = Math.min(Math.max(0, d.vazio_pct || 0), Math.max(0, d.desp_pct));
           const vals: Record<string, number> = {
             va_pct: Math.max(0, d.va_pct),
-            desp_pct: Math.max(0, d.desp_pct),
-            vazio_pct: Math.max(0, d.vazio_pct || 0),
+            desp_pct: Math.max(0, d.desp_pct) - vazioDia,
+            vazio_pct: vazioDia,
           };
           let yTopo = H - padB;
           const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · desperdício ${Math.round(d.desp_pct)}%`;

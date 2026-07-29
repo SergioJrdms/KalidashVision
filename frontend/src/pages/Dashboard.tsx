@@ -88,8 +88,8 @@ function OperacaoEmGraficos({ det, iq, processoId }: { det: DetMock; iq: Insight
   );
 }
 
-// Evolução por vídeo: colunas 100% empilhadas (produtivo/desperdício/
-// produtivo × não-produtivo), em ordem cronológica — a história do processo.
+// Evolução por vídeo: colunas 100% empilhadas (produtivo × não-produtivo),
+// em ordem cronológica — a história do processo.
 function EvolucaoPanel({ processoId }: { processoId: string }) {
   const q = useQuery({ queryKey: ["serie", processoId], queryFn: () => api.padroes.serie(processoId) });
   const pontos = (q.data?.pontos || []).slice(-16); // últimos 16 vídeos
@@ -129,7 +129,6 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
             {pontos.map((p, i) => {
               const sc = p.share_categoria || {};
               const va = Math.max(0, sc["valor_agregado"] || 0);
-              const desp = Math.max(0, sc["desperdicio"] || 0);
               // O resto do tempo é não-produtivo: não existe fatia sem dono.
               const vals: Record<string, number> = { valor_agregado: va, desperdicio: Math.max(0, 100 - va) };
               const x = padL + i * slot + (slot - bw) / 2;
@@ -539,7 +538,7 @@ function KpiVA({ det }: { det: DetMock }) {
         Índice de valor agregado <Help text="% do tempo em comportamentos de 'valor agregado' (Lean). A métrica-rainha: quanto da operação entrega o que o cliente paga." width={230} />
       </div>
       <div className="font-display tnum" style={{ fontSize: 30, fontWeight: 700, color: "var(--ink)", marginTop: 4 }}>{s.va}%</div>
-      <div style={{ marginTop: 10 }}><LeanBar va={s.va} desp={Math.max(0, s.desp - (s.vazio || 0))} vazio={s.vazio || 0} showLegend /></div>
+      <div style={{ marginTop: 10 }}><LeanBar va={s.va} desp={s.desp} vazio={s.vazio || 0} showLegend /></div>
     </Card>
   );
 }

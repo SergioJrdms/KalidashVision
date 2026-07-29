@@ -259,5 +259,113 @@ check("sem dado confiável → 0.0",
 check("nunca mistura fonte (um lado só) → 0.0",
       pl.offset_video_segmento({"gravado_em": "2026-07-21T13:00:00+00:00"}, {}) == 0.0)
 
-print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
+
+# ════════════════════════════════════════════════════════════════════════
+# [8] SMOKE do dashboard — o teste que faltava.
+#
+# A Fase 63 mexeu em toda a cadeia de agregação e nenhum teste chamava essas
+# funções de verdade: um NameError em `_montar_perguntas_gestor` derrubou o
+# dashboard inteiro em produção e a suíte passou verde. Testar o valor de
+# retorno de helpers puros não cobre "a página abre".
+# ════════════════════════════════════════════════════════════════════════
+print("\n[8] Smoke — o dashboard monta de ponta a ponta")
+
+CATS_LBL = {"operar_torno": "valor_agregado", "andar": "desperdicio",
+            "conferir_peca": "desperdicio", "posto_vazio": "desperdicio"}
+
+
+def ev_dash(i, label, ini_s, zona="torno", papel=None):
+    return {
+        "id": f"e{i}", "video_id": "v1", "empresa": "U", "processo": "T",
+        "comportamento_label": label, "label_corrigido": None,
+        "tempo_inicio_s": ini_s, "tempo_fim_s": ini_s + 60,
+        "zona_contexto": zona, "papel_pessoa": papel, "principal": True,
+        "n_amostras": 4, "confianca": 0.9, "validacao_correto": None,
+        "validado_humano": False, "pessoa_track_id": 1,
+    }
+
+
+eventos_d = [
+    ev_dash(1, "operar_torno", 0), ev_dash(2, "operar_torno", 60),
+    ev_dash(3, "andar", 120, zona="corredor"),
+    ev_dash(4, "conferir_peca", 180), ev_dash(5, "conferir_peca", 240),
+    ev_dash(6, "conferir_peca", 300),
+    ev_dash(7, "posto_vazio", 360, papel="posto_vazio"),
+]
+videos_d = [{"id": "v1", "processado_em": "2026-07-21T13:00:00+00:00",
+             "nome": "seg_20260721_130000.mp4", "duracao_s": 420}]
+dist_d = [
+    {"comportamento": "operar_torno", "tempo_total_s": 120, "pct_tempo": 20.0,
+     "categoria_lean": "valor_agregado", "categoria_lean_origem": "ia"},
+    {"comportamento": "andar", "tempo_total_s": 60, "pct_tempo": 10.0,
+     "categoria_lean": "desperdicio", "categoria_lean_origem": "ia"},
+    {"comportamento": "conferir_peca", "tempo_total_s": 180, "pct_tempo": 30.0,
+     "categoria_lean": "desperdicio", "categoria_lean_origem": "fallback"},
+    {"comportamento": "posto_vazio", "tempo_total_s": 60, "pct_tempo": 10.0,
+     "categoria_lean": "desperdicio", "categoria_lean_origem": "ia"},
+]
+composicao_d = {
+    "valor_agregado_pct": 28.6, "desperdicio_pct": 71.4,
+    "tempo_total_s": 420.0, "sem_evidencia_pct": 42.9, "sem_evidencia_s": 180.0,
+    "posto_vazio_pct": 14.3, "posto_vazio_s": 60.0,
+    "por_categoria_s": {"valor_agregado": 120.0, "desperdicio": 300.0},
+}
+
+try:
+    iq = pl.montar_insights_quantitativos(dist_d, composicao_d, eventos_d,
+                                          videos_d, CATS_LBL)
+    erro_iq = None
+except Exception as e:  # noqa: BLE001
+    iq, erro_iq = None, e
+
+check("montar_insights_quantitativos não explode", erro_iq is None, erro_iq)
+if iq:
+    check("devolve frases", isinstance(iq.get("frases"), list) and len(iq["frases"]) > 0)
+    check("por_categoria tem só as duas categorias",
+          set(iq["por_categoria"]) == {"valor_agregado", "desperdicio"}, iq["por_categoria"])
+    check("as duas fatias fecham ~100%",
+          abs(sum(v["pct"] for v in iq["por_categoria"].values()) - 100) < 0.5,
+          iq["por_categoria"])
+    check("tempo_por_acao marca o que foi assumido",
+          any(a.get("sem_evidencia") for a in iq["tempo_por_acao"]), iq["tempo_por_acao"])
+    check("perguntas montam sem erro", isinstance(iq.get("perguntas"), list))
+    check("a pergunta do tempo ASSUMIDO aparece (20% ≥ 10%)",
+          any("assumir" in p["texto"] or "sem evidência" in p["texto"]
+              for p in iq["perguntas"]),
+          [p["texto"][:60] for p in iq["perguntas"]])
+    check("nenhuma frase fala em 'não classificado'",
+          not any("não classificado" in f["texto"].lower() for f in iq["frases"]),
+          [f["texto"] for f in iq["frases"]])
+    check("placar monta", "placar" in iq)
+
+# `analise_diaria` é o outro caminho de agregação que a Fase 63 tocou.
+sb = FakeSB({
+    "eventos": eventos_d,
+    "videos": videos_d,
+    "comportamentos": [{"label": k, "categoria_lean": v, "empresa": "U",
+                        "processo": "T", "categoria_lean_origem": "ia"}
+                       for k, v in CATS_LBL.items()],
+    "contexto_processo": [{"empresa": "U", "processo": "T", "duvida_limiar": 0.65}],
+})
+try:
+    dias = pl.montar_analise_diaria(sb, "U", "T", dias=30)
+    erro_dias = None
+except Exception as e:  # noqa: BLE001
+    dias, erro_dias = None, e
+check("montar_analise_diaria não explode", erro_dias is None, erro_dias)
+if dias:
+    com_trab = [d for d in dias["dias"] if d["tempo_obs_s"] > 0]
+    check("dia com trabalho: va+desp fecham 100%",
+          all(abs(d["va_pct"] + d["desp_pct"] - 100) < 0.5 for d in com_trab),
+          [(d["dia"], d["va_pct"], d["desp_pct"]) for d in com_trab])
+    check("nenhum dia devolve none_pct",
+          all("none_pct" not in d for d in dias["dias"]))
+    check("vazio_pct nunca passa do desp_pct (é pedaço dele)",
+          all(d["vazio_pct"] <= d["desp_pct"] + 0.05 for d in com_trab),
+          [(d["dia"], d["vazio_pct"], d["desp_pct"]) for d in com_trab])
+    check("linha_tempo só usa categorias vivas",
+          all(f["cat"] in ("va", "desp", "vazio")
+              for d in dias["dias"] for f in d["linha_tempo"]))
+
+print(f"\n{'='*56}\n  TOTAL {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

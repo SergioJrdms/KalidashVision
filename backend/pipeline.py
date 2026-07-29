@@ -6943,7 +6943,11 @@ def _montar_perguntas_gestor(
     #    maior ação cuja categoria o sistema ASSUMIU (não decidiu). Ela já está
     #    contando como não-produtiva no placar; se for produtiva, o número está
     #    subestimado agora, e só o gestor resolve isso.
-    sem_evid_pct = float((composicao or {}).get("sem_evidencia_pct") or 0)
+    # Derivado de `tempo_por_acao` (que já carrega o sinal por ação) em vez de
+    # vir por parâmetro: um número só, calculado da mesma fonte que a lista
+    # abaixo usa — não dá para os dois discordarem.
+    sem_evid_pct = sum(float(a.get("pct") or 0)
+                       for a in (tempo_por_acao or []) if a.get("sem_evidencia"))
     if sem_evid_pct >= 10:
         maior_assumida = next(
             (a for a in (tempo_por_acao or [])
