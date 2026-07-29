@@ -60,6 +60,8 @@ from .pipeline import (
     propagar_categoria_para_eventos,
     relatorio_propagacao_lean,
     reverter_auto_validacao_maquina,
+    aprendizado_automatico,
+    APRENDIZADO_AUTO_PADRAO,
     placar_camadas,
     montar_fila_duvidas,
     limiar_duvida,
@@ -860,11 +862,94 @@ def propagar_lean(
     return {"ok": True, **rel}
 
 
+class AprendizadoBody(BaseModel):
+    # None = volta ao default do ambiente (KV_APRENDIZADO_AUTO, hoje 'off').
+    ativo: bool | None = None
+
+
+# O que a chave cobre e o que ela deliberadamente NÃO cobre. Fica no payload
+# para a tela poder explicar sem que ninguém precise ler o pipeline.
+_MECANISMOS_APRENDIZADO = [
+    {"nome": "correcao_aprendida", "coberto": True,
+     "efeito": "Uma correção sua deixa de remapear automaticamente descrições iguais."},
+    {"nome": "vocabulario_canonico", "coberto": True,
+     "efeito": "Rótulo já consolidado deixa de ser marcado como aprendido."},
+    {"nome": "lean_precedente_humano", "coberto": True,
+     "efeito": "Categoria Lean decidida em outro processo deixa de ser aplicada aqui."},
+    {"nome": "lean_propagacao_irmaos", "coberto": True,
+     "efeito": "Sua decisão Lean vale só no processo onde foi tomada."},
+    {"nome": "lean_classificacao_ia", "coberto": False,
+     "efeito": "Continua rodando — classificar é o trabalho do sistema, e a saída "
+               "sai marcada 'ia', sem se passar por decisão humana."},
+    {"nome": "vocabulario_no_prompt", "coberto": False,
+     "efeito": "Continua sugerindo nomes já usados ao modelo. Não valida nem "
+               "remapeia; é o que impede o mesmo comportamento de ganhar três "
+               "nomes diferentes ao longo da campanha."},
+]
+
+
+@app.get("/processos/{processo_id}/aprendizado")
+def ler_aprendizado(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Fase 62 — estado da generalização automática deste processo.
+
+    Devolve `efetivo` (o que o pipeline vai fazer) e `configurado` (o que está
+    gravado; null = herdando o default do ambiente)."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    try:
+        r = (
+            sb.table("contexto_processo").select("aprendizado_automatico")
+            .eq("empresa", user.empresa).eq("processo", nome).limit(1).execute().data
+        ) or []
+        configurado = r[0].get("aprendizado_automatico") if r else None
+    except Exception:
+        configurado = None
+    return {
+        "processo": nome,
+        "configurado": configurado,
+        "efetivo": aprendizado_automatico(sb, user.empresa, nome),
+        "padrao_ambiente": APRENDIZADO_AUTO_PADRAO,
+        "mecanismos": _MECANISMOS_APRENDIZADO,
+    }
+
+
+@app.put("/processos/{processo_id}/aprendizado")
+def setar_aprendizado(
+    processo_id: str,
+    body: AprendizadoBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Liga/desliga a generalização automática deste processo.
+
+    `ativo=null` devolve o processo ao default do ambiente. Vale a partir do
+    PRÓXIMO vídeo processado — não reescreve nada já gravado."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    try:
+        (
+            sb.table("contexto_processo")
+            .update({"aprendizado_automatico": body.ativo})
+            .eq("empresa", user.empresa).eq("processo", nome)
+            .execute()
+        )
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Falha ao gravar o flag: {e}",
+        )
+    return {
+        "ok": True,
+        "processo": nome,
+        "configurado": body.ativo,
+        "efetivo": aprendizado_automatico(sb, user.empresa, nome),
+    }
+
+
 @app.post("/processos/{processo_id}/manutencao/validacao/reverter-auto")
 def reverter_auto_validacao(
     processo_id: str,
     origens: str = Query(
-        "correcao_aprendida",
+        "correcao_aprendida,vocabulario_canonico",
         description="lista separada por vírgula. 'humano', 'auditoria' e 'posto_vazio' são recusadas.",
     ),
     dry_run: bool = Query(True, description="true (default) = só relatório, não escreve"),
@@ -3239,9 +3324,14 @@ def _aplicar_categoria_lean(sb, empresa: str, comportamento_id: str, alvo: dict,
     # outros processos (origem em 'ia' | 'aprendido' | null), marcando-os
     # como 'aprendido'. Nunca toca em 'humano' (cada processo pode ter
     # decisão própria de propósito).
+    # Fase 62: com a generalização desligada no processo de origem, a decisão
+    # vale ONDE foi tomada e não vaza para os irmãos. Aplicá-la nos eventos do
+    # próprio (empresa, processo, label) continua — isso não é generalizar, é
+    # cumprir a decisão no lugar em que ela foi feita.
+    _generaliza = aprendizado_automatico(sb, empresa, alvo.get("processo") or "")
     propagados = 0
     processos_irmaos: set = set()
-    if cat is not None and alvo.get("label"):
+    if cat is not None and alvo.get("label") and _generaliza:
         try:
             r2 = (
                 sb.table("comportamentos")

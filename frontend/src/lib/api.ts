@@ -29,6 +29,7 @@ import type {
   AnaliseDiaria,
   SaudeEdge,
   FilaDuvidas,
+  EstadoAprendizado,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -272,6 +273,15 @@ export const api = {
       req<{ cameras: string[] }>(`/processos/${processoId}/cameras`),
     frameReferencia: (processoId: string, camId: string) =>
       req<FrameReferencia>(`/processos/${processoId}/cameras/${encodeURIComponent(camId)}/frame-referencia`),
+  },
+  aprendizado: {
+    ler: (processoId: string) =>
+      req<EstadoAprendizado>(`/processos/${processoId}/aprendizado`),
+    setar: (processoId: string, ativo: boolean | null) =>
+      req<{ ok: boolean; configurado: boolean | null; efetivo: boolean }>(
+        `/processos/${processoId}/aprendizado`,
+        { method: "PUT", body: JSON.stringify({ ativo }) },
+      ),
   },
   comportamentos: {
     setCategoria: (comportamentoId: string, categoria_lean: CategoriaLean | null) =>

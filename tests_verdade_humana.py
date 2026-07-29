@@ -1,19 +1,23 @@
-"""Fase 61 — a máquina não escreve verdade humana.
+"""Fases 61 e 62 — a máquina não escreve verdade humana.
 
 O incidente: 4 correções manuais para `conversando_colega` geraram 6 eventos
 novos com origem_validacao='correcao_aprendida', validado_humano=true e
-validacao_correto=true — todos errados. Duas falhas somadas:
+validacao_correto=true — todos errados. Três falhas somadas:
   • `correcao_aprendida` entrava em auto_validado SEM limiar nenhum, enquanto
     `vocabulario_canonico` sempre exigiu n_confirmacoes >= limiar;
   • os eventos auto-validados voltavam para a memória como "confirmação
-    humana", realimentando o mesmo contador que libera a auto-validação.
+    humana", realimentando o mesmo contador que libera a auto-validação;
+  • a contagem real mostrou que METADE da "verdade humana" era máquina
+    assinando: auditoria 907 · vocabulario_canonico 122 · humano 120 ·
+    posto_vazio 71.
 
 Cobertura:
-  1) correcao_aprendida NÃO grava validado_humano/validacao_correto
-  2) vocabulario_canonico segue auto-validando (não foi o que quebrou)
+  1) NENHUMA origem inferida grava validado_humano/validacao_correto
+  2) exceções mecânicas (posto_vazio, auditoria) seguem fora da fila
   3) limiar: 1 correção não generaliza; 2 generalizam
   4) memória não conta inferência de máquina como confirmação humana
   5) reversão: escopo, proteções, dry_run e idempotência
+  6) a CHAVE por processo: desligada, nada generaliza; religada, tudo volta
 
 Rodar:  python tests_verdade_humana.py
 """
@@ -54,7 +58,7 @@ _SEQ = [0]
 class FakeQ:
     def __init__(self, sb, tabela, modo, payload=None):
         self.sb, self.tabela, self.modo, self.payload = sb, tabela, modo, payload
-        self.eqs, self.ins, self.ors = {}, {}, None
+        self.eqs, self.ins, self.isnull, self.ors = {}, {}, [], None
 
     def select(self, *a, **k): return self
     def order(self, *a, **k): return self
@@ -62,6 +66,7 @@ class FakeQ:
     def range(self, *a, **k): return self
     def eq(self, c, v): self.eqs[c] = v; return self
     def in_(self, c, vs): self.ins[c] = list(vs); return self
+    def is_(self, c, _v): self.isnull.append(c); return self
     def or_(self, e): self.ors = e; return self
 
     def _casa(self, linha):
@@ -70,6 +75,13 @@ class FakeQ:
                 return False
         for c, vs in self.ins.items():
             if linha.get(c) not in vs:
+                return False
+        for c in self.isnull:
+            if linha.get(c) is not None:
+                return False
+        if self.ors == "categoria_lean.is.null,categoria_lean_origem.eq.herdado":
+            if not (linha.get("categoria_lean") is None
+                    or linha.get("categoria_lean_origem") == "herdado"):
                 return False
         return True
 
@@ -143,13 +155,13 @@ check("origem_validacao PRESERVADA como proposta",
 check("os 3 caem na fila (pendente = validado_humano false)",
       sum(1 for e in gravados if not e["validado_humano"]) == 3)
 
-print("\n[2] vocabulario_canonico segue auto-validando")
+print("\n[2] pendente comum também nasce na fila (controle)")
 sb = FakeSB()
 evs = [evento("operando o torno", "operar_torno", i) for i in range(2)]
-_, n_auto, _ = persistir(sb, evs, lambda d: "vocabulario_canonico")
+_, n_auto, _ = persistir(sb, evs, lambda d: "pendente")
 gravados = [e for e in sb.dados["eventos"] if e.get("principal") is True]
-check("continua validado", all(e["validado_humano"] is True for e in gravados))
-check("n_auto_validados == 2", n_auto == 2, n_auto)
+check("pendente não é validado", all(e["validado_humano"] is False for e in gravados))
+check("n_auto_validados == 0", n_auto == 0, n_auto)
 
 print("\n[3] posto_vazio e auditoria intocados")
 sb = FakeSB()
@@ -255,7 +267,7 @@ check("correcoes_confirmacoes conta por descrição",
       mem["correcoes_confirmacoes"] == {"frase x": 2, "frase y": 1},
       mem["correcoes_confirmacoes"])
 
-print("\n[6] Reversão — escopo, proteções, dry_run, idempotência")
+print("\n[6] Reversão com escopo estreito — proteções, dry_run, idempotência")
 def ev_banco(id_, origem, vh=True, vc=True):
     return {"id": id_, "empresa": "U", "processo": "Torneamento",
             "comportamento_label": "conversando_colega", "label_corrigido": None,
@@ -276,14 +288,17 @@ def cenario():
 
 
 sb = FakeSB(cenario())
-rel = pl.reverter_auto_validacao_maquina(sb, "U", "Torneamento", dry_run=True)
+SO_CORRECAO = ("correcao_aprendida",)
+rel = pl.reverter_auto_validacao_maquina(sb, "U", "Torneamento",
+                                         origens=SO_CORRECAO, dry_run=True)
 check("dry_run encontra os 2", rel["encontrados"] == 2, rel)
 check("dry_run NÃO escreve", not sb.escritas and rel["revertidos"] == 0, sb.escritas)
 check("dry_run conta os minutos devolvidos",
       rel["minutos_devolvidos_a_fila"] == 2.0, rel)
 
 sb = FakeSB(cenario())
-rel = pl.reverter_auto_validacao_maquina(sb, "U", "Torneamento", dry_run=False)
+rel = pl.reverter_auto_validacao_maquina(sb, "U", "Torneamento",
+                                         origens=SO_CORRECAO, dry_run=False)
 por_id = {e["id"]: e for e in sb.dados["eventos"]}
 check("revertidos == 2", rel["revertidos"] == 2, rel)
 check("a1/a2 voltaram à fila",
@@ -298,11 +313,12 @@ check("humano INTOCADO",
       por_id["h1"])
 check("auditoria INTOCADA", por_id["au1"]["validado_humano"] is True, por_id["au1"])
 check("posto_vazio INTOCADO", por_id["pv1"]["validado_humano"] is True, por_id["pv1"])
-check("vocabulario_canonico não é alvo por default",
+check("origem fora da lista pedida não é tocada",
       por_id["vc1"]["validado_humano"] is True, por_id["vc1"])
 
 n_escritas = len(sb.escritas)
-rel2 = pl.reverter_auto_validacao_maquina(sb, "U", "Torneamento", dry_run=False)
+rel2 = pl.reverter_auto_validacao_maquina(sb, "U", "Torneamento",
+                                          origens=SO_CORRECAO, dry_run=False)
 check("idempotente — 2ª passada não acha nada", rel2["encontrados"] == 0, rel2)
 check("idempotente — 2ª passada não escreve", len(sb.escritas) == n_escritas)
 
@@ -321,5 +337,128 @@ check("escopo multi-tenant respeitado",
       por_id["x1"]["validado_humano"] is False
       and por_id["x2"]["validado_humano"] is True, por_id)
 
-print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
+
+# ════════════════════════════════════════════════════════════════════════
+# Fase 62 — a chave da generalização automática
+# ════════════════════════════════════════════════════════════════════════
+print("\n[7] vocabulario_canonico também deixa de assinar verdade humana")
+sb = FakeSB()
+evs = [evento("operando o torno", "operar_torno", i) for i in range(2)]
+_, n_auto, _ = persistir(sb, evs, lambda d: "vocabulario_canonico")
+gravados = [e for e in sb.dados["eventos"] if e.get("principal") is True]
+check("nenhum evento nasce validado",
+      all(e["validado_humano"] is False for e in gravados), gravados)
+check("n_auto_validados == 0 (nenhuma origem auto-valida)", n_auto == 0, n_auto)
+check("origem preservada como proposta",
+      all(e["origem_validacao"] == "vocabulario_canonico" for e in gravados))
+
+sb = FakeSB()
+ev_v = evento("posto de trabalho vazio", "posto_vazio", 0)
+ev_v["papel_pessoa"] = "posto_vazio"
+pl.etapa_persistir(sb, "U", "Torneamento", "/tmp/v.mp4", INFO, [ev_v], [1],
+                   {"posto_vazio": "vazio"}, lambda d: "pendente",
+                   eventos_auditoria=[evento("cru", "operar_torno", 5)])
+por_o = {e["origem_validacao"]: e for e in sb.dados["eventos"]}
+check("posto_vazio segue fora da fila (exceção mecânica, não verdade)",
+      por_o["posto_vazio"]["validado_humano"] is True)
+check("auditoria segue fora da fila", por_o["auditoria"]["validado_humano"] is True)
+
+print("\n[8] Limpeza inclui os 122 de vocabulario_canonico por default")
+sb = FakeSB(cenario())
+rel = pl.reverter_auto_validacao_maquina(sb, "U", "Torneamento", dry_run=False)
+por_id = {e["id"]: e for e in sb.dados["eventos"]}
+check("default agora pega as DUAS origens de máquina", rel["encontrados"] == 3, rel)
+check("vocabulario_canonico voltou à fila",
+      por_id["vc1"]["validado_humano"] is False
+      and por_id["vc1"]["validacao_correto"] is None, por_id["vc1"])
+check("humano segue intocado", por_id["h1"]["validado_humano"] is True)
+check("auditoria segue intocada", por_id["au1"]["validado_humano"] is True)
+check("posto_vazio segue intocado", por_id["pv1"]["validado_humano"] is True)
+
+print("\n[9] A chave: leitura do flag por processo")
+sb = FakeSB({"contexto_processo": [
+    {"empresa": "U", "processo": "Torneamento", "aprendizado_automatico": False},
+    {"empresa": "U", "processo": "Fresagem", "aprendizado_automatico": True},
+    {"empresa": "U", "processo": "Solda", "aprendizado_automatico": None},
+]})
+check("processo desligado → False",
+      pl.aprendizado_automatico(sb, "U", "Torneamento") is False)
+check("processo ligado → True",
+      pl.aprendizado_automatico(sb, "U", "Fresagem") is True)
+check("NULL herda o default do ambiente",
+      pl.aprendizado_automatico(sb, "U", "Solda") is pl.APRENDIZADO_AUTO_PADRAO)
+check("processo inexistente herda o default",
+      pl.aprendizado_automatico(sb, "U", "NaoExiste") is pl.APRENDIZADO_AUTO_PADRAO)
+check("default de ambiente é DESLIGADO durante a campanha",
+      pl.APRENDIZADO_AUTO_PADRAO is False, pl.APRENDIZADO_AUTO_PADRAO)
+
+
+class SBQuebrado:
+    def table(self, _n):
+        raise RuntimeError("banco fora")
+
+
+check("falha de leitura cai no default (modo seguro)",
+      pl.aprendizado_automatico(SBQuebrado(), "U", "X") is pl.APRENDIZADO_AUTO_PADRAO)
+
+print("\n[10] Chave desligada — nada generaliza")
+mem_forte = {"correcoes_aprendidas": {DESC: "conversando_colega"},
+             "correcoes_confirmacoes": {DESC: 9},
+             "vocabulario": [{"label": "olhar_peca", "descricao": "d",
+                              "n_confirmacoes": 50}]}
+_chamadas_llm.clear()
+_, _c, label_de, origem_de = pl.etapa_clusterizar(
+    None, obs, "torneamento", mem_forte, 2, lambda *a, **k: None,
+    aprendizado_auto=False)
+check("correção com 9 confirmações NÃO remapeia",
+      label_de(DESC) != "conversando_colega", label_de(DESC))
+check("descrição volta ao cluster normal", len(_chamadas_llm) == 1)
+check("origem é sempre pendente", origem_de(DESC) == "pendente", origem_de(DESC))
+
+_chamadas_llm.clear()
+_, _c, label_de, origem_de = pl.etapa_clusterizar(
+    None, obs, "torneamento", mem_forte, 2, lambda *a, **k: None,
+    aprendizado_auto=True)
+check("religando, a mesma memória volta a generalizar",
+      label_de(DESC) == "conversando_colega"
+      and origem_de(DESC) == "correcao_aprendida", (label_de(DESC), origem_de(DESC)))
+
+print("\n[11] Chave desligada — precedente Lean de outro processo não entra")
+_orig_mem_cat = pl.carregar_memoria_categoria
+pl.carregar_memoria_categoria = lambda *a, **k: {"mapa_humano": {"andar": "desperdicio"},
+                                                 "exemplos_por_cat": {}, "n_decisoes": 1}
+_llm_lean = []
+pl.groq_text_call = lambda *a, **k: (_llm_lean.append(1) or
+                                     _json.dumps({"classificacoes": []}))
+
+sb = FakeSB({
+    "comportamentos": [{"id": "c1", "empresa": "U", "processo": "Torneamento",
+                        "label": "andar", "descricao": "andar",
+                        "categoria_lean": None, "categoria_lean_origem": None}],
+    "contexto_processo": [{"empresa": "U", "processo": "Torneamento",
+                           "aprendizado_automatico": False}],
+    "eventos": [],
+})
+pl.classificar_comportamentos_lean(sb, None, "U", "Torneamento")
+check("precedente humano de outro processo NÃO foi aplicado",
+      sb.dados["comportamentos"][0]["categoria_lean"] is None,
+      sb.dados["comportamentos"][0])
+check("mas o nível 2 (IA) continua rodando", len(_llm_lean) == 1, _llm_lean)
+
+sb = FakeSB({
+    "comportamentos": [{"id": "c1", "empresa": "U", "processo": "Fresagem",
+                        "label": "andar", "descricao": "andar",
+                        "categoria_lean": None, "categoria_lean_origem": None}],
+    "contexto_processo": [{"empresa": "U", "processo": "Fresagem",
+                           "aprendizado_automatico": True}],
+    "eventos": [],
+})
+pl.classificar_comportamentos_lean(sb, None, "U", "Fresagem")
+check("com a chave ligada, o precedente volta a valer",
+      sb.dados["comportamentos"][0]["categoria_lean"] == "desperdicio"
+      and sb.dados["comportamentos"][0]["categoria_lean_origem"] == "aprendido",
+      sb.dados["comportamentos"][0])
+pl.carregar_memoria_categoria = _orig_mem_cat
+
+print(f"\n{'='*56}\n  TOTAL {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

@@ -619,3 +619,52 @@ update eventos
        validado_em       = null
  where origem_validacao = 'correcao_aprendida'
    and validado_humano  = true;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 62 — GENERALIZAÇÃO AUTOMÁTICA: chave de liga/desliga por processo.
+--
+-- Durante a campanha de 30 dias o objetivo é um DATASET LIMPO rotulado por
+-- gente. Com cinco mecanismos de aprendizado sobrepostos, ninguém consegue
+-- prever o efeito de corrigir um evento — e aprender sobre dado ainda sujo,
+-- no meio da coleta, destrói o ativo que a campanha existe para produzir.
+--
+-- NULL = herda o default do ambiente (KV_APRENDIZADO_AUTO, hoje 'off').
+-- Isto é uma CHAVE, não uma remoção: o código dos mecanismos continua todo
+-- no lugar, e religar é um UPDATE.
+--
+-- Cobre:     correcao_aprendida · vocabulario_canonico ·
+--            precedente Lean humano de outro processo ·
+--            propagação Lean para processos irmãos.
+-- NÃO cobre: classificação Lean pela IA (é o trabalho do sistema, e sai
+--            marcada 'ia') · vocabulário no prompt do cluster (sugere NOMES,
+--            não valida nada — sem ele o mesmo comportamento ganharia três
+--            nomes ao longo dos 30 dias, o que suja o dataset).
+-- ════════════════════════════════════════════════════════════════════════
+alter table contexto_processo add column if not exists aprendizado_automatico boolean;
+
+-- Desliga em TODOS os processos existentes durante a campanha.
+-- Para religar depois:  update contexto_processo set aprendizado_automatico = true;
+update contexto_processo set aprendizado_automatico = false
+ where aprendizado_automatico is distinct from false;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 62 — vocabulario_canonico também deixa de assinar verdade humana.
+--
+-- Contagem que motivou a decisão (eventos com validado_humano = true):
+--   auditoria 907 · vocabulario_canonico 122 · humano 120 · posto_vazio 71.
+-- Metade da "verdade humana" era a máquina assinando por si mesma. Os 122
+-- voltam para a fila; os 120 de origem 'humano' ficam intocados.
+--
+-- Mesmo racional do bloco da Fase 61 — e as mesmas proteções: 'humano',
+-- 'auditoria' e 'posto_vazio' não são tocados (as duas últimas usam
+-- validado_humano=true apenas como mecanismo para ficar FORA da fila).
+-- IDEMPOTENTE.
+-- ════════════════════════════════════════════════════════════════════════
+update eventos
+   set validado_humano   = false,
+       validacao_correto = null,
+       validado_em       = null
+ where origem_validacao = 'vocabulario_canonico'
+   and validado_humano  = true;

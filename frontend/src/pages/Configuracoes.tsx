@@ -49,9 +49,128 @@ export default function Configuracoes({ proc }: { proc: ProcHeaderMock; go: Go }
       {/* Fase 52: saúde da borda vem PRIMEIRO — é a pergunta que o cliente
           faz ao abrir esta tela ("meu sistema está de pé?"). */}
       <SaudeBloco proc={proc} />
+      <AprendizadoBloco proc={proc} />
       <TurnosBloco proc={proc} />
       <ZonasBloco proc={proc} />
     </div>
+  );
+}
+
+// ── Bloco: generalização automática (Fase 62) ────────────────
+// Durante a campanha de coleta o ativo é o dataset rotulado por gente.
+// Com a chave desligada o sistema classifica e a pessoa valida — nada se
+// propaga sozinho. É chave, não remoção: religar é um clique.
+function AprendizadoBloco({ proc }: { proc: ProcHeaderMock }) {
+  const qc = useQueryClient();
+  const q = useQuery({
+    queryKey: ["aprendizado", proc.id],
+    queryFn: () => api.aprendizado.ler(proc.id),
+  });
+  const setar = useMutation({
+    mutationFn: (ativo: boolean | null) => api.aprendizado.setar(proc.id, ativo),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["aprendizado", proc.id] });
+      toast(
+        r.efetivo
+          ? "Generalização LIGADA — vale a partir do próximo vídeo."
+          : "Generalização DESLIGADA — nada mais se propaga sozinho.",
+        { icon: "check" },
+      );
+    },
+    onError: (e: Error) => toast(`Não deu: ${e.message}`, { color: "var(--desp)" }),
+  });
+
+  const d = q.data;
+  const ligado = !!d?.efetivo;
+  return (
+    <Card style={{ padding: 22 }}>
+      <PanelHead
+        titulo="Generalização automática"
+        ajuda="Quando ligada, uma correção sua passa a valer sozinha para casos parecidos e rótulos consolidados são marcados como aprendidos. Desligada, o sistema classifica e você valida — nada se propaga sozinho."
+        leitura="Durante a coleta, desligada protege o dataset: aprender sobre dado ainda sujo estraga justamente o que a campanha produz."
+        right={
+          d ? (
+            <span
+              className="row gap1"
+              style={{
+                fontSize: 11.5, fontWeight: 700, padding: "3px 10px", borderRadius: 99,
+                background: ligado ? "var(--desp-bg)" : "var(--va-bg)",
+                color: ligado ? "var(--desp)" : "var(--va)",
+              }}
+            >
+              <Icon name={ligado ? "zap" : "shield"} size={12} />
+              {ligado ? "Ligada" : "Desligada"}
+            </span>
+          ) : undefined
+        }
+      />
+
+      {q.isLoading || !d ? (
+        <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Lendo o estado…</span>
+      ) : (
+        <div className="col" style={{ gap: 14 }}>
+          <div className="row gap2 wrap">
+            <Btn
+              size="sm"
+              variant={ligado ? "ghost" : "primary"}
+              icon="shield"
+              disabled={setar.isPending || !ligado}
+              onClick={() => setar.mutate(false)}
+            >
+              Desligar
+            </Btn>
+            <Btn
+              size="sm"
+              variant={ligado ? "primary" : "ghost"}
+              icon="zap"
+              disabled={setar.isPending || ligado}
+              onClick={() => setar.mutate(true)}
+            >
+              Religar
+            </Btn>
+            {d.configurado !== null && (
+              <button
+                onClick={() => setar.mutate(null)}
+                disabled={setar.isPending}
+                style={{
+                  cursor: "pointer", border: "1px solid var(--line)", background: "#fff",
+                  borderRadius: 99, padding: "4px 12px", fontSize: 11.5, color: "var(--muted)",
+                }}
+              >
+                usar o padrão ({d.padrao_ambiente ? "ligada" : "desligada"})
+              </button>
+            )}
+          </div>
+
+          <p style={{ fontSize: 12, color: "var(--faint)", margin: 0 }}>
+            Vale a partir do próximo vídeo processado — não reescreve nada já gravado.
+          </p>
+
+          {/* O ponto do painel: dizer exatamente o que a chave alcança. Sem
+              isto, "desligado" vira mais um mecanismo imprevisível. */}
+          <div className="col" style={{ gap: 7 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>
+              O que a chave alcança
+            </span>
+            {d.mecanismos.map((m) => (
+              <div key={m.nome} className="row gap2" style={{ alignItems: "flex-start" }}>
+                <span style={{ flex: "none", marginTop: 2 }}>
+                  <Icon
+                    name={m.coberto ? "check-circle" : "minus-circle"}
+                    size={13}
+                    color={m.coberto ? "var(--va)" : "var(--faint)"}
+                  />
+                </span>
+                <div className="col" style={{ gap: 1 }}>
+                  <code className="font-mono" style={{ fontSize: 11.5, color: "var(--text)" }}>{m.nome}</code>
+                  <span style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.45 }}>{m.efeito}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

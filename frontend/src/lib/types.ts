@@ -609,3 +609,19 @@ export interface FilaDuvidas {
   itens: ItemDuvida[];
   filtrado_por: string | null;
 }
+
+// Fase 62 — chave da generalização automática por processo.
+// `configurado` null = herdando o default do ambiente; `efetivo` é o que o
+// pipeline vai realmente fazer no próximo vídeo.
+export interface MecanismoAprendizado {
+  nome: string;
+  coberto: boolean;
+  efeito: string;
+}
+export interface EstadoAprendizado {
+  processo: string;
+  configurado: boolean | null;
+  efetivo: boolean;
+  padrao_ambiente: boolean;
+  mecanismos: MecanismoAprendizado[];
+}

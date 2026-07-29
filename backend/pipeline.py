@@ -70,6 +70,37 @@ ORIGENS_MAQUINA = frozenset(
     {"correcao_aprendida", "vocabulario_canonico", "posto_vazio", "auditoria"}
 )
 
+# Fase 62 — GENERALIZAÇÃO AUTOMÁTICA, chave de liga/desliga por processo.
+# Durante a campanha de coleta o objetivo é um dataset limpo rotulado por
+# gente. Aprender em cima de dado ainda sujo, no meio da coleta, destrói
+# justamente o ativo que a campanha existe para produzir — e com cinco
+# mecanismos de aprendizado sobrepostos ninguém consegue prever o efeito de
+# corrigir um evento. Desligado, o sistema classifica e a pessoa valida;
+# nada se propaga sozinho. O código dos mecanismos continua todo aqui: isto
+# é uma chave, não uma remoção.
+# NULL na coluna do processo → cai neste default de ambiente.
+APRENDIZADO_AUTO_PADRAO = os.environ.get("KV_APRENDIZADO_AUTO", "off") not in (
+    "off", "0", "false", "False", "no",
+)
+
+
+def aprendizado_automatico(sb: Client, empresa: str, processo: str) -> bool:
+    """Lê `contexto_processo.aprendizado_automatico`; NULL → default do env.
+
+    Falha de leitura cai no default — e o default é DESLIGADO, então o modo
+    seguro é o que vale quando não se sabe.
+    """
+    try:
+        r = (
+            sb.table("contexto_processo").select("aprendizado_automatico")
+            .eq("empresa", empresa).eq("processo", processo).limit(1).execute().data
+        ) or []
+        if r and r[0].get("aprendizado_automatico") is not None:
+            return bool(r[0]["aprendizado_automatico"])
+    except Exception as e:
+        log.warning(f"[aprendizado] leitura do flag falhou, usando default: {e}")
+    return APRENDIZADO_AUTO_PADRAO
+
 DEFAULT_ROIS_CONTEXTO: dict[str, dict] = {}
 
 
@@ -2078,8 +2109,18 @@ def etapa_clusterizar(
     limiar_auto_validacao: int,
     progress_cb: ProgressCb,
     conhecimento_adquirido: str = "",
+    aprendizado_auto: bool = True,
 ) -> tuple[dict[str, str], dict[str, str], Callable[[str], str], Callable[[str], str]]:
-    """Retorna (mapa_desc_label, catalogo, label_de, origem_de)."""
+    """Retorna (mapa_desc_label, catalogo, label_de, origem_de).
+
+    `aprendizado_auto=False` (Fase 62) desliga a GENERALIZAÇÃO: correções
+    humanas não remapeiam descrições e nenhuma origem sai como aprendida —
+    tudo vira `pendente` e vai para a fila. O vocabulário continua indo no
+    prompt (ver nota em `_vocab_estabelecido`): ele propõe NOMES, não grava
+    verdade, e é o que mantém os rótulos comparáveis entre si — sem isso o
+    dataset da campanha sairia com o mesmo comportamento batizado de três
+    jeitos, que é o oposto de limpo.
+    """
     progress_cb("cluster", 0, "Agrupando descrições em comportamentos")
     descricoes_unicas = sorted(set(o["descricao"] for o in observacoes_brutas))
     # Fase 61 — UMA CORREÇÃO NÃO VIRA REGRA GLOBAL.
@@ -2091,16 +2132,25 @@ def etapa_clusterizar(
     # caminho normal de clusterização, como se não houvesse correção.
     _corr_todas = memoria.get("correcoes_aprendidas", {}) or {}
     _corr_n = memoria.get("correcoes_confirmacoes", {}) or {}
-    correcoes = {
-        d: lbl for d, lbl in _corr_todas.items()
-        if _corr_n.get(d, 1) >= limiar_auto_validacao
-    }
-    _abaixo = len(_corr_todas) - len(correcoes)
-    if _abaixo:
+    if not aprendizado_auto:
+        # Fase 62: nada generaliza. As correções seguem guardadas na memória
+        # (e vão para o prompt como exemplo), mas não remapeiam ninguém.
+        correcoes = {}
         log.info(
-            "cluster: %d correção(ões) abaixo do limiar (%d) — não generalizam ainda.",
-            _abaixo, limiar_auto_validacao,
+            "cluster: generalização DESLIGADA para este processo — %d correção(ões) "
+            "guardadas, 0 aplicadas.", len(_corr_todas),
         )
+    else:
+        correcoes = {
+            d: lbl for d, lbl in _corr_todas.items()
+            if _corr_n.get(d, 1) >= limiar_auto_validacao
+        }
+        _abaixo = len(_corr_todas) - len(correcoes)
+        if _abaixo:
+            log.info(
+                "cluster: %d correção(ões) abaixo do limiar (%d) — não generalizam ainda.",
+                _abaixo, limiar_auto_validacao,
+            )
 
     descricoes_conhecidas: dict[str, str] = {}
     descricoes_novas: list[str] = []
@@ -2178,11 +2228,22 @@ def etapa_clusterizar(
     def label_de(desc: str) -> str:
         return mapa_descricao_label.get(desc.lower().strip(), "acao_indefinida")
 
-    vocab_estabelecido = {
-        v["label"]
-        for v in memoria.get("vocabulario", [])
-        if v["n_confirmacoes"] >= limiar_auto_validacao
-    }
+    # Fase 62: com a generalização desligada, nada é "aprendido" — tudo vai
+    # para a fila como pendente. Nota sobre o que NÃO é desligado aqui: o
+    # vocabulário continua entrando no PROMPT do cluster
+    # (`construir_bloco_memoria_cluster`). Ele sugere nomes já usados; não
+    # marca validação nem remapeia nada. Tirá-lo faria o mesmo comportamento
+    # ser batizado de três formas ao longo dos 30 dias, o que suja o dataset
+    # em vez de limpá-lo.
+    vocab_estabelecido = (
+        {
+            v["label"]
+            for v in memoria.get("vocabulario", [])
+            if v["n_confirmacoes"] >= limiar_auto_validacao
+        }
+        if aprendizado_auto
+        else set()
+    )
     origem_por_desc: dict[str, str] = {}
     for desc in descricoes_unicas:
         d_lower = desc.lower().strip()
@@ -2955,13 +3016,21 @@ def etapa_persistir(
     n_auto_validados = 0
     for e in eventos:
         origem = origem_de(e["descricao_bruta"])
-        # Fase 61 — INFERÊNCIA DA MÁQUINA NUNCA É VERDADE HUMANA.
-        # `correcao_aprendida` PROPÕE o rótulo (a descrição foi remapeada lá no
-        # cluster) mas NÃO valida: o evento vai para a fila como sugestão e quem
-        # confirma é a pessoa. `validado_humano`/`validacao_correto` são a base
-        # do dataset dos 30 dias e do placar das camadas — se a máquina escreve
-        # neles, não sobra verdade de referência para medir nada.
-        auto_validado = origem == "vocabulario_canonico"
+        # Fase 61/62 — INFERÊNCIA DA MÁQUINA NUNCA É VERDADE HUMANA.
+        # NENHUMA origem inferida auto-valida. `correcao_aprendida` e
+        # `vocabulario_canonico` PROPÕEM o rótulo; quem confirma é a pessoa.
+        # `validado_humano`/`validacao_correto` são a base do dataset dos 30
+        # dias e do placar das camadas — se a máquina escreve neles, não sobra
+        # verdade de referência contra a qual medir coisa alguma. Metade do que
+        # a tela chamava de "validado" era a máquina assinando por si mesma.
+        #
+        # `origem_validacao` continua gravada e passa a significar "rótulo
+        # proposto por" — é o que ajuda quem julga o evento na fila.
+        #
+        # As duas exceções abaixo NÃO são afirmações de verdade: `posto_vazio`
+        # e `auditoria` usam validado_humano=True só como mecanismo para ficar
+        # FORA da fila. Ambas são excluídas do aprendizado por ORIGENS_MAQUINA.
+        auto_validado = False
         # Fase 28: posto_vazio é determinístico (sem VLM) — nasce validado e
         # FORA da fila de validação, mas DENTRO das métricas (principal=True).
         if e.get("papel_pessoa") == "posto_vazio":
@@ -3807,7 +3876,7 @@ def reverter_auto_validacao_maquina(
     sb,
     empresa: str,
     processo: str,
-    origens: tuple = ("correcao_aprendida",),
+    origens: tuple = ("correcao_aprendida", "vocabulario_canonico"),
     dry_run: bool = True,
 ) -> dict:
     """Fase 61 — devolve à fila os eventos que a MÁQUINA marcou como validados.
@@ -4201,6 +4270,18 @@ def classificar_comportamentos_lean(
     # ─── Nível 1: match exato pela memória humana (escopo empresa) ────
     mem_cat = carregar_memoria_categoria(sb, empresa, processo)
     mapa_humano: dict[str, str] = mem_cat.get("mapa_humano") or {}
+    # Fase 62: o nível 1 pega a decisão Lean que a pessoa tomou em OUTRO
+    # processo e a aplica aqui — é generalização automática, mesmo formato do
+    # incidente. Com a chave desligada, ele não roda; o nível 2 (LLM) continua,
+    # porque classificar é o trabalho do sistema e a saída sai marcada 'ia',
+    # sem se passar por decisão humana.
+    if not aprendizado_automatico(sb, empresa, processo):
+        if mapa_humano:
+            log.info(
+                "Lean: generalização DESLIGADA — %d precedente(s) humano(s) de "
+                "outros processos não aplicados.", len(mapa_humano),
+            )
+        mapa_humano = {}
 
     aprendidos = 0
     para_llm = []
@@ -7852,9 +7933,17 @@ def processar_video(
             "n_perguntas": 0,
         }
 
+    # Fase 62: chave por processo. Desligada, nenhuma correção generaliza e
+    # nenhum rótulo sai como aprendido — tudo vai para a fila.
+    _aprende = aprendizado_automatico(sb, empresa, processo)
+    log.info(
+        "[aprendizado] generalização automática %s para %s/%s",
+        "LIGADA" if _aprende else "DESLIGADA", empresa, processo,
+    )
     _, catalogo, label_de, origem_de = etapa_clusterizar(
         groq_client, observacoes, descricao, memoria, limiar_auto_validacao, progress_cb,
         conhecimento_adquirido=conhecimento,
+        aprendizado_auto=_aprende,
     )
 
     progress_cb("segmentar", 0, "Formando eventos contínuos")
