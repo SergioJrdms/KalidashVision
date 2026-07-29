@@ -573,3 +573,14 @@ grant select on table camadas_duvida to authenticated;
 alter table contexto_processo add column if not exists duvida_limiar numeric;
 grant select, insert, update, delete on table contexto_processo to service_role;
 grant select on table contexto_processo to authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 59 — sinais do minuto que EXPLICAM a dúvida na fila.
+-- A consolidação já os calculava (Fase 56/B1) e eles se perdiam na hora de
+-- gravar: sem eles, o motivo mostrado ao validador fica sem "quantos rótulos
+-- disputaram" e sem a lista de concorrentes.
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists concordancia        numeric;
+alter table eventos add column if not exists n_rotulos_no_minuto int;
+alter table eventos add column if not exists rotulos_competindo  jsonb;

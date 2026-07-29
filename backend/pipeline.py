@@ -2680,21 +2680,36 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
     onde o modelo joga o que não sabe. `rotulo` filtra a fila para auditá-lo.'''
     lim = limiar_duvida(sb, empresa, processo)
 
-    def _fab():
-        return (
-            sb.table("eventos")
-            .select("id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
-                    "tempo_inicio_s, tempo_fim_s, confianca, n_rotulos_no_minuto, "
-                    "rotulos_competindo, em_duvida, duvida_motivo, camadas_disparadas, "
-                    "validado_humano, cam_id, pessoa_track_id, papel_pessoa, principal")
-            .eq("empresa", empresa).eq("processo", processo)
-            .eq("validado_humano", False)
-            .order("id")
-        )
+    # Colunas ESSENCIAIS x ENRIQUECIMENTO. Se uma coluna do enriquecimento ainda
+    # não existir (migração não rodada), a fila degrada — perde o detalhe, não a
+    # função. Uma tela inteira caindo em 500 por causa de uma coluna opcional é
+    # falha de projeto, não de operação.
+    BASE = ("id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
+            "tempo_inicio_s, tempo_fim_s, confianca, n_amostras, validado_humano, "
+            "cam_id, pessoa_track_id, papel_pessoa, principal")
+    EXTRA = ("em_duvida, duvida_motivo, camadas_disparadas, "
+             "n_rotulos_no_minuto, rotulos_competindo")
+
+    def _fab_com(cols):
+        def _f():
+            return (
+                sb.table("eventos").select(cols)
+                .eq("empresa", empresa).eq("processo", processo)
+                .eq("validado_humano", False)
+                .order("id")
+            )
+        return _f
+
     try:
-        eventos = _scan_todos(_fab)
+        eventos = _scan_todos(_fab_com(BASE + ", " + EXTRA))
     except Exception as e:
-        return {"erro": f"leitura falhou: {e}", "itens": [], "por_rotulo": []}
+        log.warning("[duvidas] colunas de enriquecimento indisponíveis (%s) — "
+                    "seguindo só com o essencial. Rode a migração da Fase 59.", e)
+        try:
+            eventos = _scan_todos(_fab_com(BASE))
+        except Exception as e2:
+            return {"erro": f"leitura falhou: {e2}", "itens": [], "por_rotulo": [],
+                    "por_tipo": [], "limiar": lim, "total": 0, "minutos_totais": 0.0}
 
     itens, por_rotulo, por_tipo = [], {}, {}
     for e in eventos:
@@ -2905,6 +2920,10 @@ def etapa_persistir(
             # (comportamento antigo — o filtro downstream mantém True + None).
             "principal": e.get("principal"),
         }
+        # Fase 59: sinais do minuto que explicam a dúvida na fila.
+        for _c in ("concordancia", "n_rotulos_no_minuto", "rotulos_competindo"):
+            if e.get(_c) is not None:
+                row[_c] = e[_c]
         # Fase 57: dúvida levantada pelas camadas (o placar depende disto).
         if e.get("camadas_disparadas"):
             row["camadas_disparadas"] = e["camadas_disparadas"]

@@ -117,5 +117,40 @@ ck("filtro por tipo funciona",
    len(f9["itens"])==1 and f9["itens"][0]["id"]=="s1", f9["itens"])
 ck("agregado por tipo NÃO some ao filtrar", len(f9["por_tipo"])==2, f9["por_tipo"])
 
+print("\n[10] Fase 59 — coluna faltando DEGRADA, não derruba a tela")
+class SBParcial:
+    """Simula o banco sem as colunas de enriquecimento (migração não rodada)."""
+    def __init__(s, ev): s.ev=ev; s.tentativas=[]
+    def table(s,n):
+        if n!="eventos": return Q([])
+        outer=s
+        class T:
+            def select(self, cols):
+                outer.tentativas.append(cols)
+                if "rotulos_competindo" in cols:
+                    raise Exception('column eventos.rotulos_competindo does not exist')
+                return Q(outer.ev)
+        return T()
+e_base = {"id":"p1","video_id":"v","comportamento_label":"x","label_corrigido":None,
+          "descricao_bruta":"x","tempo_inicio_s":0,"tempo_fim_s":120,"confianca":0.5,
+          "n_amostras":9,"validado_humano":False,"cam_id":"cam1","pessoa_track_id":1,
+          "papel_pessoa":"operador","principal":True}
+sbp = SBParcial([e_base])
+r10 = pl.montar_fila_duvidas(sbp,"U","P")
+ck("NÃO retorna erro quando falta coluna", "erro" not in r10, r10)
+ck("tentou o select completo primeiro", "rotulos_competindo" in sbp.tentativas[0])
+ck("caiu para o select essencial", len(sbp.tentativas)==2, sbp.tentativas)
+ck("a fila FUNCIONA mesmo degradada", len(r10["itens"])==1, r10["itens"])
+ck("detecta discordância só com o essencial",
+   r10["itens"][0]["tipo"]=="discordancia", r10["itens"][0])
+ck("resposta tem todas as chaves que a tela espera",
+   {"limiar","total","minutos_totais","por_rotulo","por_tipo","itens"} <= set(r10), list(r10))
+# falha TOTAL ainda devolve payload completo (a tela não quebra)
+class SBMorto:
+    def table(s,n): raise Exception("banco fora")
+r11 = pl.montar_fila_duvidas(SBMorto(),"U","P")
+ck("banco fora → payload completo, sem KeyError na tela",
+   {"por_tipo","por_rotulo","itens","limiar"} <= set(r11), list(r11))
+
 print(f"\n== {ok} ok, {fail} fail ==")
 sys.exit(1 if fail else 0)
