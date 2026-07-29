@@ -1,7 +1,7 @@
 export interface ComposicaoValorLite {
   valor_agregado_pct: number;
   desperdicio_pct: number;
-  nao_classificado_pct: number;
+  sem_evidencia_pct?: number;
 }
 
 export interface Processo {
@@ -123,7 +123,7 @@ export interface ComposicaoValor {
   desperdicio_pct: number;
   posto_vazio_pct?: number;
   posto_vazio_s?: number;
-  nao_classificado_pct: number;
+  sem_evidencia_pct?: number;
   tempo_total_s: number;
   por_categoria_s: Record<string, number>;
 }
@@ -526,7 +526,6 @@ export interface DiaAnalise {
   va_pct: number;
   desp_pct: number;
   vazio_pct: number;
-  none_pct: number;
   // B5: % do tempo observado em DÚVIDA (concordância abaixo do limiar ou
   // camada ativa). É o veredito do produto — cai = o sistema aprende.
   duvida_pct: number;
@@ -542,7 +541,7 @@ export interface DiaAnalise {
   top_acao: { label: string; seg: number } | null;
   top_acoes: { label: string; seg: number }[];
   // Fase 35.2: o "filme" do dia — faixas de 15 min com a categoria dominante
-  linha_tempo: { ini_m: number; fim_m: number; cat: "va" | "desp" | "vazio" | "none" }[];
+  linha_tempo: { ini_m: number; fim_m: number; cat: "va" | "desp" | "vazio" }[];
   por_hora: DiaHora[];
   sem_trabalho: "sem_captura" | "posto_vazio" | null;
 }
@@ -579,7 +578,7 @@ export interface FrameReferencia {
 
 
 // ── Fase 58/59: fila da dúvida ───────────────────────────────────────────────
-export type TipoDuvida = "sem_evidencia" | "discordancia" | "camada";
+export type TipoDuvida = "sem_evidencia" | "discordancia" | "camada" | "categoria_assumida";
 
 export interface ItemDuvida {
   id: string;
@@ -596,6 +595,9 @@ export interface ItemDuvida {
   camadas: string[];
   rotulos_competindo: string[];
   cam_id: string | null;
+  // Fase 63: 2º ângulo do MESMO instante. `offset_s` é a diferença real de
+  // relógio entre as duas câmeras — somá-lo em ini/fim é o que sincroniza.
+  segundo_angulo: { segmento_id: string; cam_id: string | null; offset_s: number } | null;
   pessoa: number;
   papel: string | null;
 }

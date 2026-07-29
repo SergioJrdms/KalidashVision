@@ -2732,8 +2732,9 @@ def limiar_duvida(sb: Client, empresa: str, processo: str) -> float:
     return DUVIDA_LIMIAR_PADRAO
 
 
-def evento_em_duvida(e: dict, limiar: float) -> tuple:
-    '''(em_duvida, motivo). Duas origens independentes:
+def evento_em_duvida(e: dict, limiar: float,
+                     labels_assumidos: set | None = None) -> tuple:
+    '''(em_duvida, motivo). Origens independentes:
       • CAMADA ativa disparou (Fase 57) — a cena contradiz o rótulo;
       • CONCORDÂNCIA abaixo do limiar (Fase 56/B1) — as amostras do minuto não
         se entenderam. É o sistema dizendo "não sei" de forma DERIVADA, sem
@@ -2773,7 +2774,84 @@ def evento_em_duvida(e: dict, limiar: float) -> tuple:
             + (f", {n} rótulos disputando)" if n and n > 1 else ")")
         )
         tipo = tipo or "discordancia"
+    # Fase 63 — CATEGORIA ASSUMIDA. O rótulo pode estar certíssimo e ainda
+    # assim ninguém ter decidido se aquilo agrega valor. Como o "não
+    # classificado" deixou de existir, esse tempo já está contando como
+    # NÃO-PRODUTIVO no placar — e é justamente por isso que precisa aparecer
+    # aqui: se estiver errado, a produtividade está subestimada agora.
+    # Vem por último de propósito: se o minuto já é duvidoso por outra razão,
+    # aquela razão é mais informativa para quem valida.
+    if labels_assumidos:
+        label = e.get("label_corrigido") or e.get("comportamento_label") or ""
+        if label in labels_assumidos:
+            motivos.append(
+                "ninguém decidiu se este comportamento agrega valor — está "
+                "contando como NÃO-produtivo por convenção, não por evidência"
+            )
+            tipo = tipo or "categoria_assumida"
     return (bool(motivos), " · ".join(motivos), tipo)
+
+
+def offset_video_segmento(video_meta: dict, seg: dict) -> float:
+    """Fase 30: offset (s) entre o início do vídeo (cam1) e o do segmento par
+    (cam2) — os dois NÃO começam no mesmo segundo. O front soma este offset em
+    ini/fim ao pedir frames do 2º ângulo (/segmentos/{id}/frames).
+
+    Usa a MESMA fonte nos dois lados (gravado_em de ambos, senão o token
+    seg_YYYYMMDD_HHMMSS do nome de ambos) para nunca misturar tz-aware com
+    naive. Sem dado confiável → 0.0 (comportamento anterior)."""
+    from datetime import datetime as _dt
+    import re as _re
+
+    def _iso(v):
+        try:
+            return _dt.fromisoformat(str(v).replace("Z", "+00:00")) if v else None
+        except Exception:
+            return None
+
+    def _token(nome):
+        m = _re.search(r"seg_(\d{8})_(\d{6})", nome or "")
+        if not m:
+            return None
+        d, h = m.group(1), m.group(2)
+        try:
+            return _dt(int(d[0:4]), int(d[4:6]), int(d[6:8]),
+                       int(h[0:2]), int(h[2:4]), int(h[4:6]))
+        except Exception:
+            return None
+
+    ga, gb = _iso(video_meta.get("gravado_em")), _iso(seg.get("gravado_em"))
+    if ga is not None and gb is not None:
+        return round((ga - gb).total_seconds(), 1)
+    na, nb = _token(video_meta.get("nome")), _token(seg.get("nome"))
+    if na is not None and nb is not None:
+        return round((na - nb).total_seconds(), 1)
+    return 0.0
+
+
+def labels_com_categoria_assumida(sb: Client, empresa: str, processo: str) -> set:
+    """Rótulos cuja categoria Lean foi ASSUMIDA (origem 'fallback') ou ainda
+    está nula. É o conjunto que alimenta a dúvida de categoria.
+
+    Consulta por RÓTULO, não por evento: a categoria vive em `comportamentos`
+    e é de lá que o dashboard a lê. Perguntar ao banco por evento traria
+    milhares de linhas para responder uma pergunta que tem dezenas."""
+    try:
+        r = (
+            sb.table("comportamentos")
+            .select("label, categoria_lean, categoria_lean_origem")
+            .eq("empresa", empresa).eq("processo", processo)
+            .limit(2000).execute().data
+        ) or []
+    except Exception as e:
+        log.warning("[duvidas] catálogo não lido (%s) — sem dúvida de categoria.", e)
+        return set()
+    return {
+        c["label"] for c in r
+        if c.get("label")
+        and not categoria_tem_evidencia(c.get("categoria_lean"),
+                                        c.get("categoria_lean_origem"))
+    }
 
 
 def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
@@ -2831,21 +2909,55 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
                 "filtrado_por": rotulo}
 
     # cam_id vem de `videos` (uma consulta só, com os ids que já temos).
+    # Fase 63: a mesma leitura traz `gravado_em`/`nome`, que são o que permite
+    # calcular o offset real de relógio até a cam2 — sem ele os dois ângulos
+    # mostrariam instantes diferentes, que é pior que não mostrar o segundo.
     cam_por_video: dict = {}
+    meta_por_video: dict = {}
+    segundo_por_video: dict = {}
+    vids = sorted({e.get("video_id") for e in eventos if e.get("video_id")})
     try:
-        vids = sorted({e.get("video_id") for e in eventos if e.get("video_id")})
         if vids:
-            for v in (sb.table("videos").select("id, cam_id")
+            for v in (sb.table("videos").select("id, cam_id, nome, gravado_em")
                       .in_("id", vids).execute().data or []):
                 cam_por_video[v["id"]] = v.get("cam_id")
+                meta_por_video[v["id"]] = v
     except Exception as e:
         log.warning("[duvidas] cam_id não resolvido (%s) — segue sem a câmera.", e)
+
+    # 2º ÂNGULO: segmento concluído do MESMO vídeo com OUTRA câmera. Mesmo
+    # lookup da tela de eventos — a fila é onde a segunda vista mais importa,
+    # porque é exatamente onde a primeira não bastou para decidir.
+    try:
+        if vids:
+            rs = (
+                sb.table("segmentos")
+                .select("id, video_id, cam_id, gravado_em, nome")
+                .eq("empresa", empresa).in_("video_id", vids)
+                .eq("status", "concluido").execute().data
+            ) or []
+            for s in rs:
+                vid = s.get("video_id")
+                if not vid or not s.get("cam_id"):
+                    continue
+                if s.get("cam_id") == cam_por_video.get(vid):
+                    continue               # é a própria câmera do evento
+                if vid not in segundo_por_video:
+                    segundo_por_video[vid] = {
+                        "segmento_id": s["id"],
+                        "cam_id": s.get("cam_id"),
+                        "offset_s": offset_video_segmento(meta_por_video.get(vid, {}), s),
+                    }
+    except Exception as e:
+        log.warning("[duvidas] 2º ângulo não resolvido (%s) — segue com uma câmera.", e)
+
+    assumidos = labels_com_categoria_assumida(sb, empresa, processo)
 
     itens, por_rotulo, por_tipo = [], {}, {}
     for e in eventos:
         if e.get("principal") is False:
             continue                       # auditoria não vai para a fila
-        duvida, motivo, tipo = evento_em_duvida(e, lim)
+        duvida, motivo, tipo = evento_em_duvida(e, lim, assumidos)
         if not duvida:
             continue
         label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
@@ -2865,14 +2977,16 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
             "minutos": round(dur / 60, 2),
             "confianca": e.get("confianca"),
             "motivo": motivo,
-            # "sem_evidencia" | "discordancia" | "camada" — nunca misturados:
-            # exigem ações diferentes de quem valida.
+            # "sem_evidencia" | "discordancia" | "camada" | "categoria_assumida"
+            # — nunca misturados: exigem ações diferentes de quem valida.
             "tipo": tipo,
             "n_amostras": e.get("n_amostras"),
             "camadas": [d.get("nome") for d in (e.get("camadas_disparadas") or [])
                         if d.get("modo") == "ativa"],
             "rotulos_competindo": e.get("rotulos_competindo") or [],
             "cam_id": cam_por_video.get(e.get("video_id")),
+            # Fase 63: 2º ângulo do MESMO instante (offset real de relógio).
+            "segundo_angulo": segundo_por_video.get(e.get("video_id")),
             "pessoa": e.get("pessoa_track_id"),
             "papel": e.get("papel_pessoa"),
         })
@@ -3805,11 +3919,58 @@ def recomputar_sugestoes_processo(sb: Client, empresa: str, processo: str) -> in
 # decisão do PRÓPRIO processo quando houver conflito.
 # ═════════════════════════════════════════════════════════════════════════
 # Fase 49: classificação BINÁRIA — produtivo (valor_agregado) × não-produtivo
-# (desperdicio). "apoio" foi removido (a IA decide por ação). "nao_classificado"
-# segue como estado DERIVADO (categoria nula), não atribuível pela IA.
+# (desperdicio). "apoio" foi removido (a IA decide por ação).
 CATEGORIAS_LEAN_VALIDAS = {"valor_agregado", "desperdicio"}
-# Label da ação que o modelo de visão não conseguiu nomear → fica SEM categoria
-# (não-classificado), nunca vira produtivo nem desperdício por chute.
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 63 — "NÃO CLASSIFICADO" DEIXA DE EXISTIR.
+#
+# Todo tempo observado é produtivo ou não-produtivo. Não há terceira fatia,
+# nem no banco, nem nas métricas, nem na tela. O cinza era uma não-resposta
+# que crescia sem dono: ninguém olhava para ele e ele não pedia nada a
+# ninguém.
+#
+# A regra de decisão, quando falta evidência, é a convenção Lean: o ônus da
+# prova é de quem afirma que a atividade agrega valor. Sem essa prova, é
+# NÃO-PRODUTIVO. Isso é conservador na direção certa — nunca infla a
+# produtividade que o cliente vai mostrar para a diretoria.
+#
+# O que substitui o cinza é a DÚVIDA DECLARADA: sempre que o sistema decide
+# sem evidência, ele marca a decisão com origem 'fallback' e o trecho vai
+# para a fila de dúvidas. A pergunta deixa de ser "quanto está sem
+# classificar?" e passa a ser "de quanto eu ainda não tenho certeza?" — que
+# é a mesma informação, só que acionável e com fim previsto.
+# ═════════════════════════════════════════════════════════════════════════
+CATEGORIA_SEM_EVIDENCIA = "desperdicio"
+# Origem que marca "o sistema escolheu, mas sem evidência" — é ela que joga o
+# trecho para a fila. Precede 'ia' em fraqueza: 'ia' é um palpite fundamentado
+# no domínio; 'fallback' é a ausência de qualquer palpite.
+ORIGEM_SEM_EVIDENCIA = "fallback"
+
+
+def categoria_efetiva(cat: str | None) -> str:
+    """Categoria Lean que a tela mostra. NUNCA devolve None.
+
+    Único ponto de decisão do sistema inteiro: qualquer lugar que precise
+    saber "isso é produtivo ou não" passa por aqui. Antes cada agregação
+    escrevia `cat or "nao_classificado"` por conta própria, e era daí que
+    vinham as divergências entre a tela principal e os gráficos.
+    """
+    return cat if cat in CATEGORIAS_LEAN_VALIDAS else CATEGORIA_SEM_EVIDENCIA
+
+
+def categoria_tem_evidencia(cat: str | None, origem: str | None = None) -> bool:
+    """False quando a categoria foi assumida, não decidida. É o que separa
+    'o sistema sabe' de 'o sistema teve de escolher' — e o que alimenta a
+    fila de dúvidas e o KPI de cobertura."""
+    if cat not in CATEGORIAS_LEAN_VALIDAS:
+        return False
+    return (origem or "") != ORIGEM_SEM_EVIDENCIA
+
+
+# Label da ação que o modelo de visão não conseguiu nomear. Fase 63: passa a
+# receber categoria como todo o resto (não-produtivo, por falta de prova de
+# valor) — e vai para a fila de dúvidas, que é onde a incerteza deve morar.
 LABEL_INDEFINIDA = "acao_indefinida"
 
 
@@ -4247,17 +4408,25 @@ def classificar_comportamentos_lean(
                 except Exception as e:
                     log.warning(f"Lean: posto_vazio não atualizado: {e}")
             continue
-        # Fase 49: ação que a visão não nomeou fica SEM categoria (não-classificado);
-        # não é produtivo nem desperdício por chute. Se ficou 'apoio' de antes,
-        # zera. Sem LLM; o gestor pode reclassificar pela UI.
+        # Fase 63: a ação que a visão não nomeou DEIXA de ficar sem categoria.
+        # Ela recebe não-produtivo pela convenção Lean (sem prova de que agrega
+        # valor, não agrega) com origem 'fallback' — que é o que a manda para a
+        # fila de dúvidas. Antes ela virava tempo cinza: sem categoria, sem
+        # dono e sem prazo para alguém olhar.
+        # Sem LLM: não há descrição para o modelo classificar, é justamente o
+        # caso em que a visão não conseguiu nomear nada.
         if c.get("label") == LABEL_INDEFINIDA:
-            if c.get("categoria_lean") is not None:
+            if (c.get("categoria_lean") != CATEGORIA_SEM_EVIDENCIA
+                    or c.get("categoria_lean_origem") != ORIGEM_SEM_EVIDENCIA):
                 try:
                     sb.table("comportamentos").update(
-                        {"categoria_lean": None, "categoria_lean_origem": None}
+                        {"categoria_lean": CATEGORIA_SEM_EVIDENCIA,
+                         "categoria_lean_origem": ORIGEM_SEM_EVIDENCIA}
                     ).eq("id", c["id"]).execute()
+                    propagar_categoria_para_eventos(
+                        sb, empresa, processo, LABEL_INDEFINIDA, CATEGORIA_SEM_EVIDENCIA)
                 except Exception as e:
-                    log.warning(f"Lean: acao_indefinida não zerada: {e}")
+                    log.warning(f"Lean: acao_indefinida não marcada: {e}")
             continue
         # 'aprendido' e 'ia' são candidatos a refinamento se reclassificar_ia
         if c.get("categoria_lean") and origem in ("ia", "aprendido") and not reclassificar_ia:
@@ -4339,10 +4508,11 @@ def classificar_comportamentos_lean(
         classifs = dados.get("classificacoes") or []
     except Exception as e:
         log.warning(f"Lean: falha ao classificar via LLM: {e}")
-        return aprendidos
+        classifs = []
 
     por_label = {c["label"]: c["id"] for c in para_llm}
     atualizados_ia = 0
+    decididos: set = set()      # quem o LLM de fato classificou
     for item in classifs:
         if not isinstance(item, dict):
             continue
@@ -4363,12 +4533,41 @@ def classificar_comportamentos_lean(
             propagar_categoria_para_eventos(sb, empresa, processo, label, cat)
         except Exception as e:
             log.warning(f"Lean: falha ao atualizar {label}: {e}")
+        else:
+            decididos.add(label)
+
+    # ─── Fase 63: FECHAMENTO. Ninguém sai daqui sem categoria ──────────
+    # O que o LLM não classificou (recusou, devolveu categoria inválida, ou a
+    # chamada falhou inteira) recebe não-produtivo com origem 'fallback'. Não é
+    # um chute disfarçado de decisão: 'fallback' é o que joga o rótulo para a
+    # fila de dúvidas e o mantém lá até alguém julgar. O cinza sumia da vista;
+    # isto não some.
+    assumidos = 0
+    for c in para_llm:
+        lbl = c.get("label") or ""
+        if lbl in decididos:
+            continue
+        try:
+            sb.table("comportamentos").update(
+                {"categoria_lean": CATEGORIA_SEM_EVIDENCIA,
+                 "categoria_lean_origem": ORIGEM_SEM_EVIDENCIA}
+            ).eq("id", c["id"]).execute()
+            propagar_categoria_para_eventos(
+                sb, empresa, processo, lbl, CATEGORIA_SEM_EVIDENCIA)
+            assumidos += 1
+        except Exception as e:
+            log.warning(f"Lean: falha ao assumir categoria de {lbl}: {e}")
+    if assumidos:
+        log.info(
+            "Lean: %d comportamento(s) SEM evidência → não-produtivo por convenção; "
+            "vão para a fila de dúvidas.", assumidos,
+        )
 
     log.info(
         f"Lean: {empresa}/{processo} · {aprendidos} aprendidos (match humano) "
-        f"+ {atualizados_ia} via IA (de {len(para_llm)} candidatos novos)."
+        f"+ {atualizados_ia} via IA + {assumidos} assumidos (de {len(para_llm)} candidatos novos)."
     )
-    return aprendidos + atualizados_ia
+    return aprendidos + atualizados_ia + assumidos
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -5799,15 +5998,17 @@ def agregar_portfolio(
     def _fab_cmp():
         q = (
             sb.table("comportamentos")
-            .select("processo, label, categoria_lean")
+            .select("processo, label, categoria_lean, categoria_lean_origem")
             .eq("empresa", empresa)
             .order("id")
         )
         return q.eq("processo", processo) if processo is not None else q
     comps = _scan_todos(_fab_cmp)
     cat_por_pl: dict[tuple, str | None] = {}
+    orig_por_pl: dict[tuple, str | None] = {}
     for c in comps:
         cat_por_pl[(c.get("processo"), c.get("label"))] = c.get("categoria_lean")
+        orig_por_pl[(c.get("processo"), c.get("label"))] = c.get("categoria_lean_origem")
 
     def _fab_ev():
         q = (
@@ -5943,18 +6144,18 @@ def agregar_portfolio(
             }
             for lbl, d in top[:5]
         ]
-        soma_cat = {"valor_agregado": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+        # Fase 63: duas fatias, sempre. `n_sem_evidencia` continua sendo
+        # contado — não para virar uma fatia cinza, mas para alimentar a
+        # maturidade e a fila de dúvidas.
+        soma_cat = {"valor_agregado": 0.0, "desperdicio": 0.0}
         n_comp_local = 0
-        n_nao_classif = 0
+        n_sem_evidencia = 0
         for lbl, d in agg.items():
-            cat = cat_por_pl.get((n, lbl))
+            cat_bruta = cat_por_pl.get((n, lbl))
             n_comp_local += 1
-            if not cat:
-                n_nao_classif += 1
-                cat = "nao_classificado"
-            if cat not in soma_cat:
-                cat = "nao_classificado"
-            soma_cat[cat] += d["dur"]
+            if not categoria_tem_evidencia(cat_bruta, orig_por_pl.get((n, lbl))):
+                n_sem_evidencia += 1
+            soma_cat[categoria_efetiva(cat_bruta)] += d["dur"]
         composicao = {
             f"{k}_pct": round(v / max(1, tempo_total) * 100, 1) for k, v in soma_cat.items()
         }
@@ -5981,7 +6182,10 @@ def agregar_portfolio(
         n_humano = p.get("n_origem_humano", 0)
         n_pend = p.get("n_origem_pendente", 0)
         pct_auto = n_auto / max(1, n_auto + n_humano + n_pend)
-        cobertura_lean = 1 - (n_nao_classif / max(1, n_comp_local))
+        # Fase 63: com tudo classificado, medir 'preenchimento' daria 100%
+        # sempre e viraria ponto grátis. A cobertura passa a medir
+        # EVIDÊNCIA: quanto do catálogo foi decidido, não assumido.
+        cobertura_lean = 1 - (n_sem_evidencia / max(1, n_comp_local))
         n_pad = n_padroes_alta.get(n, 0)
         n_resp = n_respostas.get(n, 0)
 
@@ -6059,7 +6263,7 @@ def montar_snapshot_global(
 
     # composição consolidada (recomputa direto pelos % ponderados por tempo)
     total_min = cons["tempo_total_min"] or 1
-    comp_cons = {"valor_agregado": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+    comp_cons = {"valor_agregado": 0.0, "desperdicio": 0.0}
     for nome, st in portfolio.items():
         peso = st["tempo_total_min"]
         for k in comp_cons:
@@ -6388,7 +6592,6 @@ def _fmt_dur_h(seg: float) -> str:
 _LEAN_ROTULO = {
     "valor_agregado": "produtivo",
     "desperdicio": "desperdício",
-    "nao_classificado": "não classificado",
 }
 
 
@@ -6422,20 +6625,28 @@ def _inicio_video_dt(v: dict) -> datetime | None:
 # ═════════════════════════════════════════════════════════════════════════
 def compor_tempo_observado(va_s: float, desp_s: float, vazio_s: float,
                            total_s: float) -> dict:
-    """Percentuais sobre o TEMPO OBSERVADO. As quatro fatias sempre fecham 100%
-    (o resto é o cinza REAL: tempo observado sem categoria)."""
+    """Percentuais sobre o TEMPO OBSERVADO.
+
+    Fase 63: não há mais fatia cinza. Produtivo + não-produtivo fecham 100%,
+    e `vazio` é um DETALHE do não-produtivo (quanto dele foi posto vazio), não
+    uma terceira fatia — por isso não entra na soma.
+
+    Qualquer resíduo (tempo observado que não caiu em nenhuma categoria por
+    arredondamento ou por evento sem rótulo) vai para NÃO-PRODUTIVO, na mesma
+    convenção do resto do sistema: sem prova de que agrega valor, não agrega.
+    Somar o resíduo ao produtivo inflaria o número que o cliente mostra para
+    a diretoria — é o único erro aqui que não pode acontecer.
+    """
     tot = float(total_s or 0)
     if tot <= 0:
-        return {"va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0,
-                "none_pct": 0.0, "observado_s": 0.0}
-    va = max(0.0, float(va_s)); desp = max(0.0, float(desp_s))
-    vazio = max(0.0, float(vazio_s))
-    none_s = max(0.0, tot - va - desp - vazio)
+        return {"va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0, "observado_s": 0.0}
+    va = min(max(0.0, float(va_s)), tot)
+    desp = max(0.0, tot - va)          # absorve o resíduo
+    vazio = min(max(0.0, float(vazio_s)), desp)
     return {
         "va_pct": round(va / tot * 100, 1),
         "desp_pct": round(desp / tot * 100, 1),
         "vazio_pct": round(vazio / tot * 100, 1),
-        "none_pct": round(none_s / tot * 100, 1),
         "observado_s": round(tot, 1),
     }
 
@@ -6443,7 +6654,7 @@ def compor_tempo_observado(va_s: float, desp_s: float, vazio_s: float,
 def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
     """(label efetivo, categoria lean, duração) de um evento principal."""
     label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
-    cat = cat_por_label.get(label) or "nao_classificado"
+    cat = categoria_efetiva(cat_por_label.get(label))
     dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
     return label, cat, dur
 
@@ -6727,24 +6938,26 @@ def _montar_perguntas_gestor(
             })
             break
 
-    # 4) Batizar o tempo CINZA (Fase 20): a maior ação ainda sem categoria Lean.
-    #    Só o gestor sabe se aquilo agrega valor — e a resposta destrava todos
-    #    os outros números.
-    nao_class = (por_categoria or {}).get("nao_classificado") or {}
-    if float(nao_class.get("pct") or 0) >= 10:
-        maior_cinza = next(
+    # 4) Fase 63: não existe mais "tempo cinza" para batizar — todo tempo já é
+    #    produtivo ou não-produtivo. O que resta perguntar é mais preciso: a
+    #    maior ação cuja categoria o sistema ASSUMIU (não decidiu). Ela já está
+    #    contando como não-produtiva no placar; se for produtiva, o número está
+    #    subestimado agora, e só o gestor resolve isso.
+    sem_evid_pct = float((composicao or {}).get("sem_evidencia_pct") or 0)
+    if sem_evid_pct >= 10:
+        maior_assumida = next(
             (a for a in (tempo_por_acao or [])
-             if (a.get("categoria") or "nao_classificado") == "nao_classificado"
-             and a.get("seg", 0) >= 120),
+             if a.get("sem_evidencia") and a.get("seg", 0) >= 120),
             None,
         )
-        if maior_cinza:
+        if maior_assumida:
             perguntas.append({
-                "texto": f"'{maior_cinza['acao']}' tomou {maior_cinza['pct']:.0f}% do "
-                         "tempo e ainda não tem categoria — isso "
-                         "agrega valor ou não (desperdício)? Classifique em 'Tempo "
-                         "por comportamento' e o placar passa a refletir a realidade.",
-                "contexto": f"{nao_class.get('pct', 0):.0f}% do tempo ainda sem categoria",
+                "texto": f"'{maior_assumida['acao']}' tomou "
+                         f"{maior_assumida['pct']:.0f}% do tempo e está contando "
+                         "como NÃO-produtivo porque o sistema teve de assumir, "
+                         "sem evidência. Isso agrega valor ao produto? Se sim, o "
+                         "placar está subestimando a produtividade hoje.",
+                "contexto": f"{sem_evid_pct:.0f}% do tempo classificado por suposição",
             })
 
     # 5) Ação de desperdício que mais consome o processo.
@@ -6801,7 +7014,11 @@ def montar_insights_quantitativos(
     tempo_por_acao = [
         {"acao": d.get("comportamento"), "seg": round(d.get("tempo_total_s", 0), 1),
          "pct": round(float(d.get("tempo_total_s", 0)) / total * 100, 1),
-         "categoria": d.get("categoria_lean")}
+         "categoria": categoria_efetiva(d.get("categoria_lean")),
+         # Fase 63: a categoria sempre existe; o que varia é se ela foi
+         # DECIDIDA ou ASSUMIDA. É esse sinal que vira pergunta e vira fila.
+         "sem_evidencia": not categoria_tem_evidencia(
+             d.get("categoria_lean"), d.get("categoria_lean_origem"))}
         for d in sorted(dist or [], key=lambda x: x.get("tempo_total_s", 0), reverse=True)
     ]
     if tempo_por_acao:
@@ -6814,7 +7031,7 @@ def montar_insights_quantitativos(
     por_cat_s = composicao.get("por_categoria_s") or {}
     por_categoria = {}
     partes_lean = []
-    for k in ("valor_agregado", "desperdicio", "nao_classificado"):
+    for k in ("valor_agregado", "desperdicio"):
         seg = float(por_cat_s.get(k, 0) or 0)
         pct = round(seg / total * 100, 1)
         por_categoria[k] = {"seg": round(seg, 1), "pct": pct}
@@ -6849,7 +7066,7 @@ def montar_insights_quantitativos(
         if dur <= 0:
             continue
         label = e.get("label_corrigido") or e.get("comportamento_label")
-        cat = cat_por_label.get(label) or "nao_classificado"
+        cat = categoria_efetiva(cat_por_label.get(label))
         z = por_zona.setdefault(zona, {"seg": 0.0, "va": 0.0, "desp": 0.0})
         z["seg"] += dur
         if cat == "valor_agregado":
@@ -6884,7 +7101,7 @@ def montar_insights_quantitativos(
         if dur <= 0:
             continue
         label = e.get("label_corrigido") or e.get("comportamento_label")
-        cat = cat_por_label.get(label) or "nao_classificado"
+        cat = categoria_efetiva(cat_por_label.get(label))
         d = desp_por_video.setdefault(vid, {"tot": 0.0, "desp": 0.0})
         d["tot"] += dur
         if cat == "desperdicio":
@@ -6982,7 +7199,7 @@ def montar_insights_quantitativos(
 # ═════════════════════════════════════════════════════════════════════════
 def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 30) -> dict:
     """Agrega os eventos por DIA REAL (relógio dos vídeos) e devolve:
-      dias:      [{dia, rot, dow, tempo_obs_s, va/desp/none_pct,
+      dias:      [{dia, rot, dow, tempo_obs_s, va_pct/desp_pct/vazio_pct,
                    posto_vazio_s/pct, n_videos, visitas, primeira_h, ultima_h,
                    top_acao, por_hora[], sem_trabalho}]  (calendário contínuo —
                    dia sem vídeo vira sem_trabalho='sem_captura'; dia filmado
@@ -7042,6 +7259,10 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         _lim_duvida = limiar_duvida(sb, empresa, processo)
     except Exception:
         _lim_duvida = DUVIDA_LIMIAR_PADRAO
+    # Fase 63: o KPI da dúvida tem de bater com a FILA. Se a categoria assumida
+    # manda o trecho para a fila mas não entra na curva, a tela diz uma coisa e
+    # a fila outra — e o número deixa de servir para acompanhar a campanha.
+    _assumidos = labels_com_categoria_assumida(sb, empresa, processo) if processo else set()
 
     # ── Agregação por dia (e por hora dentro do dia) ──
     por_dia: dict[str, dict] = {}
@@ -7065,8 +7286,9 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                                           "vazio": 0.0}),
             # Fase 35.2: "jornada" — buckets de 15 min do dia (96) com segundos
             # por categoria, p/ desenhar o filme do dia em uma faixa.
-            "buckets": defaultdict(lambda: {"va": 0.0, "desp": 0.0,
-                                            "vazio": 0.0, "none": 0.0}),
+            # Fase 63: sem bucket "none" — `categoria_efetiva` garante que
+            # todo evento cai em va ou desp (ou vazio, que é detalhe do desp).
+            "buckets": defaultdict(lambda: {"va": 0.0, "desp": 0.0, "vazio": 0.0}),
             "primeiro": inst, "ultimo": inst,
         })
         d["tot"] += dur
@@ -7079,7 +7301,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             d["desp"] += dur
         # B5: o KPI que responde à pergunta do negócio — quanto do tempo
         # observado o sistema NÃO SABE. Calculado na leitura (limiar vivo).
-        _dv, _, _tp = evento_em_duvida(e, _lim_duvida) if _lim_duvida is not None else (False, "", "")
+        _dv, _, _tp = (evento_em_duvida(e, _lim_duvida, _assumidos)
+                       if _lim_duvida is not None else (False, "", ""))
         if _dv:
             if _tp == "sem_evidencia":
                 d["sem_evidencia"] += dur
@@ -7105,8 +7328,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         # Fase 35.2: pinta os buckets de 15 min pela sobreposição real do
         # evento no relógio do dia (o "filme" da jornada).
         chave_cat = ("vazio" if eh_vazio else
-                     "va" if cat == "valor_agregado" else
-                     "desp" if cat == "desperdicio" else "none")
+                     "va" if cat == "valor_agregado" else "desp")
         m_ini = inst.hour * 60 + inst.minute + inst.second / 60.0
         m_fim = min(1440.0, m_ini + dur / 60.0)
         b = int(m_ini // 15)
@@ -7132,7 +7354,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         if d is None or d["tot"] <= 0:
             saida_dias.append({
                 "dia": iso, "rot": rot, "dow": dow, "tempo_obs_s": 0.0,
-                "va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0, "none_pct": 0.0,
+                "va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0,
                 "duvida_pct": 0.0, "sem_evidencia_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
@@ -7148,7 +7370,6 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             # Dia filmado mas ~só posto vazio (ou atividade desprezível) =
             # "máquina vazia o dia todo" → o dono precisa VER isso.
             sem_trab = "posto_vazio" if (vazio_pct >= 90 or atividade < 120) else None
-            none_s = max(0.0, tot - d["va"] - d["desp"] - d["vazio"])
             top = max(d["acoes"].items(), key=lambda kv: kv[1]) if d["acoes"] else None
             # Fase 35.2: top 5 ações do dia (mini-pareto do dia selecionado).
             top_acoes = [
@@ -7161,7 +7382,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             # todo produtivo sumia, contradizendo o "ritmo por hora"). Agora cada
             # bloco é fatiado na proporção real de cada categoria (ordem fixa p/
             # ficar limpo); faixas contíguas de mesma categoria são fundidas.
-            ORDEM_CAT = ("va", "desp", "none", "vazio")
+            ORDEM_CAT = ("va", "desp", "vazio")
             linha_tempo: list[dict] = []
             for b in sorted(d["buckets"]):
                 bk = d["buckets"][b]
@@ -7335,7 +7556,7 @@ def montar_serie_temporal(sb: Client, empresa: str, processo: str) -> dict:
             lbl = _label_efetivo(e)
             d = max(0, (e.get("tempo_fim_s") or 0) - (e.get("tempo_inicio_s") or 0))
             dur_por_label[lbl] += d
-            cat = cat_por_label.get(lbl) or "nao_classificado"
+            cat = categoria_efetiva(cat_por_label.get(lbl))
             dur_por_cat[cat] += d
             pessoas.add(e.get("pessoa_track_id"))
             total += d

@@ -62,6 +62,9 @@ from .pipeline import (
     reverter_auto_validacao_maquina,
     aprendizado_automatico,
     APRENDIZADO_AUTO_PADRAO,
+    categoria_efetiva,
+    categoria_tem_evidencia,
+    offset_video_segmento,
     placar_camadas,
     montar_fila_duvidas,
     limiar_duvida,
@@ -2254,19 +2257,27 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         )
     snapshot["distribuicao_comportamentos"] = dist_enriquecida
 
-    # Composição de valor agregada (% sobre o tempo total observado). Fase 49:
-    # binário — sem 'apoio' (categoria antiga cai em nao_classificado).
-    soma_por_cat = {"valor_agregado": 0.0, "desperdicio": 0.0, "nao_classificado": 0.0}
+    # Composição de valor agregada (% sobre o tempo total observado).
+    # Fase 63: DUAS fatias, sempre — produtivo × não-produtivo. Não existe
+    # "não classificado". Onde falta evidência, vale a convenção Lean (o ônus
+    # da prova é de quem afirma que agrega valor) e o trecho vai para a fila
+    # de dúvidas em vez de virar uma fatia cinza que ninguém reclama.
+    soma_por_cat = {"valor_agregado": 0.0, "desperdicio": 0.0}
+    _sem_evid_s = 0.0
     for d in dist_enriquecida:
-        cat = d.get("categoria_lean") or "nao_classificado"
-        if cat not in soma_por_cat:
-            cat = "nao_classificado"
-        soma_por_cat[cat] += d.get("tempo_total_s", 0)
+        soma_por_cat[categoria_efetiva(d.get("categoria_lean"))] += d.get("tempo_total_s", 0)
+        if not categoria_tem_evidencia(d.get("categoria_lean"), d.get("categoria_lean_origem")):
+            _sem_evid_s += d.get("tempo_total_s", 0)
     composicao_valor = {
         f"{k}_pct": round(v / total_tempo * 100, 1) for k, v in soma_por_cat.items()
     }
     composicao_valor["tempo_total_s"] = round(total_tempo, 1)
     composicao_valor["por_categoria_s"] = {k: round(v, 1) for k, v in soma_por_cat.items()}
+    # Quanto do tempo já classificado foi ASSUMIDO em vez de decidido. Não é
+    # uma fatia — é a medida honesta de quanto ainda falta julgar, e é o mesmo
+    # tempo que aparece na fila de dúvidas.
+    composicao_valor["sem_evidencia_pct"] = round(_sem_evid_s / total_tempo * 100, 1)
+    composicao_valor["sem_evidencia_s"] = round(_sem_evid_s, 1)
     # Fase 56: `posto_vazio` (operador AUSENTE) segue contando DENTRO de
     # desperdicio_pct — o número do card não muda —, mas vai separado aqui para
     # a tela poder mostrar a fatia e dizer "dos quais X pts são posto vazio".
@@ -2388,41 +2399,11 @@ def marcar_sugestao(
 # ═════════════════════════════════════════════════════════════════════════
 # VALIDAÇÃO HUMANA
 # ═════════════════════════════════════════════════════════════════════════
-def _offset_video_segmento(video_meta: dict, seg: dict) -> float:
-    """Fase 30: offset (s) entre o início do vídeo (cam1) e o do segmento par
-    (cam2) — os dois NÃO começam no mesmo segundo. O front soma este offset em
-    ini/fim ao pedir frames do 2º ângulo (/segmentos/{id}/frames).
-
-    Usa a MESMA fonte nos dois lados (gravado_em de ambos, senão o token
-    seg_YYYYMMDD_HHMMSS do nome de ambos) para nunca misturar tz-aware com
-    naive. Sem dado confiável → 0.0 (comportamento anterior)."""
-    from datetime import datetime as _dt
-    import re as _re
-
-    def _iso(v):
-        try:
-            return _dt.fromisoformat(str(v).replace("Z", "+00:00")) if v else None
-        except Exception:
-            return None
-
-    def _token(nome):
-        m = _re.search(r"seg_(\d{8})_(\d{6})", nome or "")
-        if not m:
-            return None
-        d, h = m.group(1), m.group(2)
-        try:
-            return _dt(int(d[0:4]), int(d[4:6]), int(d[6:8]),
-                       int(h[0:2]), int(h[2:4]), int(h[4:6]))
-        except Exception:
-            return None
-
-    ga, gb = _iso(video_meta.get("gravado_em")), _iso(seg.get("gravado_em"))
-    if ga is not None and gb is not None:
-        return round((ga - gb).total_seconds(), 1)
-    na, nb = _token(video_meta.get("nome")), _token(seg.get("nome"))
-    if na is not None and nb is not None:
-        return round((na - nb).total_seconds(), 1)
-    return 0.0
+# Fase 63: a implementação vive em pipeline.py — a fila de dúvidas também
+# precisa do offset, e duplicar a regra de sincronismo entre os dois
+# arquivos é como os dois ângulos acabariam mostrando instantes
+# diferentes. Aqui fica só o alias.
+_offset_video_segmento = offset_video_segmento
 
 
 @app.get("/processos/{processo_id}/eventos")

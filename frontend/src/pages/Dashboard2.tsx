@@ -136,11 +136,12 @@ function JanelaMini({ titulo, j, delta }: { titulo: string; j: JanelaAgregada; d
 }
 
 // ═══ 2) OBRIGATÓRIA — Evolução por dia + ritmo/resumão do dia (mesmo card) ═══
-const CATS: Array<{ k: keyof Pick<DiaAnalise, "va_pct" | "desp_pct" | "vazio_pct" | "none_pct">; cat: LeanShort }> = [
+// Fase 63: produtivo × não-produtivo fecham 100%. `vazio_pct` é desenhado
+// DENTRO do não-produtivo (mesma barra, cor própria), porque a causa de
+// "operador ausente" é outra — mas não é uma terceira categoria.
+const CATS: Array<{ k: keyof Pick<DiaAnalise, "va_pct" | "desp_pct" | "vazio_pct">; cat: LeanShort }> = [
   { k: "va_pct", cat: "va" }, { k: "desp_pct", cat: "desp" },
-  // Fase 56: posto vazio é fatia PRÓPRIA. Antes caía no "não classificado" e
-  // inflava o cinza sem ser dúvida nenhuma.
-  { k: "vazio_pct", cat: "vazio" }, { k: "none_pct", cat: "none" },
+  { k: "vazio_pct", cat: "vazio" },
 ];
 
 // "Dia típico": para cada faixa de 15 min do relógio, a PROPORÇÃO de cada
@@ -149,7 +150,7 @@ const CATS: Array<{ k: keyof Pick<DiaAnalise, "va_pct" | "desp_pct" | "vazio_pct
 // desperdício recorrente mas curto sumia). Agora cada slot é fatiado na
 // proporção real. Slots sem cobertura viram buraco; faixas vizinhas de mesma
 // categoria são fundidas.
-const ORDEM_CAT_TIPICO = ["va", "desp", "none", "vazio"] as const;
+const ORDEM_CAT_TIPICO = ["va", "desp", "vazio"] as const;
 function agregarLinhaTempo(dias: DiaAnalise[]): DiaAnalise["linha_tempo"] {
   const SLOT = 15, N = Math.ceil(1440 / SLOT);
   // minutos de cada categoria por slot, somando a SOBREPOSIÇÃO real de todas as faixas.
@@ -215,7 +216,7 @@ function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
     va_pct: wavg((d) => d.va_pct), vazio_pct: wavg((d) => d.vazio_pct || 0),
     duvida_pct: wavg((d) => d.duvida_pct || 0),
     sem_evidencia_pct: wavg((d) => d.sem_evidencia_pct || 0),
-    desp_pct: wavg((d) => d.desp_pct), none_pct: wavg((d) => d.none_pct),
+    desp_pct: wavg((d) => d.desp_pct),
     posto_vazio_s: dias.reduce((s, d) => s + d.posto_vazio_s, 0),
     posto_vazio_pct: wavg((d) => d.posto_vazio_pct),
     n_videos: dias.reduce((s, d) => s + d.n_videos, 0),
@@ -245,7 +246,7 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Evolução por dia"
-        ajuda="Cada coluna é UM DIA do calendário, dividida em produtivo, desperdício e não classificado. Dias sem trabalho aparecem marcados (cinza = sem captura, vermelho = máquina vazia o dia todo). Clique num dia para ver o ritmo e o resumo dele logo abaixo."
+        ajuda="Cada coluna é UM DIA do calendário, dividida em produtivo e não-produtivo (com o posto vazio destacado dentro do não-produtivo). Dias sem trabalho aparecem marcados (cinza = sem captura, vermelho = máquina vazia o dia todo). Clique num dia para ver o ritmo e o resumo dele logo abaixo."
         leitura="Verde crescendo dia após dia = o posto está rendendo mais."
         right={<span style={{ fontSize: 12, color: "var(--muted)" }}>últimos {dias.length} dias</span>}
       />
@@ -275,7 +276,6 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
             va_pct: Math.max(0, d.va_pct),
             desp_pct: Math.max(0, d.desp_pct),
             vazio_pct: Math.max(0, d.vazio_pct || 0),
-            none_pct: Math.max(0, 100 - d.va_pct - d.desp_pct - (d.vazio_pct || 0)),
           };
           let yTopo = H - padB;
           const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · desperdício ${Math.round(d.desp_pct)}%`;
@@ -286,7 +286,7 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
                 const h = (vals[k] / 100) * plotH;
                 if (h <= 0.5) return null;
                 yTopo -= h;
-                return <rect key={k} x={x} y={yTopo + 1} width={bw} height={Math.max(1, h - 2)} rx="2.5" fill={leanCor(cat)} opacity={cat === "none" ? 0.55 : 0.92}><title>{tip}</title></rect>;
+                return <rect key={k} x={x} y={yTopo + 1} width={bw} height={Math.max(1, h - 2)} rx="2.5" fill={leanCor(cat)} opacity={0.92}><title>{tip}</title></rect>;
               })}
               {mostraRotulo && <text x={x + bw / 2} y={H - padB + 14} fontSize="9" textAnchor="middle" fill={sel ? "var(--accent)" : "var(--muted)"} fontFamily="var(--mono)" fontWeight={sel ? 700 : 400}>{d.rot}</text>}
             </g>
@@ -374,12 +374,11 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; me
       {horas.length >= 2 ? (
         <ul className="col" style={{ gap: 8, listStyle: "none", padding: 0, margin: 0 }}>
           {horas.map((h) => {
-            const none = Math.max(0, 100 - h.va_pct - h.desp_pct - (h.vazio_pct || 0));
             return (
               <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
                 <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
                 <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
-                  <LeanBar va={h.va_pct} desp={h.desp_pct} vazio={h.vazio_pct || 0} none={none} height={10} />
+                  <LeanBar va={h.va_pct} desp={h.desp_pct} vazio={h.vazio_pct || 0} height={10} />
                 </div>
               </li>
             );
@@ -590,11 +589,10 @@ function PresencaCard({ dias }: { dias: DiaAnalise[] }) {
 
 // ═══ Jornada do dia: o FILME do dia selecionado numa faixa só ═══
 const CAT_CORES: Record<string, string> = {
-  va: leanCor("va"), desp: leanCor("desp"),
-  none: leanCor("none"), vazio: "#8a8598",
+  va: leanCor("va"), desp: leanCor("desp"), vazio: "#8a8598",
 };
 const CAT_NOMES: Record<string, string> = {
-  va: "produtivo", desp: "desperdício", none: "não classificado", vazio: "posto vazio",
+  va: "produtivo", desp: "desperdício", vazio: "posto vazio",
 };
 
 function fmtMin(m: number): string {
@@ -614,8 +612,8 @@ function JornadaDoDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
       <PanelHead
         titulo={agregado ? "A jornada típica — todos os dias" : `A jornada de ${d.dow} ${d.rot}`}
         ajuda={agregado
-          ? "O dia TÍPICO do operador: em cada faixa de 15 min, a categoria que mais apareceu naquele horário somando todos os dias. Verde = produtivo, vermelho = desperdício, cinza claro = não classificado, cinza escuro = posto vazio. Buracos em branco = horário sem filmagem em nenhum dia."
-          : "O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produtivo, vermelho = desperdício, cinza claro = não classificado, cinza escuro = posto vazio. Buracos em branco = sem filmagem naquele horário."}
+          ? "O dia TÍPICO do operador: em cada faixa de 15 min, a proporção de cada categoria somando todos os dias. Verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = horário sem filmagem em nenhum dia."
+          : "O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = sem filmagem naquele horário."}
         leitura={agregado
           ? "O padrão do posto: onde o dia costuma render, o horário do almoço e as folgas típicas."
           : "O filme do dia: dá pra ver quando começou, o almoço, os buracos e onde o dia rendeu."}
@@ -629,7 +627,7 @@ function JornadaDoDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
               position: "absolute", top: 8, bottom: 14,
               left: `${((f.ini_m - ini) / span) * 100}%`,
               width: `${((f.fim_m - f.ini_m) / span) * 100}%`,
-              background: CAT_CORES[f.cat], opacity: f.cat === "none" ? 0.55 : 0.92,
+              background: CAT_CORES[f.cat], opacity: 0.92,
               borderRadius: 3,
             }} />
         ))}
@@ -640,7 +638,7 @@ function JornadaDoDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
         ))}
       </div>
       <div className="row wrap" style={{ gap: 10, fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
-        {(["va", "desp", "vazio", "none"] as const).map((c) => (
+        {(["va", "desp", "vazio"] as const).map((c) => (
           <span key={c} className="row" style={{ gap: 5 }}>
             <i style={{ width: 9, height: 9, borderRadius: 3, background: CAT_CORES[c] }} /> {CAT_NOMES[c]}
           </span>

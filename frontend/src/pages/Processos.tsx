@@ -193,7 +193,7 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
           <span className="row gap1" style={{ color: nivel.cor, fontWeight: 700 }}><Icon name="sparkles" size={11} /> Prism {nivel.rotulo.toLowerCase()}</span>
           <span>produtivo <b className="tnum" style={{ color: "var(--va)" }}>{p.va}%</b></span>
         </div>
-        <LeanBar va={p.va} desp={p.desp} none={p.none} height={7} />
+        <LeanBar va={p.va} desp={Math.max(0, 100 - p.va)} height={7} />
       </div>
 
       <div className="row" style={{ gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line-2)" }}>

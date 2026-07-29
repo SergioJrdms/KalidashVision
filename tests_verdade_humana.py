@@ -440,8 +440,11 @@ sb = FakeSB({
     "eventos": [],
 })
 pl.classificar_comportamentos_lean(sb, None, "U", "Torneamento")
+# Fase 63: não existe mais categoria nula — o que prova que o precedente não
+# foi aplicado é a ORIGEM. 'fallback' = o sistema assumiu por convenção;
+# 'aprendido' seria a decisão de outro processo tendo vazado para cá.
 check("precedente humano de outro processo NÃO foi aplicado",
-      sb.dados["comportamentos"][0]["categoria_lean"] is None,
+      sb.dados["comportamentos"][0]["categoria_lean_origem"] == "fallback",
       sb.dados["comportamentos"][0])
 check("mas o nível 2 (IA) continua rodando", len(_llm_lean) == 1, _llm_lean)
 

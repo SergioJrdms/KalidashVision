@@ -81,7 +81,7 @@ function GraficoEvolucao({ serie }: { serie: SerieMock }) {
   const iw = W - padL - padR, ih = H - padT - padB;
   const x = (i: number) => padL + (pts.length <= 1 ? iw / 2 : (i / (pts.length - 1)) * iw);
   const y = (v: number) => padT + (1 - v / 100) * ih;
-  const order: (keyof SerieMock["pontos"][number])[] = ["va", "desp", "none"];
+  const order: (keyof SerieMock["pontos"][number])[] = ["va", "desp"];
   const bands = order.map((cat, ci) => {
     const lowKeys = order.slice(0, ci);
     const top = pts.map((p, i) => ({ i, v: lowKeys.reduce((s, k) => s + (p[k] as number), 0) + (p[cat] as number) }));
@@ -96,11 +96,11 @@ function GraficoEvolucao({ serie }: { serie: SerieMock }) {
         {[0, 25, 50, 75, 100].map((g) => (
           <g key={g}><line x1={padL} x2={W - padR} y1={y(g)} y2={y(g)} stroke="var(--line-2)" /><text x={padL - 6} y={y(g) + 3} fontSize="9" textAnchor="end" fill="var(--faint)" className="font-mono">{g}%</text></g>
         ))}
-        {bands.map((b) => <path key={b.cat} d={b.path} fill={leanCor(b.cat)} fillOpacity={b.cat === "none" ? 0.28 : 0.82} stroke={leanCor(b.cat)} strokeOpacity={0.3} strokeWidth=".5" />)}
+        {bands.map((b) => <path key={b.cat} d={b.path} fill={leanCor(b.cat)} fillOpacity={0.82} stroke={leanCor(b.cat)} strokeOpacity={0.3} strokeWidth=".5" />)}
         {pts.map((p, i) => i % 2 === 0 && <text key={i} x={x(i)} y={H - padB + 16} fontSize="9" textAnchor="middle" fill="var(--muted)" className="font-mono">{p.turno}</text>)}
       </svg>
       <div className="row wrap" style={{ gap: 14, marginTop: 8, justifyContent: "center" }}>
-        {["va", "desp", "none"].map((k) => (
+        {["va", "desp"].map((k) => (
           <span key={k} className="row gap1" style={{ fontSize: 12, color: "var(--text)" }}><i style={{ width: 11, height: 11, borderRadius: 3, background: leanCor(k) }} /> {leanLabel(k)}</span>
         ))}
       </div>

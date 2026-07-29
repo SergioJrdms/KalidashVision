@@ -3,9 +3,11 @@
 // Os dados mock foram substituídos pela camada de API real.
 // ============================================================
 
-// Fase 49: classificação binária — produtivo (va) × não-produtivo. O
-// não-produtivo ainda se detalha em desperdício (desp) e não-classificado (none).
-export type LeanShort = "va" | "desp" | "vazio" | "none";
+// Fase 63: NÃO existe "não classificado". Todo tempo é produtivo (va) ou
+// não-produtivo (desp); `vazio` (posto sem operador) é um DETALHE do
+// não-produtivo, mostrado à parte porque a causa e a ação são outras — não é
+// uma terceira fatia e não entra na soma de 100%.
+export type LeanShort = "va" | "desp" | "vazio";
 
 // Níveis de maturidade do Prism por processo
 export const NIVEIS = [
@@ -26,28 +28,27 @@ export const LEAN: Record<LeanShort, { label: string; cor: string; bg: string }>
   va: { label: "Produtivo", cor: "var(--va)", bg: "var(--va-bg)" },
   desp: { label: "Desperdício", cor: "var(--desp)", bg: "var(--desp-bg)" },
   vazio: { label: "Posto vazio", cor: "#8a8598", bg: "var(--none-bg)" },
-  none: { label: "Não classificado", cor: "var(--none)", bg: "var(--none-bg)" },
 };
 
 export function leanCor(c: string) {
-  return (LEAN[c as LeanShort] || LEAN.none).cor;
+  return (LEAN[c as LeanShort] || LEAN.desp).cor;
 }
 export function leanLabel(c: string) {
-  return (LEAN[c as LeanShort] || LEAN.none).label;
+  return (LEAN[c as LeanShort] || LEAN.desp).label;
 }
 
-/** Mapa categoria do banco (valor_agregado/desperdicio/null) → short do design.
- * Fase 49: 'apoio' foi removido; valores desconhecidos caem em não-classificado. */
+/** Mapa categoria do banco → short do design.
+ * Fase 63: espelha `categoria_efetiva` do backend — nulo/desconhecido cai em
+ * NÃO-PRODUTIVO, nunca em cinza. A convenção Lean é que o ônus da prova é de
+ * quem afirma que a atividade agrega valor; sem prova, não agrega. Errar para
+ * o outro lado inflaria a produtividade que o cliente leva para a diretoria. */
 export function leanShort(cat: string | null | undefined): LeanShort {
   if (cat === "valor_agregado") return "va";
-  if (cat === "desperdicio") return "desp";
-  return "none";
+  return "desp";
 }
 /** Inverso: short do design → categoria do banco. */
-export function leanLong(c: LeanShort): "valor_agregado" | "desperdicio" | null {
-  if (c === "va") return "valor_agregado";
-  if (c === "desp") return "desperdicio";
-  return null;
+export function leanLong(c: LeanShort): "valor_agregado" | "desperdicio" {
+  return c === "va" ? "valor_agregado" : "desperdicio";
 }
 
 export function fmtSeg(s: number) {

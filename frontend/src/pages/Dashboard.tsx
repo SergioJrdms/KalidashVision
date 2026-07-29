@@ -89,7 +89,7 @@ function OperacaoEmGraficos({ det, iq, processoId }: { det: DetMock; iq: Insight
 }
 
 // Evolução por vídeo: colunas 100% empilhadas (produtivo/desperdício/
-// não classificado), em ordem cronológica — a história do processo.
+// produtivo × não-produtivo), em ordem cronológica — a história do processo.
 function EvolucaoPanel({ processoId }: { processoId: string }) {
   const q = useQuery({ queryKey: ["serie", processoId], queryFn: () => api.padroes.serie(processoId) });
   const pontos = (q.data?.pontos || []).slice(-16); // últimos 16 vídeos
@@ -105,15 +105,16 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
   const slot = (W - padL - padR) / n;
   const bw = Math.min(30, slot - 6);
   const plotH = H - padT - padB;
+  // Fase 63: duas fatias, e elas fecham 100%.
   const CATS: Array<{ k: string; cat: LeanShort }> = [
     { k: "valor_agregado", cat: "va" },
-    { k: "desperdicio", cat: "desp" }, { k: "nao_classificado", cat: "none" },
+    { k: "desperdicio", cat: "desp" },
   ];
   return (
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Evolução por vídeo"
-        ajuda="Cada coluna é um vídeo (em ordem cronológica), dividida em produtivo, desperdício e não classificado. Mostra se a operação está melhorando de um vídeo para o outro."
+        ajuda="Cada coluna é um vídeo (em ordem cronológica), dividida em produtivo e não-produtivo. Mostra se a operação está melhorando de um vídeo para o outro."
         leitura="Verde crescendo = o processo está aprendendo a render."
       />
       {pontos.length < 2 ? (
@@ -129,11 +130,11 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
               const sc = p.share_categoria || {};
               const va = Math.max(0, sc["valor_agregado"] || 0);
               const desp = Math.max(0, sc["desperdicio"] || 0);
-              const none = Math.max(0, 100 - va - desp);
-              const vals: Record<string, number> = { valor_agregado: va, desperdicio: desp, nao_classificado: none };
+              // O resto do tempo é não-produtivo: não existe fatia sem dono.
+              const vals: Record<string, number> = { valor_agregado: va, desperdicio: Math.max(0, 100 - va) };
               const x = padL + i * slot + (slot - bw) / 2;
               let yTopo = H - padB; // empilha de baixo (produtivo) pra cima
-              const tip = `${rotulo(p, i)} — produtivo ${Math.round(va)}% · desperdício ${Math.round(desp)}% · não classif. ${Math.round(none)}%`;
+              const tip = `${rotulo(p, i)} — produtivo ${Math.round(va)}% · não-produtivo ${Math.round(100 - va)}%`;
               const passoRotulo = Math.ceil(pontos.length / 6);
               const mostraRotulo = i % passoRotulo === 0;
               return (
@@ -142,7 +143,7 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
                     const h = (vals[k] / 100) * plotH;
                     if (h <= 0.5) return null;
                     yTopo -= h;
-                    return <rect key={k} x={x} y={yTopo + 1} width={bw} height={Math.max(1, h - 2)} rx="2.5" fill={leanCor(cat)} opacity={cat === "none" ? 0.55 : 0.92}><title>{tip}</title></rect>;
+                    return <rect key={k} x={x} y={yTopo + 1} width={bw} height={Math.max(1, h - 2)} rx="2.5" fill={leanCor(cat)} opacity={0.92}><title>{tip}</title></rect>;
                   })}
                   {mostraRotulo && <text x={x + bw / 2} y={H - padB + 14} fontSize="9" textAnchor="middle" fill="var(--muted)" fontFamily="var(--mono)">{rotulo(p, i)}</text>}
                 </g>
@@ -171,7 +172,7 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Ritmo do dia"
-        ajuda="O tempo de cada hora do relógio (somando todos os dias filmados), dividido em produtivo, desperdício e não classificado. Revela padrões estruturais: começo de turno lento, queda pós-almoço, fim de dia disperso."
+        ajuda="O tempo de cada hora do relógio (somando todos os dias filmados), dividido em produtivo e não-produtivo. Revela padrões estruturais: começo de turno lento, queda pós-almoço, fim de dia disperso."
         leitura="Procure a hora mais vermelha — é onde a rotina trava todo dia."
       />
       {horas.length < 2 ? (
@@ -180,19 +181,18 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
         <>
           <ul className="col" style={{ gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
             {horas.map((h) => {
-              const none = Math.max(0, 100 - h.va_pct - h.desp_pct);
               return (
                 <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
                   <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
                   <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
-                    <LeanBar va={h.va_pct} desp={h.desp_pct} none={none} height={10} />
+                    <LeanBar va={h.va_pct} desp={h.desp_pct} height={10} />
                   </div>
                 </li>
               );
             })}
           </ul>
           <div className="row wrap" style={{ gap: 10, fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
-            {(["va", "desp", "none"] as LeanShort[]).map((c) => (
+            {(["va", "desp"] as LeanShort[]).map((c) => (
               <span key={c} className="row" style={{ gap: 5 }}>
                 <i style={{ width: 9, height: 9, borderRadius: 3, background: leanCor(c) }} /> {leanLabel(c)}
               </span>
@@ -306,24 +306,22 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Fase 20 — Próximo passo: a ÚNICA ação de maior alavancagem agora.
-// Regra de prioridade: (1) tempo sem categoria ≥15% (classificar destrava
-// todos os números) → (2) fila de validação grande (ensinar o Prism) →
-// (3) desperdício relevante (agir nas sugestões). Nada disparou → some.
+// Fase 20/63 — Próximo passo: a ÚNICA ação de maior alavancagem agora.
+// Prioridade: (1) tempo classificado por SUPOSIÇÃO ≥15% — hoje ele conta como
+// não-produtivo e pode estar subestimando o placar → (2) fila de validação
+// grande → (3) desperdício relevante. Nada disparou → some.
 // ═══════════════════════════════════════════════════════════════════════
 function ProximoPasso({ det, proc, go }: { det: DetMock; proc: ProcHeaderMock; go: Go }) {
-  const none = det.insights?.por_categoria?.["nao_classificado"];
-  const nonePct = none?.pct ?? det.snapshot.none;
-  const topCinza = det.comportamentos.find((c) => c.cat === "none");
+  const semEvidPct = det.snapshot.semEvidencia;
   const desp = det.insights?.por_categoria?.["desperdicio"];
 
   let passo: { titulo: string; desc: string; cta: string; onClick: () => void } | null = null;
-  if (nonePct >= 15 && topCinza) {
+  if (semEvidPct >= 15) {
     passo = {
-      titulo: "Classifique o tempo sem categoria",
-      desc: `${Math.round(nonePct)}% do tempo ainda é cinza — comece por '${topCinza.nome}'. Toque no chip de categoria e diga se agrega valor, apoia ou desperdiça. O placar fica real na hora.`,
-      cta: "Classificar agora",
-      onClick: () => document.getElementById("painel-tempo-comportamento")?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      titulo: "Resolva o tempo que o sistema assumiu",
+      desc: `${Math.round(semEvidPct)}% do tempo está contando como NÃO-produtivo porque ninguém decidiu — o sistema teve de escolher sem evidência. Se parte disso agrega valor, seu placar está pior do que a realidade.`,
+      cta: "Abrir dúvidas",
+      onClick: () => go("processo", proc.id, "duvidas"),
     };
   } else if (proc.pendencias >= 30) {
     passo = {
@@ -409,7 +407,7 @@ function PorPosto({ iq }: { iq: InsightsQuantitativos | null }) {
               <span className="grow" />
               
             </div>
-            <LeanBar va={r.va_pct} desp={r.desp_pct} none={Math.max(0, 100 - r.va_pct - r.desp_pct)} />
+            <LeanBar va={r.va_pct} desp={Math.max(0, 100 - r.va_pct)} />
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
               <b style={{ color: leanCor("va") }}>{r.va_pct.toFixed(0)}% produtivo</b> · <b style={{ color: leanCor("desp") }}>{r.desp_pct.toFixed(0)}% desperdício</b>
             </div>
@@ -541,7 +539,7 @@ function KpiVA({ det }: { det: DetMock }) {
         Índice de valor agregado <Help text="% do tempo em comportamentos de 'valor agregado' (Lean). A métrica-rainha: quanto da operação entrega o que o cliente paga." width={230} />
       </div>
       <div className="font-display tnum" style={{ fontSize: 30, fontWeight: 700, color: "var(--ink)", marginTop: 4 }}>{s.va}%</div>
-      <div style={{ marginTop: 10 }}><LeanBar va={s.va} desp={Math.max(0, s.desp - (s.vazio || 0))} vazio={s.vazio || 0} none={s.none} showLegend /></div>
+      <div style={{ marginTop: 10 }}><LeanBar va={s.va} desp={Math.max(0, s.desp - (s.vazio || 0))} vazio={s.vazio || 0} showLegend /></div>
     </Card>
   );
 }
@@ -702,11 +700,10 @@ function ComposicaoPanel({ det }: { det: DetMock }) {
     { v: s.va, c: "var(--va)", n: "Produtivo" },
     { v: Math.max(0, s.desp - (s.vazio || 0)), c: "var(--desp)", n: "Desperdício" },
     { v: s.vazio || 0, c: "#8a8598", n: "Posto vazio" },
-    { v: s.none, c: "var(--none)", n: "Não classificado" },
   ];
   return (
     <Card style={{ padding: 20 }}>
-      <PanelHead titulo="Produtivo × não-produtivo" ajuda="Como o tempo total se distribui entre produtivo (valor agregado) e não-produtivo (desperdício + não classificado). A categoria vem da IA — você pode reclassificar." leitura="Há espaço claro para mover tempo de Desperdício para Produtivo." />
+      <PanelHead titulo="Produtivo × não-produtivo" ajuda="Como o tempo observado se divide entre produtivo (agrega valor ao produto) e não-produtivo. São as duas únicas categorias: todo minuto cai em uma delas. 'Posto vazio' é um pedaço do não-produtivo, separado porque a causa é outra. Você pode reclassificar qualquer comportamento." leitura="Há espaço claro para mover tempo de Desperdício para Produtivo." />
       <div className="row gap4" style={{ alignItems: "center", justifyContent: "center" }}>
         <Donut data={data} size={168} thickness={26} centerLabel={`${s.va}%`} centerSub="valor" />
         <ul className="col" style={{ gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
@@ -739,7 +736,7 @@ function ParetoPanel({ det }: { det: DetMock }) {
           {[0, 25, 50, 75, 100].map((g) => <line key={g} x1={padL} x2={W - padR} y1={yT(g)} y2={yT(g)} stroke="var(--line-2)" />)}
           {data.map((d, i) => {
             const top = yT(d.pct), h = (H - padT - padB) - (top - padT);
-            return <rect key={i} x={x(i) + 3} y={top} width={bw - 6} height={Math.max(2, h)} rx="4" fill={leanCor(d.cat)} opacity={d.cat === "none" ? 0.5 : 0.92} />;
+            return <rect key={i} x={x(i) + 3} y={top} width={bw - 6} height={Math.max(2, h)} rx="4" fill={leanCor(d.cat)} opacity={0.92} />;
           })}
           <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="2.2" />
           {data.map((d, i) => <circle key={i} cx={x(i) + bw / 2} cy={yT(d.acc)} r="3" fill="var(--accent)" />)}
@@ -784,7 +781,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
   const [verTodos, setVerTodos] = useState(false);
   // Reclassifica pelo RÓTULO, não pelo id do catálogo: rótulo que ainda não
   // entrou em `comportamentos` vinha sem id, e o clique morria em silêncio —
-  // justamente nos "não classificados", que é onde todo rótulo sem linha cai.
+  // justamente nos rótulos sem linha no catálogo, que era onde o cinza caía.
   const setCat = useMutation({
     mutationFn: ({ label, cat }: { label: string; cat: LeanShort }) =>
       api.comportamentos.setCategoriaPorLabel(processoId, label, leanLong(cat)),

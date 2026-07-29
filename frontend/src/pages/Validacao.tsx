@@ -460,7 +460,7 @@ function FilaFoco({
                   <datalist id="labels-fila">{labels.map((l) => <option key={l} value={l} />)}</datalist>
                 </div>
               )}
-              {evento.sugestao !== "none" && (
+              {(
                 <span className="badge badge-purple"><i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(evento.sugestao) }} /> {leanLabel(evento.sugestao)}</span>
               )}
             </div>

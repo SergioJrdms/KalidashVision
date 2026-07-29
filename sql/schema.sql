@@ -668,3 +668,61 @@ update eventos
        validado_em       = null
  where origem_validacao = 'vocabulario_canonico'
    and validado_humano  = true;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 63 — "NÃO CLASSIFICADO" DEIXA DE EXISTIR.
+--
+-- Todo tempo observado passa a ser produtivo ou não-produtivo. Não há
+-- terceira fatia, nem no banco, nem nas métricas, nem na tela.
+--
+-- A regra, quando falta evidência, é a convenção Lean: o ônus da prova é de
+-- quem afirma que a atividade agrega valor. Sem prova, é NÃO-PRODUTIVO —
+-- conservador na direção certa, porque nunca infla a produtividade que o
+-- cliente leva para a diretoria.
+--
+-- O que substitui o cinza é a DÚVIDA DECLARADA: a decisão sem evidência
+-- fica marcada com `categoria_lean_origem = 'fallback'`, e é essa marca que
+-- joga o trecho para a fila de dúvidas. A pergunta deixa de ser "quanto está
+-- sem classificar?" (que ninguém respondia) e passa a ser "de quanto eu
+-- ainda não tenho certeza?" — mesma informação, agora acionável.
+--
+-- ⚠️ NÃO toca em `categoria_lean_origem = 'humano'`: decisão da pessoa é
+-- inviolável, inclusive a de deixar algo como está.
+--
+-- Confira o tamanho do backfill antes de rodar:
+--   select coalesce(categoria_lean,'(nulo)') as cat,
+--          coalesce(categoria_lean_origem,'(nula)') as origem, count(*)
+--     from comportamentos group by 1,2 order by 3 desc;
+-- ════════════════════════════════════════════════════════════════════════
+
+-- 1) Comportamentos sem categoria → não-produtivo, marcado como assumido.
+update comportamentos
+   set categoria_lean        = 'desperdicio',
+       categoria_lean_origem = 'fallback'
+ where categoria_lean is null
+   and coalesce(categoria_lean_origem, '') <> 'humano';
+
+-- 2) `acao_indefinida` era zerada de propósito até a Fase 62. Agora entra na
+--    mesma regra: não-produtivo por convenção, e vai para a fila de dúvidas.
+update comportamentos
+   set categoria_lean        = 'desperdicio',
+       categoria_lean_origem = 'fallback'
+ where label = 'acao_indefinida'
+   and coalesce(categoria_lean_origem, '') <> 'humano';
+
+-- 3) Eventos sem categoria herdam a do comportamento. A precedência da Fase
+--    55 continua valendo: só escreve em quem está NULL ou é 'herdado'.
+update eventos e
+   set categoria_lean        = c.categoria_lean,
+       categoria_lean_origem = 'herdado'
+  from comportamentos c
+ where c.empresa = e.empresa
+   and c.processo = e.processo
+   and c.label = coalesce(e.label_corrigido, e.comportamento_label)
+   and c.categoria_lean is not null
+   and (e.categoria_lean is null or e.categoria_lean_origem = 'herdado')
+   and e.categoria_lean is distinct from c.categoria_lean;
+
+-- Sobrou algo sem categoria? Deve devolver 0 linhas.
+--   select count(*) from comportamentos where categoria_lean is null;

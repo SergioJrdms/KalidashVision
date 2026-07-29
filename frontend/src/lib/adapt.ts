@@ -29,7 +29,6 @@ export interface ProcMock {
   pendencias: number;
   va: number;
   desp: number;
-  none: number;
   ultimoVideo: string;
 }
 
@@ -47,7 +46,7 @@ export interface ProcHeaderMock {
 export interface CompMock { id: string; nome: string; pct: number; seg: number; cat: LeanShort; origem: string | null }
 export interface SugMock { id: string; prioridade: string; area: string; sugestao: string; impacto: string; situacao: string; causa: string; comportamentos: string[]; voltou: boolean }
 export interface DetMock {
-  snapshot: { va: number; desp: number; vazio: number; none: number; tempoObservadoMin: number; videos: number; validadoPct: number; topComportamento: { nome: string; pct: number } };
+  snapshot: { va: number; desp: number; vazio: number; semEvidencia: number; tempoObservadoMin: number; videos: number; validadoPct: number; topComportamento: { nome: string; pct: number } };
   comportamentos: CompMock[];
   pareto: { nome: string; pct: number; acc: number; cat: LeanShort }[];
   transicoes: { de: string; para: string; vezes: number }[];
@@ -62,7 +61,7 @@ export interface PendIrmaoMock { id: string; camId: string | null; label: string
 export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[] }
 export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null; papel: string | null; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
-export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; desp: number; none: number }[] }
+export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; desp: number }[] }
 export interface PadProcMock { id: string; tipo: string; confianca: string; relevancia: string; titulo: string; descricao: string; recomendacao: string | null; comportamentos: string[] }
 export interface InsightMock { id: string; prioridade: string; titulo: string; descricao: string; processos: string[] }
 export interface PadGlobalMock { id: string; tipo: string; confianca: string; titulo: string; descricao: string; recomendacao: string | null; processos: string[] }
@@ -97,7 +96,6 @@ export function mapProcessos(rows: Processo[]): ProcMock[] {
       pendencias: p.eventos_pendentes || 0,
       va: cv?.valor_agregado_pct || 0,
       desp: cv?.desperdicio_pct || 0,
-      none: cv?.nao_classificado_pct || 0,
       ultimoVideo: rel(p.ultimo_video_em),
     };
   });
@@ -150,7 +148,9 @@ export function mapDashboard(d: DashboardData): DetMock {
       va: Math.round(cv.valor_agregado_pct),
       desp: Math.round(cv.desperdicio_pct),
       vazio: Math.round(cv.posto_vazio_pct || 0),
-      none: Math.round(cv.nao_classificado_pct),
+      // Não é uma fatia — é quanto do tempo já classificado foi ASSUMIDO em
+      // vez de decidido. Vira o "próximo passo" e vira fila de dúvidas.
+      semEvidencia: Math.round(cv.sem_evidencia_pct || 0),
       tempoObservadoMin: s.tempo_total_observado_min,
       videos: s.videos_analisados,
       validadoPct: Math.round(s.pct_validado_por_humano),

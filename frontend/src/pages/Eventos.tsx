@@ -50,7 +50,7 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
   });
   // Reclassifica pelo RÓTULO. Antes ia pelo `comportamento_id`, que vem nulo
   // para todo rótulo sem linha em `comportamentos` — e rótulo sem linha aparece
-  // sempre como "não classificado". Daí o chip travado justo nesses casos.
+  // sem categoria própria. Daí o chip travado justo nesses casos.
   const setCatMut = useMutation({
     mutationFn: ({ label, cat }: { label: string; cat: LeanShort }) =>
       api.comportamentos.setCategoriaPorLabel(proc.id, label, leanLong(cat)),
