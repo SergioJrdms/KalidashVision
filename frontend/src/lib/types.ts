@@ -527,6 +527,9 @@ export interface DiaAnalise {
   desp_pct: number;
   vazio_pct: number;
   none_pct: number;
+  // B5: % do tempo observado em DÚVIDA (concordância abaixo do limiar ou
+  // camada ativa). É o veredito do produto — cai = o sistema aprende.
+  duvida_pct: number;
   posto_vazio_s: number;
   posto_vazio_pct: number;
   n_videos: number;

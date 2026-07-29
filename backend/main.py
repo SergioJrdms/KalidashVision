@@ -60,6 +60,8 @@ from .pipeline import (
     propagar_categoria_para_eventos,
     relatorio_propagacao_lean,
     placar_camadas,
+    montar_fila_duvidas,
+    limiar_duvida,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -789,6 +791,30 @@ def excluir_camada(processo_id: str, nome: str,
     sb.table("camadas_duvida").delete().eq("empresa", user.empresa).eq(
         "processo", proc).eq("nome", nome).execute()
     return {"ok": True}
+
+
+@app.get("/processos/{processo_id}/duvidas")
+def fila_de_duvidas(
+    processo_id: str,
+    rotulo: str | None = Query(None, description="filtra a fila por rótulo"),
+    limite: int = Query(200, ge=1, le=1000),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """B4 — fila da dúvida ORDENADA POR MINUTOS EM JOGO, não por ordem de
+    chegada: valida-se primeiro o que mais move o placar.
+
+    Cada item traz o MOTIVO (qual camada disparou, ou a discordância entre as
+    amostras) — sem isso o validador está adivinhando junto com a máquina. Os
+    frames vêm do cache já aquecido no processamento (Fase 54), sem custo.
+
+    `por_rotulo` mostra a concentração da dúvida por rótulo, e `?rotulo=` filtra
+    a fila: é como auditar a suspeita de um rótulo virar depósito da dúvida."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = montar_fila_duvidas(sb, user.empresa, nome, rotulo=rotulo, limite=limite)
+    if "erro" in r:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, r["erro"])
+    return {"ok": True, **r}
 
 
 @app.get("/processos/{processo_id}/camadas/placar")

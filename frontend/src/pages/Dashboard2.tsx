@@ -48,6 +48,9 @@ export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
       )}
       <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
         <div style={{ flex: "1.2 1 380px" }}><TendenciaCard dias={trabalhados} tendencia={dados.tendencia} /></div>
+        <div style={{ flex: "1 1 340px" }}><DuvidaCard dias={trabalhados} /></div>
+      </div>
+      <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
         <div style={{ flex: "1 1 340px" }}><HeatmapQuinzena dias={dias} onSelecionar={toggleDia} /></div>
       </div>
       <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
@@ -210,6 +213,7 @@ function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
     dia: "__agg__", rot: `${dias.length} dias`, dow: "",
     tempo_obs_s: dias.reduce((s, d) => s + d.tempo_obs_s, 0),
     va_pct: wavg((d) => d.va_pct), vazio_pct: wavg((d) => d.vazio_pct || 0),
+    duvida_pct: wavg((d) => d.duvida_pct || 0),
     desp_pct: wavg((d) => d.desp_pct), none_pct: wavg((d) => d.none_pct),
     posto_vazio_s: dias.reduce((s, d) => s + d.posto_vazio_s, 0),
     posto_vazio_pct: wavg((d) => d.posto_vazio_pct),
@@ -453,6 +457,78 @@ function TendenciaCard({ dias, tendencia }: { dias: DiaAnalise[]; tendencia: Ana
           )}
         </>
       )}
+    </Card>
+  );
+}
+
+// ═══ B5 — O KPI que responde à pergunta do negócio ═══
+// "% do tempo observado em DÚVIDA", por dia. Esta curva é o veredito do
+// produto: se cai semana a semana, o sistema aprende; se estabiliza em 20-30%,
+// a tese está errada. Por isso é visível e permanente, não um número escondido.
+function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
+  const pts = dias.filter((d) => d.duvida_pct != null);
+  if (pts.length === 0) return null;
+  const W = 460, H = 150, padT = 10, padB = 24, padL = 30, padR = 10;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = pts.length;
+  const x = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const y = (v: number) => padT + (1 - Math.min(100, Math.max(0, v)) / 100) * plotH;
+  const atual = pts[pts.length - 1].duvida_pct;
+  // Tendência simples: média da 1ª metade contra a 2ª.
+  const meio = Math.floor(n / 2);
+  const m = (a: DiaAnalise[]) => (a.length ? a.reduce((s, d) => s + d.duvida_pct, 0) / a.length : 0);
+  const delta = n >= 4 ? m(pts.slice(meio)) - m(pts.slice(0, meio)) : null;
+  const cor = atual >= 30 ? leanCor("desp") : atual >= 20 ? "#c98a00" : leanCor("va");
+  return (
+    <Card style={{ padding: 20, height: "100%" }}>
+      <PanelHead
+        titulo="Quanto o sistema não sabe"
+        ajuda="Parte do tempo observado em que a leitura ficou em dúvida — as amostras do minuto discordaram entre si, ou uma verificação da cena contradisse o rótulo. Esses trechos vão para a fila de validação, ordenados por impacto."
+        leitura="Esta curva é o veredito: caindo semana a semana, o sistema está aprendendo."
+      />
+      <div className="row gap2" style={{ alignItems: "baseline", marginBottom: 6 }}>
+        <span className="font-display tnum" style={{ fontSize: 26, fontWeight: 700, color: cor }}>
+          {atual.toFixed(0)}%
+        </span>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>do tempo observado, no último dia</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }} role="img"
+           aria-label="Evolução do percentual de tempo em dúvida">
+        {[0, 25, 50].map((g) => (
+          <g key={g}>
+            <line x1={padL} x2={W - padR} y1={y(g)} y2={y(g)} stroke="var(--line-2)" />
+            <text x={padL - 6} y={y(g) + 3} fontSize="8.5" textAnchor="end" fill="var(--faint)" fontFamily="var(--mono)">{g}%</text>
+          </g>
+        ))}
+        {/* faixa 20-30%: acima disso, o dono do processo disse que não há produto */}
+        <rect x={padL} y={y(30)} width={plotW} height={Math.max(0, y(20) - y(30))}
+              fill="var(--desp)" opacity={0.07} />
+        <polyline fill="none" stroke={cor} strokeWidth={2.2} strokeLinejoin="round"
+                  points={pts.map((d, i) => `${x(i)},${y(d.duvida_pct)}`).join(" ")} />
+        {pts.map((d, i) => (
+          <circle key={d.dia} cx={x(i)} cy={y(d.duvida_pct)} r={3} fill="#fff" stroke={cor} strokeWidth={1.6}>
+            <title>{`${d.dow} ${d.rot} — ${d.duvida_pct.toFixed(0)}% em dúvida`}</title>
+          </circle>
+        ))}
+        {pts.map((d, i) => {
+          const passo = Math.ceil(n / 6);
+          return i % passo === 0 ? (
+            <text key={d.dia} x={x(i)} y={H - padB + 14} fontSize="8.5" textAnchor="middle"
+                  fill="var(--muted)" fontFamily="var(--mono)">{d.rot}</text>
+          ) : null;
+        })}
+      </svg>
+      <p style={{ fontSize: 12, color: "var(--text)", margin: "6px 0 0" }}>
+        {delta == null ? (
+          <span style={{ color: "var(--muted)" }}>Poucos dias para dizer se está caindo.</span>
+        ) : delta <= -2 ? (
+          <><b style={{ color: leanCor("va") }}>▼ Caindo {Math.abs(delta).toFixed(0)} pts</b> — o sistema está aprendendo.</>
+        ) : delta >= 2 ? (
+          <><b style={{ color: leanCor("desp") }}>▲ Subindo {delta.toFixed(0)} pts</b> — vale olhar o que mudou na operação.</>
+        ) : (
+          <><b style={{ color: "#c98a00" }}>◆ Estável</b> — se ficar entre 20% e 30%, a leitura ainda não é confiável o bastante.</>
+        )}
+      </p>
     </Card>
   );
 }

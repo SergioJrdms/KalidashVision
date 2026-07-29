@@ -2582,6 +2582,136 @@ def placar_camadas(sb: Client, empresa: str, processo: str) -> dict:
     return {"camadas": saida, "total_disparos": sum(c["disparos"] for c in saida)}
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 58 (B4/B5) — FILA DA DÚVIDA + KPI DO PRODUTO
+#
+# Limiar medido nos dados (198 eventos), não chutado: abaixo de 0.65 estão os
+# empates reais (3 rótulos disputando, moeda ao ar, 3-contra-2).
+#
+# ⚠️ O corte é aplicado na LEITURA, nunca gravado no evento. Mudar o limiar
+# passa a valer na hora, inclusive para os eventos já processados — se ficasse
+# congelado numa coluna, ajustar exigiria reprocessar 30 dias de campanha.
+# ═════════════════════════════════════════════════════════════════════════
+DUVIDA_LIMIAR_PADRAO = float(os.environ.get("KV_DUVIDA_LIMIAR", "0.65"))
+
+
+def limiar_duvida(sb: Client, empresa: str, processo: str) -> float:
+    """Limiar do processo (coluna `duvida_limiar` em contexto_processo) com
+    fallback no env. Configurável por processo porque cada operação tem seu
+    próprio nível de ambiguidade."""
+    try:
+        r = (
+            sb.table("contexto_processo").select("duvida_limiar")
+            .eq("empresa", empresa).eq("processo", processo).limit(1).execute().data
+        ) or []
+        if r and r[0].get("duvida_limiar") is not None:
+            return float(r[0]["duvida_limiar"])
+    except Exception:
+        pass
+    return DUVIDA_LIMIAR_PADRAO
+
+
+def evento_em_duvida(e: dict, limiar: float) -> tuple:
+    '''(em_duvida, motivo). Duas origens independentes:
+      • CAMADA ativa disparou (Fase 57) — a cena contradiz o rótulo;
+      • CONCORDÂNCIA abaixo do limiar (Fase 56/B1) — as amostras do minuto não
+        se entenderam. É o sistema dizendo "não sei" de forma DERIVADA, sem
+        precisar que o VLM declare abstenção.
+    Evento já julgado por humano sai da fila: a dúvida foi resolvida.'''
+    if e.get("validado_humano"):
+        return False, ""
+    motivos = []
+    # A garantia da SOMBRA vale também na leitura: mesmo que `em_duvida` venha
+    # marcado, só conta se houver camada ATIVA entre as disparadas. Defesa em
+    # profundidade — o compromisso é "sombra nunca contamina", e ele não pode
+    # depender só de quem escreveu.
+    disparos = e.get("camadas_disparadas")
+    tem_ativa = (any((d or {}).get("modo") == "ativa" for d in disparos)
+                 if disparos else bool(e.get("em_duvida")))
+    if e.get("em_duvida") and tem_ativa:
+        motivos.append(e.get("duvida_motivo")
+                       or "uma verificação da cena contradiz o rótulo")
+    conf = e.get("confianca")
+    if conf is not None and float(conf) < limiar:
+        n = e.get("n_rotulos_no_minuto")
+        motivos.append(
+            f"as amostras do minuto discordaram (concordância {float(conf):.0%}"
+            + (f", {n} rótulos disputando)" if n and n > 1 else ")")
+        )
+    return (bool(motivos), " · ".join(motivos))
+
+
+def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
+                        rotulo: str | None = None, limite: int = 200) -> dict:
+    '''B4 — fila ORDENADA POR MINUTOS EM JOGO, não por ordem de chegada:
+    valida-se primeiro o que mais move o placar.
+
+    `por_rotulo` existe para auditar a suspeita de "rótulo depósito da dúvida"
+    — um rótulo que aparece em todas as faixas de baixa confiança costuma ser
+    onde o modelo joga o que não sabe. `rotulo` filtra a fila para auditá-lo.'''
+    lim = limiar_duvida(sb, empresa, processo)
+
+    def _fab():
+        return (
+            sb.table("eventos")
+            .select("id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
+                    "tempo_inicio_s, tempo_fim_s, confianca, n_rotulos_no_minuto, "
+                    "rotulos_competindo, em_duvida, duvida_motivo, camadas_disparadas, "
+                    "validado_humano, cam_id, pessoa_track_id, papel_pessoa, principal")
+            .eq("empresa", empresa).eq("processo", processo)
+            .eq("validado_humano", False)
+            .order("id")
+        )
+    try:
+        eventos = _scan_todos(_fab)
+    except Exception as e:
+        return {"erro": f"leitura falhou: {e}", "itens": [], "por_rotulo": []}
+
+    itens, por_rotulo = [], {}
+    for e in eventos:
+        if e.get("principal") is False:
+            continue                       # auditoria não vai para a fila
+        duvida, motivo = evento_em_duvida(e, lim)
+        if not duvida:
+            continue
+        label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        r = por_rotulo.setdefault(label, {"rotulo": label, "eventos": 0, "segundos": 0.0})
+        r["eventos"] += 1
+        r["segundos"] += dur
+        if rotulo and label != rotulo:
+            continue                       # filtro aplicado DEPOIS do agregado
+        itens.append({
+            "id": e["id"], "video_id": e.get("video_id"), "rotulo": label,
+            "descricao": e.get("descricao_bruta"),
+            "ini": e.get("tempo_inicio_s"), "fim": e.get("tempo_fim_s"),
+            "minutos": round(dur / 60, 2),
+            "confianca": e.get("confianca"),
+            "motivo": motivo,
+            "camadas": [d.get("nome") for d in (e.get("camadas_disparadas") or [])
+                        if d.get("modo") == "ativa"],
+            "rotulos_competindo": e.get("rotulos_competindo") or [],
+            "cam_id": e.get("cam_id"), "pessoa": e.get("pessoa_track_id"),
+            "papel": e.get("papel_pessoa"),
+        })
+
+    # ORDEM POR IMPACTO: mais minutos primeiro. Empate → menor confiança antes.
+    itens.sort(key=lambda x: (-x["minutos"], x["confianca"] if x["confianca"] is not None else 1))
+    lista_rot = sorted(
+        ({"rotulo": v["rotulo"], "eventos": v["eventos"],
+          "minutos": round(v["segundos"] / 60, 1)} for v in por_rotulo.values()),
+        key=lambda x: -x["minutos"],
+    )
+    return {
+        "limiar": lim,
+        "total": sum(v["eventos"] for v in por_rotulo.values()),
+        "minutos_totais": round(sum(v["segundos"] for v in por_rotulo.values()) / 60, 1),
+        "por_rotulo": lista_rot,
+        "itens": itens[:limite],
+        "filtrado_por": rotulo,
+    }
+
+
 def etapa_persistir(
     sb: Client,
     empresa: str,
@@ -6589,7 +6719,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         sb.table("eventos")
         .select(
             "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, validacao_correto, principal, papel_pessoa"
+            "tempo_fim_s, validacao_correto, principal, papel_pessoa, "
+            "confianca, em_duvida, duvida_motivo, validado_humano, n_rotulos_no_minuto"
         )
         .eq("empresa", empresa)
         .eq("processo", processo)
@@ -6601,6 +6732,12 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         e for e in eventos
         if e.get("validacao_correto") is not False and e.get("principal") is not False
     ]
+
+    # B5: limiar do processo, lido UMA vez (a checagem por evento é pura).
+    try:
+        _lim_duvida = limiar_duvida(sb, empresa, processo)
+    except Exception:
+        _lim_duvida = DUVIDA_LIMIAR_PADRAO
 
     # ── Agregação por dia (e por hora dentro do dia) ──
     por_dia: dict[str, dict] = {}
@@ -6618,7 +6755,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
         dia = inst.date().isoformat()
         d = por_dia.setdefault(dia, {
-            "tot": 0.0, "va": 0.0, "desp": 0.0,
+            "tot": 0.0, "va": 0.0, "desp": 0.0, "duvida": 0.0,
             "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
             "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "desp": 0.0,
                                           "vazio": 0.0}),
@@ -6636,6 +6773,10 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             d["va"] += dur
         elif cat == "desperdicio":
             d["desp"] += dur
+        # B5: o KPI que responde à pergunta do negócio — quanto do tempo
+        # observado o sistema NÃO SABE. Calculado na leitura (limiar vivo).
+        if _lim_duvida is not None and evento_em_duvida(e, _lim_duvida)[0]:
+            d["duvida"] += dur
         if e.get("papel_pessoa") == "visitante":
             d["visitas"] += 1
         if not eh_vazio:
@@ -6684,6 +6825,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             saida_dias.append({
                 "dia": iso, "rot": rot, "dow": dow, "tempo_obs_s": 0.0,
                 "va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0, "none_pct": 0.0,
+                "duvida_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
                 "top_acoes": [], "linha_tempo": [],
@@ -6745,6 +6887,10 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 "dia": iso, "rot": rot, "dow": dow,
                 "tempo_obs_s": round(tot, 1),
                 **compor_tempo_observado(d["va"], d["desp"], d["vazio"], tot),
+                # B5 — a curva que é o veredito do produto: se cai semana a
+                # semana o sistema aprende; se estabiliza em 20-30%, a tese
+                # está errada. Fica VISÍVEL e permanente, não escondida.
+                "duvida_pct": round(d["duvida"] / tot * 100, 1),
                 "posto_vazio_s": round(d["vazio"], 1),
                 "posto_vazio_pct": round(vazio_pct, 1),
                 "n_videos": len(videos_por_dia.get(iso, ())),

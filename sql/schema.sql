@@ -560,3 +560,16 @@ create policy camadas_duvida_modify on camadas_duvida
 -- VAZIO e sem erro — o pior modo de falha).
 grant select, insert, update, delete on table camadas_duvida to service_role;
 grant select on table camadas_duvida to authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 58 — LIMIAR DE DÚVIDA POR PROCESSO
+-- Medido nos dados (198 eventos): abaixo de 0.65 estão os empates reais.
+-- Configurável por processo porque cada operação tem seu próprio nível de
+-- ambiguidade. NULL = usa KV_DUVIDA_LIMIAR (default 0.65).
+-- O corte é aplicado na LEITURA, nunca gravado no evento: ajustar o limiar
+-- vale na hora, inclusive para os 30 dias já processados.
+-- ════════════════════════════════════════════════════════════════════════
+alter table contexto_processo add column if not exists duvida_limiar numeric;
+grant select, insert, update, delete on table contexto_processo to service_role;
+grant select on table contexto_processo to authenticated;
