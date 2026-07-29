@@ -1,0 +1,30 @@
+# BoT-SORT para CÂMERA FIXA (Fase 64) — opcional, via KV_TRACKER=fixa.
+#
+# Idêntico ao botsort.yaml de fábrica, com UMA mudança: gmc_method: none.
+#
+# GMC (Global Motion Compensation) existe para compensar o movimento da
+# CÂMERA. As nossas são de parede/tripé e não se mexem — o warp estimado é
+# ~identidade de qualquer forma. Com `none`, o resultado do tracking é o
+# mesmo e economiza-se `goodFeaturesToTrack` + fluxo óptico em TODO frame
+# rastreado (6 fps × duração), que na instância pequena do Render não é
+# desprezível.
+#
+# Não é a correção do warning do GMC — essa é o reset entre vídeos, em
+# `pipeline.resetar_tracker`. Isto aqui é economia de CPU, e opt-in de
+# propósito: mudar o tracker no meio da campanha de 30 dias tem de ser
+# decisão de quem é dono do dado, não efeito colateral de um deploy.
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 30
+match_thresh: 0.8
+fuse_score: True
+
+# ← a única diferença para o arquivo de fábrica
+gmc_method: none
+
+proximity_thresh: 0.5
+appearance_thresh: 0.8
+with_reid: False
+model: auto

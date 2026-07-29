@@ -55,7 +55,17 @@ GROQ_MODEL_RAPIDO = "llama-3.3-70b-versatile"
 
 YOLO_CONF_MIN = 0.45
 AREA_MIN_RATIO = 0.005
-TRACKER_CONFIG = "botsort.yaml"
+# Fase 64: `KV_TRACKER=fixa` usa o perfil de CÂMERA FIXA (idêntico ao de
+# fábrica, só com gmc_method: none). Default = arquivo de fábrica: trocar o
+# tracker no meio da campanha de 30 dias é decisão do dono do dado, não efeito
+# colateral de deploy. Env desconhecido cai no de fábrica, nunca quebra.
+_TRACKER_FIXA = str(Path(__file__).resolve().parent / "trackers" / "botsort_camera_fixa.yaml")
+TRACKER_CONFIG = (
+    _TRACKER_FIXA
+    if os.environ.get("KV_TRACKER", "").strip().lower() in ("fixa", "fixed", "camera_fixa")
+    and Path(_TRACKER_FIXA).is_file()
+    else "botsort.yaml"
+)
 
 # 5s (não 3s): ~40% menos chamadas ao VLM por vídeo → menos pressão de RPM/TPM
 # no Groq Free Tier e fila drena mais rápido. Configurável via env.
@@ -1615,6 +1625,55 @@ def _gate_distancia(ancora: dict, pessoa: dict) -> float:
     return sum(t * p for t, p in zip(termos, pesos)) / soma
 
 
+def resetar_tracker(yolo) -> str:
+    """Fase 64 — zera o estado do BoT-SORT ENTRE VÍDEOS. Devolve o que fez
+    (para log/teste). Nunca levanta: falhar aqui não pode matar um vídeo.
+
+    POR QUE ISTO É NECESSÁRIO
+    O worker mantém UM `YOLO` vivo para todos os vídeos (`_get_yolo`, para não
+    recarregar o modelo a cada job) e chama `.track(persist=True)`. `persist`
+    quer dizer "não recrie os trackers" — o que é o correto DENTRO de um vídeo
+    e errado ENTRE vídeos. Duas consequências, nesta ordem de gravidade:
+
+    1) VAZAMENTO DE TRACK ENTRE VÍDEOS. Tracks perdidas sobrevivem
+       `track_buffer` frames (30 no botsort.yaml). No primeiro frame do vídeo
+       seguinte elas ainda estão vivas e podem casar com quem aparecer ali —
+       câmera fixa, mesmo posto, pessoa quase na mesma posição: é o cenário
+       ideal para o casamento errado. `ids_unicos` (total_pessoas) sai torto.
+
+    2) GMC TRAVADO. O GMC guarda `prevFrame`. Em
+       `gmc.py::applySparseOptFlow`, `calcOpticalFlowPyrLK` roda ANTES de
+       `self.prevFrame = frame.copy()`. Se os tamanhos divergirem, o OpenCV
+       levanta (assertion `prevPyr.size() == nextPyr.size()`), o ultralytics
+       captura e cai para identidade — mas `prevFrame` NUNCA é atualizado.
+       Resultado: o quadro velho fica preso e TODO frame seguinte falha
+       igual, para sempre, no processo inteiro. É por isso que o warning sai
+       repetido em vez de uma vez só: não é um tropeço, é um estado travado.
+
+    `BOTSORT.reset()` chama `gmc.reset_params()`, que é exatamente a saída
+    desse estado. Em versões sem `reset()`, apagar `predictor.trackers` força
+    `on_predict_start` a recriá-los mesmo com `persist=True` (ele só reusa se
+    o atributo existir).
+    """
+    try:
+        # A leitura dos atributos fica DENTRO do try: `predictor` pode ser uma
+        # property e levantar. Deixá-la de fora dava a um detalhe do ultralytics
+        # o poder de derrubar o vídeo inteiro.
+        pred = getattr(yolo, "predictor", None)
+        trackers = getattr(pred, "trackers", None) or []
+        if trackers and all(hasattr(t, "reset") for t in trackers):
+            for t in trackers:
+                t.reset()
+            return "reset"
+        if pred is not None and hasattr(pred, "trackers"):
+            del pred.trackers          # força a recriação no próximo track()
+            return "recriar"
+    except Exception as e:  # noqa: BLE001
+        log.warning("[tracker] reset falhou (não-fatal): %s", e)
+        return "falhou"
+    return "nada"                      # 1º vídeo do processo: ainda não existe
+
+
 def etapa_detectar_e_amostrar(
     yolo: YOLO,
     video_path: str,
@@ -1622,6 +1681,10 @@ def etapa_detectar_e_amostrar(
     rois_contexto: dict,
     progress_cb: ProgressCb,
 ) -> tuple[list[Amostra], dict, list[int]]:
+    # Cada vídeo começa com o tracker limpo. Ver `resetar_tracker` para o
+    # porquê — em resumo: `persist=True` é certo dentro do vídeo e errado
+    # entre vídeos.
+    log.debug("[tracker] estado entre vídeos: %s", resetar_tracker(yolo))
     info = inspecionar_video(video_path)
     fps = info["fps"]
     total_frames = info["total_frames"]
