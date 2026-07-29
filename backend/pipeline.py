@@ -62,6 +62,14 @@ TRACKER_CONFIG = "botsort.yaml"
 DEFAULT_INTERVALO_AMOSTRAGEM_S = float(os.environ.get("KV_INTERVALO_AMOSTRAGEM_S", "5.0"))
 DEFAULT_LIMIAR_AUTO_VALIDACAO = 2
 
+# Fase 61 — origens que a MÁQUINA escreve. Nenhuma delas conta como evidência
+# humana: não alimenta a memória de aprendizado e não pode marcar
+# `validado_humano`/`validacao_correto`, que são a verdade de referência do
+# dataset e do placar das camadas.
+ORIGENS_MAQUINA = frozenset(
+    {"correcao_aprendida", "vocabulario_canonico", "posto_vazio", "auditoria"}
+)
+
 DEFAULT_ROIS_CONTEXTO: dict[str, dict] = {}
 
 
@@ -461,6 +469,7 @@ def carregar_memoria_do_negocio(
     memoria = {
         "vocabulario": [],
         "correcoes_aprendidas": {},
+        "correcoes_confirmacoes": {},
         "descartados": {},
         "total_eventos_validados": 0,
     }
@@ -468,7 +477,8 @@ def carregar_memoria_do_negocio(
     r = (
         sb.table("eventos")
         .select(
-            "comportamento_label, label_corrigido, descricao_bruta, validacao_correto, principal"
+            "comportamento_label, label_corrigido, descricao_bruta, validacao_correto, "
+            "principal, origem_validacao"
         )
         .eq("empresa", empresa)
         .eq("processo", processo)
@@ -479,6 +489,18 @@ def carregar_memoria_do_negocio(
     # Fase 16: crus de auditoria entram como validado_humano=True; remove-os do
     # aprendizado (só principais/antigos contam).
     eventos = [e for e in (r.data or []) if e.get("principal") is not False]
+    # Fase 61 — A MÁQUINA NÃO CONFIRMA A SI MESMA.
+    # Todo evento auto-validado entrava aqui como "confirmação humana" e somava
+    # em `n_confirmacoes` — o mesmo contador que libera a auto-validação. Ou
+    # seja: uma vez cruzado o limiar, cada evento auto-validado reforçava o
+    # limiar que o auto-validou. O contador só subia, nunca descia, e a
+    # "evidência humana" virava eco da própria inferência.
+    # Origem nula fica de fora do corte: é validação humana legada, anterior
+    # ao campo `origem_validacao`.
+    eventos = [
+        e for e in eventos
+        if (e.get("origem_validacao") or "humano") not in ORIGENS_MAQUINA
+    ]
     memoria["total_eventos_validados"] = len(eventos)
 
     if not eventos:
@@ -504,8 +526,14 @@ def carregar_memoria_do_negocio(
             else:
                 confirmados[label_orig] += 1
 
+    # Fase 61: guarda também QUANTAS vezes a correção vencedora foi feita. Sem
+    # essa contagem não há como aplicar limiar — e sem limiar, uma correção
+    # isolada vira regra global (foi exatamente o que aconteceu).
     memoria["correcoes_aprendidas"] = {
         desc: ctr.most_common(1)[0][0] for desc, ctr in correcoes_brutas.items()
+    }
+    memoria["correcoes_confirmacoes"] = {
+        desc: ctr.most_common(1)[0][1] for desc, ctr in correcoes_brutas.items()
     }
     memoria["descartados"] = dict(descartados.most_common(20))
 
@@ -2054,7 +2082,25 @@ def etapa_clusterizar(
     """Retorna (mapa_desc_label, catalogo, label_de, origem_de)."""
     progress_cb("cluster", 0, "Agrupando descrições em comportamentos")
     descricoes_unicas = sorted(set(o["descricao"] for o in observacoes_brutas))
-    correcoes = memoria.get("correcoes_aprendidas", {})
+    # Fase 61 — UMA CORREÇÃO NÃO VIRA REGRA GLOBAL.
+    # Antes, qualquer correção humana já generalizava para toda descrição igual,
+    # sem limiar nenhum — enquanto `vocabulario_canonico` sempre exigiu
+    # `n_confirmacoes >= limiar`. Agora a correção passa pelo MESMO limiar: só
+    # generaliza quando a mesma descrição foi corrigida para o mesmo rótulo pelo
+    # menos `limiar_auto_validacao` vezes. Abaixo disso a descrição segue o
+    # caminho normal de clusterização, como se não houvesse correção.
+    _corr_todas = memoria.get("correcoes_aprendidas", {}) or {}
+    _corr_n = memoria.get("correcoes_confirmacoes", {}) or {}
+    correcoes = {
+        d: lbl for d, lbl in _corr_todas.items()
+        if _corr_n.get(d, 1) >= limiar_auto_validacao
+    }
+    _abaixo = len(_corr_todas) - len(correcoes)
+    if _abaixo:
+        log.info(
+            "cluster: %d correção(ões) abaixo do limiar (%d) — não generalizam ainda.",
+            _abaixo, limiar_auto_validacao,
+        )
 
     descricoes_conhecidas: dict[str, str] = {}
     descricoes_novas: list[str] = []
@@ -2909,7 +2955,13 @@ def etapa_persistir(
     n_auto_validados = 0
     for e in eventos:
         origem = origem_de(e["descricao_bruta"])
-        auto_validado = origem in ("correcao_aprendida", "vocabulario_canonico")
+        # Fase 61 — INFERÊNCIA DA MÁQUINA NUNCA É VERDADE HUMANA.
+        # `correcao_aprendida` PROPÕE o rótulo (a descrição foi remapeada lá no
+        # cluster) mas NÃO valida: o evento vai para a fila como sugestão e quem
+        # confirma é a pessoa. `validado_humano`/`validacao_correto` são a base
+        # do dataset dos 30 dias e do placar das camadas — se a máquina escreve
+        # neles, não sobra verdade de referência para medir nada.
+        auto_validado = origem == "vocabulario_canonico"
         # Fase 28: posto_vazio é determinístico (sem VLM) — nasce validado e
         # FORA da fila de validação, mas DENTRO das métricas (principal=True).
         if e.get("papel_pessoa") == "posto_vazio":
@@ -3749,6 +3801,92 @@ def propagar_categoria_para_eventos(
     n = _aplica("comportamento_label", so_sem_correcao=True)
     n += _aplica("label_corrigido", so_sem_correcao=False)
     return n
+
+
+def reverter_auto_validacao_maquina(
+    sb,
+    empresa: str,
+    processo: str,
+    origens: tuple = ("correcao_aprendida",),
+    dry_run: bool = True,
+) -> dict:
+    """Fase 61 — devolve à fila os eventos que a MÁQUINA marcou como validados.
+
+    Zera `validado_humano`, `validacao_correto` e `validado_em` dos eventos cuja
+    `origem_validacao` está em `origens`. NÃO mexe em:
+      • `origem_validacao='humano'`  — a decisão da pessoa é inviolável;
+      • `origem_validacao='auditoria'` — secundários marcados de propósito para
+        ficar fora da fila (validado_humano=True é o mecanismo disso);
+      • `origem_validacao='posto_vazio'` — determinístico, sem VLM, e também
+        depende de validado_humano=True para não poluir a fila.
+
+    A `origem_validacao` é PRESERVADA: ela deixa de significar "validado" e
+    passa a significar "rótulo proposto por", que é a informação útil para quem
+    vai julgar o evento na fila.
+
+    IDEMPOTENTE: na segunda passada o filtro `validado_humano=true` já não casa
+    com nada. `dry_run=True` (default) só conta.
+    """
+    alvo = [o for o in origens if o not in ("humano", "auditoria", "posto_vazio")]
+    if not alvo:
+        return {"erro": "nenhuma origem elegível — 'humano'/'auditoria'/'posto_vazio' são protegidas."}
+
+    achados: list[dict] = []
+    for origem in alvo:
+        def _fab(_o=origem):
+            return (
+                sb.table("eventos")
+                .select("id, comportamento_label, label_corrigido, tempo_inicio_s, "
+                        "tempo_fim_s, origem_validacao, validacao_correto")
+                .eq("empresa", empresa)
+                .eq("processo", processo)
+                .eq("origem_validacao", _o)
+                .eq("validado_humano", True)
+                .order("id")
+            )
+        try:
+            achados.extend(_scan_todos(_fab))
+        except Exception as e:
+            return {"erro": f"leitura de eventos falhou ({origem}): {e}"}
+
+    por_rotulo: Counter = Counter()
+    minutos = 0.0
+    for e in achados:
+        rot = e.get("label_corrigido") or e.get("comportamento_label") or "—"
+        por_rotulo[rot] += 1
+        dur = (e.get("tempo_fim_s") or 0) - (e.get("tempo_inicio_s") or 0)
+        minutos += max(0.0, float(dur)) / 60.0
+
+    revertidos = 0
+    if not dry_run and achados:
+        CH = 100
+        ids = [e["id"] for e in achados if e.get("id")]
+        for i in range(0, len(ids), CH):
+            try:
+                (
+                    sb.table("eventos")
+                    .update({
+                        "validado_humano": False,
+                        "validacao_correto": None,
+                        "validado_em": None,
+                    })
+                    .in_("id", ids[i : i + CH])
+                    .execute()
+                )
+                revertidos += len(ids[i : i + CH])
+            except Exception as e:
+                log.warning(f"[fase61] falha ao reverter lote {i}: {e}")
+
+    return {
+        "dry_run": dry_run,
+        "origens": alvo,
+        "encontrados": len(achados),
+        "revertidos": revertidos,
+        "minutos_devolvidos_a_fila": round(minutos, 1),
+        "por_rotulo": [
+            {"rotulo": r, "eventos": n} for r, n in por_rotulo.most_common(30)
+        ],
+    }
 
 
 def relatorio_propagacao_lean(

@@ -584,3 +584,38 @@ grant select on table contexto_processo to authenticated;
 alter table eventos add column if not exists concordancia        numeric;
 alter table eventos add column if not exists n_rotulos_no_minuto int;
 alter table eventos add column if not exists rotulos_competindo  jsonb;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 61 — A MÁQUINA NÃO ESCREVE VERDADE HUMANA.
+--
+-- `origem_validacao='correcao_aprendida'` marcava validado_humano=true e
+-- validacao_correto=true sem nenhum limiar: UMA correção humana generalizava
+-- para toda descrição idêntica e a máquina assinava o resultado como se fosse
+-- decisão de gente. Isso destrói a verdade de referência do dataset dos 30
+-- dias e o placar das camadas, que medem contra o julgamento humano.
+--
+-- Este bloco devolve esses eventos à fila. IDEMPOTENTE (na segunda passada o
+-- filtro validado_humano=true não casa com nada).
+--
+-- PRESERVA `origem_validacao`: ela deixa de significar "validado" e passa a
+-- significar "rótulo proposto por" — é o que o validador precisa saber.
+--
+-- NÃO TOCA em:
+--   • 'humano'     → decisão da pessoa, inviolável;
+--   • 'auditoria'  → secundários (principal=false) marcados de propósito para
+--                    ficar FORA da fila; validado_humano=true é o mecanismo;
+--   • 'posto_vazio'→ determinístico, sem VLM, mesmo mecanismo.
+--
+-- Confira antes de rodar (deve bater com o que o dashboard chama de "auto"):
+--   select origem_validacao, count(*)
+--     from eventos
+--    where validado_humano = true
+--    group by 1 order by 2 desc;
+-- ════════════════════════════════════════════════════════════════════════
+update eventos
+   set validado_humano   = false,
+       validacao_correto = null,
+       validado_em       = null
+ where origem_validacao = 'correcao_aprendida'
+   and validado_humano  = true;

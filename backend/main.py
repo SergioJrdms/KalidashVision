@@ -59,6 +59,7 @@ from .pipeline import (
     varrer_videos_expirados,
     propagar_categoria_para_eventos,
     relatorio_propagacao_lean,
+    reverter_auto_validacao_maquina,
     placar_camadas,
     montar_fila_duvidas,
     limiar_duvida,
@@ -854,6 +855,44 @@ def propagar_lean(
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
     rel = relatorio_propagacao_lean(sb, user.empresa, nome, dry_run=dry_run)
+    if "erro" in rel:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
+    return {"ok": True, **rel}
+
+
+@app.post("/processos/{processo_id}/manutencao/validacao/reverter-auto")
+def reverter_auto_validacao(
+    processo_id: str,
+    origens: str = Query(
+        "correcao_aprendida",
+        description="lista separada por vírgula. 'humano', 'auditoria' e 'posto_vazio' são recusadas.",
+    ),
+    dry_run: bool = Query(True, description="true (default) = só relatório, não escreve"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 61 — devolve à fila o que a MÁQUINA marcou como validado.
+
+    Limpa `validado_humano`/`validacao_correto`/`validado_em` dos eventos com a
+    origem indicada, preservando `origem_validacao` (que passa a significar
+    "rótulo proposto por", e é o que ajuda quem vai julgar na fila).
+
+    Protegidas e recusadas: `humano` (decisão da pessoa é inviolável),
+    `auditoria` e `posto_vazio` (secundários/determinísticos que dependem de
+    `validado_humano=True` justamente para NÃO entrar na fila).
+
+    IDEMPOTENTE. `dry_run=true` é o default de propósito."""
+    lista = tuple(o.strip() for o in (origens or "").split(",") if o.strip())
+    if not lista:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "informe ao menos uma origem.")
+    protegidas = {"humano", "auditoria", "posto_vazio"} & set(lista)
+    if protegidas:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"origem protegida: {', '.join(sorted(protegidas))}.",
+        )
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    rel = reverter_auto_validacao_maquina(sb, user.empresa, nome, origens=lista, dry_run=dry_run)
     if "erro" in rel:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
     return {"ok": True, **rel}
@@ -2076,12 +2115,15 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     # Distribuição por origem (auto vs humano vs pendente)
     origens: Counter = Counter()
     for e in evs:
-        if e.get("validado_humano") is True and e.get("origem_validacao") == "humano":
-            origens["humano"] += 1
-        elif e.get("origem_validacao") in ("correcao_aprendida", "vocabulario_canonico"):
-            origens["auto"] += 1
-        else:
+        # Fase 61: "pendente" vem PRIMEIRO. Desde que `correcao_aprendida` virou
+        # só proposta (sem validado_humano), um evento com essa origem continua
+        # pendente — contá-lo como "auto" mostraria trabalho já feito que não foi.
+        if not e.get("validado_humano"):
             origens["pendente"] += 1
+        elif e.get("origem_validacao") == "humano":
+            origens["humano"] += 1
+        else:
+            origens["auto"] += 1
 
     pendentes = (
         sb.table("eventos")
