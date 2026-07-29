@@ -3145,18 +3145,23 @@ def dispensar_pergunta(
 _CATS_LEAN_VALIDAS = {"valor_agregado", "desperdicio"}
 
 
+def _normalizar_cat_lean(bruto: str | None) -> str | None:
+    cat = (bruto or "").strip().lower() or None
+    if cat is not None and cat not in _CATS_LEAN_VALIDAS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "categoria_lean deve ser uma de: valor_agregado, desperdicio, ou null.",
+        )
+    return cat
+
+
 @app.put("/comportamentos/{comportamento_id}/categoria")
 def setar_categoria_lean(
     comportamento_id: str,
     body: CategoriaLeanBody,
     user: CurrentUser = Depends(get_current_user),
 ):
-    cat = (body.categoria_lean or "").strip().lower() or None
-    if cat is not None and cat not in _CATS_LEAN_VALIDAS:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "categoria_lean deve ser uma de: valor_agregado, desperdicio, ou null.",
-        )
+    cat = _normalizar_cat_lean(body.categoria_lean)
     sb = make_supabase_client()
     r = (
         sb.table("comportamentos")
@@ -3169,7 +3174,16 @@ def setar_categoria_lean(
     alvo = r.data[0]
     if alvo["empresa"] != user.empresa:
         raise HTTPException(status.HTTP_403_FORBIDDEN)
+    return _aplicar_categoria_lean(sb, user.empresa, comportamento_id, alvo, cat)
 
+
+def _aplicar_categoria_lean(sb, empresa: str, comportamento_id: str, alvo: dict, cat: str | None) -> dict:
+    """Grava a decisão do gestor + propaga (irmãos e eventos).
+
+    Extraído da rota para poder ser reusado pela variante POR RÓTULO — que é
+    a que atende os 'não classificados' cujo rótulo ainda não tem linha em
+    `comportamentos` e que, por isso, não tinham como ser reclassificados.
+    """
     update = (
         {"categoria_lean": cat, "categoria_lean_origem": "humano"}
         if cat is not None
@@ -3190,7 +3204,7 @@ def setar_categoria_lean(
             r2 = (
                 sb.table("comportamentos")
                 .select("id, processo, categoria_lean_origem")
-                .eq("empresa", user.empresa)
+                .eq("empresa", empresa)
                 .eq("label", alvo["label"])
                 .neq("id", comportamento_id)
                 .execute()
@@ -3224,20 +3238,110 @@ def setar_categoria_lean(
     eventos_atualizados = 0
     if alvo.get("label") and cat:
         eventos_atualizados = propagar_categoria_para_eventos(
-            sb, user.empresa, alvo["processo"], alvo["label"], cat)
+            sb, empresa, alvo["processo"], alvo["label"], cat)
         # Os comportamentos irmãos (mesmo label, outros processos) recebem a
         # categoria como 'aprendido' — os eventos deles também descem.
         for proc_irmao in processos_irmaos:
             eventos_atualizados += propagar_categoria_para_eventos(
-                sb, user.empresa, proc_irmao, alvo["label"], cat)
+                sb, empresa, proc_irmao, alvo["label"], cat)
 
     return {
         "ok": True,
+        "comportamento_id": comportamento_id,
         "categoria_lean": cat,
         "origem": "humano" if cat else None,
         "propagados": propagados,
         "eventos_atualizados": eventos_atualizados,
     }
+
+
+class CategoriaLeanPorLabelBody(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    categoria_lean: str | None = None
+
+
+@app.put("/processos/{processo_id}/comportamentos/categoria")
+def setar_categoria_lean_por_label(
+    processo_id: str,
+    body: CategoriaLeanPorLabelBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Reclassifica pelo RÓTULO, criando a linha do catálogo se ela não existir.
+
+    Por que existe: até aqui só dava para reclassificar por `comportamento_id`,
+    e esse id vem de `comportamentos`. Só que a linha de `comportamentos` nasce
+    no processamento, a partir do CATÁLOGO do vídeo — um rótulo que aparece nos
+    eventos sem ter entrado no catálogo (rótulo renomeado à mão na validação,
+    rótulo de um vídeo antigo, rótulo semeado fora do cluster) fica sem linha.
+    Sem linha, `comportamento_id` vem nulo; sem id, a tela desabilitava o chip
+    (Eventos) ou mandava um id inexistente (gráfico "Tempo por comportamento").
+
+    E como a tela mostra "não classificado" exatamente quando não há categoria —
+    o que inclui todo rótulo sem linha —, o sintoma aparecia colado nos
+    "não classificados". Materializar a linha aqui resolve na origem: a decisão
+    do gestor passa a ter onde morar, e a herança na ingestão passa a alcançar
+    os vídeos seguintes.
+    """
+    cat = _normalizar_cat_lean(body.categoria_lean)
+    label = body.label.strip()
+    if not label:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "label é obrigatório.")
+
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+
+    r = (
+        sb.table("comportamentos")
+        .select("id, empresa, processo, label")
+        .eq("empresa", user.empresa)
+        .eq("processo", nome)
+        .eq("label", label)
+        .execute()
+    )
+    if r.data:
+        alvo = r.data[0]
+    else:
+        try:
+            ins = (
+                sb.table("comportamentos")
+                .insert(
+                    {
+                        "empresa": user.empresa,
+                        "processo": nome,
+                        "label": label,
+                        "descricao": label.replace("_", " ").capitalize(),
+                        "total_ocorrencias": 0,
+                    }
+                )
+                .execute()
+            )
+            alvo = (ins.data or [{}])[0]
+        except Exception as e:
+            # Corrida com o processamento (unique empresa+processo+label): se
+            # alguém criou no meio do caminho, seguimos com a linha existente.
+            r2 = (
+                sb.table("comportamentos")
+                .select("id, empresa, processo, label")
+                .eq("empresa", user.empresa)
+                .eq("processo", nome)
+                .eq("label", label)
+                .execute()
+            )
+            if not r2.data:
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    f"Não foi possível criar o comportamento {label!r}: {e}",
+                )
+            alvo = r2.data[0]
+
+    if not alvo.get("id"):
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Comportamento criado sem id — não foi possível classificar.",
+        )
+    alvo.setdefault("processo", nome)
+    alvo.setdefault("label", label)
+    return _aplicar_categoria_lean(sb, user.empresa, alvo["id"], alvo, cat)
 
 
 # ═════════════════════════════════════════════════════════════════════════

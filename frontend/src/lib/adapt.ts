@@ -42,6 +42,8 @@ export interface ProcHeaderMock {
   pendencias: number;
 }
 
+// `id` só serve de chave de lista — pode ser sintético. Reclassificação usa
+// SEMPRE `nome` (o rótulo), porque nem todo rótulo tem linha em `comportamentos`.
 export interface CompMock { id: string; nome: string; pct: number; seg: number; cat: LeanShort; origem: string | null }
 export interface SugMock { id: string; prioridade: string; area: string; sugestao: string; impacto: string; situacao: string; causa: string; comportamentos: string[]; voltou: boolean }
 export interface DetMock {
@@ -116,8 +118,10 @@ export function mapDashboard(d: DashboardData): DetMock {
   const s = d.snapshot;
   const cv = d.composicao_valor;
   const top = s.distribuicao_comportamentos[0];
-  const comportamentos: CompMock[] = s.distribuicao_comportamentos.map((c, i) => ({
-    id: (c.comportamento_id as string) || `c${i}`,
+  const comportamentos: CompMock[] = s.distribuicao_comportamentos.map((c) => ({
+    // Chave estável mesmo sem linha no catálogo — o índice mudava de posição a
+    // cada refresh e embaralhava o estado de edição da lista.
+    id: (c.comportamento_id as string) || `lbl:${c.comportamento}`,
     nome: c.comportamento,
     pct: Math.round(c.pct_tempo),
     seg: Math.round(c.tempo_total_s),

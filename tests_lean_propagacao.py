@@ -233,7 +233,10 @@ check("IA propaga após classificar",
       src.count("propagar_categoria_para_eventos(sb, empresa, processo") >= 2, )
 main_src = open("backend/main.py").read()
 check("endpoint humano usa a função compartilhada",
-      "propagar_categoria_para_eventos(\n            sb, user.empresa, alvo[\"processo\"]" in main_src)
+      # Fase 60: o corpo virou `_aplicar_categoria_lean(sb, empresa, ...)`, para
+      # ser reusado pela rota POR RÓTULO. O `user.empresa` entra como argumento.
+      "propagar_categoria_para_eventos(\n            sb, empresa, alvo[\"processo\"]" in main_src
+      and "_aplicar_categoria_lean(sb, user.empresa, comportamento_id, alvo, cat)" in main_src)
 check("endpoint de backfill existe", "manutencao/lean/propagar" in main_src)
 check("dry_run é o DEFAULT do endpoint", 'dry_run: bool = Query(True' in main_src)
 

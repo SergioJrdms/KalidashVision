@@ -284,6 +284,25 @@ export const api = {
         method: "PUT",
         body: JSON.stringify({ categoria_lean }),
       }),
+    // Pelo RÓTULO: funciona mesmo quando o rótulo ainda não tem linha em
+    // `comportamentos` (o backend cria). É a rota que as telas usam, porque
+    // é a única que não depende de um id que pode não existir.
+    setCategoriaPorLabel: (
+      processoId: string,
+      label: string,
+      categoria_lean: CategoriaLean | null,
+    ) =>
+      req<{
+        ok: boolean;
+        comportamento_id: string;
+        categoria_lean: CategoriaLean | null;
+        origem: string | null;
+        propagados?: number;
+        eventos_atualizados?: number;
+      }>(`/processos/${processoId}/comportamentos/categoria`, {
+        method: "PUT",
+        body: JSON.stringify({ label, categoria_lean }),
+      }),
   },
   // Prism com escopo: processoId definido → modo processo; null → modo global.
   prism: (processoId: string | null) => {

@@ -782,9 +782,14 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
   const qc = useQueryClient();
   const [edit, setEdit] = useState<string | null>(null);
   const [verTodos, setVerTodos] = useState(false);
+  // Reclassifica pelo RÓTULO, não pelo id do catálogo: rótulo que ainda não
+  // entrou em `comportamentos` vinha sem id, e o clique morria em silêncio —
+  // justamente nos "não classificados", que é onde todo rótulo sem linha cai.
   const setCat = useMutation({
-    mutationFn: ({ id, cat }: { id: string; cat: LeanShort }) => api.comportamentos.setCategoria(id, leanLong(cat)),
+    mutationFn: ({ label, cat }: { label: string; cat: LeanShort }) =>
+      api.comportamentos.setCategoriaPorLabel(processoId, label, leanLong(cat)),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["dashboard", processoId] }); qc.invalidateQueries({ queryKey: ["processos"] }); setEdit(null); toast("Anotado. O Prism vai classificar parecidos sozinho.", { icon: "check" }); },
+    onError: (e: Error) => toast(`Não deu para reclassificar: ${e.message}`, { color: "var(--desp)" }),
   });
   const total = det.comportamentos.length;
   const lista: CompMock[] = verTodos ? det.comportamentos : det.comportamentos.slice(0, COMP_VISIVEL_PADRAO);
@@ -806,7 +811,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
                 <span className="truncate" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", maxWidth: 180 }}>{d.nome}</span>
                 {editing ? (
                   <span className="row gap1" style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 8, padding: "2px 4px", boxShadow: "var(--glow)" }}>
-                    {(["va", "desp"] as LeanShort[]).map((c) => <button key={c} onClick={() => d.id && setCat.mutate({ id: d.id, cat: c })} title={leanLabel(c)} style={{ width: 18, height: 18, borderRadius: 5, border: d.cat === c ? "2px solid var(--ink)" : "none", background: leanCor(c) }} />)}
+                    {(["va", "desp"] as LeanShort[]).map((c) => <button key={c} disabled={setCat.isPending} onClick={() => setCat.mutate({ label: d.nome, cat: c })} title={leanLabel(c)} style={{ width: 18, height: 18, borderRadius: 5, border: d.cat === c ? "2px solid var(--ink)" : "none", background: leanCor(c), opacity: setCat.isPending ? 0.5 : 1 }} />)}
                     <button onClick={() => setEdit(null)} className="center" style={{ width: 18, height: 18, border: "none", background: "none", color: "var(--faint)" }}><Icon name="x" size={12} /></button>
                   </span>
                 ) : (

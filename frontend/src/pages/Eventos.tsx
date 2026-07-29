@@ -48,9 +48,14 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
     mutationFn: ({ id, acao, label }: { id: string; acao: AcaoEvento; label?: string }) => (acao === "reabrir" ? api.eventos.reabrir(id) : api.eventos.validar(id, acao, label)),
     onSuccess: invalidar,
   });
+  // Reclassifica pelo RÓTULO. Antes ia pelo `comportamento_id`, que vem nulo
+  // para todo rótulo sem linha em `comportamentos` — e rótulo sem linha aparece
+  // sempre como "não classificado". Daí o chip travado justo nesses casos.
   const setCatMut = useMutation({
-    mutationFn: ({ id, cat }: { id: string; cat: LeanShort }) => api.comportamentos.setCategoria(id, leanLong(cat)),
+    mutationFn: ({ label, cat }: { label: string; cat: LeanShort }) =>
+      api.comportamentos.setCategoriaPorLabel(proc.id, label, leanLong(cat)),
     onSuccess: () => { invalidar(); qc.invalidateQueries({ queryKey: ["processos"] }); },
+    onError: (e: Error) => toast(`Não deu para reclassificar: ${e.message}`, { color: "var(--desp)" }),
   });
 
   function pedirCorrigir(e: EvTabMock) {
@@ -68,15 +73,17 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
     const labelMudou = !!label && label !== e.label;
     const catMudou = novaCat !== e.cat;
     if (labelMudou) acaoMut.mutate({ id: e.id, acao: "corrigir", label });
-    if (catMudou && e.comportamentoId) setCatMut.mutate({ id: e.comportamentoId, cat: novaCat });
+    // A categoria vale para o rótulo FINAL: se o gestor renomeou e reclassificou
+    // na mesma tela, gravar no rótulo antigo classificaria a coisa errada.
+    if (catMudou) setCatMut.mutate({ label: labelMudou ? label : e.label, cat: novaCat });
     if (labelMudou || catMudou) toast("Correção salva. O Prism aprendeu com você.", { icon: "check" });
     setEditId(null);
   }
   // Reclassificação Lean direta pela coluna (fora da correção). Vale para o
   // comportamento (mesmo endpoint do gráfico "Tempo por comportamento").
   function reclassificar(e: EvTabMock, cat: LeanShort) {
-    if (!e.comportamentoId || cat === e.cat) return;
-    setCatMut.mutate({ id: e.comportamentoId, cat });
+    if (cat === e.cat) return;
+    setCatMut.mutate({ label: e.label, cat });
     toast(`“${e.label}” reclassificado como ${leanLabel(cat)}.`, { icon: "check" });
   }
 
@@ -308,13 +315,15 @@ function FrameSegundoAngulo({ segmentoId, ini, fim }: { segmentoId: string; ini:
 // comportamento". A troca vale para o comportamento (não só para este evento).
 function LeanCell({ e, onSet, saving }: { e: EvTabMock; onSet: (cat: LeanShort) => void; saving: boolean }) {
   const [open, setOpen] = useState(false);
-  const editable = !!e.comportamentoId;
+  // Sempre editável: a reclassificação vai pelo rótulo e o backend cria a linha
+  // do catálogo se ela ainda não existir. Não há mais estado "sem id, sem chip".
+  const editable = !!e.label;
   const chip = (
     <button
       type="button"
       onClick={() => editable && setOpen((v) => !v)}
       disabled={!editable || saving}
-      title={editable ? "Clique para reclassificar — vale para este comportamento" : "Disponível quando o comportamento entra no catálogo"}
+      title={editable ? "Clique para reclassificar — vale para este comportamento" : "Evento sem rótulo"}
       className="row gap1"
       style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", padding: "2px 8px", borderRadius: 7, border: open ? "1px solid var(--ink)" : "1px solid var(--line)", background: "#fff", cursor: editable ? "pointer" : "default", whiteSpace: "nowrap", opacity: saving ? 0.6 : 1 }}
     >
@@ -356,7 +365,7 @@ function CorrigirForm({ e, labels, onSalvar, onCancelar }: { e: EvTabMock; label
             </button>
           ))}
         </div>
-        {!e.comportamentoId && <span style={{ fontSize: 11, color: "var(--faint)" }}>A reclassificação será aplicada quando o comportamento existir no catálogo.</span>}
+        {!e.comportamentoId && <span style={{ fontSize: 11, color: "var(--faint)" }}>Este rótulo ainda não está no catálogo — ao salvar, ele entra com a categoria escolhida.</span>}
       </div>
       <div className="row gap1">
         <Btn variant="primary" size="sm" icon="check" disabled={!label.trim()} onClick={() => onSalvar(label, cat)}>Salvar correção</Btn>
