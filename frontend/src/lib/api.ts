@@ -28,6 +28,7 @@ import type {
   FrameReferencia,
   AnaliseDiaria,
   SaudeEdge,
+  FilaDuvidas,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -253,6 +254,13 @@ export const api = {
     // Fase 35: análise diária (evolução por dia, janelas 7/30, tendência).
     analise: (processoId: string, dias = 30) =>
       req<AnaliseDiaria>(`/processos/${processoId}/dias?dias=${dias}`),
+  },
+  duvidas: {
+    // Fase 58: fila ordenada por MINUTOS EM JOGO, com filtro por rótulo/tipo.
+    listar: (processoId: string, rotulo?: string | null, tipo?: string | null) =>
+      req<FilaDuvidas>(`/processos/${processoId}/duvidas`
+        + `?limite=200${rotulo ? `&rotulo=${encodeURIComponent(rotulo)}` : ""}`
+        + `${tipo ? `&tipo=${encodeURIComponent(tipo)}` : ""}`),
   },
   saude: {
     // Fase 52: estado da borda JÁ INTERPRETADO (observado × turno esperado).

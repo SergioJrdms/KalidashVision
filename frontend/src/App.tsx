@@ -17,6 +17,7 @@ import Processos from "./pages/Processos";
 import Dashboard from "./pages/Dashboard";
 import Dashboard2 from "./pages/Dashboard2";
 import Validacao from "./pages/Validacao";
+import Duvidas from "./pages/Duvidas";
 import Eventos from "./pages/Eventos";
 import Padroes from "./pages/Padroes";
 import Fila from "./pages/Fila";
@@ -112,6 +113,7 @@ function AppShell() {
       );
     } else if (route.tab === "dashboard") content = <Dashboard proc={proc} go={goTyped} />;
     else if (route.tab === "diaadia") content = <Dashboard2 proc={proc} go={goTyped} />;
+    else if (route.tab === "duvidas") content = <Duvidas proc={proc} go={goTyped} />;
     else if (route.tab === "validacao") content = <Validacao proc={proc} go={goTyped} t={TWEAKS} />;
     else if (route.tab === "eventos") content = <Eventos proc={proc} />;
     else if (route.tab === "padroes") content = <Padroes proc={proc} go={goTyped} />;

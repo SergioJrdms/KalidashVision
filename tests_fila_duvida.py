@@ -16,28 +16,28 @@ def ck(n,c,e=""):
     c=bool(c); print(("  ok   " if c else "  FAIL ")+n+("" if c else f"  {e}")); ok+=c; fail+=(not c)
 
 print("\n[1] Limiar 0.65 — o corte medido nos dados")
-ck("0.53 (moeda ao ar) → dúvida", pl.evento_em_duvida({"confianca":0.53},0.65)[0])
-ck("0.60 → dúvida", pl.evento_em_duvida({"confianca":0.60},0.65)[0])
-ck("0.65 NÃO é dúvida (limiar é exclusivo)", not pl.evento_em_duvida({"confianca":0.65},0.65)[0])
-ck("0.70 → não", not pl.evento_em_duvida({"confianca":0.70},0.65)[0])
-ck("1.00 (concordante) → não", not pl.evento_em_duvida({"confianca":1.0},0.65)[0])
-d,m = pl.evento_em_duvida({"confianca":0.5,"n_rotulos_no_minuto":3},0.65)
+ck("0.53 (moeda ao ar) → dúvida", pl.evento_em_duvida({"confianca":0.53,"n_amostras":9},0.65)[0])
+ck("0.60 → dúvida", pl.evento_em_duvida({"confianca":0.60,"n_amostras":9},0.65)[0])
+ck("0.65 NÃO é dúvida (limiar é exclusivo)", not pl.evento_em_duvida({"confianca":0.65,"n_amostras":9},0.65)[0])
+ck("0.70 → não", not pl.evento_em_duvida({"confianca":0.70,"n_amostras":9},0.65)[0])
+ck("1.00 (concordante) → não", not pl.evento_em_duvida({"confianca":1.0,"n_amostras":9},0.65)[0])
+d,m,tp = pl.evento_em_duvida({"confianca":0.5,"n_rotulos_no_minuto":3,"n_amostras":9},0.65)
 ck("motivo cita concordância e nº de rótulos", "50%" in m and "3 rótulos" in m, m)
 
 print("\n[2] Camada ativa também põe em dúvida (independe da confiança)")
-d,m = pl.evento_em_duvida({"confianca":0.95,"em_duvida":True,"duvida_motivo":"só uma pessoa"},0.65)
+d,m,tp = pl.evento_em_duvida({"confianca":0.95,"em_duvida":True,"duvida_motivo":"só uma pessoa","n_amostras":9},0.65)
 ck("confiança alta + camada → dúvida", d, (d,m))
 ck("motivo da camada preservado", "só uma pessoa" in m, m)
-d,m = pl.evento_em_duvida({"confianca":0.4,"em_duvida":True,"duvida_motivo":"cena X"},0.65)
+d,m,tp = pl.evento_em_duvida({"confianca":0.4,"em_duvida":True,"duvida_motivo":"cena X","n_amostras":9},0.65)
 ck("as duas origens somam no motivo", "cena X" in m and "amostras" in m, m)
 
 print("\n[3] Já validado sai da fila")
 ck("validado_humano → não é dúvida",
-   not pl.evento_em_duvida({"confianca":0.3,"em_duvida":True,"validado_humano":True},0.65)[0])
+   not pl.evento_em_duvida({"confianca":0.3,"em_duvida":True,"validado_humano":True,"n_amostras":9},0.65)[0])
 
 print("\n[4] Limiar CONFIGURÁVEL muda o resultado sem reprocessar")
-ck("com 0.55, o 0.60 sai da dúvida", not pl.evento_em_duvida({"confianca":0.60},0.55)[0])
-ck("com 0.80, o 0.70 entra", pl.evento_em_duvida({"confianca":0.70},0.80)[0])
+ck("com 0.55, o 0.60 sai da dúvida", not pl.evento_em_duvida({"confianca":0.60,"n_amostras":9},0.55)[0])
+ck("com 0.80, o 0.70 entra", pl.evento_em_duvida({"confianca":0.70,"n_amostras":9},0.80)[0])
 
 print("\n[5] B4 — fila ordenada por MINUTOS e filtro por rótulo")
 class Q:
@@ -60,7 +60,8 @@ def ev(i,label,conf,dur,principal=True,camadas=None):
             "n_rotulos_no_minuto":2,"rotulos_competindo":[label,"outro"],
             "em_duvida":bool(camadas),"duvida_motivo":"camada X" if camadas else None,
             "camadas_disparadas":camadas,"validado_humano":False,"cam_id":"cam1",
-            "pessoa_track_id":1,"papel_pessoa":"operador","principal":principal}
+            "pessoa_track_id":1,"papel_pessoa":"operador","principal":principal,
+            "n_amostras":9}
 eventos=[ev("a","monitorar_maquina",0.5,60), ev("b","monitorar_maquina",0.6,300),
          ev("c","operar_torno",0.5,120), ev("d","operar_torno",0.9,600),
          ev("e","conversar",0.4,30,principal=False)]
@@ -93,5 +94,28 @@ ck("camada em SOMBRA não põe na fila", len(r3["itens"])==0, r3["itens"])
 print("\n[8] Limiar por processo (coluna) tem precedência sobre o env")
 ck("coluna do processo vence", pl.limiar_duvida(SB([],[{"duvida_limiar":0.8}]),"U","P")==0.8)
 ck("sem coluna → env/default", pl.limiar_duvida(SB([],[{"duvida_limiar":None}]),"U","P")==0.65)
+print("\n[9] Fase 59 — AUSÊNCIA DE EVIDÊNCIA é caso à parte")
+d,m,tp = pl.evento_em_duvida({"confianca":0.65,"n_amostras":1},0.65)
+ck("1 amostra → dúvida do tipo sem_evidencia", d and tp=="sem_evidencia", (d,tp))
+ck("motivo diz que falta evidência, não que discordaram",
+   "evidência" in m and "discord" not in m, m)
+d,m,tp = pl.evento_em_duvida({"confianca":1.0,"n_amostras":1},0.65)
+ck("1 amostra com share 1.0 NÃO passa por confiante", d and tp=="sem_evidencia", (d,tp))
+d,m,tp = pl.evento_em_duvida({"confianca":None,"n_amostras":1},0.65)
+ck("concordância indefinida (None) é tratada", d and tp=="sem_evidencia", (d,tp))
+d,m,tp = pl.evento_em_duvida({"confianca":0.53,"n_amostras":14},0.65)
+ck("14 amostras discordando → tipo discordancia", d and tp=="discordancia", (d,tp))
+ck("os dois casos NÃO se misturam no motivo", "evidência" not in m, m)
+e1 = ev("s1","x",0.65,8); e1["n_amostras"]=1
+e2 = ev("s2","x",0.53,60); e2["n_amostras"]=14
+r9 = pl.montar_fila_duvidas(SB([e1,e2]),"U","P")
+tipos = {t["tipo"]: t for t in r9["por_tipo"]}
+ck("fila separa por tipo", set(tipos)=={"sem_evidencia","discordancia"}, r9["por_tipo"])
+ck("cada item carrega seu tipo", all(i["tipo"] for i in r9["itens"]), r9["itens"])
+f9 = pl.montar_fila_duvidas(SB([e1,e2]),"U","P",tipo_filtro="sem_evidencia")
+ck("filtro por tipo funciona",
+   len(f9["itens"])==1 and f9["itens"][0]["id"]=="s1", f9["itens"])
+ck("agregado por tipo NÃO some ao filtrar", len(f9["por_tipo"])==2, f9["por_tipo"])
+
 print(f"\n== {ok} ok, {fail} fail ==")
 sys.exit(1 if fail else 0)

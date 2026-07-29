@@ -2222,7 +2222,13 @@ def etapa_segmentar_eventos(
     for e in eventos:
         e["tempo_fim_s"] = round(e["tempo_fim_s"] + intervalo_s, 2)
         e["tempo_inicio_s"] = round(e["tempo_inicio_s"], 2)
-        e["confianca"] = round(min(0.95, 0.6 + 0.05 * e["n_amostras"]), 2)
+        # Fase 59: a fórmula antiga (0.6 + 0.05*n) era o que produzia o degrau
+        # de 0.65 — exatamente o valor de UMA amostra. Ela misturava dois eixos
+        # INDEPENDENTES: quanto as amostras concordam (concordância) e quantas
+        # amostras existem (evidência). Um evento cru é, por construção, uma
+        # sequência do MESMO rótulo: a concordância é total. O que pode faltar
+        # é EVIDÊNCIA — e isso `n_amostras` já diz, sem precisar fingir de %.
+        e["confianca"] = 1.0 if e["n_amostras"] >= MIN_AMOSTRAS_EVIDENCIA else None
 
     return eventos
 
@@ -2294,6 +2300,7 @@ def etapa_consolidar_principais(
         if share < dominancia and len(dur_por_label) > 1:
             escolhido = _principal_por_ia(no_bucket, catalogo) or top_label
         # Representante = evento do rótulo escolhido com MAIOR sobreposição no minuto.
+        _n_votos = sum(e["n_amostras"] for e, _ in no_bucket)
         reps = [(e, ov) for (e, ov) in no_bucket if e["comportamento_label"] == escolhido]
         rep = (max(reps, key=lambda x: x[1]) if reps else max(no_bucket, key=lambda x: x[1]))[0]
         principais.append({
@@ -2307,7 +2314,7 @@ def etapa_consolidar_principais(
             "bbox_inicio": list(rep["bbox_inicio"]),
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": rep.get("papel_pessoa"),
-            "n_amostras": sum(e["n_amostras"] for e, _ in no_bucket),
+            "n_amostras": _n_votos,
             # Fase 56 (B1) — CONFIANÇA = CONCORDÂNCIA entre as amostras do minuto.
             #
             # A fórmula antiga era `min(0.95, 0.6 + 0.05*n_amostras)`: contagem
@@ -2320,10 +2327,12 @@ def etapa_consolidar_principais(
             # honesta disponível e não custa nenhuma chamada a mais:
             #   4 amostras concordantes → share 1.00
             #   2 contra 2             → share 0.50 (moeda ao ar)
-            "confianca": round(share, 2),
+            "confianca": (round(share, 2)
+                          if _n_votos >= MIN_AMOSTRAS_EVIDENCIA else None),
             # Guardados à parte porque explicam a confiança na fila de dúvida —
             # e porque n_amostras é informação útil, só não é confiança.
-            "concordancia": round(share, 2),
+            "concordancia": (round(share, 2)
+                             if _n_votos >= MIN_AMOSTRAS_EVIDENCIA else None),
             "n_rotulos_no_minuto": len(dur_por_label),
             "rotulos_competindo": sorted(dur_por_label, key=dur_por_label.get, reverse=True)[:4],
             "decidido_por_ia": escolhido != top_label,
@@ -2593,6 +2602,11 @@ def placar_camadas(sb: Client, empresa: str, processo: str) -> dict:
 # congelado numa coluna, ajustar exigiria reprocessar 30 dias de campanha.
 # ═════════════════════════════════════════════════════════════════════════
 DUVIDA_LIMIAR_PADRAO = float(os.environ.get("KV_DUVIDA_LIMIAR", "0.65"))
+# Abaixo disto não há com quem concordar: a concordância é INDEFINIDA, não alta.
+# Com 1 amostra, o share do vencedor é 1.0 por definição — leitura falsamente
+# confiante. Isso é AUSÊNCIA DE EVIDÊNCIA, um problema diferente de dúvida:
+# um se resolve com mais amostragem, o outro com melhor decisão.
+MIN_AMOSTRAS_EVIDENCIA = int(os.environ.get("KV_MIN_AMOSTRAS", "2"))
 
 
 def limiar_duvida(sb: Client, empresa: str, processo: str) -> float:
@@ -2619,18 +2633,31 @@ def evento_em_duvida(e: dict, limiar: float) -> tuple:
         precisar que o VLM declare abstenção.
     Evento já julgado por humano sai da fila: a dúvida foi resolvida.'''
     if e.get("validado_humano"):
-        return False, ""
+        return False, "", ""
+    # AUSÊNCIA DE EVIDÊNCIA vem primeiro e é EXCLUSIVA: com menos de duas
+    # amostras não existe concordância a medir — falar em "amostras
+    # discordantes" aqui seria mentira. São problemas diferentes: este se
+    # resolve com mais evidência (amostrar mais denso), o outro com melhor
+    # decisão (rótulo, prompt, camada).
+    n_am = e.get("n_amostras")
+    if n_am is not None and int(n_am) < MIN_AMOSTRAS_EVIDENCIA:
+        return (True,
+                f"apenas {int(n_am)} amostra neste trecho — não há evidência "
+                "suficiente para afirmar nem para duvidar",
+                "sem_evidencia")
     motivos = []
     # A garantia da SOMBRA vale também na leitura: mesmo que `em_duvida` venha
     # marcado, só conta se houver camada ATIVA entre as disparadas. Defesa em
     # profundidade — o compromisso é "sombra nunca contamina", e ele não pode
     # depender só de quem escreveu.
+    tipo = ""
     disparos = e.get("camadas_disparadas")
     tem_ativa = (any((d or {}).get("modo") == "ativa" for d in disparos)
                  if disparos else bool(e.get("em_duvida")))
     if e.get("em_duvida") and tem_ativa:
         motivos.append(e.get("duvida_motivo")
                        or "uma verificação da cena contradiz o rótulo")
+        tipo = "camada"
     conf = e.get("confianca")
     if conf is not None and float(conf) < limiar:
         n = e.get("n_rotulos_no_minuto")
@@ -2638,11 +2665,13 @@ def evento_em_duvida(e: dict, limiar: float) -> tuple:
             f"as amostras do minuto discordaram (concordância {float(conf):.0%}"
             + (f", {n} rótulos disputando)" if n and n > 1 else ")")
         )
-    return (bool(motivos), " · ".join(motivos))
+        tipo = tipo or "discordancia"
+    return (bool(motivos), " · ".join(motivos), tipo)
 
 
 def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
-                        rotulo: str | None = None, limite: int = 200) -> dict:
+                        rotulo: str | None = None, limite: int = 200,
+                        tipo_filtro: str | None = None) -> dict:
     '''B4 — fila ORDENADA POR MINUTOS EM JOGO, não por ordem de chegada:
     valida-se primeiro o que mais move o placar.
 
@@ -2667,11 +2696,11 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
     except Exception as e:
         return {"erro": f"leitura falhou: {e}", "itens": [], "por_rotulo": []}
 
-    itens, por_rotulo = [], {}
+    itens, por_rotulo, por_tipo = [], {}, {}
     for e in eventos:
         if e.get("principal") is False:
             continue                       # auditoria não vai para a fila
-        duvida, motivo = evento_em_duvida(e, lim)
+        duvida, motivo, tipo = evento_em_duvida(e, lim)
         if not duvida:
             continue
         label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
@@ -2679,8 +2708,11 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
         r = por_rotulo.setdefault(label, {"rotulo": label, "eventos": 0, "segundos": 0.0})
         r["eventos"] += 1
         r["segundos"] += dur
-        if rotulo and label != rotulo:
-            continue                       # filtro aplicado DEPOIS do agregado
+        t = por_tipo.setdefault(tipo, {"tipo": tipo, "eventos": 0, "segundos": 0.0})
+        t["eventos"] += 1
+        t["segundos"] += dur
+        if (rotulo and label != rotulo) or (tipo_filtro and tipo != tipo_filtro):
+            continue                       # filtros aplicados DEPOIS do agregado
         itens.append({
             "id": e["id"], "video_id": e.get("video_id"), "rotulo": label,
             "descricao": e.get("descricao_bruta"),
@@ -2688,6 +2720,10 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
             "minutos": round(dur / 60, 2),
             "confianca": e.get("confianca"),
             "motivo": motivo,
+            # "sem_evidencia" | "discordancia" | "camada" — nunca misturados:
+            # exigem ações diferentes de quem valida.
+            "tipo": tipo,
+            "n_amostras": e.get("n_amostras"),
             "camadas": [d.get("nome") for d in (e.get("camadas_disparadas") or [])
                         if d.get("modo") == "ativa"],
             "rotulos_competindo": e.get("rotulos_competindo") or [],
@@ -2707,6 +2743,12 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
         "total": sum(v["eventos"] for v in por_rotulo.values()),
         "minutos_totais": round(sum(v["segundos"] for v in por_rotulo.values()) / 60, 1),
         "por_rotulo": lista_rot,
+        # Separado de propósito: "amostra única" e "amostras discordantes" são
+        # problemas distintos e misturá-los esconde os dois.
+        "por_tipo": sorted(
+            ({"tipo": v["tipo"], "eventos": v["eventos"],
+              "minutos": round(v["segundos"] / 60, 1)} for v in por_tipo.values()),
+            key=lambda x: -x["minutos"]),
         "itens": itens[:limite],
         "filtrado_por": rotulo,
     }
@@ -6755,7 +6797,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
         dia = inst.date().isoformat()
         d = por_dia.setdefault(dia, {
-            "tot": 0.0, "va": 0.0, "desp": 0.0, "duvida": 0.0,
+            "tot": 0.0, "va": 0.0, "desp": 0.0, "duvida": 0.0, "sem_evidencia": 0.0,
             "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
             "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "desp": 0.0,
                                           "vazio": 0.0}),
@@ -6775,8 +6817,12 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             d["desp"] += dur
         # B5: o KPI que responde à pergunta do negócio — quanto do tempo
         # observado o sistema NÃO SABE. Calculado na leitura (limiar vivo).
-        if _lim_duvida is not None and evento_em_duvida(e, _lim_duvida)[0]:
-            d["duvida"] += dur
+        _dv, _, _tp = evento_em_duvida(e, _lim_duvida) if _lim_duvida is not None else (False, "", "")
+        if _dv:
+            if _tp == "sem_evidencia":
+                d["sem_evidencia"] += dur
+            else:
+                d["duvida"] += dur
         if e.get("papel_pessoa") == "visitante":
             d["visitas"] += 1
         if not eh_vazio:
@@ -6825,7 +6871,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             saida_dias.append({
                 "dia": iso, "rot": rot, "dow": dow, "tempo_obs_s": 0.0,
                 "va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0, "none_pct": 0.0,
-                "duvida_pct": 0.0,
+                "duvida_pct": 0.0, "sem_evidencia_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
                 "top_acoes": [], "linha_tempo": [],
@@ -6891,6 +6937,9 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 # semana o sistema aprende; se estabiliza em 20-30%, a tese
                 # está errada. Fica VISÍVEL e permanente, não escondida.
                 "duvida_pct": round(d["duvida"] / tot * 100, 1),
+                # Trecho curto demais para afirmar OU duvidar — resolve-se com
+                # mais amostragem, não com melhor decisão.
+                "sem_evidencia_pct": round(d["sem_evidencia"] / tot * 100, 1),
                 "posto_vazio_s": round(d["vazio"], 1),
                 "posto_vazio_pct": round(vazio_pct, 1),
                 "n_videos": len(videos_por_dia.get(iso, ())),

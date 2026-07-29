@@ -214,6 +214,7 @@ function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
     tempo_obs_s: dias.reduce((s, d) => s + d.tempo_obs_s, 0),
     va_pct: wavg((d) => d.va_pct), vazio_pct: wavg((d) => d.vazio_pct || 0),
     duvida_pct: wavg((d) => d.duvida_pct || 0),
+    sem_evidencia_pct: wavg((d) => d.sem_evidencia_pct || 0),
     desp_pct: wavg((d) => d.desp_pct), none_pct: wavg((d) => d.none_pct),
     posto_vazio_s: dias.reduce((s, d) => s + d.posto_vazio_s, 0),
     posto_vazio_pct: wavg((d) => d.posto_vazio_pct),
@@ -474,6 +475,7 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
   const x = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
   const y = (v: number) => padT + (1 - Math.min(100, Math.max(0, v)) / 100) * plotH;
   const atual = pts[pts.length - 1].duvida_pct;
+  const semEvid = pts[pts.length - 1].sem_evidencia_pct || 0;
   // Tendência simples: média da 1ª metade contra a 2ª.
   const meio = Math.floor(n / 2);
   const m = (a: DiaAnalise[]) => (a.length ? a.reduce((s, d) => s + d.duvida_pct, 0) / a.length : 0);
@@ -492,6 +494,14 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
         </span>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>do tempo observado, no último dia</span>
       </div>
+      {semEvid > 0 && (
+        // Caso DIFERENTE: trecho curto demais para afirmar ou duvidar. Resolve-se
+        // com mais amostragem, não com melhor decisão — por isso fica separado.
+        <p style={{ fontSize: 11.5, color: "var(--muted)", margin: "0 0 6px" }}>
+          + <b className="tnum">{semEvid.toFixed(0)}%</b> sem evidência suficiente
+          (trechos curtos demais para julgar) — isso se resolve gravando mais denso.
+        </p>
+      )}
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }} role="img"
            aria-label="Evolução do percentual de tempo em dúvida">
         {[0, 25, 50].map((g) => (

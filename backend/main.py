@@ -797,6 +797,7 @@ def excluir_camada(processo_id: str, nome: str,
 def fila_de_duvidas(
     processo_id: str,
     rotulo: str | None = Query(None, description="filtra a fila por rótulo"),
+    tipo: str | None = Query(None, description="sem_evidencia | discordancia | camada"),
     limite: int = Query(200, ge=1, le=1000),
     user: CurrentUser = Depends(get_current_user),
 ):
@@ -811,7 +812,8 @@ def fila_de_duvidas(
     a fila: é como auditar a suspeita de um rótulo virar depósito da dúvida."""
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
-    r = montar_fila_duvidas(sb, user.empresa, nome, rotulo=rotulo, limite=limite)
+    r = montar_fila_duvidas(sb, user.empresa, nome, rotulo=rotulo, limite=limite,
+                            tipo_filtro=tipo)
     if "erro" in r:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, r["erro"])
     return {"ok": True, **r}

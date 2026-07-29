@@ -530,6 +530,9 @@ export interface DiaAnalise {
   // B5: % do tempo observado em DÚVIDA (concordância abaixo do limiar ou
   // camada ativa). É o veredito do produto — cai = o sistema aprende.
   duvida_pct: number;
+  // Trecho curto demais para afirmar OU duvidar — resolve-se com mais
+  // amostragem, não com melhor decisão. Caso DIFERENTE de duvida_pct.
+  sem_evidencia_pct: number;
   posto_vazio_s: number;
   posto_vazio_pct: number;
   n_videos: number;
@@ -572,4 +575,37 @@ export interface FrameReferencia {
   altura: number | null;
   video_nome: string | null;
   gravado_em: string | null;
+}
+
+
+// ── Fase 58/59: fila da dúvida ───────────────────────────────────────────────
+export type TipoDuvida = "sem_evidencia" | "discordancia" | "camada";
+
+export interface ItemDuvida {
+  id: string;
+  video_id: string | null;
+  rotulo: string;
+  descricao: string | null;
+  ini: number;
+  fim: number;
+  minutos: number;
+  confianca: number | null;
+  motivo: string;
+  tipo: TipoDuvida | "";
+  n_amostras: number | null;
+  camadas: string[];
+  rotulos_competindo: string[];
+  cam_id: string | null;
+  pessoa: number;
+  papel: string | null;
+}
+
+export interface FilaDuvidas {
+  limiar: number;
+  total: number;
+  minutos_totais: number;
+  por_rotulo: { rotulo: string; eventos: number; minutos: number }[];
+  por_tipo: { tipo: TipoDuvida; eventos: number; minutos: number }[];
+  itens: ItemDuvida[];
+  filtrado_por: string | null;
 }
