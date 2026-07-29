@@ -117,40 +117,55 @@ ck("filtro por tipo funciona",
    len(f9["itens"])==1 and f9["itens"][0]["id"]=="s1", f9["itens"])
 ck("agregado por tipo NÃO some ao filtrar", len(f9["por_tipo"])==2, f9["por_tipo"])
 
-print("\n[10] Fase 59 — coluna faltando DEGRADA, não derruba a tela")
-class SBParcial:
-    """Simula o banco sem as colunas de enriquecimento (migração não rodada)."""
-    def __init__(s, ev): s.ev=ev; s.tentativas=[]
+print("\n[10] Fase 59 — leitura AUTO-CURATIVA (o incidente do 500)")
+class SBSemColuna:
+    """Banco a uma migração de distância: recusa colunas específicas, uma por vez,
+    exatamente como o PostgREST fez com `eventos.cam_id`."""
+    def __init__(s, ev, ausentes): s.ev=ev; s.ausentes=set(ausentes); s.tentativas=[]
     def table(s,n):
         if n!="eventos": return Q([])
         outer=s
         class T:
             def select(self, cols):
                 outer.tentativas.append(cols)
-                if "rotulos_competindo" in cols:
-                    raise Exception('column eventos.rotulos_competindo does not exist')
+                for c in outer.ausentes:
+                    if c in cols.split(", "):
+                        raise Exception({"message": f"column eventos.{c} does not exist",
+                                         "code":"42703"})
                 return Q(outer.ev)
+            def in_(self,*a,**k): return Q([])
         return T()
 e_base = {"id":"p1","video_id":"v","comportamento_label":"x","label_corrigido":None,
           "descricao_bruta":"x","tempo_inicio_s":0,"tempo_fim_s":120,"confianca":0.5,
-          "n_amostras":9,"validado_humano":False,"cam_id":"cam1","pessoa_track_id":1,
+          "n_amostras":9,"validado_humano":False,"pessoa_track_id":1,
           "papel_pessoa":"operador","principal":True}
-sbp = SBParcial([e_base])
-r10 = pl.montar_fila_duvidas(sbp,"U","P")
-ck("NÃO retorna erro quando falta coluna", "erro" not in r10, r10)
-ck("tentou o select completo primeiro", "rotulos_competindo" in sbp.tentativas[0])
-ck("caiu para o select essencial", len(sbp.tentativas)==2, sbp.tentativas)
-ck("a fila FUNCIONA mesmo degradada", len(r10["itens"])==1, r10["itens"])
-ck("detecta discordância só com o essencial",
-   r10["itens"][0]["tipo"]=="discordancia", r10["itens"][0])
-ck("resposta tem todas as chaves que a tela espera",
-   {"limiar","total","minutos_totais","por_rotulo","por_tipo","itens"} <= set(r10), list(r10))
-# falha TOTAL ainda devolve payload completo (a tela não quebra)
+# UMA coluna ausente (o caso real: cam_id)
+sb1 = SBSemColuna([e_base], ["rotulos_competindo"])
+r10 = pl.montar_fila_duvidas(sb1,"U","P")
+ck("1 coluna ausente → sem erro", "erro" not in r10, r10)
+ck("a fila FUNCIONA degradada", len(r10["itens"])==1, r10["itens"])
+ck("removeu só a coluna recusada",
+   "rotulos_competindo" not in sb1.tentativas[-1] and "confianca" in sb1.tentativas[-1],
+   sb1.tentativas[-1])
+# VÁRIAS ausentes: precisa curar uma a uma, não desistir na primeira
+sb2 = SBSemColuna([e_base], ["em_duvida","duvida_motivo","camadas_disparadas",
+                             "n_rotulos_no_minuto","rotulos_competindo"])
+r11 = pl.montar_fila_duvidas(sb2,"U","P")
+ck("5 colunas ausentes → ainda funciona", "erro" not in r11 and len(r11["itens"])==1, r11)
+ck("removeu TODAS as recusadas",
+   not any(c in sb2.tentativas[-1] for c in
+           ["em_duvida","duvida_motivo","camadas_disparadas","n_rotulos_no_minuto","rotulos_competindo"]),
+   sb2.tentativas[-1])
+ck("detecta discordância mesmo sem enriquecimento",
+   r11["itens"][0]["tipo"]=="discordancia", r11["itens"][0])
+ck("cam_id não é pedido a eventos (mora em videos)",
+   "cam_id" not in sb2.tentativas[0], sb2.tentativas[0])
+# erro que NÃO é de coluna → não entra em loop, devolve payload completo
 class SBMorto:
     def table(s,n): raise Exception("banco fora")
-r11 = pl.montar_fila_duvidas(SBMorto(),"U","P")
-ck("banco fora → payload completo, sem KeyError na tela",
-   {"por_tipo","por_rotulo","itens","limiar"} <= set(r11), list(r11))
+r12 = pl.montar_fila_duvidas(SBMorto(),"U","P")
+ck("erro não-de-coluna → payload completo, sem KeyError na tela",
+   {"por_tipo","por_rotulo","itens","limiar","filtrado_por"} <= set(r12), list(r12))
 
 print(f"\n== {ok} ok, {fail} fail ==")
 sys.exit(1 if fail else 0)

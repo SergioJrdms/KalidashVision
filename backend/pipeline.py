@@ -2680,36 +2680,59 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
     onde o modelo joga o que não sabe. `rotulo` filtra a fila para auditá-lo.'''
     lim = limiar_duvida(sb, empresa, processo)
 
-    # Colunas ESSENCIAIS x ENRIQUECIMENTO. Se uma coluna do enriquecimento ainda
-    # não existir (migração não rodada), a fila degrada — perde o detalhe, não a
-    # função. Uma tela inteira caindo em 500 por causa de uma coluna opcional é
-    # falha de projeto, não de operação.
-    BASE = ("id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
-            "tempo_inicio_s, tempo_fim_s, confianca, n_amostras, validado_humano, "
-            "cam_id, pessoa_track_id, papel_pessoa, principal")
-    EXTRA = ("em_duvida, duvida_motivo, camadas_disparadas, "
-             "n_rotulos_no_minuto, rotulos_competindo")
+    # Colunas pedidas ao banco. `cam_id` NÃO entra: ele vive em `videos`, não em
+    # `eventos` — foi exatamente esse engano que derrubou a tela em 500.
+    COLS = ["id", "video_id", "comportamento_label", "label_corrigido",
+            "descricao_bruta", "tempo_inicio_s", "tempo_fim_s", "confianca",
+            "n_amostras", "validado_humano", "pessoa_track_id", "papel_pessoa",
+            "principal", "em_duvida", "duvida_motivo", "camadas_disparadas",
+            "n_rotulos_no_minuto", "rotulos_competindo"]
+
+    _RE_COL = __import__("re").compile(r"column\s+\S*?eventos\.(\w+)\s+does not exist")
 
     def _fab_com(cols):
         def _f():
             return (
-                sb.table("eventos").select(cols)
+                sb.table("eventos").select(", ".join(cols))
                 .eq("empresa", empresa).eq("processo", processo)
                 .eq("validado_humano", False)
                 .order("id")
             )
         return _f
 
-    try:
-        eventos = _scan_todos(_fab_com(BASE + ", " + EXTRA))
-    except Exception as e:
-        log.warning("[duvidas] colunas de enriquecimento indisponíveis (%s) — "
-                    "seguindo só com o essencial. Rode a migração da Fase 59.", e)
+    # Leitura AUTO-CURATIVA: se o banco recusar uma coluna, ela é removida e a
+    # consulta refeita. Uma tela inteira em 500 porque o schema está uma
+    # migração atrás é falha de projeto — a fila perde detalhe, nunca a função.
+    cols, eventos, ultimo_erro = list(COLS), None, None
+    for _ in range(len(COLS)):
         try:
-            eventos = _scan_todos(_fab_com(BASE))
-        except Exception as e2:
-            return {"erro": f"leitura falhou: {e2}", "itens": [], "por_rotulo": [],
-                    "por_tipo": [], "limiar": lim, "total": 0, "minutos_totais": 0.0}
+            eventos = _scan_todos(_fab_com(cols))
+            break
+        except Exception as e:
+            ultimo_erro = e
+            faltando = _RE_COL.search(str(e))
+            if not faltando or faltando.group(1) not in cols:
+                break
+            alvo = faltando.group(1)
+            cols = [c for c in cols if c != alvo]
+            log.warning("[duvidas] coluna `%s` não existe neste banco — seguindo "
+                        "sem ela (rode a migração para ter o detalhe).", alvo)
+    if eventos is None:
+        log.error("[duvidas] leitura falhou: %s", ultimo_erro)
+        return {"erro": f"leitura falhou: {ultimo_erro}", "itens": [], "por_rotulo": [],
+                "por_tipo": [], "limiar": lim, "total": 0, "minutos_totais": 0.0,
+                "filtrado_por": rotulo}
+
+    # cam_id vem de `videos` (uma consulta só, com os ids que já temos).
+    cam_por_video: dict = {}
+    try:
+        vids = sorted({e.get("video_id") for e in eventos if e.get("video_id")})
+        if vids:
+            for v in (sb.table("videos").select("id, cam_id")
+                      .in_("id", vids).execute().data or []):
+                cam_por_video[v["id"]] = v.get("cam_id")
+    except Exception as e:
+        log.warning("[duvidas] cam_id não resolvido (%s) — segue sem a câmera.", e)
 
     itens, por_rotulo, por_tipo = [], {}, {}
     for e in eventos:
@@ -2742,7 +2765,8 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
             "camadas": [d.get("nome") for d in (e.get("camadas_disparadas") or [])
                         if d.get("modo") == "ativa"],
             "rotulos_competindo": e.get("rotulos_competindo") or [],
-            "cam_id": e.get("cam_id"), "pessoa": e.get("pessoa_track_id"),
+            "cam_id": cam_por_video.get(e.get("video_id")),
+            "pessoa": e.get("pessoa_track_id"),
             "papel": e.get("papel_pessoa"),
         })
 
