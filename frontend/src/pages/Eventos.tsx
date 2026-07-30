@@ -7,7 +7,7 @@ import { api } from "../lib/api";
 import { mapEventosTabela, type EvTabMock, type ProcHeaderMock } from "../lib/adapt";
 import { fmtSeg, leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
 import { Btn, Card, Icon, Badge, Empty, Modal, toast } from "../design/ui";
-import { FrameReal } from "../lib/frames";
+import { FrameReal, janelaCam2 } from "../lib/frames";
 import type { AcaoEvento } from "../lib/types";
 
 const AVISO_VOCAB_KEY = "spectra_corrigir_vocab_aviso";
@@ -252,24 +252,35 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
                   usa o do meio, agora a cam1 também, então batem o instante. */}
               <div style={{ width: 240, flex: "none" }} className="col" >
                 <span className="badge badge-purple" style={{ fontSize: 10, alignSelf: "flex-start", marginBottom: 4 }}>
-                  {(e.camId || "cam1").replace(/^cam/i, "Cam ")}{e.segundoAngulo ? " · mesmo instante" : ""}
+                  {(e.camId || "cam1").replace(/^cam/i, "Cam ")}
                 </span>
                 <FrameReal id={e.id} pessoa={e.pessoa} height={140} pos={1} />
               </div>
-              {e.segundoAngulo && (
-                <div style={{ width: 240, flex: "none" }} className="col">
-                  <span className="badge badge-purple" style={{ fontSize: 10, alignSelf: "flex-start", marginBottom: 4 }}>
-                    {(e.segundoAngulo.camId || "cam2").replace(/^cam/i, "Cam ")} · mesmo instante
-                  </span>
-                  {/* Fase 30: soma o offset de relógio cam1→cam2 (os segmentos
-                      do par não começam no mesmo segundo). */}
-                  <FrameSegundoAngulo
-                    segmentoId={e.segundoAngulo.segmentoId}
-                    ini={Math.max(0, e.ini + e.segundoAngulo.offsetS)}
-                    fim={Math.max(0, e.fim + e.segundoAngulo.offsetS)}
-                  />
-                </div>
-              )}
+              {e.segundoAngulo && (() => {
+                // Fase 78: o offset é compensado (Fase 30) E o residual é
+                // mostrado. Quando a janela cai fora do segmento da cam2, o
+                // frame NÃO é o mesmo instante — dizer que é faz julgar duas
+                // cenas diferentes como se fossem uma.
+                const j = janelaCam2(e.ini, e.fim, e.segundoAngulo.offsetS);
+                return (
+                  <div style={{ width: 240, flex: "none" }} className="col">
+                    <span className={j.sincronizado ? "badge badge-purple" : "badge"}
+                          style={{ fontSize: 10, alignSelf: "flex-start", marginBottom: 4,
+                                   background: j.sincronizado ? undefined : "var(--desp-bg)",
+                                   color: j.sincronizado ? undefined : "var(--desp)" }}>
+                      {(e.segundoAngulo.camId || "cam2").replace(/^cam/i, "Cam ")}
+                      {j.sincronizado
+                        ? " · mesmo instante"
+                        : ` · ⚠ ${Math.round(j.residual)}s fora de sincronia`}
+                    </span>
+                    <FrameSegundoAngulo
+                      segmentoId={e.segundoAngulo.segmentoId}
+                      ini={j.ini}
+                      fim={j.fim}
+                    />
+                  </div>
+                );
+              })()}
               <div className="grow" style={{ minWidth: 220 }}>
                 <p style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginBottom: 12 }}>{e.descricao}</p>
                 {editing ? (

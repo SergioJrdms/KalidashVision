@@ -29,7 +29,8 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Btn, Card, Icon, Empty, PanelHead, Segmented, toast } from "../design/ui";
-import { FrameStripReal, FrameStripSegmento } from "../lib/frames";
+import { FrameStripReal, FrameStripSegmento, janelaCam2, RotuloSegundoAngulo,
+         useAspecto, colunasPorAspecto } from "../lib/frames";
 import { leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { Go } from "../design/Shell";
@@ -247,6 +248,10 @@ function ItemDaFila({ it, procId, ocupado, onValidar, onClassificar }: {
   const [confirmando, setConfirmando] = useState(false);
   const tom = TIPO_ROTULO[it.tipo] || TIPO_ROTULO.discordancia;
   const sa = it.segundo_angulo;
+  const _j = janelaCam2(it.ini, it.fim, sa?.offset_s ?? 0);
+  // Fase 78: a grade se adapta às proporções REAIS dos dois ROIs.
+  const [a1, mede1] = useAspecto();
+  const [a2, mede2] = useAspecto();
   return (
     <Card style={{ padding: 0, overflow: "hidden" }}>
       <div className="row gap2 wrap" style={{ alignItems: "center", padding: "12px 16px", borderBottom: "1px solid var(--line-2)" }}>
@@ -269,26 +274,27 @@ function ItemDaFila({ it, procId, ocupado, onValidar, onClassificar }: {
       {/* Os DOIS ângulos do mesmo instante. É aqui que a dúvida costuma morrer:
           o que a cam1 não mostra (oclusão, operador de costas, mão fora de
           quadro) quase sempre está visível na cam2. */}
-      <div style={{ display: "grid", gridTemplateColumns: sa ? "1fr 1fr" : "1fr", gap: 2, background: "#0d0820" }}>
+      <div style={{ display: "grid", gridTemplateColumns: sa ? colunasPorAspecto(a1, a2) : "1fr",
+                    gap: 2, background: "#0d0820", alignItems: "start" }}>
         <div className="col" style={{ gap: 0 }}>
           <span style={{ fontSize: 10.5, fontWeight: 700, color: "rgba(255,255,255,.72)", padding: "6px 10px 2px", fontFamily: "var(--mono)" }}>
             {(it.cam_id || "cam1").replace(/^cam/i, "Cam ")}
           </span>
-          <FrameStripReal ativo={{ id: it.id, pessoa: it.pessoa, label: it.rotulo, ini: it.ini, fim: it.fim }} />
+          <FrameStripReal ativo={{ id: it.id, pessoa: it.pessoa, label: it.rotulo, ini: it.ini, fim: it.fim }}
+                          onAspecto={mede1} />
         </div>
         {sa && (
           <div className="col" style={{ gap: 0 }}>
-            <span style={{ fontSize: 10.5, fontWeight: 700, color: "rgba(255,255,255,.72)", padding: "6px 10px 2px", fontFamily: "var(--mono)" }}>
-              {(sa.cam_id || "cam2").replace(/^cam/i, "Cam ")} · mesmo instante
-            </span>
-            {/* offset_s = diferença REAL de relógio entre as duas câmeras. Sem
-                somá-lo, os dois lados mostrariam momentos distintos — pior que
-                não mostrar o segundo ângulo, porque parece sincronizado. */}
-            <FrameStripSegmento
-              segmentoId={sa.segmento_id}
-              ini={Math.max(0, it.ini + sa.offset_s)}
-              fim={Math.max(0, it.fim + sa.offset_s)}
-            />
+            {/* Fase 78: o rótulo só diz "mesmo instante" quando é verdade. O
+                `Math.max(0, …)` que estava aqui clampava em SILÊNCIO quando a
+                janela caía fora do segmento da cam2 — e era isso que fazia
+                julgar duas cenas distintas como se fossem a mesma. */}
+            <div style={{ padding: "6px 10px 2px" }}>
+              <RotuloSegundoAngulo camId={sa.cam_id} offsetS={sa.offset_s}
+                                   residual={_j.residual} sincronizado={_j.sincronizado} />
+            </div>
+            <FrameStripSegmento segmentoId={sa.segmento_id} ini={_j.ini} fim={_j.fim}
+                                onAspecto={mede2} />
           </div>
         )}
       </div>
