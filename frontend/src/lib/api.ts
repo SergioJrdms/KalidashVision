@@ -30,6 +30,7 @@ import type {
   SaudeEdge,
   FilaDuvidas,
   EstadoAprendizado,
+  FusoProcesso,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -262,6 +263,14 @@ export const api = {
       req<FilaDuvidas>(`/processos/${processoId}/duvidas`
         + `?limite=200${rotulo ? `&rotulo=${encodeURIComponent(rotulo)}` : ""}`
         + `${tipo ? `&tipo=${encodeURIComponent(tipo)}` : ""}`),
+  },
+  fuso: {
+    ler: (processoId: string) => req<FusoProcesso>(`/processos/${processoId}/fuso`),
+    setar: (processoId: string, fuso_horario: string | null) =>
+      req<{ ok: boolean; efetivo: string; agora_local: string }>(
+        `/processos/${processoId}/fuso`,
+        { method: "PUT", body: JSON.stringify({ fuso_horario }) },
+      ),
   },
   saude: {
     // Fase 52: estado da borda JÁ INTERPRETADO (observado × turno esperado).

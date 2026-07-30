@@ -586,6 +586,77 @@ def _validar_dias(dias: list[int]) -> list[int]:
     return sorted(set(dias))
 
 
+class FusoBody(BaseModel):
+    # None = volta ao padrão do ambiente (KV_TZ).
+    fuso_horario: str | None = None
+
+
+# Poucos e comuns no Brasil — a lista existe para o cliente não digitar um
+# nome IANA errado, que é um erro silencioso caríssimo neste painel.
+FUSOS_SUGERIDOS = [
+    "America/Sao_Paulo", "America/Bahia", "America/Fortaleza",
+    "America/Recife", "America/Belem", "America/Manaus",
+    "America/Cuiaba", "America/Campo_Grande", "America/Rio_Branco",
+    "America/Noronha", "UTC",
+]
+
+
+@app.get("/processos/{processo_id}/fuso")
+def ler_fuso(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Fase 65 — fuso da FÁBRICA, usado pelo painel de saúde e pelo turno."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    tz, tz_nome = fuso_do_processo(sb, user.empresa, nome)
+    configurado = None
+    try:
+        r = (
+            sb.table("contexto_processo").select("fuso_horario")
+            .eq("empresa", user.empresa).eq("processo", nome).limit(1).execute().data
+        ) or []
+        configurado = (r[0].get("fuso_horario") if r else None) or None
+    except Exception:
+        pass
+    return {
+        "configurado": configurado,
+        "efetivo": tz_nome,
+        "padrao_ambiente": FUSO_PADRAO,
+        "agora_local": datetime.now(timezone.utc).astimezone(tz).strftime("%d/%m %H:%M"),
+        "sugestoes": FUSOS_SUGERIDOS,
+    }
+
+
+@app.put("/processos/{processo_id}/fuso")
+def setar_fuso(processo_id: str, body: FusoBody,
+               user: CurrentUser = Depends(get_current_user)):
+    """Grava o fuso. Recusa nome inválido: um fuso errado não dá erro em lugar
+    nenhum — só faz o painel mentir o dia inteiro."""
+    alvo = (body.fuso_horario or "").strip() or None
+    if alvo is not None:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(alvo)
+        except Exception:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Fuso desconhecido: {alvo!r}. Use um nome IANA, ex.: America/Sao_Paulo.",
+            )
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    try:
+        (
+            sb.table("contexto_processo").update({"fuso_horario": alvo})
+            .eq("empresa", user.empresa).eq("processo", nome).execute()
+        )
+    except Exception as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            f"Falha ao gravar o fuso: {e}")
+    tz, tz_nome = fuso_do_processo(sb, user.empresa, nome)
+    return {
+        "ok": True, "configurado": alvo, "efetivo": tz_nome,
+        "agora_local": datetime.now(timezone.utc).astimezone(tz).strftime("%d/%m %H:%M"),
+    }
+
+
 @app.get("/processos/{processo_id}/turnos")
 def listar_turnos(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     sb = make_supabase_client()
@@ -1034,8 +1105,59 @@ def receber_heartbeat(body: HeartbeatBody, user: CurrentUser = Depends(get_curre
     return {"ok": True}
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 65 — O RELÓGIO DE PAREDE É O DA FÁBRICA, NÃO O DO SERVIDOR.
+#
+# O painel de saúde usava `datetime.now().astimezone()` — o fuso do SERVIDOR.
+# No Render o container roda em UTC, e a fábrica está em UTC−3. Resultado:
+#   • a faixa de 24h aparecia 3h deslocada (parecia ter começado às 03h
+#     quando a gravação começou às 06h);
+#   • pior, o turno era comparado contra o relógio errado: às 11h da fábrica
+#     (14h UTC) o painel dizia "em repouso" com o Pi gravando. Um painel de
+#     saúde que erra o estado é pior que não ter painel.
+#
+# O Pi decide o turno pelo relógio DELE (TURNO_JANELAS roda local no edge).
+# Para o painel concordar com a realidade, o backend tem de usar o mesmo
+# relógio — o da fábrica.
+# ═════════════════════════════════════════════════════════════════════════
+FUSO_PADRAO = os.environ.get("KV_TZ", "America/Sao_Paulo")
+# Fallback se a base de fusos não existir na imagem (slim sem tzdata): offset
+# fixo. Perde horário de verão, mas errar por 1h no verão é muito melhor que
+# errar por 3h o ano inteiro — e o log deixa o motivo visível.
+_FUSO_FALLBACK = timezone(timedelta(hours=-3), "UTC-3")
+
+
+def _fuso(nome: str | None):
+    """IANA → tzinfo. Nome inválido/base ausente nunca derruba o painel."""
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(nome or FUSO_PADRAO)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[saude] fuso %r indisponível (%s) — usando UTC-3 fixo.",
+                    nome or FUSO_PADRAO, e)
+        return _FUSO_FALLBACK
+
+
+def fuso_do_processo(sb, empresa: str, processo: str):
+    """Fuso da FÁBRICA: coluna do processo → env KV_TZ → America/Sao_Paulo."""
+    nome = None
+    try:
+        r = (
+            sb.table("contexto_processo").select("fuso_horario")
+            .eq("empresa", empresa).eq("processo", processo).limit(1).execute().data
+        ) or []
+        if r:
+            nome = (r[0].get("fuso_horario") or "").strip() or None
+    except Exception as e:  # noqa: BLE001
+        log.warning("[saude] fuso do processo não lido (%s) — usando o padrão.", e)
+    return _fuso(nome), (nome or FUSO_PADRAO)
+
+
 def _turno_janelas_do_dia(turnos: list, quando: datetime) -> list:
     """[(inicio_dt, fim_dt, nome)] das janelas ATIVAS no dia de `quando`.
+
+    ⚠️ `quando` TEM de estar no fuso da fábrica: as janelas são horário de
+    parede ("06:00") e `replace(hour=...)` as ancora no fuso que vier.
     Um turno vale no dia se `dias_semana` contém o ISO weekday."""
     dow = quando.isoweekday()
     janelas = []
@@ -1104,9 +1226,11 @@ def saude_edge(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     except Exception:
         turnos = []
 
-    # O Pi grava no fuso local dele; o painel fala do turno do cliente. Usamos
-    # o fuso do servidor como referência do "relógio de parede" da fábrica.
-    local = datetime.now().astimezone()
+    # Fase 65: o relógio de parede é o DA FÁBRICA. O Pi decide o turno pelo
+    # fuso dele; o painel tem de usar o mesmo, senão diverge do que está
+    # realmente acontecendo no chão. Nunca o fuso do servidor (UTC no Render).
+    tz_fabrica, tz_nome = fuso_do_processo(sb, user.empresa, processo_nome)
+    local = agora.astimezone(tz_fabrica)
     janelas = _turno_janelas_do_dia(turnos, local)
     ativa = _dentro_de_janela(janelas, local)
     stale_s = HEARTBEAT_INTERVALO_MIN * 60 * SAUDE_STALE_FATOR
@@ -1225,7 +1349,7 @@ def saude_edge(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         t = _parse_iso_utc(h.get("recebido_em"))
         if not t:
             continue
-        delta = (t.astimezone(local.tzinfo) - ini_faixa).total_seconds()
+        delta = (t.astimezone(tz_fabrica) - ini_faixa).total_seconds()
         if delta >= 0:
             idx = int(delta // (BLOCO_MIN * 60))
             if 0 <= idx < n_blocos:
@@ -1255,6 +1379,11 @@ def saude_edge(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         "turno": turno_out,
         "cobertura_24h": cobertura,
         "intervalo_min": HEARTBEAT_INTERVALO_MIN,
+        # Fuso usado para TUDO acima. Vai no payload de propósito: fuso errado
+        # é um erro silencioso — o painel continua bonito e mente o dia
+        # inteiro. Visível na tela, alguém percebe no primeiro olhar.
+        "fuso": tz_nome,
+        "agora_local": local.strftime("%H:%M"),
     }
 
 

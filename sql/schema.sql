@@ -726,3 +726,27 @@ update eventos e
 
 -- Sobrou algo sem categoria? Deve devolver 0 linhas.
 --   select count(*) from comportamentos where categoria_lean is null;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 65 — FUSO DA FÁBRICA (o relógio de parede não é o do servidor).
+--
+-- O painel de saúde usava o fuso do SERVIDOR. No Render o container roda em
+-- UTC e a fábrica está em UTC−3, então:
+--   • a faixa de 24h aparecia 3h deslocada (parecia ter começado às 03h
+--     quando a gravação começou às 06h);
+--   • o turno era comparado contra o relógio errado: às 11h da fábrica
+--     (14h UTC) o painel dizia "em repouso" com o Pi gravando.
+--
+-- O Pi decide o turno pelo relógio DELE. Para o painel concordar com a
+-- realidade, o backend precisa do mesmo relógio.
+--
+-- NULL = usa KV_TZ (default 'America/Sao_Paulo').
+-- Nome IANA — o endpoint PUT /processos/{id}/fuso valida antes de gravar,
+-- porque fuso errado não dá erro em lugar nenhum: só faz o painel mentir.
+-- ════════════════════════════════════════════════════════════════════════
+alter table contexto_processo add column if not exists fuso_horario text;
+
+-- Deixa explícito nos processos existentes (idempotente).
+update contexto_processo set fuso_horario = 'America/Sao_Paulo'
+ where fuso_horario is null;

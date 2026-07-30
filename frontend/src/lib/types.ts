@@ -506,6 +506,19 @@ export interface SaudeEdge {
   };
   cobertura_24h: SaudeBlocoCobertura[];
   intervalo_min: number;
+  // Fase 65: fuso da FÁBRICA usado para tudo acima. Vem no payload porque
+  // fuso errado é erro silencioso — o painel continua bonito e mente o dia
+  // inteiro. Na tela, alguém percebe no primeiro olhar.
+  fuso?: string;
+  agora_local?: string;
+}
+
+export interface FusoProcesso {
+  configurado: string | null;
+  efetivo: string;
+  padrao_ambiente: string;
+  agora_local: string;
+  sugestoes: string[];
 }
 
 export interface DiaHora {

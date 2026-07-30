@@ -9,9 +9,10 @@
 //
 // Todo o cálculo mora no backend (GET /processos/{id}/saude). Aqui só pintamos.
 // ============================================================
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { Card, Icon, PanelHead } from "../design/ui";
+import { Btn, Card, Icon, PanelHead, toast } from "../design/ui";
 import { tempoRelativo } from "../design/helpers";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { EstadoSaude, SaudeCamera, SaudeEdge } from "../lib/types";
@@ -110,6 +111,7 @@ export function SaudeBloco({ proc }: { proc: ProcHeaderMock }) {
           <Cameras cameras={s.cameras} />
           {s.disco && <Armazenamento disco={s.disco} />}
           <FaixaCobertura s={s} />
+          <FusoDaFabrica proc={proc} s={s} />
         </div>
       )}
     </Card>
@@ -312,11 +314,16 @@ function FaixaCobertura({ s }: { s: SaudeEdge }) {
   const blocos = s.cobertura_24h || [];
   if (!blocos.length) return null;
 
+  // Fase 65: a hora do rótulo sai do PRÓPRIO ISO, que já vem no fuso da
+  // fábrica ("2026-07-30T06:00:00-03:00" → "06"). `new Date(...).getHours()`
+  // reconverteria para o fuso do NAVEGADOR — deslocando a faixa de novo, agora
+  // para quem abre a tela de outro lugar.
   const horas: { pos: number; hora: string }[] = [];
   blocos.forEach((b, i) => {
-    const d = new Date(b.inicio);
-    if (d.getMinutes() === 0 && d.getHours() % 6 === 0) {
-      horas.push({ pos: (i / blocos.length) * 100, hora: `${String(d.getHours()).padStart(2, "0")}h` });
+    const hh = b.inicio.slice(11, 13);
+    const mm = b.inicio.slice(14, 16);
+    if (mm === "00" && Number(hh) % 6 === 0) {
+      horas.push({ pos: (i / blocos.length) * 100, hora: `${hh}h` });
     }
   });
 
@@ -391,6 +398,90 @@ function FaixaCobertura({ s }: { s: SaudeEdge }) {
           <i style={{ width: 9, height: 9, borderRadius: 2, background: "var(--line)" }} /> fora do turno
         </span>
       </div>
+    </div>
+  );
+}
+
+// ── 5 · O fuso da fábrica (Fase 65) ──────────────────────────────
+// Fica VISÍVEL de propósito. Fuso errado não dá erro em lugar nenhum: o painel
+// continua bonito, a faixa aparece deslocada e o turno é comparado contra o
+// relógio errado — o sistema chega a dizer "em repouso" com o Pi gravando.
+// Era exatamente o que acontecia quando isto vinha do fuso do SERVIDOR (UTC no
+// Render) em vez do fuso do chão de fábrica.
+function FusoDaFabrica({ proc, s }: { proc: ProcHeaderMock; s: SaudeEdge }) {
+  const qc = useQueryClient();
+  const [editando, setEditando] = useState(false);
+  const q = useQuery({
+    queryKey: ["fuso", proc.id],
+    queryFn: () => api.fuso.ler(proc.id),
+    enabled: editando,
+  });
+  const setar = useMutation({
+    mutationFn: (tz: string) => api.fuso.setar(proc.id, tz),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["saude", proc.id] });
+      qc.invalidateQueries({ queryKey: ["fuso", proc.id] });
+      setEditando(false);
+      toast(`Relógio da fábrica: ${r.efetivo} — agora são ${r.agora_local}.`, { icon: "check" });
+    },
+    onError: (e: Error) => toast(`Não deu: ${e.message}`, { color: "var(--desp)" }),
+  });
+
+  if (!s.fuso) return null;
+  return (
+    <div className="col" style={{ gap: 7, borderTop: "1px solid var(--line-2)", paddingTop: 12 }}>
+      <div className="row gap2 wrap" style={{ alignItems: "baseline" }}>
+        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>
+          Relógio da fábrica
+        </span>
+        <code className="font-mono" style={{ fontSize: 11.5, background: "var(--line-2)", padding: "1px 8px", borderRadius: 5 }}>
+          {s.fuso}
+        </code>
+        {s.agora_local && (
+          <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+            são <b style={{ color: "var(--text)" }}>{s.agora_local}</b> no chão de fábrica
+          </span>
+        )}
+        <span className="grow" />
+        {!editando && (
+          <button onClick={() => setEditando(true)}
+            style={{ cursor: "pointer", border: "1px solid var(--line)", background: "#fff", borderRadius: 99, padding: "3px 11px", fontSize: 11.5, fontWeight: 600, color: "var(--accent)" }}>
+            trocar
+          </button>
+        )}
+      </div>
+
+      {editando && (
+        <div className="col" style={{ gap: 8 }}>
+          <p style={{ fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 }}>
+            É por este relógio que o turno e a faixa de 24 horas são lidos. Se
+            estiver errado, o painel mostra o horário deslocado e pode dizer que
+            a captura parou quando ela está rodando.
+          </p>
+          <div className="row gap1 wrap">
+            {(q.data?.sugestoes || []).map((tz) => (
+              <button
+                key={tz}
+                disabled={setar.isPending}
+                onClick={() => setar.mutate(tz)}
+                style={{
+                  cursor: "pointer", borderRadius: 99, padding: "3px 11px", fontSize: 11.5,
+                  fontFamily: "var(--mono)", fontWeight: 600,
+                  border: tz === s.fuso ? "1px solid var(--accent)" : "1px solid var(--line)",
+                  background: tz === s.fuso ? "var(--accent-soft)" : "#fff",
+                  color: tz === s.fuso ? "var(--accent)" : "var(--text)",
+                }}
+              >
+                {tz}
+              </button>
+            ))}
+            {q.isLoading && <span style={{ fontSize: 12, color: "var(--muted)" }}>carregando fusos…</span>}
+          </div>
+          <div className="row gap1">
+            <Btn size="sm" variant="ghost" onClick={() => setEditando(false)}>Cancelar</Btn>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
