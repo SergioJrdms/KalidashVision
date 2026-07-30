@@ -60,6 +60,7 @@ from .pipeline import (
     propagar_categoria_para_eventos,
     relatorio_propagacao_lean,
     reverter_auto_validacao_maquina,
+    diagnosticar_contagio_por_descricao,
     aprendizado_automatico,
     APRENDIZADO_AUTO_PADRAO,
     categoria_efetiva,
@@ -1017,6 +1018,29 @@ def setar_aprendizado(
         "configurado": body.ativo,
         "efetivo": aprendizado_automatico(sb, user.empresa, nome),
     }
+
+
+@app.post("/processos/{processo_id}/manutencao/validacao/contagio-descricao")
+def limpar_contagio_descricao(
+    processo_id: str,
+    dry_run: bool = Query(True, description="true (default) = só relatório, não escreve"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 67 — acha (e desfaz) os eventos que herdaram um rótulo por
+    CASAMENTO DE DESCRIÇÃO com uma correção humana.
+
+    `dry_run=true` é o default: devolve o volume por descrição antes de tocar
+    em nada. As correções do próprio humano (`origem_validacao='humano'`) nunca
+    são alteradas — só param de se propagar.
+
+    O rótulo ORIGINAL não volta: ele nunca foi gravado. Os eventos afetados
+    voltam para a fila para serem julgados de novo."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    rel = diagnosticar_contagio_por_descricao(sb, user.empresa, nome, dry_run=dry_run)
+    if "erro" in rel:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
+    return {"ok": True, **rel}
 
 
 @app.post("/processos/{processo_id}/manutencao/validacao/reverter-auto")

@@ -1469,16 +1469,36 @@ def construir_bloco_memoria_cluster(
         )
         blocos.append("\n".join(linhas))
 
-    if memoria.get("correcoes_aprendidas"):
-        linhas = [
-            "",
-            "CORREÇÕES APRENDIDAS de execuções anteriores (modelo havia inferido outro label e o humano corrigiu — use estes labels quando ver descrições parecidas):",
-        ]
-        for desc, label in list(memoria["correcoes_aprendidas"].items())[:max_correcoes]:
-            linhas.append(f'  - descrição "{desc}" → label CORRETO: {label}')
-        blocos.append("\n".join(linhas))
+    # ═══════════════════════════════════════════════════════════════
+    # Fase 67 — O BLOCO DE "CORREÇÕES APRENDIDAS" FOI REMOVIDO DAQUI.
+    #
+    # Ele dizia ao modelo, em texto:
+    #     descrição "operando o torno, manipulando a máquina" → label
+    #     CORRETO: posto_vazio    (use quando ver descrições PARECIDAS)
+    #
+    # Era o caminho que a chave da Fase 62 NÃO alcançava. A chave desligava
+    # o remapeamento DETERMINÍSTICO (o dict `correcoes`), mas o prompt
+    # continuava recebendo o mesmo mapa e mandando o modelo generalizar —
+    # e generalizar SEMANTICAMENTE, o que é pior que casar texto exato:
+    # "operando o torno, manipulando a máquina E FERRAMENTA" é "parecida".
+    #
+    # A raiz, porém, é anterior à chave: chavear correção por
+    # `descricao_bruta` é errado em qualquer modo. Quando o VLM ALUCINA a
+    # descrição (descreveu alguém operando com o posto vazio) e o humano
+    # corrige o RÓTULO, o sistema aprende que a frase mais frequente do
+    # dataset significa outra coisa — e envenena todos os usos corretos
+    # dela. Uma correção vale para o EVENTO corrigido e nada mais, até
+    # existir o mecanismo declarativo.
+    #
+    # `memoria["correcoes_aprendidas"]` continua sendo CALCULADO: serve de
+    # diagnóstico (é o que a limpeza usa para achar o contágio) e será a
+    # matéria-prima do mecanismo declarativo. O que não pode é virar regra.
+    # ═══════════════════════════════════════════════════════════════
 
-    if memoria.get("descartados"):
+    # `descartados` só entra com a generalização LIGADA: é a decisão de um
+    # humano num evento virando instrução para todos os vídeos seguintes —
+    # a mesma classe de propagação, ainda que menos destrutiva.
+    if memoria.get("descartados") and memoria.get("_generalizar", True):
         linhas = [
             "",
             "LABELS MARCADOS COMO FALSO POSITIVO (humanos descartaram estes labels em execuções anteriores — EVITE criar variantes deles):",
@@ -2186,34 +2206,28 @@ def etapa_clusterizar(
     """
     progress_cb("cluster", 0, "Agrupando descrições em comportamentos")
     descricoes_unicas = sorted(set(o["descricao"] for o in observacoes_brutas))
-    # Fase 61 — UMA CORREÇÃO NÃO VIRA REGRA GLOBAL.
-    # Antes, qualquer correção humana já generalizava para toda descrição igual,
-    # sem limiar nenhum — enquanto `vocabulario_canonico` sempre exigiu
-    # `n_confirmacoes >= limiar`. Agora a correção passa pelo MESMO limiar: só
-    # generaliza quando a mesma descrição foi corrigida para o mesmo rótulo pelo
-    # menos `limiar_auto_validacao` vezes. Abaixo disso a descrição segue o
-    # caminho normal de clusterização, como se não houvesse correção.
+    # Fase 67 — CORREÇÃO NÃO É MAIS CHAVEADA POR `descricao_bruta`, EM MODO
+    # NENHUM. Nem com limiar (Fase 61), nem com a chave ligada (Fase 62).
+    #
+    # O motivo é que o pressuposto era falso: "mesma descrição ⇒ mesma ação".
+    # Quando o VLM alucina a descrição — descreve alguém operando o torno com
+    # o posto vazio — e o humano corrige o RÓTULO daquele evento, o sistema
+    # conclui que a frase MAIS FREQUENTE do dataset significa `posto_vazio`.
+    # A partir daí toda ocorrência legítima da frase é remapeada.
+    #
+    # Existem dois erros diferentes e o sistema tratava os dois igual:
+    #   (a) descrição certa, rótulo errado  → corrigir o rótulo faz sentido;
+    #   (b) descrição ERRADA (alucinação)   → corrigir o rótulo cria um
+    #       mapeamento falso e contamina todos os usos corretos da frase.
+    # Enquanto a validação não separar (a) de (b), nenhuma correção pode
+    # generalizar: vale para o evento corrigido e nada mais.
     _corr_todas = memoria.get("correcoes_aprendidas", {}) or {}
-    _corr_n = memoria.get("correcoes_confirmacoes", {}) or {}
-    if not aprendizado_auto:
-        # Fase 62: nada generaliza. As correções seguem guardadas na memória
-        # (e vão para o prompt como exemplo), mas não remapeiam ninguém.
-        correcoes = {}
+    correcoes: dict[str, str] = {}
+    if _corr_todas:
         log.info(
-            "cluster: generalização DESLIGADA para este processo — %d correção(ões) "
-            "guardadas, 0 aplicadas.", len(_corr_todas),
+            "cluster: %d correção(ões) na memória, 0 aplicadas — correção não "
+            "generaliza por descrição (Fase 67).", len(_corr_todas),
         )
-    else:
-        correcoes = {
-            d: lbl for d, lbl in _corr_todas.items()
-            if _corr_n.get(d, 1) >= limiar_auto_validacao
-        }
-        _abaixo = len(_corr_todas) - len(correcoes)
-        if _abaixo:
-            log.info(
-                "cluster: %d correção(ões) abaixo do limiar (%d) — não generalizam ainda.",
-                _abaixo, limiar_auto_validacao,
-            )
 
     descricoes_conhecidas: dict[str, str] = {}
     descricoes_novas: list[str] = []
@@ -2262,7 +2276,12 @@ def etapa_clusterizar(
     if descricoes_novas:
         prompt_completo = PROMPT_CLUSTER.format(
             bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
-            bloco_memoria=construir_bloco_memoria_cluster(memoria),
+            # `_generalizar` diz ao bloco se `descartados` pode entrar. O
+            # vocabulário entra sempre: sugere NOMES já usados, não remapeia
+            # nada, e é o que impede o mesmo comportamento de ganhar três
+            # nomes ao longo da campanha.
+            bloco_memoria=construir_bloco_memoria_cluster(
+                {**memoria, "_generalizar": aprendizado_auto}),
         )
         lista_formatada = "\n".join(f"- {d}" for d in descricoes_novas)
         resposta = groq_text_call(
@@ -4109,6 +4128,135 @@ def propagar_categoria_para_eventos(
     n = _aplica("comportamento_label", so_sem_correcao=True)
     n += _aplica("label_corrigido", so_sem_correcao=False)
     return n
+
+
+def diagnosticar_contagio_por_descricao(
+    sb, empresa: str, processo: str, dry_run: bool = True,
+) -> dict:
+    """Fase 67 — acha e desfaz o CONTÁGIO POR DESCRIÇÃO.
+
+    O que é contágio: o humano corrigiu o rótulo de UM evento; o sistema
+    guardou "esta `descricao_bruta` significa este rótulo" e passou a aplicar
+    isso a todos os eventos futuros com a mesma frase (e, via prompt, com
+    frases parecidas). Quando a descrição corrigida era uma ALUCINAÇÃO do VLM,
+    o mapeamento é falso e envenena justamente a frase mais comum do dataset.
+
+    COMO IDENTIFICAR, sem coluna nova: para cada par (descricao_bruta →
+    rótulo) que um HUMANO criou, procuram-se os eventos que
+      • têm a MESMA `descricao_bruta`,
+      • terminaram com AQUELE rótulo,
+      • e NÃO foram tocados por humano (origem != 'humano').
+    Esses só podem ter chegado ao rótulo pelo mapa — é a assinatura exata.
+
+    O QUE A REVERSÃO FAZ E O QUE NÃO FAZ: devolve o evento à fila
+    (`validado_humano=false`, `validacao_correto=null`, `validado_em=null`) e
+    limpa `label_corrigido`. NÃO recupera o rótulo original: quando o remap
+    aconteceu na clusterização, o rótulo pré-remap nunca foi gravado. Só
+    reprocessar o vídeo o traria de volta — o que a limpeza garante é que
+    nenhum desses eventos continue passando por verdade.
+
+    NUNCA toca em `origem_validacao='humano'`: a decisão da pessoa é
+    inviolável, inclusive as correções que originaram o contágio.
+    """
+    def _fab():
+        return (
+            sb.table("eventos")
+            .select("id, comportamento_label, label_corrigido, descricao_bruta, "
+                    "tempo_inicio_s, tempo_fim_s, origem_validacao, "
+                    "validado_humano, validacao_correto, principal")
+            .eq("empresa", empresa).eq("processo", processo)
+            .order("id")
+        )
+    try:
+        eventos = _scan_todos(_fab)
+    except Exception as e:  # noqa: BLE001
+        return {"erro": f"leitura de eventos falhou: {e}"}
+
+    # 1) O mapa que o humano criou sem querer: descrição → rótulo corrigido.
+    mapa_humano: dict[str, Counter] = {}
+    for e in eventos:
+        if (e.get("origem_validacao") or "") != "humano":
+            continue
+        corr = e.get("label_corrigido")
+        desc = (e.get("descricao_bruta") or "").strip().lower()
+        if corr and desc and corr != e.get("comportamento_label"):
+            mapa_humano.setdefault(desc, Counter())[corr] += 1
+
+    if not mapa_humano:
+        return {"dry_run": dry_run, "correcoes_humanas": 0, "contaminados": 0,
+                "passando_por_verdade": 0, "revertidos": 0, "minutos": 0.0,
+                "por_descricao": []}
+
+    # 2) Quem herdou esse mapa sem ninguém ter pedido.
+    contagio: dict[str, dict] = {}
+    alvos: list[dict] = []
+    for e in eventos:
+        if (e.get("origem_validacao") or "") == "humano":
+            continue                       # decisão da pessoa: intocável
+        if e.get("principal") is False:
+            continue                       # auditoria não conta
+        desc = (e.get("descricao_bruta") or "").strip().lower()
+        ctr = mapa_humano.get(desc)
+        if not ctr:
+            continue
+        label_ef = e.get("label_corrigido") or e.get("comportamento_label")
+        if label_ef not in ctr:
+            continue                       # ficou com outro rótulo: não é contágio
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        d = contagio.setdefault(desc, {
+            "descricao": e.get("descricao_bruta"), "rotulo": label_ef,
+            "eventos": 0, "segundos": 0.0, "passando_por_verdade": 0,
+            "corrigido_pelo_humano_n": sum(ctr.values()),
+        })
+        d["eventos"] += 1
+        d["segundos"] += dur
+        # SÓ escrevemos em quem ainda está PASSANDO POR VERDADE. Um evento
+        # contaminado que já está na fila não precisa de reversão — o rótulo
+        # dele continua errado, mas ninguém o está tomando como julgado, e só
+        # reprocessar o vídeo corrigiria o rótulo. Separar as duas coisas é o
+        # que torna a limpeza idempotente e o relatório honesto: `contaminados`
+        # mede o estrago, `passando_por_verdade` mede o que dá para desfazer.
+        if e.get("validado_humano"):
+            d["passando_por_verdade"] += 1
+            alvos.append(e)
+
+    revertidos = 0
+    if not dry_run and alvos:
+        CH = 100
+        ids = [e["id"] for e in alvos if e.get("id")]
+        for i in range(0, len(ids), CH):
+            try:
+                (
+                    sb.table("eventos")
+                    .update({"validado_humano": False, "validacao_correto": None,
+                             "validado_em": None, "label_corrigido": None})
+                    .in_("id", ids[i : i + CH]).execute()
+                )
+                revertidos += len(ids[i : i + CH])
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"[fase67] falha ao reverter lote {i}: {e}")
+
+    return {
+        "dry_run": dry_run,
+        "correcoes_humanas": len(mapa_humano),
+        # Todo evento que herdou o rótulo pela descrição (o estrago).
+        "contaminados": sum(d["eventos"] for d in contagio.values()),
+        # Destes, os que ainda constam como julgados (o que dá para desfazer).
+        "passando_por_verdade": len(alvos),
+        "revertidos": revertidos,
+        "minutos": round(sum(d["segundos"] for d in contagio.values()) / 60, 1),
+        "por_descricao": sorted(
+            ({"descricao": d["descricao"], "rotulo": d["rotulo"],
+              "eventos": d["eventos"], "minutos": round(d["segundos"] / 60, 1),
+              "passando_por_verdade": d["passando_por_verdade"],
+              "corrigido_pelo_humano_n": d["corrigido_pelo_humano_n"]}
+             for d in contagio.values()),
+            key=lambda x: -x["minutos"],
+        ),
+        "aviso": ("O rótulo ORIGINAL não é recuperável: quando o remap aconteceu "
+                  "na clusterização, o rótulo pré-remap nunca foi gravado. Estes "
+                  "eventos voltam para a fila para serem julgados de novo."),
+    }
 
 
 def reverter_auto_validacao_maquina(

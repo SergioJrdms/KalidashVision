@@ -14,7 +14,7 @@ validacao_correto=true — todos errados. Três falhas somadas:
 Cobertura:
   1) NENHUMA origem inferida grava validado_humano/validacao_correto
   2) exceções mecânicas (posto_vazio, auditoria) seguem fora da fila
-  3) limiar: 1 correção não generaliza; 2 generalizam
+  3) correção não generaliza por descrição (limiar da F61 revogado na F67)
   4) memória não conta inferência de máquina como confirmação humana
   5) reversão: escopo, proteções, dry_run e idempotência
   6) a CHAVE por processo: desligada, nada generaliza; religada, tudo volta
@@ -178,7 +178,7 @@ check("posto_vazio segue fora da fila",
 check("auditoria segue fora da fila",
       por_origem["auditoria"]["validado_humano"] is True, por_origem.get("auditoria"))
 
-print("\n[4] Limiar — uma correção não vira regra global")
+print("\n[4] Correção não vira regra global (F61 limiar → F67 revogação)")
 DESC = "operador de pé olhando a peça"
 mem_1 = {"correcoes_aprendidas": {DESC: "conversando_colega"},
          "correcoes_confirmacoes": {DESC: 1}, "vocabulario": []}
@@ -213,24 +213,30 @@ def clusterizar(mem, limiar=2):
                                 lambda *a, **k: None)
 
 
+# ⚠️ A Fase 61 introduziu um LIMIAR para a correção generalizar. A Fase 67
+# REVOGA isso: correção não generaliza por `descricao_bruta` em modo nenhum,
+# porque o pressuposto "mesma descrição ⇒ mesma ação" é falso quando o VLM
+# alucina a descrição. O limiar continua valendo para `vocabulario_canonico`;
+# aqui as asserções passam a travar a REVOGAÇÃO.
 mapa, _cat, label_de, origem_de = clusterizar(mem_1)
 check("1 correção NÃO remapeia o rótulo",
       label_de(DESC) != "conversando_colega", label_de(DESC))
 check("1 correção NÃO marca origem correcao_aprendida",
       origem_de(DESC) == "pendente", origem_de(DESC))
-check("abaixo do limiar a descrição volta ao cluster normal",
+check("a descrição vai ao cluster normal",
       len(_chamadas_llm) == 1 and label_de(DESC) == "olhar_peca", label_de(DESC))
 
 mapa, _cat, label_de, origem_de = clusterizar(mem_2)
-check("2 correções remapeiam o rótulo",
-      label_de(DESC) == "conversando_colega", label_de(DESC))
-check("acima do limiar nem chama a LLM", not _chamadas_llm, _chamadas_llm)
-check("2 correções marcam origem correcao_aprendida",
-      origem_de(DESC) == "correcao_aprendida", origem_de(DESC))
+check("Fase 67: nem 2 correções remapeiam",
+      label_de(DESC) == "olhar_peca", label_de(DESC))
+check("Fase 67: a LLM é chamada mesmo com correção na memória",
+      len(_chamadas_llm) == 1, _chamadas_llm)
+check("Fase 67: origem nunca é correcao_aprendida",
+      origem_de(DESC) != "correcao_aprendida", origem_de(DESC))
 
 mapa, _cat, label_de, origem_de = clusterizar(mem_1, limiar=1)
-check("limiar 1 volta a aceitar correção única (configurável)",
-      label_de(DESC) == "conversando_colega", label_de(DESC))
+check("Fase 67: limiar 1 também não ressuscita o remap por descrição",
+      label_de(DESC) == "olhar_peca", label_de(DESC))
 
 print("\n[5] Memória — a máquina não confirma a si mesma")
 def linha(label, origem, correto=True, corrigido=None, desc="d"):
@@ -419,9 +425,11 @@ _chamadas_llm.clear()
 _, _c, label_de, origem_de = pl.etapa_clusterizar(
     None, obs, "torneamento", mem_forte, 2, lambda *a, **k: None,
     aprendizado_auto=True)
-check("religando, a mesma memória volta a generalizar",
-      label_de(DESC) == "conversando_colega"
-      and origem_de(DESC) == "correcao_aprendida", (label_de(DESC), origem_de(DESC)))
+# A chave da Fase 62 religa o vocabulário e os descartados. NÃO ressuscita o
+# remapeamento por descrição — esse morreu na 67, em qualquer modo.
+check("religando, a correção por descrição SEGUE morta",
+      label_de(DESC) == "olhar_peca"
+      and origem_de(DESC) != "correcao_aprendida", (label_de(DESC), origem_de(DESC)))
 
 print("\n[11] Chave desligada — precedente Lean de outro processo não entra")
 _orig_mem_cat = pl.carregar_memoria_categoria
