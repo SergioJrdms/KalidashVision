@@ -104,6 +104,17 @@ def _checar_segredos() -> None:
 
 
 @app.on_event("startup")
+def _varredura_no_boot() -> None:
+    """Rede secundária da Fase 74: se o Pi estiver desligado, o pulso não vem
+    e a varredura nunca roda. O boot cobre esse caso. Escopo global (empresa
+    None) e não-fatal — nada aqui pode impedir a API de subir."""
+    try:
+        _varrer_storage_com_throttle(make_supabase_client(), None, "startup")
+    except Exception as e:  # noqa: BLE001
+        log.warning("[varredura/startup] indisponível (não-fatal): %s", e)
+
+
+@app.on_event("startup")
 def _iniciar_infra_jobs() -> None:
     """Sobe a fila in-process serial e o debouncer dos blocos globais.
     Ambos sobrevivem a restart via persistência em /tmp."""
@@ -787,6 +798,43 @@ SAUDE_RETENCAO_DIAS = int(os.environ.get("KV_SAUDE_RETENCAO_DIAS", "7"))
 _ULTIMA_LIMPEZA_HB = {"ts": 0.0}
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Fase 74 — A VARREDURA PRECISA DE UM RELÓGIO QUE NÃO DEPENDA DE NINGUÉM.
+#
+# A expiração da Fase 54 existia como ENDPOINT e nada mais. Ninguém a chamava,
+# então em 4 dias o bucket foi de 0 a 979 MB de 1 GB e a campanha quase parou.
+# "Existe um endpoint" não é um mecanismo — é uma tarefa manual esperando ser
+# esquecida num fim de semana.
+#
+# O relógio escolhido é o HEARTBEAT DO PI: ele chega a cada poucos minutos,
+# 24/7, e não depende de ninguém lembrar. Mesmo padrão já provado em
+# `_limpar_heartbeats_antigos`. Render Hobby não tem cron, e uma thread morre
+# junto com o processo quando o serviço hiberna — o pulso, não.
+#
+# Rede secundária: no startup do FastAPI (pega o caso do Pi desligado) e o
+# endpoint manual, que continua existindo para uso sob demanda.
+# ═════════════════════════════════════════════════════════════════════
+VARREDURA_INTERVALO_MIN = int(os.environ.get("KV_VARREDURA_INTERVALO_MIN", "60"))
+_ULTIMA_VARREDURA = {"ts": 0.0}
+
+
+def _varrer_storage_com_throttle(sb, empresa: str | None, motivo: str) -> None:
+    """Roda a varredura no máximo 1×/intervalo. NUNCA levanta: se a limpeza
+    falhar, o heartbeat (ou o startup) não pode falhar junto."""
+    import time as _t
+    agora = _t.time()
+    if agora - _ULTIMA_VARREDURA["ts"] < VARREDURA_INTERVALO_MIN * 60:
+        return
+    _ULTIMA_VARREDURA["ts"] = agora
+    try:
+        r = varrer_videos_expirados(sb, empresa=empresa)
+        if r.get("total_objetos"):
+            log.info("[varredura/%s] %d objeto(s) · %.1f MB liberados",
+                     motivo, r["total_objetos"], r.get("total_mb", 0.0))
+    except Exception as e:  # noqa: BLE001
+        log.warning("[varredura/%s] falhou (não-fatal): %s", motivo, e)
+
+
 def _limpar_heartbeats_antigos(sb) -> None:
     """Retenção de 7 dias, com throttle de 1×/hora. Roda no POST porque
     heartbeat é frequente e garantido — não precisa de thread nem de cron."""
@@ -1106,6 +1154,7 @@ def reverter_auto_validacao(
 @app.post("/manutencao/videos/expirar")
 def expirar_videos(
     todos: bool = Query(False, description="varre a empresa inteira (default: sim)"),
+    dry_run: bool = Query(False, description="true = só mede, não apaga"),
     user: CurrentUser = Depends(get_current_user),
 ):
     """Fase 54 — varredura de segurança: acha vídeos JÁ processados, com frames
@@ -1119,7 +1168,8 @@ def expirar_videos(
     Os JPEGs de `__frames/` moram no mesmo bucket e são a evidência permanente:
     sem o vídeo de origem, não há como regenerá-los."""
     sb = make_supabase_client()
-    r = varrer_videos_expirados(sb, empresa=None if todos else user.empresa)
+    r = varrer_videos_expirados(sb, empresa=None if todos else user.empresa,
+                                dry_run=dry_run)
     return {"ok": True, **r}
 
 
@@ -1148,6 +1198,8 @@ def receber_heartbeat(body: HeartbeatBody, user: CurrentUser = Depends(get_curre
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
                             f"Falha ao gravar heartbeat: {e}")
     _limpar_heartbeats_antigos(sb)
+    # Fase 74: o pulso do Pi é o relógio da varredura. Throttled, não-fatal.
+    _varrer_storage_com_throttle(sb, user.empresa, "heartbeat")
     return {"ok": True}
 
 

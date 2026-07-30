@@ -3363,6 +3363,25 @@ def etapa_persistir(
             # IMPORTANTE: validado_humano sempre explícito (PostgREST batch
             # não aplica DEFAULT de coluna ausente).
             "validado_humano": auto_validado,
+            # Fase 75 — MESMA REGRA, e ela mordeu de verdade: `em_duvida` é
+            # NOT NULL DEFAULT false, mas só era escrito quando alguma camada
+            # disparava. Num INSERT em lote o PostgREST UNIFICA as colunas de
+            # todas as linhas do chunk: basta UMA linha trazer `em_duvida` para
+            # que as demais sejam enviadas com NULL explícito — e o DEFAULT não
+            # se aplica a NULL explícito. Resultado: 23502, o vídeo inteiro
+            # falha.
+            #
+            # Ficou latente desde a Fase 57 porque nenhuma camada estava ATIVA:
+            # nenhuma linha trazia a chave, o lote era homogêneo e o DEFAULT
+            # valia. As camadas de contradição das Fases 68/69 tornaram o lote
+            # heterogêneo e o bug apareceu no primeiro vídeo.
+            #
+            # Regra geral para este dict: coluna NOT NULL vai SEMPRE explícita.
+            "em_duvida": bool(e.get("em_duvida")),
+            # Fase 70: NOT NULL DEFAULT false. Hoje nenhuma linha do lote a
+            # traz, então o DEFAULT ainda valeria — mas é a MESMA armadilha
+            # esperando a primeira linha que a escreva. Explícita desde já.
+            "descricao_invalida": False,
             # Fase 16: True nos principais; None quando a consolidação está off
             # (comportamento antigo — o filtro downstream mantém True + None).
             "principal": e.get("principal"),
@@ -3372,9 +3391,10 @@ def etapa_persistir(
             if e.get(_c) is not None:
                 row[_c] = e[_c]
         # Fase 57: dúvida levantada pelas camadas (o placar depende disto).
+        # `camadas_disparadas` e `duvida_motivo` são NULLABLE — podem continuar
+        # condicionais sem risco. `em_duvida` já foi escrito acima.
         if e.get("camadas_disparadas"):
             row["camadas_disparadas"] = e["camadas_disparadas"]
-            row["em_duvida"] = bool(e.get("em_duvida"))
             if e.get("duvida_motivo"):
                 row["duvida_motivo"] = e["duvida_motivo"]
         _cat_h = cat_ingestao.get(e["comportamento_label"])
@@ -3405,6 +3425,10 @@ def etapa_persistir(
             "papel_pessoa": e.get("papel_pessoa"),
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
             "origem_validacao": "auditoria",
+            # Mesmo lote dos principais: a coluna NOT NULL tem de vir explícita
+            # aqui também, senão a unificação do PostgREST manda NULL.
+            "em_duvida": False,
+            "descricao_invalida": False,
             # validado_humano=True mantém os crus FORA de toda query "pendente"
             # (validação/contagens) sem precisar filtrar por `principal` no banco.
             # validacao_correto fica null → os leitores de métrica os removem pelo
@@ -5692,8 +5716,41 @@ def extrair_3_frames_evento(evento: dict, video_path: str) -> list[np.ndarray]:
     return crops
 
 
-def frame_para_jpeg_bytes(frame_bgr: np.ndarray, qualidade: int = 85) -> bytes:
-    ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, qualidade])
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 74 — TAMANHO DO FRAME DE VALIDAÇÃO.
+#
+# Medido em produção: 4605 frames × ~71 KB = 324,8 MB, um terço do free tier.
+# Isso é qualidade de arquivo para uma miniatura de 180px de altura numa faixa
+# de três — o olho humano não usa nada disso para dizer "o operador está no
+# torno". Dois cortes, ambos regulados por env:
+#   • LARGURA: o frame era gravado na resolução do vídeo (tipicamente 1280).
+#     640 é mais que suficiente para a faixa e corta a área em 4×.
+#   • QUALIDADE: 85 → 60. Abaixo de ~50 começam a aparecer artefatos de bloco
+#     que atrapalham julgar mão/ferramenta, então 60 é o piso confortável.
+#
+# Só afeta frames NOVOS. Os antigos continuam servindo do cache como estão —
+# reprocessá-los custaria egress e não devolveria nada além de espaço.
+FRAME_QUALIDADE = int(os.environ.get("KV_FRAME_QUALIDADE", "60"))
+FRAME_MAX_W = int(os.environ.get("KV_FRAME_MAX_W", "640"))
+
+
+def frame_para_jpeg_bytes(frame_bgr: np.ndarray, qualidade: int | None = None,
+                          max_w: int | None = None) -> bytes:
+    """JPEG da miniatura de validação. Reduz para `max_w` antes de codificar:
+    diminuir a resolução economiza muito mais que baixar a qualidade, e sem os
+    artefatos que a compressão agressiva traz."""
+    q = FRAME_QUALIDADE if qualidade is None else qualidade
+    largura_max = FRAME_MAX_W if max_w is None else max_w
+    try:
+        h, w = frame_bgr.shape[:2]
+        if largura_max > 0 and w > largura_max:
+            escala = largura_max / float(w)
+            frame_bgr = cv2.resize(
+                frame_bgr, (largura_max, max(1, int(round(h * escala)))),
+                interpolation=cv2.INTER_AREA)   # INTER_AREA é o certo p/ reduzir
+    except Exception as e:  # noqa: BLE001
+        log.warning("[frames] redimensionamento falhou (%s) — mantendo original.", e)
+    ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, q])
     assert ok
     return buf.tobytes()
 
@@ -5975,11 +6032,21 @@ def expirar_binarios_do_video(
 
 
 def varrer_videos_expirados(sb: Client, empresa: str | None = None,
-                            limite: int = 500) -> dict:
+                            limite: int = 500, dry_run: bool = False) -> dict:
     """Fase 54 — rede de segurança: acha vídeos JÁ processados, com frames
     aquecidos e binário ainda no Storage, e os apaga. Seguro rodar N vezes
     (a 2ª passada não encontra nada, porque `video_removido_em` já está
-    preenchido). Respeita KV_RETER_VIDEO_HORAS."""
+    preenchido). Respeita KV_RETER_VIDEO_HORAS.
+
+    Fase 74 — VARRE TAMBÉM A CAM2. Este era o furo que estourou o bucket: o
+    segmento da cam2 é outro objeto e NÃO tem linha em `videos`.
+    `expirar_binarios_do_video` o apagava inline, mas só no caminho
+    `RETER_VIDEO_HORAS == 0`; com retenção ligada ele retorna cedo (só carimba)
+    e a varredura, que só olhava `videos.caminho`, nunca o alcançava. Num setup
+    de 2 câmeras isso significa METADE do bucket crescendo para sempre.
+
+    `dry_run=True` conta e mede sem apagar nada.
+    """
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
     corte = datetime.now(timezone.utc) - timedelta(hours=max(0.0, RETER_VIDEO_HORAS))
     try:
@@ -5998,6 +6065,7 @@ def varrer_videos_expirados(sb: Client, empresa: str | None = None,
         return {"apagados": 0, "mb": 0.0, "erro": str(e)}
 
     apagados, mb_total, pulados = 0, 0.0, 0
+    ids_liberados: list[str] = []
     for v in candidatos:
         caminho = v.get("caminho")
         if not caminho or str(caminho).startswith(("/", "\\")):
@@ -6007,6 +6075,11 @@ def varrer_videos_expirados(sb: Client, empresa: str | None = None,
         if RETER_VIDEO_HORAS > 0 and aquecido and aquecido > corte:
             pulados += 1
             continue                      # ainda dentro da janela de retenção
+        if dry_run:
+            apagados += 1
+            mb_total += _tamanho_objeto(sb, bucket, caminho)
+            ids_liberados.append(v["id"])
+            continue
         mb = _remover_objeto(sb, bucket, caminho)
         try:
             sb.table("videos").update({
@@ -6014,11 +6087,69 @@ def varrer_videos_expirados(sb: Client, empresa: str | None = None,
             }).eq("id", v["id"]).execute()
             apagados += 1
             mb_total += mb
+            ids_liberados.append(v["id"])
         except Exception as e:
             log.warning(f"[varredura] {v['id']}: removeu o objeto mas não carimbou ({e})")
-    log.info("[varredura] %d vídeo(s) apagado(s) · %.1f MB liberados · %d dentro "
-             "da retenção/ignorados", apagados, mb_total, pulados)
-    return {"apagados": apagados, "mb": round(mb_total, 2), "pulados": pulados}
+
+    # ── CAM2: os segmentos do 2º ângulo, que não têm linha em `videos` ──
+    cam2_apagados, cam2_mb, cam2_pulados = 0, 0.0, 0
+    try:
+        q2 = (
+            sb.table("segmentos")
+            .select("id, storage_path, empresa, processado_em, status")
+            .is_("storage_removido_em", "null")
+            .eq("status", "concluido")
+            .limit(limite)
+        )
+        if empresa:
+            q2 = q2.eq("empresa", empresa)
+        segs = q2.execute().data or []
+    except Exception as e:
+        log.warning(f"[varredura] leitura de segmentos falhou: {e}")
+        segs = []
+
+    for sg in segs:
+        cam = sg.get("storage_path")
+        if not cam or str(cam).startswith(("/", "\\")):
+            cam2_pulados += 1
+            continue
+        # A régua da cam2 é o `processado_em` DELA: o segmento só é marcado
+        # 'concluido' depois de o par ter sido processado, então os frames já
+        # foram aquecidos a partir dele.
+        proc = _parse_iso_utc_pipe(sg.get("processado_em"))
+        if RETER_VIDEO_HORAS > 0 and proc and proc > corte:
+            cam2_pulados += 1
+            continue
+        if dry_run:
+            cam2_apagados += 1
+            cam2_mb += _tamanho_objeto(sb, bucket, cam)
+            continue
+        mb = _remover_objeto(sb, bucket, cam)
+        try:
+            sb.table("segmentos").update({
+                "storage_removido_em": datetime.now(timezone.utc).isoformat()
+            }).eq("id", sg["id"]).execute()
+            cam2_apagados += 1
+            cam2_mb += mb
+        except Exception as e:
+            log.warning(f"[varredura] segmento {sg['id']}: objeto removido mas "
+                        f"não carimbou ({e})")
+
+    log.info("[varredura]%s %d vídeo(s) + %d segmento(s) cam2 · %.1f MB · "
+             "%d dentro da retenção/ignorados",
+             " (DRY-RUN)" if dry_run else "", apagados, cam2_apagados,
+             mb_total + cam2_mb, pulados + cam2_pulados)
+    return {
+        "dry_run": dry_run,
+        "apagados": apagados,
+        "mb": round(mb_total, 2),
+        "pulados": pulados,
+        "cam2_apagados": cam2_apagados,
+        "cam2_mb": round(cam2_mb, 2),
+        "cam2_pulados": cam2_pulados,
+        "total_objetos": apagados + cam2_apagados,
+        "total_mb": round(mb_total + cam2_mb, 2),
+    }
 
 
 def _parse_iso_utc_pipe(s):
