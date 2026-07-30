@@ -880,3 +880,29 @@ on conflict (empresa, processo, nome) do update
 
 -- Conferência depois de rodar:
 --   select nome, modo, quando_rotulo, se from camadas_duvida order by ordem;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 70 — `descricao_invalida`: o VLM ALUCINOU a cena.
+--
+-- Estado PRÓPRIO, separado de `descartado`, porque são coisas diferentes:
+--   • descartado          → não havia ação aqui (falso positivo da detecção);
+--   • descricao_invalida  → HAVIA uma cena, e o modelo mentiu sobre ela.
+--
+-- Os dois saem das métricas. A diferença está nas consequências:
+--   • a frase entra na lista de QUEIMADAS e nunca mais funda aprendizado —
+--     nem hoje, nem quando o mecanismo declarativo existir. Uma regra
+--     fundamentada numa frase que nunca descreveu nada seria falsa;
+--   • a contagem vira a TAXA DE ALUCINAÇÃO do VLM, número que precisa ser
+--     acompanhado durante a campanha.
+--
+-- Misturar os dois perderia exatamente o sinal que revelou o contágio de
+-- rótulo (91 eventos, 30 min, crescendo desde 29/07).
+--
+-- ESCOPO: vale para o EVENTO marcado. A lista de queimadas bloqueia
+-- aprendizado FUTURO; nunca reclassifica o passado a partir de uma frase —
+-- generalizar por descrição foi a causa raiz e não se repete aqui.
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists descricao_invalida boolean not null default false;
+create index if not exists idx_eventos_desc_invalida
+    on eventos(empresa, processo) where descricao_invalida;

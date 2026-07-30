@@ -170,12 +170,14 @@ check("_generalizar=False corta os descartados", "FALSO POSITIVO" not in b_off)
 check("e mantém o vocabulário", "LABELS CANÔNICOS" in b_off)
 
 
-def ev(id_, desc, label, *, corrigido=None, origem=None, validado=False, seg=60):
+def ev(id_, desc, label, *, corrigido=None, origem=None, validado=False, seg=60,
+       criado="2026-07-29T10:00:00", validado_em=None):
     return {"id": id_, "empresa": "U", "processo": "T",
             "comportamento_label": label, "label_corrigido": corrigido,
             "descricao_bruta": desc, "tempo_inicio_s": 0, "tempo_fim_s": seg,
             "origem_validacao": origem, "validado_humano": validado,
-            "validacao_correto": True if validado else None, "principal": True}
+            "validacao_correto": True if validado else None, "principal": True,
+            "criado_em": criado, "validado_em": validado_em}
 
 
 print("\n[4] Limpeza — acha o contágio pela assinatura exata")
@@ -183,10 +185,12 @@ def cenario():
     return {"eventos": [
         # A correção legítima do gestor (o dia em que o operador faltou).
         ev("h1", FRASE, "operar_torno", corrigido="posto_vazio",
-           origem="humano", validado=True),
+           origem="humano", validado=True,
+           criado="2026-07-28T09:00:00", validado_em="2026-07-28T18:00:00"),
         # O contágio: mesma frase, terminaram no rótulo corrigido, sem humano.
-        ev("c1", FRASE, "posto_vazio"),
-        ev("c2", FRASE, "posto_vazio", validado=True, origem="vocabulario_canonico"),
+        ev("c1", FRASE, "posto_vazio", criado="2026-07-29T10:00:00"),
+        ev("c2", FRASE, "posto_vazio", validado=True,
+           origem="vocabulario_canonico", criado="2026-07-30T10:00:00"),
         # Mesma frase, MAS outro rótulo → não é contágio.
         ev("n1", FRASE, "operar_torno"),
         # Outra frase → intocado.
@@ -248,5 +252,69 @@ check("escopo multi-tenant respeitado",
       sb.dados["eventos"][1])
 check("nenhuma escrita fora da empresa", not sb.escritas, sb.escritas)
 
-print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
+
+# ════════════════════════════════════════════════════════════════════════
+# Fase 70 — MAPEAMENTO NATURAL não é contágio.
+#
+# Medido em produção: `monitorar_maquina ← "monitorando o ciclo da máquina"`
+# casa a assinatura com 361 eventos, mas a descrição levaria a esse rótulo sem
+# mapa nenhum. Contá-lo como estrago esconderia a contaminação real (~91
+# eventos) dentro de um número dez vezes maior.
+#
+# O corte é temporal: o par já existia ANTES da primeira correção humana?
+# ════════════════════════════════════════════════════════════════════════
+print("\n[5] Mapeamento natural × contágio — o corte temporal")
+
+NAT = "monitorando o ciclo da máquina"
+sb = FakeSB({"eventos": [
+    # O par (NAT → monitorar_maquina) existe desde o DIA 1, muito antes de
+    # qualquer correção. É o cluster fazendo o trabalho dele.
+    ev("nat1", NAT, "monitorar_maquina", criado="2026-07-21T08:00:00"),
+    ev("nat2", NAT, "monitorar_maquina", criado="2026-07-22T08:00:00"),
+    ev("nat3", NAT, "monitorar_maquina", criado="2026-07-30T08:00:00"),
+    # Em 28/07 alguém corrigiu um evento dessa mesma frase para posto_vazio.
+    ev("hum", NAT, "monitorar_maquina", corrigido="posto_vazio",
+       origem="humano", validado=True,
+       criado="2026-07-28T09:00:00", validado_em="2026-07-28T18:00:00"),
+    # ...e daí em diante a frase passou a virar posto_vazio sozinha. ISTO é
+    # contágio: o par não existia antes de 28/07.
+    ev("ctg1", NAT, "posto_vazio", criado="2026-07-29T08:00:00",
+       validado=True, origem="vocabulario_canonico"),
+    ev("ctg2", NAT, "posto_vazio", criado="2026-07-30T08:00:00",
+       validado=True, origem="vocabulario_canonico"),
+    # E o humano também corrigiu a mesma frase para monitorar_maquina uma vez
+    # — não pode fazer o par natural virar suspeito.
+]})
+rel = pl.diagnosticar_contagio_por_descricao(sb, "U", "T", dry_run=True)
+nat = {(n["rotulo"]) for n in rel["naturais"]}
+check("o par natural é reconhecido como natural",
+      "monitorar_maquina" in nat or not rel["naturais"], rel["naturais"])
+check("só o contágio real entra na conta", rel["contaminados"] == 2, rel)
+check("e ambos passavam por verdade", rel["passando_por_verdade"] == 2, rel)
+check("o relatório nomeia o rótulo contaminado",
+      rel["por_descricao"][0]["rotulo"] == "posto_vazio", rel["por_descricao"])
+
+sb2 = FakeSB(sb.dados)
+rel2 = pl.diagnosticar_contagio_por_descricao(sb2, "U", "T", dry_run=False)
+por_id = {e["id"]: e for e in sb2.dados["eventos"]}
+check("os naturais NÃO são revertidos",
+      all(por_id[i].get("validado_humano") is False for i in ("nat1", "nat2", "nat3"))
+      and por_id["nat3"]["comportamento_label"] == "monitorar_maquina",
+      [por_id["nat1"], por_id["nat3"]])
+check("os contaminados são revertidos", rel2["revertidos"] == 2, rel2)
+check("a correção humana segue intocada",
+      por_id["hum"]["validado_humano"] is True
+      and por_id["hum"]["label_corrigido"] == "posto_vazio", por_id["hum"])
+
+# Sem data em nada (base legada): o corte não pode inventar naturalidade.
+sb3 = FakeSB({"eventos": [
+    {**ev("h", "f", "a", corrigido="b", origem="humano", validado=True), "criado_em": None,
+     "validado_em": None},
+    {**ev("c", "f", "b"), "criado_em": None},
+]})
+rel3 = pl.diagnosticar_contagio_por_descricao(sb3, "U", "T", dry_run=True)
+check("sem data, o evento continua sendo tratado como suspeito",
+      rel3["contaminados"] == 1, rel3)
+
+print(f"\n{'='*56}\n  TOTAL {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

@@ -159,7 +159,7 @@ class ProcessoUpdateArea(BaseModel):
 
 
 class ValidacaoBody(BaseModel):
-    acao: str  # "confirmar" | "corrigir" | "descartar" | "reabrir"
+    acao: str  # confirmar | corrigir | descartar | descricao_invalida | reabrir
     label_corrigido: str | None = None
 
 
@@ -2739,6 +2739,10 @@ def _status_efetivo(ev: dict) -> str:
     """Regra única de status derivado (front não reimplementa)."""
     if not ev.get("validado_humano"):
         return "pendente"
+    # Fase 70: vem ANTES de "descartado" — os dois têm validacao_correto=False,
+    # mas dizem coisas diferentes e só um deles mede alucinação do VLM.
+    if ev.get("descricao_invalida"):
+        return "descricao_invalida"
     if ev.get("validacao_correto") is False:
         return "descartado"
     origem = ev.get("origem_validacao")
@@ -2778,6 +2782,7 @@ def listar_eventos_tabela(
         "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
         "descricao_bruta, tempo_inicio_s, tempo_fim_s, duracao_s, confianca, "
         "validado_humano, validacao_correto, origem_validacao, criado_em, validado_em, "
+        "descricao_invalida, "
         "categoria_lean, categoria_lean_origem, papel_pessoa"
     )
     q = (
@@ -2791,7 +2796,11 @@ def listar_eventos_tabela(
     if status_filter == "pendente":
         q = q.or_("validado_humano.eq.false,validado_humano.is.null")
     elif status_filter == "descartado":
-        q = q.eq("validacao_correto", False)
+        # Fase 70: `descricao_invalida` também tem validacao_correto=false —
+        # excluí-lo aqui é o que mantém os dois estados distinguíveis na tela.
+        q = q.eq("validacao_correto", False).eq("descricao_invalida", False)
+    elif status_filter == "descricao_invalida":
+        q = q.eq("descricao_invalida", True)
     elif status_filter == "auto":
         q = q.eq("validado_humano", True).in_(
             "origem_validacao", ["correcao_aprendida", "vocabulario_canonico"]
@@ -3182,7 +3191,23 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
       confirmar  → VH=true,  VC=true,  LC=null,         OV=humano, VE=now
       corrigir   → VH=true,  VC=true,  LC=X (ou null),  OV=humano, VE=now
       descartar  → VH=true,  VC=false, LC=inalterado,   OV=humano, VE=now
-      reabrir    → VH=false, VC=null,  LC=null,         OV=null,   VE=null
+      descricao_invalida
+                 → VH=true,  VC=false, LC=null,         OV=humano, VE=now,
+                   descricao_invalida=true
+      reabrir    → VH=false, VC=null,  LC=null,         OV=null,   VE=null,
+                   descricao_invalida=false
+
+    Fase 70 — POR QUE `descricao_invalida` NÃO É `descartar`.
+    Descartar significa "não havia ação aqui" (falso positivo da detecção).
+    `descricao_invalida` significa outra coisa: HAVIA uma cena, e o modelo de
+    visão MENTIU sobre ela — descreveu alguém operando com o posto vazio.
+    Sai das métricas como o descarte, mas o registro é diferente porque as
+    consequências são diferentes:
+      • a frase entra na lista de QUEIMADAS e nunca mais funda aprendizado
+        nenhum (nem hoje, nem quando o mecanismo declarativo existir);
+      • a contagem vira a taxa de alucinação do VLM, que é um número que o
+        dono do processo precisa acompanhar durante a campanha.
+    Misturar os dois perderia exatamente o sinal que revelou o contágio.
     """
     from datetime import datetime
 
@@ -3217,12 +3242,27 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
             "origem_validacao": "humano",
             "validado_em": now,
         }
+    if acao == "descricao_invalida":
+        # A DESCRIÇÃO está errada — o VLM alucinou a cena. Corrigir o RÓTULO
+        # aqui seria criar um mapeamento falso a partir de uma frase que nunca
+        # descreveu nada; foi assim que 91 eventos foram contaminados.
+        # `label_corrigido` é limpo de propósito: não existe rótulo certo para
+        # uma descrição que não aconteceu.
+        return {
+            "validado_humano": True,
+            "validacao_correto": False,
+            "label_corrigido": None,
+            "descricao_invalida": True,
+            "origem_validacao": "humano",
+            "validado_em": now,
+        }
     if acao == "reabrir":
         # Devolve à fila como pendente, limpando toda marca de validação.
         return {
             "validado_humano": False,
             "validacao_correto": None,
             "label_corrigido": None,
+            "descricao_invalida": False,
             "origem_validacao": None,
             "validado_em": None,
         }
@@ -3263,7 +3303,8 @@ def reabrir_evento(evento_id: str, user: CurrentUser = Depends(get_current_user)
 
 @app.post("/eventos/lote")
 def validar_lote(body: LoteBody, user: CurrentUser = Depends(get_current_user)):
-    if body.acao not in ("confirmar", "corrigir", "descartar", "reabrir"):
+    if body.acao not in ("confirmar", "corrigir", "descartar",
+                         "descricao_invalida", "reabrir"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "ação inválida")
     sb = make_supabase_client()
     # Carrega todos os eventos do lote e valida que pertencem à empresa do usuário.

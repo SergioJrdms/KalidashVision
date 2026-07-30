@@ -383,7 +383,14 @@ export interface EventosTabelaParams {
   order?: "asc" | "desc";
 }
 
-export type AcaoEvento = "confirmar" | "corrigir" | "descartar" | "reabrir";
+// Fase 70: `descricao_invalida` é estado PRÓPRIO, não um descarte.
+//   descartar          → não havia ação aqui (falso positivo da detecção);
+//   descricao_invalida → HAVIA uma cena e o modelo mentiu sobre ela.
+// Os dois saem das métricas; só o segundo queima a frase e mede alucinação.
+export type AcaoEvento =
+  | "confirmar" | "corrigir" | "descartar" | "descricao_invalida" | "reabrir";
+/** As ações que a tela de validação oferece (sem 'reabrir'). */
+export type AcaoValidacao = Exclude<AcaoEvento, "reabrir">;
 
 export interface PrismConversa {
   id: string;

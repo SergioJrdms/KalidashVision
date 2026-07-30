@@ -12,12 +12,16 @@ import type { AcaoEvento } from "../lib/types";
 
 const AVISO_VOCAB_KEY = "spectra_corrigir_vocab_aviso";
 
-const STATUS_LIST = ["pendente", "confirmado", "corrigido", "descartado", "auto"];
+const STATUS_LIST = ["pendente", "confirmado", "corrigido", "descartado",
+                     "descricao_invalida", "auto"];
 const STATUS_META: Record<string, { tone: string; label: string }> = {
   pendente: { tone: "neutral", label: "Pendente" },
   confirmado: { tone: "ok", label: "Confirmado" },
   corrigido: { tone: "info", label: "Corrigido" },
   descartado: { tone: "high", label: "Descartado" },
+  // Fase 70: separado de "descartado" — aqui a cena existia e o modelo
+  // mentiu sobre ela. É o que mede alucinação do VLM.
+  descricao_invalida: { tone: "high", label: "Descrição inválida" },
   auto: { tone: "warn", label: "Auto-validado" },
 };
 
@@ -394,7 +398,8 @@ function ExplicaStatus() {
               ["pendente", "A IA detectou mas não tem certeza. Aguarda sua revisão."],
               ["confirmado", "Você disse que a IA acertou. Reforça o aprendizado."],
               ["corrigido", "Você ajustou para o nome certo da sua operação."],
-              ["descartado", "Falso alarme — a IA para de marcar coisas parecidas."],
+              ["descartado", "Falso alarme — não havia ação nenhuma ali."],
+              ["descricao_invalida", "A cena existia, mas o Prism descreveu outra coisa. A frase para de ensinar o sistema."],
               ["auto", "A IA aprovou sozinha (você já confirmou 2× antes)."],
             ].map(([s, d]) => (
               <div key={s} className="row gap2" style={{ flex: "1 1 300px", alignItems: "flex-start" }}>

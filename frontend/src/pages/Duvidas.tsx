@@ -33,7 +33,7 @@ import { FrameStripReal, FrameStripSegmento } from "../lib/frames";
 import { leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { Go } from "../design/Shell";
-import type { ItemDuvida } from "../lib/types";
+import type { AcaoValidacao, ItemDuvida } from "../lib/types";
 
 const TIPO_ROTULO: Record<string, {
   nome: string; cor: string; dica: string; comoResolver: string;
@@ -89,7 +89,7 @@ export default function Duvidas({ proc }: { proc: ProcHeaderMock; go: Go }) {
   }
 
   const validar = useMutation({
-    mutationFn: ({ id, acao }: { id: string; acao: "confirmar" | "descartar" }) =>
+    mutationFn: ({ id, acao }: { id: string; acao: AcaoValidacao }) =>
       api.eventos.validar(id, acao),
     onSuccess: () => {
       invalidar();
@@ -239,7 +239,7 @@ export default function Duvidas({ proc }: { proc: ProcHeaderMock; go: Go }) {
 function ItemDaFila({ it, ocupado, onValidar, onClassificar }: {
   it: ItemDuvida;
   ocupado: boolean;
-  onValidar: (a: "confirmar" | "descartar") => void;
+  onValidar: (a: AcaoValidacao) => void;
   onClassificar: (c: LeanShort) => void;
 }) {
   const tom = TIPO_ROTULO[it.tipo] || TIPO_ROTULO.discordancia;
@@ -327,13 +327,33 @@ function ItemDaFila({ it, ocupado, onValidar, onClassificar }: {
             ))}
           </div>
         ) : (
-          <div className="row gap2 wrap">
-            <Btn size="sm" icon="check" disabled={ocupado} onClick={() => onValidar("confirmar")}>
-              O rótulo está certo
-            </Btn>
-            <Btn size="sm" variant="ghost" icon="x" disabled={ocupado} onClick={() => onValidar("descartar")}>
-              Está errado
-            </Btn>
+          // Fase 70 — a MESMA ordem da tela de validação: a descrição primeiro.
+          // Esta fila recebe as contradições lógicas (rótulo × presença), que
+          // são exatamente onde o VLM costuma ter alucinado a cena. Oferecer só
+          // "certo/errado" aqui empurraria de volta para o erro que criou o
+          // contágio: corrigir o rótulo de uma frase que nunca descreveu nada.
+          <div className="col" style={{ gap: 8 }}>
+            {it.descricao && (
+              <p style={{ fontSize: 12.5, color: "var(--text)", margin: 0, lineHeight: 1.5 }}>
+                <b>O Prism disse que viu:</b> “{it.descricao}”
+              </p>
+            )}
+            <div className="row gap2 wrap">
+              <Btn size="sm" icon="check" disabled={ocupado} onClick={() => onValidar("confirmar")}>
+                Bate, e o rótulo está certo
+              </Btn>
+              <Btn size="sm" variant="ghost" icon="x" disabled={ocupado} onClick={() => onValidar("descartar")}>
+                Bate, mas o rótulo está errado
+              </Btn>
+              <Btn size="sm" variant="ghost" icon="eye-off" disabled={ocupado}
+                   onClick={() => onValidar("descricao_invalida")}>
+                Não é isso que se vê
+              </Btn>
+            </div>
+            <span style={{ fontSize: 11, color: "var(--faint)", lineHeight: 1.5 }}>
+              “Não é isso que se vê” = o Prism descreveu algo que não aconteceu.
+              O trecho sai das métricas e a frase deixa de ensinar o sistema.
+            </span>
           </div>
         )}
       </div>

@@ -519,7 +519,7 @@ def carregar_memoria_do_negocio(
         sb.table("eventos")
         .select(
             "comportamento_label, label_corrigido, descricao_bruta, validacao_correto, "
-            "principal, origem_validacao"
+            "principal, origem_validacao, descricao_invalida"
         )
         .eq("empresa", empresa)
         .eq("processo", processo)
@@ -552,12 +552,26 @@ def carregar_memoria_do_negocio(
     descartados: Counter = Counter()
     correcoes_brutas: dict[str, Counter] = {}
 
+    # Fase 70 — FRASES QUEIMADAS. Descrição que um humano declarou INVÁLIDA (o
+    # VLM alucinou a cena) nunca mais funda aprendizado nenhum. É o antídoto
+    # permanente: mesmo quando o mecanismo declarativo existir, uma regra
+    # fundamentada numa frase que nunca descreveu nada seria falsa.
+    queimadas = {
+        (ev.get("descricao_bruta") or "").strip().lower()
+        for ev in eventos if ev.get("descricao_invalida")
+    } - {""}
+
     for ev in eventos:
         correto = ev.get("validacao_correto")
         label_orig = ev.get("comportamento_label", "")
         label_corr = ev.get("label_corrigido")
         desc_bruta = (ev.get("descricao_bruta") or "").strip().lower()
 
+        # Nada que venha de uma frase queimada entra na memória — nem como
+        # correção, nem como confirmação, nem como descarte de rótulo. A frase
+        # não descreve a cena, então nada derivado dela é evidência.
+        if desc_bruta and desc_bruta in queimadas:
+            continue
         if correto is False:
             descartados[label_orig] += 1
         elif correto is True:
@@ -577,6 +591,10 @@ def carregar_memoria_do_negocio(
         desc: ctr.most_common(1)[0][1] for desc, ctr in correcoes_brutas.items()
     }
     memoria["descartados"] = dict(descartados.most_common(20))
+    memoria["descricoes_queimadas"] = sorted(queimadas)
+    if queimadas:
+        log.info("Memória: %d descrição(ões) QUEIMADAS (VLM alucinou) — fora do "
+                 "aprendizado.", len(queimadas))
 
     r2 = (
         sb.table("comportamentos")
@@ -1439,10 +1457,15 @@ DESCRIÇÕES OBSERVADAS:
 def construir_bloco_vocabulario(memoria: dict, max_itens: int = 20) -> str:
     if not memoria.get("vocabulario"):
         return ""
+    # Fase 70: frase queimada não volta como "vocabulário conhecido" — seria
+    # ensinar ao VLM a mesma alucinação que o humano acabou de rejeitar.
+    _queimadas = set(memoria.get("descricoes_queimadas") or [])
     linhas = [
         "VOCABULÁRIO OPERACIONAL CONHECIDO deste cliente (use estes termos quando a ação corresponder, mantendo consistência com observações anteriores):"
     ]
     for v in memoria["vocabulario"][:max_itens]:
+        if (v.get("descricao") or "").strip().lower() in _queimadas:
+            continue
         linhas.append(f'- {v["descricao"]}')
     linhas.append("")
     linhas.append(
@@ -4169,7 +4192,19 @@ def diagnosticar_contagio_por_descricao(
       • têm a MESMA `descricao_bruta`,
       • terminaram com AQUELE rótulo,
       • e NÃO foram tocados por humano (origem != 'humano').
-    Esses só podem ter chegado ao rótulo pelo mapa — é a assinatura exata.
+
+    ⚠️ Isso sozinho gera FALSO POSITIVO GRANDE, e foi medido: o par
+    `monitorar_maquina ← "monitorando o ciclo da máquina"` casa a assinatura
+    com 361 eventos, mas é o mapeamento NATURAL — a descrição levaria a esse
+    rótulo sem mapa nenhum. Contá-lo como estrago esconderia a contaminação
+    real (~91 eventos) dentro de um número dez vezes maior.
+
+    O CORTE que separa um do outro é temporal e determinístico: o par
+    (descrição, rótulo) já existia ANTES da primeira correção humana daquela
+    descrição? Se sim, o cluster chegava lá sozinho — é natural. Se o par só
+    aparece DEPOIS, ele nasceu do mapa. Bate com o que os dados mostraram: a
+    contaminação de `posto_vazio` e `conversando_colega` começa em 29/07,
+    enquanto `monitorar_maquina` está lá desde o primeiro dia.
 
     O QUE A REVERSÃO FAZ E O QUE NÃO FAZ: devolve o evento à fila
     (`validado_humano=false`, `validacao_correto=null`, `validado_em=null`) e
@@ -4186,7 +4221,10 @@ def diagnosticar_contagio_por_descricao(
             sb.table("eventos")
             .select("id, comportamento_label, label_corrigido, descricao_bruta, "
                     "tempo_inicio_s, tempo_fim_s, origem_validacao, "
-                    "validado_humano, validacao_correto, principal")
+                    "validado_humano, validacao_correto, principal, "
+                    # `criado_em` e `validado_em` são o que permite o corte
+                    # temporal entre mapeamento natural e contágio.
+                    "criado_em, validado_em")
             .eq("empresa", empresa).eq("processo", processo)
             .order("id")
         )
@@ -4196,7 +4234,10 @@ def diagnosticar_contagio_por_descricao(
         return {"erro": f"leitura de eventos falhou: {e}"}
 
     # 1) O mapa que o humano criou sem querer: descrição → rótulo corrigido.
+    #    Guarda também QUANDO a primeira correção daquele par aconteceu — é o
+    #    marco que separa mapeamento natural de contágio.
     mapa_humano: dict[str, Counter] = {}
+    desde: dict[tuple, str] = {}
     for e in eventos:
         if (e.get("origem_validacao") or "") != "humano":
             continue
@@ -4204,6 +4245,31 @@ def diagnosticar_contagio_por_descricao(
         desc = (e.get("descricao_bruta") or "").strip().lower()
         if corr and desc and corr != e.get("comportamento_label"):
             mapa_humano.setdefault(desc, Counter())[corr] += 1
+            quando = e.get("validado_em") or e.get("criado_em")
+            if quando:
+                atual = desde.get((desc, corr))
+                if atual is None or str(quando) < str(atual):
+                    desde[(desc, corr)] = str(quando)
+
+    # 1b) O par já existia ANTES da correção? Então o cluster chegava lá
+    #     sozinho e nada disso é contágio. Um único evento anterior basta:
+    #     mapeamento natural não precisa de maioria para ser natural.
+    natural: set = set()
+    for e in eventos:
+        # A PRÓPRIA correção não serve de prova. Ela nasce com
+        # `label_corrigido = Y` e `criado_em` anterior ao `validado_em`, então
+        # sem este corte ela se auto-atestava como "o par já existia" e o
+        # contágio inteiro virava mapeamento natural.
+        if (e.get("origem_validacao") or "") == "humano":
+            continue
+        desc = (e.get("descricao_bruta") or "").strip().lower()
+        label_ef = e.get("label_corrigido") or e.get("comportamento_label")
+        marco = desde.get((desc, label_ef))
+        if not marco:
+            continue
+        criado = e.get("criado_em")
+        if criado and str(criado) < marco:
+            natural.add((desc, label_ef))
 
     if not mapa_humano:
         return {"dry_run": dry_run, "correcoes_humanas": 0, "contaminados": 0,
@@ -4212,6 +4278,7 @@ def diagnosticar_contagio_por_descricao(
 
     # 2) Quem herdou esse mapa sem ninguém ter pedido.
     contagio: dict[str, dict] = {}
+    naturais: dict[tuple, int] = {}
     alvos: list[dict] = []
     for e in eventos:
         if (e.get("origem_validacao") or "") == "humano":
@@ -4225,6 +4292,9 @@ def diagnosticar_contagio_por_descricao(
         label_ef = e.get("label_corrigido") or e.get("comportamento_label")
         if label_ef not in ctr:
             continue                       # ficou com outro rótulo: não é contágio
+        if (desc, label_ef) in natural:
+            naturais[(desc, label_ef)] = naturais.get((desc, label_ef), 0) + 1
+            continue                       # o cluster chegava lá sem o mapa
         dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
         d = contagio.setdefault(desc, {
             "descricao": e.get("descricao_bruta"), "rotulo": label_ef,
@@ -4268,6 +4338,12 @@ def diagnosticar_contagio_por_descricao(
         "passando_por_verdade": len(alvos),
         "revertidos": revertidos,
         "minutos": round(sum(d["segundos"] for d in contagio.values()) / 60, 1),
+        # Pares que casam a assinatura mas são MAPEAMENTO NATURAL: o cluster
+        # chegava neles antes de existir qualquer correção. Ficam à vista para
+        # o número poder ser conferido, e NUNCA são escritos.
+        "naturais": sorted(
+            ({"descricao": d, "rotulo": r, "eventos": n}
+             for (d, r), n in naturais.items()), key=lambda x: -x["eventos"]),
         "por_descricao": sorted(
             ({"descricao": d["descricao"], "rotulo": d["rotulo"],
               "eventos": d["eventos"], "minutos": round(d["segundos"] / 60, 1),

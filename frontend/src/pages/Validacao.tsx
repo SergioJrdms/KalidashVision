@@ -15,6 +15,7 @@ import { Btn, Card, Icon, Prism, Ring, toast } from "../design/ui";
 import { FrameStripReal, FrameStripSegmento, FrameReal } from "../lib/frames";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
+import type { AcaoValidacao } from "../lib/types";
 
 const TAMANHO_LOTE = 10;
 
@@ -68,23 +69,29 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
   const validar = useMutation({
     // Resolve o grupo inteiro num lote atômico: o primário + todos os irmãos
     // (câmeras diferentes da mesma ação). Com 1 id só, o lote age como validar.
-    mutationFn: ({ ids, acao, label }: { ids: string[]; acao: "confirmar" | "corrigir" | "descartar"; label?: string }) =>
+    mutationFn: ({ ids, acao, label }: { ids: string[]; acao: AcaoValidacao; label?: string }) =>
       api.eventos.lote(ids, acao, label),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["dashboard", proc.id] }); qc.invalidateQueries({ queryKey: ["processos"] }); },
   });
   const respMut = useMutation({ mutationFn: ({ id, resposta }: { id: string; resposta: string }) => api.perguntas.responder(id, resposta) });
   const dispMut = useMutation({ mutationFn: (id: string) => api.perguntas.dispensar(id) });
 
-  function resolver(ev: PendMock, acao: "confirmar" | "corrigir" | "descartar", novoLabel?: string) {
+  function resolver(ev: PendMock, acao: AcaoValidacao, novoLabel?: string) {
     const ids = [ev.id, ...(ev.irmaos?.map((s) => s.id) ?? [])];
     validar.mutate({ ids, acao, label: novoLabel });
     setQueue((q) => q.filter((x) => x.id !== ev.id));
     setBlocoIds((ids) => ids.filter((id) => id !== ev.id));
     setDone((d) => d + 1);
-    if (acao !== "descartar") setLearned((l) => l + 1);
-    setStreak((s) => (acao === "descartar" ? 0 : s + 1));
-    const msg = acao === "confirmar" ? "Confirmado · o Prism aprendeu com você" : acao === "corrigir" ? `Corrigido para “${novoLabel}”` : "Descartado · falso alarme registrado";
-    toast(msg, { icon: acao === "descartar" ? "x" : "check", color: acao === "descartar" ? "#F8B4B6" : "#3EE6AE" });
+    const negativa = acao === "descartar" || acao === "descricao_invalida";
+    if (!negativa) setLearned((l) => l + 1);
+    setStreak((s) => (negativa ? 0 : s + 1));
+    const msg =
+      acao === "confirmar" ? "Confirmado · o Prism aprendeu com você"
+      : acao === "corrigir" ? `Corrigido para “${novoLabel}”`
+      : acao === "descricao_invalida"
+        ? "Registrado · esta frase não ensina mais o sistema"
+        : "Descartado · falso alarme registrado";
+    toast(msg, { icon: negativa ? "x" : "check", color: negativa ? "#F8B4B6" : "#3EE6AE" });
   }
 
   function pular() {
@@ -337,12 +344,20 @@ function FilaFoco({
   loteIdx: number;
   totalLotes: number;
   naFilaAposBloco: number;
-  onResolver: (ev: PendMock, k: "confirmar" | "corrigir" | "descartar", l?: string) => void;
+  onResolver: (ev: PendMock, k: AcaoValidacao, l?: string) => void;
   onPular: () => void;
   labels: string[];
 }) {
   const [phase, setPhase] = useState<"idle" | "confirm" | "leaving">("idle");
   const [corrigir, setCorrigir] = useState(false);
+  // Fase 70 — DUAS PERGUNTAS, NESTA ORDEM.
+  //   "descricao" → a descrição bate com a imagem?
+  //   "rotulo"    → (só se bateu) o rótulo está certo?
+  // A ordem é o ponto. Perguntar do rótulo primeiro foi o que levou o gestor a
+  // CORRIGIR quando devia DESCARTAR: o VLM tinha alucinado um operador no posto
+  // vazio, e a correção do rótulo virou o mapa que contaminou 91 eventos.
+  // Invertendo, o erro fica difícil de cometer.
+  const [passo, setPasso] = useState<"descricao" | "rotulo">("descricao");
   const [label, setLabel] = useState(evento.label);
   const [conf, setConf] = useState(Math.round(evento.conf * 100));
   const [resolvedKind, setResolvedKind] = useState<string | null>(null);
@@ -352,11 +367,15 @@ function FilaFoco({
   useEffect(() => {
     setPhase("idle"); setCorrigir(false); setLabel(evento.label);
     setConf(Math.round(evento.conf * 100)); setResolvedKind(null); setDrag(null);
+    // Cada card recomeça pela DESCRIÇÃO. Sem isto o segundo card já abriria no
+    // passo do rótulo e a ordem — que é o ponto da mudança — se perderia.
+    setPasso("descricao");
   }, [evento.id]);
 
-  function act(kind: "confirmar" | "corrigir" | "descartar", lbl?: string) {
+  function act(kind: AcaoValidacao | "pular", lbl?: string) {
+    if (kind === "pular") { onPular?.(); return; }
     setResolvedKind(kind);
-    if (kind !== "descartar") setConf(Math.min(98, Math.round(evento.conf * 100) + 23));
+    if (kind !== "descartar" && kind !== "descricao_invalida") setConf(Math.min(98, Math.round(evento.conf * 100) + 23));
     setPhase("confirm");
     setTimeout(() => setPhase("leaving"), 620);
     setTimeout(() => onResolver(evento, kind, lbl), 980);
@@ -447,11 +466,44 @@ function FilaFoco({
           )}
 
           <div style={{ padding: "16px 20px 20px" }}>
+            {/* PERGUNTA 1 — a descrição. Vem antes do rótulo de propósito:
+                sem saber se a frase descreve a cena, julgar o rótulo é
+                adivinhar. */}
             <div className="row gap2" style={{ marginBottom: 4 }}>
               <Prism size={24} ring />
-              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>O Prism interpretou como</span>
+              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                {passo === "descricao" ? "O Prism disse que viu" : "O Prism interpretou como"}
+              </span>
             </div>
-            <div className="row gap2 wrap" style={{ alignItems: "center", marginBottom: 10 }}>
+            {passo === "descricao" && phase === "idle" && (
+              <div className="col" style={{ gap: 12, marginBottom: 6 }}>
+                <p className="pretty font-display" style={{ fontSize: 18, fontWeight: 600, color: "var(--ink)", lineHeight: 1.4, margin: 0, maxWidth: 620 }}>
+                  “{evento.descricao}”
+                </p>
+                <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
+                  É isso que está acontecendo nas imagens?
+                </p>
+                <div className="row gap2 wrap">
+                  <button onClick={() => setPasso("rotulo")} className="btn btn-ok btn-lg" style={{ flex: "1 1 200px" }}>
+                    <Icon name="check" size={19} strokeWidth={2.6} /> Sim, é isso
+                  </button>
+                  <button onClick={() => act("descricao_invalida")} className="btn btn-danger btn-lg" style={{ flex: "1 1 240px" }}>
+                    <Icon name="eye-off" size={18} strokeWidth={2.4} /> Não é isso que se vê
+                  </button>
+                  <button onClick={() => act("pular")} className="btn btn-ghost btn-lg">
+                    <Icon name="rotate-cw" size={17} /> Pular
+                  </button>
+                </div>
+                <p style={{ fontSize: 11.5, color: "var(--faint)", margin: 0, lineHeight: 1.5 }}>
+                  “Não é isso” = o Prism descreveu algo que não aconteceu. O trecho
+                  sai das métricas <b>e</b> a frase deixa de ensinar o sistema para
+                  sempre. Não corrija o rótulo neste caso — corrigir criaria um
+                  mapeamento a partir de uma frase que nunca descreveu nada.
+                </p>
+              </div>
+            )}
+            <div className="row gap2 wrap" style={{ alignItems: "center", marginBottom: 10,
+                                                    display: passo === "rotulo" || phase !== "idle" ? undefined : "none" }}>
               {!corrigir ? (
                 <span className="font-display" style={{ fontSize: 22, fontWeight: 700, color: "var(--ink)" }}>“{label}”</span>
               ) : (
@@ -464,9 +516,15 @@ function FilaFoco({
                 <span className="badge badge-purple"><i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(evento.sugestao) }} /> {leanLabel(evento.sugestao)}</span>
               )}
             </div>
-            <p className="pretty" style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.5, marginBottom: 14, maxWidth: 620 }}>{evento.descricao}</p>
+            {(passo === "rotulo" || phase !== "idle") && (
+              // A descrição continua visível no passo 2 — é a única forma de
+              // notar, no meio da validação, que ela e o rótulo divergem. Foi
+              // assim que o contágio foi descoberto.
+              <p className="pretty" style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.5, marginBottom: 14, maxWidth: 620 }}>{evento.descricao}</p>
+            )}
 
-            <div className="row gap2" style={{ marginBottom: 18, maxWidth: 420 }}>
+            <div className="row gap2" style={{ marginBottom: 18, maxWidth: 420,
+                                              display: passo === "rotulo" || phase !== "idle" ? undefined : "none" }}>
               <span style={{ fontSize: 11.5, color: "var(--muted)", width: 84 }}>confiança</span>
               <div className="grow track" style={{ height: 8 }}>
                 <i style={{ width: `${conf}%`, background: resolvedKind && resolvedKind !== "descartar" && resolvedKind !== "pular" ? "linear-gradient(90deg,#34D399,#10B981)" : "var(--grad-cta)", transition: "width .6s cubic-bezier(.2,.8,.2,1)" }} />
@@ -474,11 +532,24 @@ function FilaFoco({
               <span className="tnum font-mono" style={{ fontSize: 12, color: resolvedKind && resolvedKind !== "descartar" && resolvedKind !== "pular" ? "var(--va)" : "var(--accent)", width: 38, textAlign: "right" }}>{conf}%</span>
             </div>
 
-            {phase === "idle" && !corrigir && (
-              <div className="row gap2 wrap">
-                <button onClick={() => act("confirmar")} className="btn btn-ok btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={19} strokeWidth={2.6} /> Confirmar</button>
-                <button onClick={() => setCorrigir(true)} className="btn btn-secondary btn-lg" style={{ flex: "1 1 140px" }}><Icon name="pencil" size={17} /> Corrigir</button>
-                <button onClick={() => act("descartar")} className="btn btn-danger btn-lg" style={{ flex: "1 1 140px" }}><Icon name="x" size={18} strokeWidth={2.4} /> Descartar</button>
+            {/* PERGUNTA 2 — só chega aqui quem confirmou a descrição. Agora
+                corrigir o rótulo é seguro: a frase descreve a cena. */}
+            {phase === "idle" && passo === "rotulo" && !corrigir && (
+              <div className="col" style={{ gap: 8 }}>
+                <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                  A descrição bate. E o rótulo — está certo?
+                </span>
+                <div className="row gap2 wrap">
+                  <button onClick={() => act("confirmar")} className="btn btn-ok btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={19} strokeWidth={2.6} /> Rótulo certo</button>
+                  <button onClick={() => setCorrigir(true)} className="btn btn-secondary btn-lg" style={{ flex: "1 1 140px" }}><Icon name="pencil" size={17} /> Corrigir rótulo</button>
+                  <button onClick={() => act("descartar")} className="btn btn-danger btn-lg" style={{ flex: "1 1 160px" }} title="A cena existe e a descrição bate, mas isto não é um evento a contar">
+                    <Icon name="x" size={18} strokeWidth={2.4} /> Não é um evento
+                  </button>
+                </div>
+                <button onClick={() => setPasso("descricao")} className="row gap1"
+                        style={{ alignSelf: "flex-start", border: "none", background: "none", color: "var(--muted)", fontSize: 12, cursor: "pointer" }}>
+                  <Icon name="arrow-left" size={13} /> voltar para a descrição
+                </button>
               </div>
             )}
             {phase === "idle" && corrigir && (
@@ -560,18 +631,18 @@ function LoteConcluido({ loteIdx, totalLotes, restantesFila, tamanhoLote, onProx
   );
 }
 
-function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolver: (ev: PendMock, k: "confirmar" | "corrigir" | "descartar", l?: string) => void; labels: string[] }) {
+function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolver: (ev: PendMock, k: AcaoValidacao, l?: string) => void; labels: string[] }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(min(100%, 320px),1fr))", gap: 14 }}>
       {queue.map((ev) => <CardEvento key={ev.id} ev={ev} onResolver={onResolver} labels={labels} />)}
     </div>
   );
 }
-function CardEvento({ ev, onResolver, labels }: { ev: PendMock; onResolver: (ev: PendMock, k: "confirmar" | "corrigir" | "descartar", l?: string) => void; labels: string[] }) {
+function CardEvento({ ev, onResolver, labels }: { ev: PendMock; onResolver: (ev: PendMock, k: AcaoValidacao, l?: string) => void; labels: string[] }) {
   const [leaving, setLeaving] = useState<string | null>(null);
   const [corrigir, setCorrigir] = useState(false);
   const [label, setLabel] = useState(ev.label);
-  function act(kind: "confirmar" | "corrigir" | "descartar", lbl?: string) { setLeaving(kind); setTimeout(() => onResolver(ev, kind, lbl), 360); }
+  function act(kind: AcaoValidacao, lbl?: string) { setLeaving(kind); setTimeout(() => onResolver(ev, kind, lbl), 360); }
   return (
     <div className={`card ${leaving ? (leaving === "descartar" ? "leave-r" : "leave-l") : "anim-fadeup"}`} style={{ padding: 0, overflow: "hidden" }}>
       <FrameReal id={ev.id} pessoa={ev.pessoa} height={130} />
