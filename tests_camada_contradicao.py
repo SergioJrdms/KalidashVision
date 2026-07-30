@@ -145,5 +145,102 @@ dv, disp = pl.avaliar_camadas(fato, "posto_vazio", [sombra])
 check("em sombra NÃO marca dúvida", dv is False, dv)
 check("mas conta no placar", len(disp) == 1 and disp[0]["modo"] == "sombra", disp)
 
-print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
+
+# ════════════════════════════════════════════════════════════════════════
+# Fase 69 — C1, C2 e a sombra. A linha entre ATIVA e SOMBRA é uma só:
+# ativa quando os dois sinais NÃO PODEM estar certos ao mesmo tempo.
+# ════════════════════════════════════════════════════════════════════════
+ROTULOS_DO_OPERADOR = ["operar_torno", "monitorar_maquina", "ajustar_maquina",
+                       "preparar_maquina", "medir_peca", "limpando_cavaco",
+                       "lendo_desenho_tecnico"]
+C1 = {"nome": "contradicao_ato_do_operador_sem_operador",
+      "quando_rotulo": ROTULOS_DO_OPERADOR,
+      "se": {"operador_presente": False}, "entao": "duvida",
+      "modo": "ativa", "ordem": 11, "motivo": "ato do titular sem o titular"}
+C2 = {"nome": "contradicao_posto_vazio_com_maos_na_maquina",
+      "quando_rotulo": ["posto_vazio"], "se": {"maos_na_maquina": True},
+      "entao": "duvida", "modo": "ativa", "ordem": 12, "motivo": "mão na máquina"}
+S1 = {"nome": "suspeita_conversa_sem_operador",
+      "quando_rotulo": ["conversando_colega", "interagir_com_colega_ou_lider"],
+      "se": {"operador_presente": False}, "entao": "duvida",
+      "modo": "sombra", "ordem": 20, "motivo": "conversa sem operador"}
+TODAS = [CAMADA, C1, C2, S1]
+
+print("\n[6] C1 — ato do titular sem o titular presente")
+for rot in ROTULOS_DO_OPERADOR:
+    dv, _ = pl.avaliar_camadas(fato_vazio, rot, [C1])
+    check(f"C1 dispara em '{rot}' sem operador", dv is True)
+    dv, _ = pl.avaliar_camadas(fato, rot, [C1])
+    check(f"C1 NÃO dispara em '{rot}' com operador", dv is False)
+
+dv, _ = pl.avaliar_camadas(fato_vazio, "deslocar_buscar_material_ferramenta", [C1])
+check("buscar material sem operador é LEGÍTIMO — não dispara", dv is False)
+dv, _ = pl.avaliar_camadas(fato_vazio, "posto_vazio", [C1])
+check("posto_vazio sem operador não dispara C1 (é o esperado)", dv is False)
+
+print("\n[7] C2 — mão na máquina com posto vazio (independe do corpo)")
+fato_maos = pl.montar_fato_evento(
+    REP, [({**amostra("visitante"), "maos_maquina": True}, 1.0)],
+    share=1.0, n_rotulos=1)
+check("o sinal da mão existe quando há zona de máquina",
+      fato_maos.get("maos_na_maquina") is True, fato_maos)
+dv, disp = pl.avaliar_camadas(fato_maos, "posto_vazio", [C2])
+check("C2 dispara: mão na máquina com posto vazio", dv is True, disp)
+
+fato_sem_maos = pl.montar_fato_evento(
+    REP, [({**amostra("visitante"), "maos_maquina": False}, 1.0)],
+    share=1.0, n_rotulos=1)
+dv, _ = pl.avaliar_camadas(fato_sem_maos, "posto_vazio", [C2])
+check("sem mão na máquina, C2 fica quieta", dv is False)
+dv, _ = pl.avaliar_camadas(fato_vazio, "posto_vazio", [C2])
+check("sem zona de máquina (sinal ausente), C2 fica quieta", dv is False)
+
+print("\n[8] S1 — conversa sem operador MEDE, não alarma")
+dv, disp = pl.avaliar_camadas(fato_vazio, "conversando_colega", TODAS)
+check("S1 não marca dúvida (é sombra)", dv is False, dv)
+check("mas conta no placar",
+      any(d["nome"] == S1["nome"] for d in disp), disp)
+check("C1 não pega conversa (rótulo fora da lista)",
+      not any(d["nome"] == C1["nome"] for d in disp), disp)
+
+print("\n[9] A ARMADILHA: processo SEM zona de posto não pode alarmar")
+# `operador_presente=false` é a condição de C1 e S1. Se o sinal fosse emitido
+# como False em processo sem zona, C1 dispararia em TODO evento de operação —
+# uma tempestade de alarme falso vinda de ausência de informação.
+fato_sem_zona = pl.montar_fato_evento(
+    REP, [({"pessoa_track_id": 1, "tempo_inicio_s": 0, "tempo_fim_s": 5,
+            "bbox_inicio": [10, 10, 40, 90]}, 1.0)],
+    share=1.0, n_rotulos=1, rastreia_papel=False)
+check("sem rastreio de papel, a chave é OMITIDA (não vira False)",
+      "operador_presente" not in fato_sem_zona, fato_sem_zona)
+for c in (C1, S1):
+    dv, disp = pl.avaliar_camadas(fato_sem_zona, "operar_torno", [c])
+    check(f"{c['nome'][:28]}… fica quieta sem a zona", dv is False and not disp)
+
+# E o inverso: com rastreio, o sinal existe e as regras voltam a valer.
+fato_com_zona = pl.montar_fato_evento(
+    REP, [(amostra("visitante"), 1.0)], share=1.0, n_rotulos=1,
+    rastreia_papel=True)
+check("com rastreio, a chave existe e é False",
+      fato_com_zona.get("operador_presente") is False)
+dv, _ = pl.avaliar_camadas(fato_com_zona, "operar_torno", [C1])
+check("e aí C1 volta a disparar", dv is True)
+
+print("\n[10] O SQL semeia as quatro (duas ativas, uma sombra, S2 recusada)")
+sql = Path("sql/schema.sql").read_text()
+bloco = sql[sql.index("Fase 69"):]
+check("C1 está no SQL", "contradicao_ato_do_operador_sem_operador" in bloco)
+check("C1 tem os 7 rótulos", all(r in bloco for r in ROTULOS_DO_OPERADOR))
+check("C1 é ativa", "'ativa', 11" in bloco)
+check("C2 está no SQL e é ativa",
+      "contradicao_posto_vazio_com_maos_na_maquina" in bloco and "'ativa', 12" in bloco)
+check("S1 é sombra", "suspeita_conversa_sem_operador" in bloco and "'sombra', 20" in bloco)
+check("deslocar_buscar_material NÃO virou regra",
+      "deslocar_buscar_material" not in bloco, "escreveram regra para um caso legítimo")
+check("S2 foi recusada com o motivo escrito",
+      "NÃO FOI ESCRITA" in bloco and "insert into camadas_duvida" not in
+      bloco[bloco.index("S2 (rótulo × zona)"):])
+check("todas idempotentes", bloco.count("on conflict (empresa, processo, nome)") == 3)
+
+print(f"\n{'='*56}\n  TOTAL {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

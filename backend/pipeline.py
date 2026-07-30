@@ -2470,6 +2470,12 @@ def etapa_consolidar_principais(
     dominancia = float(os.environ.get("KV_PRINCIPAL_DOMINANCIA", "0.5") or 0.5)
     n_buckets = max(1, int(math.ceil(duracao_s / bucket_s)))
 
+    # O processo rastreia PAPEL? Só se alguma zona de posto estiver desenhada —
+    # sem ela `papel_pessoa` nunca é preenchido. Decidido UMA vez, sobre o vídeo
+    # inteiro: um minuto sem ninguém não pode fazer o sinal desaparecer e mudar
+    # o comportamento das camadas no meio do vídeo.
+    _rastreia_papel = any(e.get("papel_pessoa") for e in eventos_crus)
+
     principais: list[dict] = []
     for b in range(n_buckets):
         ws, we = b * bucket_s, min((b + 1) * bucket_s, duracao_s)
@@ -2530,7 +2536,8 @@ def etapa_consolidar_principais(
         # Fase 57: CAMADAS DE DÚVIDA — determinísticas, em CPU, ZERO chamada
         # extra ao VLM. Camada nunca corrige o rótulo: só marca dúvida.
         if camadas:
-            fato = montar_fato_evento(principais[-1], no_bucket, share, len(dur_por_label))
+            fato = montar_fato_evento(principais[-1], no_bucket, share,
+                                      len(dur_por_label), rastreia_papel=_rastreia_papel)
             em_duvida, disparos = avaliar_camadas(fato, escolhido, camadas)
             if disparos:
                 principais[-1]["camadas_disparadas"] = disparos
@@ -2647,7 +2654,8 @@ def avaliar_camadas(fato: dict, label: str, camadas: list) -> tuple:
 
 
 def montar_fato_evento(rep: dict, no_bucket: list, share: float,
-                       n_rotulos: int, mov_limiar: float = None) -> dict:
+                       n_rotulos: int, mov_limiar: float = None,
+                       rastreia_papel: bool = True) -> dict:
     '''Sinais da cena para UM evento principal, montados do que a detecção já
     produziu. Nada aqui custa inferência nova.'''
     limiar = MOV_LIMIAR_PADRAO if mov_limiar is None else mov_limiar
@@ -2680,20 +2688,27 @@ def montar_fato_evento(rep: dict, no_bucket: list, share: float,
     fato = {
         "pessoas_na_cena": len(pessoas),
         "pessoas_no_posto": len(no_posto),
-        # Fase 68: `papel_pessoa` explícito como sinal. Já existia embutido em
-        # `pessoas_no_posto`, mas escrever uma regra contando gente para dizer
-        # "o operador está lá" é indireto — e regra indireta é regra que
-        # ninguém revisa. `operador_presente` vem do RASTREAMENTO + ZONAS:
-        # determinístico, sem VLM. É o sinal mais forte que o sistema tem sobre
-        # presença, e é o que contradiz um rótulo `posto_vazio`.
-        "operador_presente": bool(no_posto),
-        "papeis_na_cena": sorted({p for p in (e.get("papel_pessoa") for e in eventos) if p}),
         "zonas_ocupadas": sorted(z for z in zonas),
         "concordancia": round(float(share), 2),
         "n_rotulos_no_minuto": int(n_rotulos),
         "duracao_s": round(float(rep.get("tempo_fim_s") or 0)
                            - float(rep.get("tempo_inicio_s") or 0), 1),
     }
+    # Fase 68: `papel_pessoa` como sinal de primeira classe. Já existia embutido
+    # em `pessoas_no_posto`, mas escrever uma regra contando gente para dizer "o
+    # operador está lá" é indireto — e regra indireta é regra que ninguém revisa.
+    # `operador_presente` vem do RASTREAMENTO + ZONAS: determinístico, sem VLM.
+    #
+    # ⚠️ SÓ EXISTE SE O PROCESSO RASTREIA PAPEL. Sem zona de posto desenhada,
+    # `papel_pessoa` é sempre nulo e `operador_presente` seria sempre False —
+    # uma regra do tipo {"operador_presente": false} dispararia em TODOS os
+    # eventos do processo. Ausência de zona não é ausência de operador; é
+    # ausência de informação, e o contrato das camadas é que falta de dado
+    # nunca vira suspeita. Por isso a chave é OMITIDA, não posta como False.
+    if rastreia_papel:
+        fato["operador_presente"] = bool(no_posto)
+        fato["papeis_na_cena"] = sorted(
+            {p for p in (e.get("papel_pessoa") for e in eventos) if p})
     if desloc_rel is not None:
         fato["deslocamento_rel"] = desloc_rel
         # Abstração de chão de fábrica: quem escreve a regra pensa em "parado"

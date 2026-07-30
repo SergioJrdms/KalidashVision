@@ -789,3 +789,94 @@ on conflict (empresa, processo, nome) do update
        modo  = excluded.modo,
        motivo = excluded.motivo,
        atualizado_em = now();
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 69 — MAIS CONTRADIÇÕES LÓGICAS (C1, C2) + duas em SOMBRA.
+--
+-- A linha que separa ATIVA de SOMBRA aqui é uma só: ATIVA quando os dois
+-- sinais NÃO PODEM estar certos ao mesmo tempo; SOMBRA quando é forte
+-- suspeita mas existe cenário legítimo. Regra que tem exceção legítima e
+-- nasce ativa enche a fila de alarme falso e mata o mecanismo por
+-- descrédito — foi o risco levantado quando o placar foi desenhado.
+--
+-- ⚠️ `operador_presente` só existe em processo que RASTREIA PAPEL (com zona
+-- `posto_operador` desenhada). Sem a zona, a chave é OMITIDA do fato e
+-- TODAS as regras abaixo ficam quietas — ausência de zona é ausência de
+-- informação, não afirmação de que o posto está vazio.
+-- ════════════════════════════════════════════════════════════════════════
+
+-- ── C1 · ATIVA — ato do titular sem o titular presente ─────────────────
+-- Estes sete rótulos só o operador do posto executa. Se o rastreamento diz
+-- que ele NÃO está lá e o rótulo afirma que ele está fazendo isso, é
+-- impossível. Confirmado nos dados: `operar_torno` tinha 5 eventos com
+-- papel_pessoa='posto_vazio' — a alucinação original, o dia em que o
+-- operador faltou e o VLM descreveu alguém operando.
+insert into camadas_duvida
+    (empresa, processo, nome, quando_rotulo, se, entao, motivo, modo, ordem)
+select c.empresa, c.processo,
+       'contradicao_ato_do_operador_sem_operador',
+       '["operar_torno","monitorar_maquina","ajustar_maquina","preparar_maquina",
+         "medir_peca","limpando_cavaco","lendo_desenho_tecnico"]'::jsonb,
+       '{"operador_presente": false}'::jsonb,
+       'duvida',
+       'Este rótulo descreve um ato que só o operador do posto executa, mas o '
+       || 'rastreamento não identificou o operador no posto neste minuto. Ou a '
+       || 'leitura da ação está errada, ou a presença não foi detectada — '
+       || 'confira nos dois ângulos.',
+       'ativa', 11
+  from contexto_processo c
+on conflict (empresa, processo, nome) do update
+   set quando_rotulo = excluded.quando_rotulo, se = excluded.se,
+       modo = excluded.modo, motivo = excluded.motivo, atualizado_em = now();
+
+-- ── C2 · ATIVA — posto vazio com mão na máquina ────────────────────────
+-- Sinal INDEPENDENTE do rastreamento de corpo: pega o caso em que o corpo
+-- do operador está ocluso (o ventilador do episódio da Fase 42) mas o punho
+-- aparece dentro da zona da máquina. Se há mão na máquina, o posto não está
+-- vazio. `maos_na_maquina` só existe onde há zona `maquina` desenhada.
+insert into camadas_duvida
+    (empresa, processo, nome, quando_rotulo, se, entao, motivo, modo, ordem)
+select c.empresa, c.processo,
+       'contradicao_posto_vazio_com_maos_na_maquina',
+       '["posto_vazio"]'::jsonb,
+       '{"maos_na_maquina": true}'::jsonb,
+       'duvida',
+       'Há mão dentro da zona da máquina neste minuto, mas o rótulo diz que o '
+       || 'posto estava vazio. O sinal da mão não depende do rastreamento do '
+       || 'corpo — ele enxerga o operador mesmo quando o corpo está ocluso.',
+       'ativa', 12
+  from contexto_processo c
+on conflict (empresa, processo, nome) do update
+   set quando_rotulo = excluded.quando_rotulo, se = excluded.se,
+       modo = excluded.modo, motivo = excluded.motivo, atualizado_em = now();
+
+-- ── S1 · SOMBRA — conversa sem o titular no posto ──────────────────────
+-- Parece exigir operador, mas NÃO exige: um visitante pode conversar na zona
+-- do posto com o titular ausente. Fica medindo; o placar decide.
+insert into camadas_duvida
+    (empresa, processo, nome, quando_rotulo, se, entao, motivo, modo, ordem)
+select c.empresa, c.processo,
+       'suspeita_conversa_sem_operador',
+       '["conversando_colega","interagir_com_colega_ou_lider"]'::jsonb,
+       '{"operador_presente": false}'::jsonb,
+       'duvida',
+       'Rótulo de conversa sem o operador identificado no posto. Pode ser '
+       || 'legítimo (dois visitantes conversando na zona) — por isso está em '
+       || 'sombra: mede antes de alarmar.',
+       'sombra', 20
+  from contexto_processo c
+on conflict (empresa, processo, nome) do update
+   set quando_rotulo = excluded.quando_rotulo, se = excluded.se,
+       modo = excluded.modo, motivo = excluded.motivo, atualizado_em = now();
+
+-- ── S2 (rótulo × zona) NÃO FOI ESCRITA, e é decisão, não esquecimento ──
+-- Ela precisaria de: (1) um operador novo no motor para "lista vazia"; e
+-- (2) saber QUAL zona cada rótulo exige — o nome da zona é do cliente, não
+-- do sistema, então "zonas_ocupadas vazia" seria um proxy fraco. Pior: em
+-- processo sem zona nenhuma desenhada ela dispararia em todo evento, e
+-- mesmo em sombra isso sujaria o placar com ruído que ninguém pediu.
+-- Fica para depois da campanha, com o nome das zonas em mãos.
+
+-- Conferência depois de rodar:
+--   select nome, modo, quando_rotulo, se from camadas_duvida order by ordem;

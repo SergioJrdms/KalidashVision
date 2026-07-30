@@ -17,7 +17,7 @@ deploy. Vale a partir do próximo processamento.
 |---|---|---|
 | `pessoas_na_cena` | número | pessoas distintas detectadas no minuto |
 | `pessoas_no_posto` | número | quantas estão na zona do posto do operador |
-| `operador_presente` | sim/não | o rastreamento identificou o OPERADOR no posto |
+| `operador_presente` | sim/não | o rastreamento identificou o OPERADOR no posto ⚠️ |
 | `papeis_na_cena` | lista | papéis vistos no minuto (`operador`, `visitante`, …) |
 | `zonas_ocupadas` | lista | nomes das zonas com alguém dentro |
 | `maos_na_maquina` | sim/não | punho dentro da zona da máquina |
@@ -193,3 +193,37 @@ contradiziam o terceiro. Não havia alarme para isso; agora há.
 **O que ela NÃO faz.** Não corrige o rótulo (`entao` só aceita `duvida`).
 Ela põe o trecho na fila com o motivo visível. Quem decide continua sendo
 gente.
+
+
+## As camadas que já vêm semeadas
+
+| Nome | Modo | Dispara quando |
+|---|---|---|
+| `contradicao_posto_vazio_com_operador` | **ativa** | rótulo `posto_vazio` + operador rastreado no posto |
+| `contradicao_ato_do_operador_sem_operador` | **ativa** | rótulo de ato do titular + operador ausente |
+| `contradicao_posto_vazio_com_maos_na_maquina` | **ativa** | rótulo `posto_vazio` + mão dentro da zona da máquina |
+| `suspeita_conversa_sem_operador` | sombra | rótulo de conversa + operador ausente |
+
+**A linha entre ativa e sombra é uma só:** ativa quando os dois sinais **não
+podem** estar certos ao mesmo tempo; sombra quando é suspeita forte mas existe
+cenário legítimo. Conversa sem o titular pode ser dois visitantes conversando
+na zona — por isso mede antes de alarmar.
+
+**Casos que NÃO viraram regra, de propósito:**
+
+- `deslocar_buscar_material_ferramenta` com operador ausente é **legítimo**: o
+  operador sai do posto justamente para buscar material.
+- rótulo × `zona_contexto` é heurística, não contradição — depende de como as
+  zonas foram desenhadas, e o nome da zona é do cliente. Fica para depois da
+  campanha.
+
+## ⚠️ `operador_presente` e a armadilha do processo sem zona
+
+O sinal **só existe** em processo que rastreia papel — ou seja, com zona
+`posto_operador` desenhada. Sem ela, `papel_pessoa` é sempre nulo, e emitir
+`operador_presente: false` faria toda regra do tipo
+`{"operador_presente": false}` disparar em **todos** os eventos do processo.
+
+Ausência de zona não é afirmação de que o posto está vazio: é ausência de
+informação. Por isso a chave é **omitida** do fato, nunca posta como `false` —
+e o contrato "sinal ausente nunca vira dúvida" cuida do resto.
