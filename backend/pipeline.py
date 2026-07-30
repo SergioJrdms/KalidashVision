@@ -3157,6 +3157,47 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
     }
 
 
+class VideoJaProcessado(RuntimeError):
+    """Fase 72 — este arquivo já virou eventos. Processar de novo DUPLICA."""
+
+
+def video_ja_processado(sb, empresa: str, processo: str, caminho: str | None) -> dict | None:
+    """Linha de `videos` com este mesmo `caminho`, se existir. None = livre.
+
+    Falha de leitura devolve None de propósito: a guarda não pode ser o motivo
+    de um vídeo legítimo não ser processado. Ela evita o acidente comum, não
+    substitui a substituição idempotente que ainda não existe.
+    """
+    if not caminho:
+        return None
+    try:
+        r = (
+            sb.table("videos").select("id, nome, processado_em")
+            .eq("empresa", empresa).eq("processo", processo)
+            .eq("caminho", caminho).limit(1).execute().data
+        ) or []
+        return r[0] if r else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("[guarda] checagem de duplicata falhou (%s) — seguindo.", e)
+        return None
+
+
+def _barrar_duplicata(sb, empresa: str, processo: str, caminho: str | None) -> None:
+    """Recusa processar um caminho que já tem vídeo. Ver `VideoJaProcessado`."""
+    ja = video_ja_processado(sb, empresa, processo, caminho)
+    if not ja:
+        return
+    raise VideoJaProcessado(
+        f"Este arquivo já foi processado em {ja.get('processado_em')} "
+        f"(video_id={ja.get('id')}). Processar de novo criaria uma SEGUNDA "
+        f"linha em `videos` e um SEGUNDO conjunto de eventos — tudo passaria a "
+        f"contar em dobro. Reprocessamento ainda não é suportado; ver "
+        f"docs/problemas_conhecidos.md. Se este segmento está em ERRO mas o "
+        f"vídeo existe, o processamento chegou ao fim: marque o segmento como "
+        f"concluído em vez de reenfileirá-lo."
+    )
+
+
 def etapa_persistir(
     sb: Client,
     empresa: str,
@@ -3210,6 +3251,10 @@ def etapa_persistir(
             linha_video["gravado_em"] = gravado_em
         except Exception as e:
             log.warning(f"gravado_em ignorado (não é ISO 8601: {gravado_em!r}, {e})")
+    # Fase 72: última checagem antes do INSERT. `insert` sem upsert é o que
+    # torna o reprocessamento destrutivo; enquanto não houver substituição
+    # idempotente, a duplicata é barrada aqui, no ponto exato da escrita.
+    _barrar_duplicata(sb, empresa, processo, caminho_storage)
     video_row = (
         sb.table("videos")
         .insert(linha_video)
@@ -8554,6 +8599,11 @@ def processar_video(
     else:
         from ultralytics import YOLO  # import lazy: só carrega torch quando há upload
         yolo = YOLO(YOLO_MODEL)
+
+    # Fase 72: barra a duplicata ANTES de qualquer inferência. A guarda do
+    # `etapa_persistir` é a garantia; esta é a que evita pagar VLM e YOLO por
+    # um vídeo que seria recusado no fim.
+    _barrar_duplicata(sb, empresa, processo, caminho_storage)
 
     progress_cb("setup", 0, f"Iniciando · {empresa}/{processo}")
     memoria = carregar_memoria_do_negocio(sb, empresa, processo)
