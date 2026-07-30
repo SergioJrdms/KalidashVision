@@ -316,5 +316,84 @@ rel3 = pl.diagnosticar_contagio_por_descricao(sb3, "U", "T", dry_run=True)
 check("sem data, o evento continua sendo tratado como suspeito",
       rel3["contaminados"] == 1, rel3)
 
+
+# ════════════════════════════════════════════════════════════════════════
+# Fase 71 — relatório de reprocesso. SÓ LEITURA, ranqueado por MINUTOS.
+# ════════════════════════════════════════════════════════════════════════
+print("\n[6] Relatório de reprocesso — o minuto manda, não a contagem")
+
+F = "operando o torno, manipulando a máquina"
+
+
+def evv(id_, vid, desc, label, *, seg=60, origem=None, criado="2026-07-29T10:00:00"):
+    return {**ev(id_, desc, label, criado=criado), "video_id": vid,
+            "tempo_fim_s": seg, "origem_validacao": origem,
+            "validado_humano": origem == "humano"}
+
+
+dados = {"eventos": [
+    # A correção humana que criou o mapa (em 28/07).
+    {**ev("h", F, "operar_torno", corrigido="posto_vazio", origem="humano",
+          validado=True, criado="2026-07-28T09:00:00",
+          validado_em="2026-07-28T18:00:00"), "video_id": "vA"},
+    # vB: POUCOS eventos, MUITOS minutos. Tem de vir na frente.
+    evv("b1", "vB", F, "posto_vazio", seg=300),
+    evv("b2", "vB", F, "posto_vazio", seg=300),
+    # vC: MUITOS eventos, POUCOS minutos.
+    *[evv(f"c{i}", "vC", F, "posto_vazio", seg=10) for i in range(8)],
+    # vD: contaminado E com correção humana — não pode ser reprocessado sem perda.
+    evv("d1", "vD", F, "posto_vazio", seg=60),
+    {**ev("d2", "outra frase", "operar_torno", corrigido="medir_peca",
+          origem="humano", validado=True), "video_id": "vD"},
+], "videos": [
+    {"id": "vA", "nome": "a.mp4", "duracao_s": 600, "video_removido_em": None},
+    {"id": "vB", "nome": "b.mp4", "duracao_s": 600, "video_removido_em": None},
+    {"id": "vC", "nome": "c.mp4", "duracao_s": 600, "video_removido_em": None},
+    {"id": "vD", "nome": "d.mp4", "duracao_s": 600, "video_removido_em": None},
+    {"id": "vE", "nome": "e.mp4", "duracao_s": 600, "video_removido_em": "2026-07-29"},
+]}
+sb = FakeSB(dados)
+rel = pl.relatorio_reprocesso_por_video(sb, "U", "T", custo_por_min=0.02)
+
+check("não escreve nada (relatório é só leitura)", not sb.escritas, sb.escritas)
+top = rel["por_video"][0]
+check("o vídeo com MAIS MINUTOS vem primeiro, não o com mais eventos",
+      top["video_id"] == "vB", [(l["video_id"], l["minutos_contaminados"],
+                                 l["eventos_contaminados"]) for l in rel["por_video"]])
+check("vB tem menos eventos que vC", top["eventos_contaminados"] == 2)
+segundo = rel["por_video"][1]
+check("vC vem depois mesmo com 8 eventos",
+      segundo["video_id"] == "vC" and segundo["eventos_contaminados"] == 8, segundo)
+
+check("acumulado é monotônico e fecha em 100%",
+      rel["por_video"][-1]["acumulado_pct"] == 100.0,
+      [l["acumulado_pct"] for l in rel["por_video"]])
+check("informa quantos vídeos cobrem 80% do estrago",
+      rel["videos_para_80pct"] == 1, rel["videos_para_80pct"])
+check("e o custo desses", rel["custo_80pct"] == 0.2, rel["custo_80pct"])
+check("custo total usa a DURAÇÃO do vídeo, não os minutos contaminados",
+      rel["custo_reprocessar_tudo"] == round(30 * 0.02, 2),
+      (rel["custo_reprocessar_tudo"], rel["minutos_de_video"]))
+
+check("separa os vídeos SEM correção humana",
+      rel["sem_correcao_humana"]["videos"] == 2,
+      rel["sem_correcao_humana"])
+check("e nomeia os que TÊM correção (decisão caso a caso)",
+      [v["video_id"] for v in rel["com_correcao_humana"]] == ["vD"],
+      rel["com_correcao_humana"])
+check("vD conta a correção humana dele",
+      rel["com_correcao_humana"][0]["correcoes_humanas"] == 1,
+      rel["com_correcao_humana"])
+check("o vídeo sem contaminação não aparece",
+      all(l["video_id"] != "vA" for l in rel["por_video"]),
+      [l["video_id"] for l in rel["por_video"]])
+check("avisa que reprocessar HOJE duplica",
+      "DUPLICA" in rel["aviso"] and "sem dedup" in rel["aviso"], rel["aviso"])
+
+sb2 = FakeSB({"eventos": [], "videos": []})
+rel2 = pl.relatorio_reprocesso_por_video(sb2, "U", "T")
+check("sem contaminação, o relatório não quebra",
+      rel2["videos_afetados"] == 0 and rel2["minutos_contaminados"] == 0.0, rel2)
+
 print(f"\n{'='*56}\n  TOTAL {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

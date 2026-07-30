@@ -4176,6 +4176,138 @@ def propagar_categoria_para_eventos(
     return n
 
 
+def relatorio_reprocesso_por_video(
+    sb, empresa: str, processo: str, custo_por_min: float = 0.02,
+) -> dict:
+    """Fase 71 — SÓ LEITURA. Ranqueia os vídeos por MINUTOS CONTAMINADOS.
+
+    A pergunta que responde: quantos vídeos concentram 80% do estrago, e quanto
+    custaria reprocessar só eles? Ranquear por CONTAGEM de eventos daria a
+    resposta errada — um vídeo com 20 eventos de 5s pesa menos que um com 3
+    eventos de 1 min, e é o minuto que move o placar.
+
+    Também separa, por vídeo, o que decide se ele PODE ser reprocessado sem
+    perda:
+      • `correcoes_humanas` — reprocessar cria eventos NOVOS; as decisões
+        tomadas nos eventos antigos não sobrevivem;
+      • `binario_disponivel` — sem o arquivo no Storage não há reprocesso.
+
+    NÃO ESCREVE NADA. É o insumo da decisão entre reprocessar e limpar.
+    """
+    diag = diagnosticar_contagio_por_descricao(sb, empresa, processo, dry_run=True)
+    if "erro" in diag:
+        return diag
+
+    # Reconstrói o conjunto contaminado com o video_id junto (o diagnóstico
+    # agrega por descrição; aqui a unidade é o vídeo).
+    def _fab():
+        return (
+            sb.table("eventos")
+            .select("id, video_id, comportamento_label, label_corrigido, "
+                    "descricao_bruta, tempo_inicio_s, tempo_fim_s, "
+                    "origem_validacao, validado_humano, principal, criado_em, "
+                    "validado_em")
+            .eq("empresa", empresa).eq("processo", processo).order("id")
+        )
+    try:
+        eventos = _scan_todos(_fab)
+    except Exception as e:  # noqa: BLE001
+        return {"erro": f"leitura de eventos falhou: {e}"}
+
+    # Mesma assinatura do diagnóstico, incluindo o corte do mapeamento natural.
+    alvo_desc_rot = {(d["descricao"] or "").strip().lower(): d["rotulo"]
+                     for d in diag.get("por_descricao", [])}
+
+    por_video: dict = {}
+    correcoes_por_video: dict = {}
+    for e in eventos:
+        vid = e.get("video_id")
+        if not vid:
+            continue
+        if (e.get("origem_validacao") or "") == "humano":
+            correcoes_por_video[vid] = correcoes_por_video.get(vid, 0) + 1
+            continue
+        if e.get("principal") is False:
+            continue
+        desc = (e.get("descricao_bruta") or "").strip().lower()
+        label_ef = e.get("label_corrigido") or e.get("comportamento_label")
+        if alvo_desc_rot.get(desc) != label_ef:
+            continue
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        d = por_video.setdefault(vid, {"eventos": 0, "segundos": 0.0})
+        d["eventos"] += 1
+        d["segundos"] += dur
+
+    metas: dict = {}
+    try:
+        vids = sorted(por_video)
+        for i in range(0, len(vids), 100):
+            for v in (sb.table("videos")
+                      .select("id, nome, duracao_s, processado_em, video_removido_em")
+                      .in_("id", vids[i : i + 100]).execute().data or []):
+                metas[v["id"]] = v
+    except Exception as e:  # noqa: BLE001
+        log.warning("[reprocesso] metadados de vídeo não lidos (%s).", e)
+
+    linhas = []
+    for vid, d in por_video.items():
+        m = metas.get(vid, {})
+        linhas.append({
+            "video_id": vid,
+            "nome": m.get("nome"),
+            "processado_em": m.get("processado_em"),
+            "duracao_min": round(float(m.get("duracao_s") or 0) / 60, 1),
+            "eventos_contaminados": d["eventos"],
+            "minutos_contaminados": round(d["segundos"] / 60, 1),
+            # Reprocessar cria eventos NOVOS: estas decisões não sobrevivem.
+            "correcoes_humanas": correcoes_por_video.get(vid, 0),
+            "binario_disponivel": m.get("video_removido_em") is None,
+        })
+    linhas.sort(key=lambda x: -x["minutos_contaminados"])
+
+    total_min = sum(l["minutos_contaminados"] for l in linhas) or 0.0
+    acc = 0.0
+    n_80 = None
+    custo_80 = 0.0
+    for i, l in enumerate(linhas, 1):
+        acc += l["minutos_contaminados"]
+        l["pct_do_estrago"] = round(l["minutos_contaminados"] / total_min * 100, 1) if total_min else 0.0
+        l["acumulado_pct"] = round(acc / total_min * 100, 1) if total_min else 0.0
+        l["custo_reprocesso"] = round(l["duracao_min"] * custo_por_min, 2)
+        if n_80 is None and l["acumulado_pct"] >= 80:
+            n_80 = i
+            custo_80 = round(sum(x["duracao_min"] for x in linhas[:i]) * custo_por_min, 2)
+
+    limpos = [l for l in linhas if l["correcoes_humanas"] == 0 and l["binario_disponivel"]]
+    return {
+        "custo_por_min": custo_por_min,
+        "videos_afetados": len(linhas),
+        "minutos_contaminados": round(total_min, 1),
+        "minutos_de_video": round(sum(l["duracao_min"] for l in linhas), 1),
+        "custo_reprocessar_tudo": round(sum(l["duracao_min"] for l in linhas) * custo_por_min, 2),
+        # Pareto: quantos vídeos concentram 80% do estrago, e o que custam.
+        "videos_para_80pct": n_80,
+        "custo_80pct": custo_80,
+        # Os que dá para reprocessar sem perder decisão humana nenhuma.
+        "sem_correcao_humana": {
+            "videos": len(limpos),
+            "minutos_contaminados": round(sum(l["minutos_contaminados"] for l in limpos), 1),
+            "minutos_de_video": round(sum(l["duracao_min"] for l in limpos), 1),
+            "custo": round(sum(l["duracao_min"] for l in limpos) * custo_por_min, 2),
+        },
+        "com_correcao_humana": [
+            {k: l[k] for k in ("video_id", "nome", "minutos_contaminados", "correcoes_humanas")}
+            for l in linhas if l["correcoes_humanas"] > 0
+        ],
+        "sem_binario": [l["nome"] for l in linhas if not l["binario_disponivel"]],
+        "por_video": linhas,
+        "aviso": ("⚠️ REPROCESSAR HOJE DUPLICA: `etapa_persistir` faz INSERT em "
+                  "`videos` sem dedup por caminho, então o mesmo arquivo vira uma "
+                  "SEGUNDA linha de vídeo e um SEGUNDO conjunto de eventos. Tudo "
+                  "conta em dobro. Não reprocesse nada antes de isso ser resolvido."),
+    }
+
+
 def diagnosticar_contagio_por_descricao(
     sb, empresa: str, processo: str, dry_run: bool = True,
 ) -> dict:

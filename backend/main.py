@@ -61,6 +61,7 @@ from .pipeline import (
     relatorio_propagacao_lean,
     reverter_auto_validacao_maquina,
     diagnosticar_contagio_por_descricao,
+    relatorio_reprocesso_por_video,
     aprendizado_automatico,
     APRENDIZADO_AUTO_PADRAO,
     categoria_efetiva,
@@ -1018,6 +1019,27 @@ def setar_aprendizado(
         "configurado": body.ativo,
         "efetivo": aprendizado_automatico(sb, user.empresa, nome),
     }
+
+
+@app.get("/processos/{processo_id}/manutencao/reprocesso/relatorio")
+def relatorio_reprocesso(
+    processo_id: str,
+    custo_por_min: float = Query(0.02, description="US$ por minuto de vídeo reprocessado"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 71 — SÓ LEITURA (GET, de propósito). Ranqueia os vídeos por MINUTOS
+    contaminados, não por contagem de eventos: um vídeo com 20 eventos de 5s
+    pesa menos que um com 3 de 1 min, e é o minuto que move o placar.
+
+    Responde: quantos vídeos concentram 80% do estrago, quanto custa
+    reprocessar só eles, quais NÃO têm correção humana (e portanto podem ser
+    reprocessados sem perda) e quais já perderam o binário."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    rel = relatorio_reprocesso_por_video(sb, user.empresa, nome, custo_por_min=custo_por_min)
+    if "erro" in rel:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
+    return {"ok": True, **rel}
 
 
 @app.post("/processos/{processo_id}/manutencao/validacao/contagio-descricao")
