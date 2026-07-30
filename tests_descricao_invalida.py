@@ -32,6 +32,21 @@ from pathlib import Path  # noqa: E402
 from backend import main as mn  # noqa: E402
 from backend import pipeline as pl  # noqa: E402
 
+import re as _re
+
+
+def _visivel(txt: str) -> str:
+    """Texto que o usuário vê: sem comentários e com espaços normalizados.
+    O JSX quebra frases em várias linhas, então comparar substring crua daria
+    falso negativo; e um comentário citando o texto ANTIGO não pode fazer o
+    teste achar que ele ainda está na tela."""
+    txt = _re.sub(r"\{/\*.*?\*/\}", " ", txt, flags=_re.S)   # comentário JSX
+    txt = _re.sub(r"/\*.*?\*/", " ", txt, flags=_re.S)         # bloco /* */
+    txt = _re.sub(r"^\s*//.*$", " ", txt, flags=_re.M)          # linha //
+    return _re.sub(r"\s+", " ", txt)
+
+
+
 ok = fail = 0
 
 
@@ -156,7 +171,8 @@ check("dá para voltar para a descrição", "voltar para a descrição" in val)
 check("a descrição continua visível no passo 2 (divergência é o sinal)",
       'passo === "rotulo" || phase !== "idle"' in val)
 check("o texto avisa para NÃO corrigir o rótulo no caso (b)",
-      "Não corrija o rótulo neste caso" in val)
+      "Não corrija o rótulo neste caso" in _visivel(
+          Path("frontend/src/pages/Validacao.tsx").read_text()))
 
 duv = Path("frontend/src/pages/Duvidas.tsx").read_text()
 check("a fila de dúvidas oferece a mesma saída",
@@ -173,5 +189,80 @@ check("e diz que não reclassifica o passado",
 check("nenhum UPDATE em massa por descrição no bloco",
       "update eventos" not in bloco70.lower(), "há update em massa")
 
-print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
+
+# ════════════════════════════════════════════════════════════════════════
+# Fase 77 — o TERCEIRO caso, e o custo de queimar uma frase.
+#
+# Testando a tela, o dono do processo achou um caso que ela não distinguia:
+# descrição IMPRECISA de uma cena que EXISTIU. "operando o torno, manipulando e
+# ajustando a máquina" quando o operador estava, de fato, monitorando parado.
+# Não é alucinação (ele está lá, na máquina) — o Prism errou o verbo.
+#
+# O texto de ajuda dizia "descreveu algo que não aconteceu" e empurrava para o
+# botão errado: ali "Não é isso" apagaria um minuto de trabalho REAL das
+# métricas e queimaria uma frase que está correta na maioria das vezes.
+#
+# O critério que separa os três casos numa pergunta só é o do APAGAMENTO.
+# ════════════════════════════════════════════════════════════════════════
+print("\n[7] O teste do apagamento substitui 'não aconteceu'")
+val = _visivel(Path("frontend/src/pages/Validacao.tsx").read_text())
+duv = _visivel(Path("frontend/src/pages/Duvidas.tsx").read_text())
+
+check("o critério do apagamento está na tela de validação",
+      "teste do apagamento" in val.lower(), )
+check("e formulado como PERGUNTA sobre perder tempo real",
+      "perdendo tempo real de trabalho" in val, )
+check("cobre a descrição IMPRECISA (o caso que faltava)",
+      "imprecisa" in val and "errou o verbo" in val, )
+check("diz explicitamente para usar 'Sim, é isso' nesse caso",
+      "Use <b>“Sim, é isso”</b>" in val or "“Sim, é isso”" in val, )
+check("o texto antigo ('descreveu algo que não aconteceu') saiu da validação",
+      "descreveu algo que não aconteceu" not in val, )
+check("a fila de dúvidas usa o mesmo critério",
+      "Teste do apagamento" in duv and "tempo REAL" in duv, )
+check("e também não usa mais o texto antigo",
+      "descreveu algo que não aconteceu" not in duv, )
+
+print("\n[8] Queimar uma frase mostra o custo ANTES")
+check("existe uma confirmação dedicada", "function ConfirmaQueima" in duv)
+check("ela consulta o uso da descrição", "api.descricoes.uso" in duv)
+check("mostra em quantos trechos a frase aparece",
+      "trecho(s)" in duv and "u?.eventos" in duv)
+check("mostra os minutos em jogo", "u.minutos" in duv)
+# A nota sobre polissemia é COMENTÁRIO (explica o porquê a quem lê o código);
+# o que o usuário vê é a lista de rótulos. Cada um é checado na sua fonte.
+_duv_raw = Path("frontend/src/pages/Duvidas.tsx").read_text()
+check("mostra os rótulos que a frase já produziu",
+      "u.rotulos" in _duv_raw and "Ela já virou" in duv)
+check("e o código explica por que isso importa (frase polissêmica)",
+      "polissêmica" in _duv_raw.lower())
+check("esclarece que os OUTROS trechos seguem nas métricas",
+      "continuam contando nas métricas" in duv)
+check("e que dá para desfazer (não é irreversível)",
+      "reabra o evento" in duv)
+check("o botão da validação passa pela confirmação, não age direto",
+      'onClick={() => setConfirmandoQueima(true)}' in val)
+check("a confirmação reseta a cada card",
+      'setConfirmandoQueima(false);' in val)
+check("a fila também confirma antes",
+      'onClick={() => setConfirmando(true)}' in duv)
+
+print("\n[9] O endpoint do custo é só leitura e mede o que importa")
+mn_src = Path("backend/main.py").read_text()
+i = mn_src.index("def uso_da_descricao(")
+bloco = mn_src[i:i + 3000]
+check("é GET (não muda nada)", '@app.get("/processos/{processo_id}/descricoes/uso")' in mn_src)
+check("filtra por empresa E processo",
+      '.eq("empresa", user.empresa).eq("processo", nome)' in bloco)
+check("conta só os PRINCIPAIS (auditoria não é trecho de trabalho)",
+      'l.get("principal") is not False' in bloco)
+check("devolve os rótulos que a frase produziu", '"rotulos"' in bloco)
+check("marca se já está queimada", '"ja_queimada"' in bloco)
+check("declara que é reversível", '"reversivel": True' in bloco)
+check("o docstring corrige a suposição de irreversibilidade",
+      "NÃO é irreversível" in bloco)
+check("e explica que a queima não tira os outros das métricas",
+      "NÃO remove os outros eventos das métricas" in bloco)
+
+print(f"\n{'='*56}\n  TOTAL {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

@@ -226,6 +226,7 @@ export default function Duvidas({ proc }: { proc: ProcHeaderMock; go: Go }) {
           <ItemDaFila
             key={it.id}
             it={it}
+            procId={proc.id}
             ocupado={validar.isPending || classificar.isPending}
             onValidar={(acao) => validar.mutate({ id: it.id, acao })}
             onClassificar={(cat) => classificar.mutate({ label: it.rotulo, cat })}
@@ -236,12 +237,14 @@ export default function Duvidas({ proc }: { proc: ProcHeaderMock; go: Go }) {
   );
 }
 
-function ItemDaFila({ it, ocupado, onValidar, onClassificar }: {
+function ItemDaFila({ it, procId, ocupado, onValidar, onClassificar }: {
   it: ItemDuvida;
+  procId: string;
   ocupado: boolean;
   onValidar: (a: AcaoValidacao) => void;
   onClassificar: (c: LeanShort) => void;
 }) {
+  const [confirmando, setConfirmando] = useState(false);
   const tom = TIPO_ROTULO[it.tipo] || TIPO_ROTULO.discordancia;
   const sa = it.segundo_angulo;
   return (
@@ -346,17 +349,105 @@ function ItemDaFila({ it, ocupado, onValidar, onClassificar }: {
                 Bate, mas o rótulo está errado
               </Btn>
               <Btn size="sm" variant="ghost" icon="eye-off" disabled={ocupado}
-                   onClick={() => onValidar("descricao_invalida")}>
+                   onClick={() => setConfirmando(true)}>
                 Não é isso que se vê
               </Btn>
             </div>
+            {confirmando && it.descricao && (
+              <ConfirmaQueima
+                processoId={procId}
+                descricao={it.descricao}
+                onCancelar={() => setConfirmando(false)}
+                onConfirmar={() => { setConfirmando(false); onValidar("descricao_invalida"); }}
+              />
+            )}
             <span style={{ fontSize: 11, color: "var(--faint)", lineHeight: 1.5 }}>
-              “Não é isso que se vê” = o Prism descreveu algo que não aconteceu.
-              O trecho sai das métricas e a frase deixa de ensinar o sistema.
+              <b>Teste do apagamento:</b> se apagar este trecho das métricas
+              custa tempo REAL de trabalho, a cena existiu — use “Bate” e
+              corrija o rótulo, mesmo que a frase esteja imprecisa. “Não é isso
+              que se vê” é só para cena que não aconteceu.
             </span>
           </div>
         )}
       </div>
     </Card>
+  );
+}
+
+// ── Fase 77 · Confirmação antes de QUEIMAR uma frase ───────────────
+// Marcar uma descrição como inválida tira do APRENDIZADO todos os eventos que
+// a usam — não só o card aberto. Se a frase for a mais comum do dataset, o
+// custo é grande, e a tela não o mostrava: o botão era apertado às cegas.
+//
+// Mostra o custo, não impede a ação. E diz que é reversível (as queimadas são
+// derivadas de `descricao_invalida`; reabrir o evento limpa a marca) — a
+// suposição de irreversibilidade estava fazendo o gestor hesitar à toa.
+export function ConfirmaQueima({
+  processoId, descricao, onConfirmar, onCancelar,
+}: {
+  processoId: string;
+  descricao: string;
+  onConfirmar: () => void;
+  onCancelar: () => void;
+}) {
+  const q = useQuery({
+    queryKey: ["uso-descricao", processoId, descricao],
+    queryFn: () => api.descricoes.uso(processoId, descricao),
+    staleTime: 60_000,
+  });
+  const u = q.data;
+  const outros = Math.max(0, (u?.eventos ?? 1) - 1);
+  const pesado = outros >= 10;
+  return (
+    <div className="col" style={{
+      gap: 9, background: "var(--desp-bg)", border: "1px solid var(--desp)",
+      borderRadius: 10, padding: "12px 14px",
+    }}>
+      <div className="row gap1" style={{ fontSize: 12.5, fontWeight: 700, color: "var(--desp)" }}>
+        <Icon name="alert-triangle" size={14} /> Confirmar: esta frase deixa de ensinar o sistema
+      </div>
+
+      {q.isLoading ? (
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>Medindo o alcance da frase…</span>
+      ) : (
+        <>
+          <p style={{ fontSize: 12.5, color: "var(--text)", margin: 0, lineHeight: 1.55 }}>
+            Esta descrição aparece em <b className="tnum">{u?.eventos ?? "?"}</b> trecho(s)
+            {u?.minutos ? <> · <b className="tnum">{u.minutos.toFixed(0)} min</b></> : null}
+            {outros > 0 && (
+              <> — <b>{outros}</b> além deste.</>
+            )}
+          </p>
+          {u?.rotulos && u.rotulos.length > 1 && (
+            // Frase que produz vários rótulos é POLISSÊMICA: o problema é ela,
+            // não o card. Ver isto aqui muda a decisão.
+            <p style={{ fontSize: 11.5, color: "var(--muted)", margin: 0 }}>
+              Ela já virou{" "}
+              {u.rotulos.map((r) => (
+                <code key={r.rotulo} className="font-mono" style={{
+                  fontSize: 11, background: "#fff", padding: "1px 6px",
+                  borderRadius: 4, marginRight: 4,
+                }}>{r.rotulo} ({r.eventos})</code>
+              ))}
+            </p>
+          )}
+          <p style={{ fontSize: 11.5, color: "var(--muted)", margin: 0, lineHeight: 1.55 }}>
+            Os outros trechos <b>continuam contando nas métricas</b> — o que muda
+            é que esta frase para de alimentar o vocabulário e as correções.
+            {pesado && (
+              <> Como ela é frequente, isso desliga uma parte grande do aprendizado.</>
+            )}{" "}
+            Dá para desfazer: reabra o evento e a marca some.
+          </p>
+        </>
+      )}
+
+      <div className="row gap2 wrap">
+        <Btn size="sm" variant="ghost" icon="x" onClick={onCancelar}>Cancelar</Btn>
+        <Btn size="sm" icon="eye-off" onClick={onConfirmar}>
+          Confirmar — a cena não aconteceu
+        </Btn>
+      </div>
+    </div>
   );
 }

@@ -653,3 +653,16 @@ export interface EstadoAprendizado {
   padrao_ambiente: boolean;
   mecanismos: MecanismoAprendizado[];
 }
+
+
+// Fase 77 — quanto custa QUEIMAR uma descrição (marcá-la como inválida).
+// A queima tira a frase do APRENDIZADO em todos os eventos que a usam, não só
+// no card aberto. Reversível: reabrir o evento limpa a marca.
+export interface UsoDescricao {
+  descricao: string;
+  eventos: number;
+  minutos: number;
+  rotulos: { rotulo: string; eventos: number }[];
+  ja_queimada: boolean;
+  reversivel: boolean;
+}

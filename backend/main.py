@@ -614,6 +614,65 @@ FUSOS_SUGERIDOS = [
 ]
 
 
+@app.get("/processos/{processo_id}/descricoes/uso")
+def uso_da_descricao(
+    processo_id: str,
+    descricao: str = Query(..., description="a descricao_bruta a consultar"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 77 — QUANTO CUSTA QUEIMAR ESTA FRASE.
+
+    Marcar uma descrição como inválida tira do APRENDIZADO todos os eventos que
+    a usam — não só o card na tela. Se a frase for a mais comum do dataset, o
+    custo é grande e a tela não o mostrava: o gestor apertava o botão sem saber
+    o tamanho do que estava desligando.
+
+    ⚠️ Isto NÃO é irreversível, e a tela precisa dizer isso: as queimadas são
+    DERIVADAS de `eventos.descricao_invalida`. Reabrir o evento (`reabrir`)
+    limpa a marca e a frase volta a ensinar.
+
+    O que a queima faz: tira a frase do aprendizado (memória de vocabulário,
+    correções e descartes). NÃO remove os outros eventos das métricas — só o
+    evento marcado sai, e sai por `validacao_correto=false`, como qualquer
+    descarte."""
+    from collections import Counter          # local, como no resto do arquivo
+    alvo = (descricao or "").strip()
+    if not alvo:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "descricao é obrigatória.")
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    try:
+        linhas = (
+            sb.table("eventos")
+            .select("id, comportamento_label, label_corrigido, tempo_inicio_s, "
+                    "tempo_fim_s, principal, descricao_invalida")
+            .eq("empresa", user.empresa).eq("processo", nome)
+            .eq("descricao_bruta", alvo)
+            .limit(5000).execute().data
+        ) or []
+    except Exception as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            f"Falha ao consultar a descrição: {e}")
+
+    principais = [l for l in linhas if l.get("principal") is not False]
+    seg = sum(max(0.0, float(l.get("tempo_fim_s") or 0) - float(l.get("tempo_inicio_s") or 0))
+              for l in principais)
+    rotulos: Counter = Counter(
+        (l.get("label_corrigido") or l.get("comportamento_label") or "?")
+        for l in principais
+    )
+    return {
+        "descricao": alvo,
+        "eventos": len(principais),
+        "minutos": round(seg / 60, 1),
+        # Frase que produz MUITOS rótulos diferentes é polissêmica — sinal de
+        # que o problema é a frase, não o card em que ela apareceu.
+        "rotulos": [{"rotulo": r, "eventos": n} for r, n in rotulos.most_common(6)],
+        "ja_queimada": any(l.get("descricao_invalida") for l in linhas),
+        "reversivel": True,
+    }
+
+
 @app.get("/processos/{processo_id}/fuso")
 def ler_fuso(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     """Fase 65 — fuso da FÁBRICA, usado pelo painel de saúde e pelo turno."""

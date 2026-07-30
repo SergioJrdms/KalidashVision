@@ -31,6 +31,7 @@ import type {
   FilaDuvidas,
   EstadoAprendizado,
   FusoProcesso,
+  UsoDescricao,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -263,6 +264,13 @@ export const api = {
       req<FilaDuvidas>(`/processos/${processoId}/duvidas`
         + `?limite=200${rotulo ? `&rotulo=${encodeURIComponent(rotulo)}` : ""}`
         + `${tipo ? `&tipo=${encodeURIComponent(tipo)}` : ""}`),
+  },
+  descricoes: {
+    // Custo de queimar uma frase — consultado ANTES de marcar como inválida.
+    uso: (processoId: string, descricao: string) =>
+      req<UsoDescricao>(
+        `/processos/${processoId}/descricoes/uso?descricao=${encodeURIComponent(descricao)}`,
+      ),
   },
   fuso: {
     ler: (processoId: string) => req<FusoProcesso>(`/processos/${processoId}/fuso`),

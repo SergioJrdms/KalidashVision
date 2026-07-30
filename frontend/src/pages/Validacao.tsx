@@ -13,6 +13,7 @@ import { mapPendentes, mapPerguntas, type PendMock, type PendIrmaoMock, type Per
 import { nivelDe, leanCor, leanLabel, fmtSeg } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Ring, toast } from "../design/ui";
 import { FrameStripReal, FrameStripSegmento, FrameReal } from "../lib/frames";
+import { ConfirmaQueima } from "./Duvidas";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
 import type { AcaoValidacao } from "../lib/types";
@@ -150,6 +151,7 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
           naFilaAposBloco={naFilaAposBloco}
           onResolver={resolver}
           onPular={pular}
+          procId={proc.id}
           labels={labels}
         />
       ) : (
@@ -337,6 +339,7 @@ function FilaFoco({
   naFilaAposBloco,
   onResolver,
   onPular,
+  procId,
   labels,
 }: {
   evento: PendMock;
@@ -346,6 +349,7 @@ function FilaFoco({
   naFilaAposBloco: number;
   onResolver: (ev: PendMock, k: AcaoValidacao, l?: string) => void;
   onPular: () => void;
+  procId: string;
   labels: string[];
 }) {
   const [phase, setPhase] = useState<"idle" | "confirm" | "leaving">("idle");
@@ -358,6 +362,8 @@ function FilaFoco({
   // vazio, e a correção do rótulo virou o mapa que contaminou 91 eventos.
   // Invertendo, o erro fica difícil de cometer.
   const [passo, setPasso] = useState<"descricao" | "rotulo">("descricao");
+  // Fase 77: queimar a frase passa por confirmação COM O CUSTO à vista.
+  const [confirmandoQueima, setConfirmandoQueima] = useState(false);
   const [label, setLabel] = useState(evento.label);
   const [conf, setConf] = useState(Math.round(evento.conf * 100));
   const [resolvedKind, setResolvedKind] = useState<string | null>(null);
@@ -369,7 +375,7 @@ function FilaFoco({
     setConf(Math.round(evento.conf * 100)); setResolvedKind(null); setDrag(null);
     // Cada card recomeça pela DESCRIÇÃO. Sem isto o segundo card já abriria no
     // passo do rótulo e a ordem — que é o ponto da mudança — se perderia.
-    setPasso("descricao");
+    setPasso("descricao"); setConfirmandoQueima(false);
   }, [evento.id]);
 
   function act(kind: AcaoValidacao | "pular", lbl?: string) {
@@ -487,19 +493,55 @@ function FilaFoco({
                   <button onClick={() => setPasso("rotulo")} className="btn btn-ok btn-lg" style={{ flex: "1 1 200px" }}>
                     <Icon name="check" size={19} strokeWidth={2.6} /> Sim, é isso
                   </button>
-                  <button onClick={() => act("descricao_invalida")} className="btn btn-danger btn-lg" style={{ flex: "1 1 240px" }}>
+                  <button onClick={() => setConfirmandoQueima(true)} className="btn btn-danger btn-lg" style={{ flex: "1 1 240px" }}>
                     <Icon name="eye-off" size={18} strokeWidth={2.4} /> Não é isso que se vê
                   </button>
                   <button onClick={() => act("pular")} className="btn btn-ghost btn-lg">
                     <Icon name="rotate-cw" size={17} /> Pular
                   </button>
                 </div>
-                <p style={{ fontSize: 11.5, color: "var(--faint)", margin: 0, lineHeight: 1.5 }}>
-                  “Não é isso” = o Prism descreveu algo que não aconteceu. O trecho
-                  sai das métricas <b>e</b> a frase deixa de ensinar o sistema para
-                  sempre. Não corrija o rótulo neste caso — corrigir criaria um
-                  mapeamento a partir de uma frase que nunca descreveu nada.
-                </p>
+                {/* Fase 77 — O TESTE DO APAGAMENTO.
+                    O texto anterior ("descreveu algo que não aconteceu") só
+                    cobria a alucinação pura e empurrava para o botão errado o
+                    caso mais comum: descrição IMPRECISA de uma cena que
+                    existiu — o Prism erra o verbo, não inventa a cena. Ali
+                    "Não é isso" apagaria um minuto de trabalho REAL das
+                    métricas e queimaria uma frase que está certa na maioria
+                    das vezes.
+                    O critério que separa os três casos numa pergunta só é o
+                    do apagamento: perder este trecho custa tempo real? */}
+                <div style={{ background: "var(--soft)", border: "1px solid var(--line-2)",
+                              borderRadius: 8, padding: "9px 12px" }}>
+                  <p style={{ fontSize: 12, color: "var(--text)", margin: 0, lineHeight: 1.55 }}>
+                    <b>Na dúvida, faça o teste do apagamento:</b> se eu apagar
+                    este trecho das métricas, estou perdendo tempo real de
+                    trabalho?
+                  </p>
+                  <ul className="col" style={{ gap: 3, margin: "6px 0 0", paddingLeft: 17,
+                                               fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+                    <li>
+                      <b>Sim, o operador estava trabalhando</b> — mesmo que a
+                      frase esteja imprecisa (errou o verbo, exagerou a ação):
+                      a cena existiu. Use <b>“Sim, é isso”</b> e corrija o
+                      rótulo no passo seguinte.
+                    </li>
+                    <li>
+                      <b>Não, não havia nada disso</b> — o Prism descreveu uma
+                      cena que não aconteceu. Aí sim, “Não é isso que se vê”.
+                      <b> Não corrija o rótulo neste caso</b>: corrigir criaria
+                      um mapeamento a partir de uma frase que nunca descreveu
+                      nada.
+                    </li>
+                  </ul>
+                </div>
+                {confirmandoQueima && (
+                  <ConfirmaQueima
+                    processoId={procId}
+                    descricao={evento.descricao}
+                    onCancelar={() => setConfirmandoQueima(false)}
+                    onConfirmar={() => { setConfirmandoQueima(false); act("descricao_invalida"); }}
+                  />
+                )}
               </div>
             )}
             <div className="row gap2 wrap" style={{ alignItems: "center", marginBottom: 10,
