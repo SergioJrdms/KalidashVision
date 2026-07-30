@@ -5901,7 +5901,12 @@ def pre_extrair_frames(
                 finally:
                     cap.release()
                 if ok and frame is not None:
-                    _up(f"{prefix1}/ref_{cam_id}_{video_id}.jpg", frame_para_jpeg_bytes(frame))
+                    # Referência de ZONAS: resolução CHEIA de propósito —
+                    # é sobre ela que o cliente desenha os polígonos, e
+                    # reduzir tornaria as coordenadas imprecisas. São
+                    # poucos objetos (1 por câmera/vídeo), não 3 por evento.
+                    _up(f"{prefix1}/ref_{cam_id}_{video_id}.jpg",
+                        frame_para_jpeg_bytes(frame, qualidade=85, max_w=0))
                     stats["refs"] += 1
             except Exception as e:
                 log.warning(f"[pre-frames] ref {cam_id}: {e}")
@@ -5934,8 +5939,9 @@ def pre_extrair_frames(
                 finally:
                     cap.release()
                 if ok and frame is not None:
+                    # Mesma razão da cam1: referência de zonas em cheia.
                     _up(f"{prefix2}/ref_{cam_id_sec}_{segmento_id_sec}.jpg",
-                        frame_para_jpeg_bytes(frame))
+                        frame_para_jpeg_bytes(frame, qualidade=85, max_w=0))
                     stats["refs"] += 1
             except Exception as e:
                 log.warning(f"[pre-frames] ref {cam_id_sec}: {e}")

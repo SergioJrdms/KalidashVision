@@ -96,6 +96,44 @@ campanha de 30 dias rodando, seria o negócio errado.
 
 ---
 
+## 4. O Storage estourou porque a expiração nunca rodava
+
+**Estado:** corrigido (Fase 76). Fica registrado porque a causa se repete.
+
+O bucket foi de 0 a **979 MB de 1 GB em 4 dias** e a campanha quase parou.
+Duas causas independentes, e a segunda era a maior:
+
+**A varredura nunca foi agendada.** `varrer_videos_expirados` existia desde a
+Fase 54 e só era alcançável pelo endpoint manual. Ninguém nunca o chamou.
+*"Existe um endpoint" não é um mecanismo* — é uma tarefa manual esperando ser
+esquecida num fim de semana.
+
+**A varredura ignorava a cam2.** O segmento do 2º ângulo é outro objeto e não
+tem linha em `videos`. `expirar_binarios_do_video` o apagava inline, mas só no
+caminho `RETER_VIDEO_HORAS == 0`; com retenção ligada ele retorna cedo (só
+carimba `frames_aquecidos_em`) e a varredura, que olhava apenas
+`videos.caminho`, nunca o alcançava. Num setup de duas câmeras isso significa
+**metade do bucket imortal**.
+
+### O relógio escolhido
+
+O **heartbeat do Pi**, com throttle de 1×/hora (`KV_VARREDURA_INTERVALO_MIN`).
+Ele chega a cada poucos minutos, 24/7, e não depende de ninguém lembrar —
+mesmo padrão já provado em `_limpar_heartbeats_antigos`. Render Hobby não tem
+cron, e uma thread morre junto com o processo quando o serviço hiberna; o
+pulso, não. Rede secundária no `startup` (cobre o Pi desligado) e o endpoint
+manual continua existindo.
+
+A varredura é **não-fatal** nos dois pontos: se ela falhar, o heartbeat e o
+boot seguem. Uma limpeza quebrada não pode derrubar a coleta.
+
+### Regra que fica
+
+Toda rotina de manutenção precisa de um **relógio** no momento em que é
+escrita. Endpoint sem gatilho é dívida, não funcionalidade.
+
+---
+
 ## 2. `gravado_em` carimba a tz do servidor no timestamp do nome
 
 **Estado:** não corrigido. Sem efeito visível hoje.
