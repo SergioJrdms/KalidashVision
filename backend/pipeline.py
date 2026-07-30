@@ -2680,6 +2680,14 @@ def montar_fato_evento(rep: dict, no_bucket: list, share: float,
     fato = {
         "pessoas_na_cena": len(pessoas),
         "pessoas_no_posto": len(no_posto),
+        # Fase 68: `papel_pessoa` explícito como sinal. Já existia embutido em
+        # `pessoas_no_posto`, mas escrever uma regra contando gente para dizer
+        # "o operador está lá" é indireto — e regra indireta é regra que
+        # ninguém revisa. `operador_presente` vem do RASTREAMENTO + ZONAS:
+        # determinístico, sem VLM. É o sinal mais forte que o sistema tem sobre
+        # presença, e é o que contradiz um rótulo `posto_vazio`.
+        "operador_presente": bool(no_posto),
+        "papeis_na_cena": sorted({p for p in (e.get("papel_pessoa") for e in eventos) if p}),
         "zonas_ocupadas": sorted(z for z in zonas),
         "concordancia": round(float(share), 2),
         "n_rotulos_no_minuto": int(n_rotulos),

@@ -17,6 +17,8 @@ deploy. Vale a partir do próximo processamento.
 |---|---|---|
 | `pessoas_na_cena` | número | pessoas distintas detectadas no minuto |
 | `pessoas_no_posto` | número | quantas estão na zona do posto do operador |
+| `operador_presente` | sim/não | o rastreamento identificou o OPERADOR no posto |
+| `papeis_na_cena` | lista | papéis vistos no minuto (`operador`, `visitante`, …) |
 | `zonas_ocupadas` | lista | nomes das zonas com alguém dentro |
 | `maos_na_maquina` | sim/não | punho dentro da zona da máquina |
 | `movimento` | `"parado"` \| `"andando"` | trajetória no minuto |
@@ -160,3 +162,34 @@ rótulos claramente parados (`operar_torno`, `monitorar_maquina`) e claramente
 móveis (`andar`, `buscar_material`). O limiar certo é o vale entre as duas
 distribuições. Se elas se sobrepõem demais, o sinal não separa nesse processo —
 e aí é melhor não escrever regra sobre movimento do que escrever uma ruim.
+
+
+## A camada que já vem ligada: a contradição lógica
+
+```json
+{
+  "nome": "contradicao_posto_vazio_com_operador",
+  "quando_rotulo": ["posto_vazio"],
+  "se": { "operador_presente": true },
+  "modo": "ativa",
+  "ordem": 10
+}
+```
+
+**Por que esta nasce ATIVA e não em sombra.** A sombra existe para calibrar
+uma regra de julgamento — medir o impacto antes de ligar. Aqui não há o que
+calibrar: `operador_presente` vem do rastreamento e das zonas, sem passar
+pelo modelo de visão, e afirma que o operador está no posto. O rótulo diz
+que o posto está vazio. Os dois não podem estar certos ao mesmo tempo. Uma
+impossibilidade não tem limiar.
+
+**De onde ela veio.** Uma correção humana num dia em que o operador faltou
+virou, por casamento de `descricao_bruta`, a regra "esta frase significa
+posto_vazio" — e a frase era a mais comum do dataset. O resultado foram 80
+eventos (25,5 min, 27/07 a 30/07) com o operador rastreado no posto e o
+rótulo dizendo vazio. Dois sinais independentes — presença e descrição —
+contradiziam o terceiro. Não havia alarme para isso; agora há.
+
+**O que ela NÃO faz.** Não corrige o rótulo (`entao` só aceita `duvida`).
+Ela põe o trecho na fila com o motivo visível. Quem decide continua sendo
+gente.

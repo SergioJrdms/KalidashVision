@@ -750,3 +750,42 @@ alter table contexto_processo add column if not exists fuso_horario text;
 -- Deixa explícito nos processos existentes (idempotente).
 update contexto_processo set fuso_horario = 'America/Sao_Paulo'
  where fuso_horario is null;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 68 — A PRIMEIRA CAMADA DE DÚVIDA, e ela é DADO, não palpite.
+--
+-- `papel_pessoa` vem do rastreamento + zonas: determinístico, não passa pelo
+-- VLM. Quando ele diz 'operador' (alguém identificado NO POSTO) e o rótulo
+-- diz `posto_vazio`, os dois não podem estar certos ao mesmo tempo. Não é
+-- ambiguidade a calibrar — é contradição lógica. Por isso entra em modo
+-- ATIVA, não sombra: não há limiar a ajustar numa impossibilidade.
+--
+-- Foi assim que o contágio por descrição (Fase 67) apareceu: 80 eventos,
+-- 25,5 min, de 27/07 a 30/07, com o operador rastreado no posto e o rótulo
+-- dizendo que o posto estava vazio — e o VLM descrevendo "monitorando o
+-- ciclo da máquina", ou seja, dois sinais independentes contradizendo o
+-- terceiro, que era o que vinha do mapa envenenado.
+--
+-- A camada NÃO corrige nada (`entao='duvida'` é o único valor permitido):
+-- ela põe o trecho na fila com o motivo visível. É o alarme que faltava.
+-- ════════════════════════════════════════════════════════════════════════
+insert into camadas_duvida
+    (empresa, processo, nome, quando_rotulo, se, entao, motivo, modo, ordem)
+select c.empresa, c.processo,
+       'contradicao_posto_vazio_com_operador',
+       '["posto_vazio"]'::jsonb,
+       '{"operador_presente": true}'::jsonb,
+       'duvida',
+       'O rastreamento identificou o OPERADOR no posto neste minuto, mas o '
+       || 'rótulo diz que o posto estava vazio. Os dois não podem estar '
+       || 'certos: a presença vem das zonas e do rastreamento, sem passar '
+       || 'pelo modelo de visão.',
+       'ativa',
+       10
+  from contexto_processo c
+on conflict (empresa, processo, nome) do update
+   set se    = excluded.se,
+       modo  = excluded.modo,
+       motivo = excluded.motivo,
+       atualizado_em = now();
