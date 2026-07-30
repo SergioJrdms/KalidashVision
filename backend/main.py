@@ -3267,7 +3267,10 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
     if acao == "descricao_invalida":
         # A DESCRIÇÃO está errada — o VLM alucinou a cena. Corrigir o RÓTULO
         # aqui seria criar um mapeamento falso a partir de uma frase que nunca
-        # descreveu nada; foi assim que 91 eventos foram contaminados.
+        # descreveu nada. Foi assim que o mapa envenenado nasceu — e o que
+        # o tornava perigoso não era o estrago já feito (que a medição
+        # mostrou não ter chegado às métricas), e sim o prompt ensinando o
+        # remapeamento a cada nova correção.
         # `label_corrigido` é limpo de propósito: não existe rótulo certo para
         # uma descrição que não aconteceu.
         return {

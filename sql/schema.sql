@@ -897,7 +897,9 @@ on conflict (empresa, processo, nome) do update
 --     acompanhado durante a campanha.
 --
 -- Misturar os dois perderia exatamente o sinal que revelou o contágio de
--- rótulo (91 eventos, 30 min, crescendo desde 29/07).
+-- rótulo. (A medição posterior mostrou que aqueles eventos eram de
+-- auditoria e correções humanas, e nunca entraram em métrica — mas a
+-- contradição em si é real e a camada é a rede que a pega no 1º vídeo.)
 --
 -- ESCOPO: vale para o EVENTO marcado. A lista de queimadas bloqueia
 -- aprendizado FUTURO; nunca reclassifica o passado a partir de uma frase —

@@ -9,7 +9,8 @@ uma armadilha para quem chegar depois.
 ## 1. Reprocessar um vídeo DUPLICA tudo
 
 **Estado:** não corrigido. Uma guarda impede o acidente.
-**Descoberto em:** Fase 71, ao avaliar reprocessar 48 vídeos contaminados.
+**Descoberto em:** Fase 71, ao avaliar reprocessar 48 vídeos suspeitos de
+contaminação (que a medição depois mostrou não estarem contaminados).
 
 `etapa_persistir` grava assim:
 
@@ -72,11 +73,26 @@ silencioso. Reprocessar apenas vídeos sem correção humana é a saída segura.
 
 ### Por que não foi corrigido agora
 
-Avaliado na Fase 71 e recusado pelo dono do processo, com razão: o estrago do
-contágio era finito (~91 eventos, ~30 min) e **parou de crescer** no primeiro
-ciclo após o conserto do prompt (três assinaturas independentes zeradas às
-12:00 UTC contra 49 eventos às 11:00). Trocar isso por escrita idempotente em
-produção, com a campanha de 30 dias rodando, não compensava.
+Avaliado na Fase 71 e recusado pelo dono do processo, com razão. Duas coisas
+foram medidas depois:
+
+1. o contágio **parou de crescer** no primeiro ciclo após o conserto do prompt
+   (três assinaturas independentes zeradas às 12:00 UTC contra 49 eventos às
+   11:00);
+2. e a limpeza devolveu **`contaminados: 0`** — o que estava correto. A
+   decomposição dos 114 eventos que as queries manuais pegavam:
+   **75** eram `principal=false, origem='auditoria'` (registro de auditoria,
+   que o filtro `principal is not False` já removia de toda métrica),
+   **29** eram `principal=true, origem='humano'` (correções do próprio gestor,
+   que a limpeza recusa tocar de propósito) e **10** eram
+   `principal=false, origem='humano'`.
+
+**A contaminação nunca chegou às métricas.** O risco real era o prompt
+ensinando o remapeamento — isso sim teria atingido eventos principais nos dias
+seguintes, conforme mais correções fossem feitas. A Fase 67 fechou antes disso.
+
+Trocar um estrago que não existia por escrita idempotente em produção, com a
+campanha de 30 dias rodando, seria o negócio errado.
 
 ---
 

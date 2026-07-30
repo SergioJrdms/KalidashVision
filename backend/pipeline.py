@@ -4374,7 +4374,9 @@ def diagnosticar_contagio_por_descricao(
     `monitorar_maquina ← "monitorando o ciclo da máquina"` casa a assinatura
     com 361 eventos, mas é o mapeamento NATURAL — a descrição levaria a esse
     rótulo sem mapa nenhum. Contá-lo como estrago esconderia a contaminação
-    real (~91 eventos) dentro de um número dez vezes maior.
+    real dentro de um número dez vezes maior. (Com o corte aplicado, a
+    contaminação de eventos PRINCIPAIS deu zero — os suspeitos eram todos
+    registro de auditoria ou correção humana.)
 
     O CORTE que separa um do outro é temporal e determinístico: o par
     (descrição, rótulo) já existia ANTES da primeira correção humana daquela
