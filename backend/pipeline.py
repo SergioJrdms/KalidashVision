@@ -2795,15 +2795,30 @@ def limiar_duvida(sb: Client, empresa: str, processo: str) -> float:
     return DUVIDA_LIMIAR_PADRAO
 
 
+# Origens em que `validado_humano=True` NÃO significa "alguém julgou": é o
+# mecanismo que mantém o registro fora da fila. Nunca foram dúvida e não podem
+# entrar na curva histórica como dúvida resolvida.
+_ORIGENS_MECANICAS = frozenset({"posto_vazio", "auditoria"})
+
+
 def evento_em_duvida(e: dict, limiar: float,
-                     labels_assumidos: set | None = None) -> tuple:
-    '''(em_duvida, motivo). Origens independentes:
+                     labels_assumidos: set | None = None,
+                     incluir_resolvidas: bool = False) -> tuple:
+    '''(em_duvida, motivo, tipo). Origens independentes:
+
+    `incluir_resolvidas=True` ignora o julgamento humano e responde à pergunta
+    HISTÓRICA: "este trecho estava em dúvida quando foi lido?". É o que a curva
+    do veredito precisa — ver `montar_analise_diaria`. A FILA usa o default
+    (False), porque lá a pergunta é outra: "o que ainda falta julgar?".
       • CAMADA ativa disparou (Fase 57) — a cena contradiz o rótulo;
       • CONCORDÂNCIA abaixo do limiar (Fase 56/B1) — as amostras do minuto não
         se entenderam. É o sistema dizendo "não sei" de forma DERIVADA, sem
         precisar que o VLM declare abstenção.
     Evento já julgado por humano sai da fila: a dúvida foi resolvida.'''
-    if e.get("validado_humano"):
+    # Determinístico/auditoria nunca foi dúvida — nem hoje, nem no histórico.
+    if (e.get("origem_validacao") or "") in _ORIGENS_MECANICAS:
+        return False, "", ""
+    if e.get("validado_humano") and not incluir_resolvidas:
         return False, "", ""
     # AUSÊNCIA DE EVIDÊNCIA vem primeiro e é EXCLUSIVA: com menos de duas
     # amostras não existe concordância a medir — falar em "amostras
@@ -7308,7 +7323,12 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         .select(
             "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
             "tempo_fim_s, validacao_correto, principal, papel_pessoa, "
-            "confianca, em_duvida, duvida_motivo, validado_humano, n_rotulos_no_minuto"
+            "confianca, em_duvida, duvida_motivo, validado_humano, n_rotulos_no_minuto, "
+            # Fase 66: sem `n_amostras` o ramo 'sem_evidencia' nunca disparava
+            # aqui (vinha None) e o KPI mostrava 0 para sempre; sem
+            # `origem_validacao` não dava para excluir o determinístico;
+            # sem `camadas_disparadas` a garantia da sombra caía no fallback.
+            "n_amostras, origem_validacao, camadas_disparadas"
         )
         .eq("empresa", empresa)
         .eq("processo", processo)
@@ -7348,6 +7368,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         dia = inst.date().isoformat()
         d = por_dia.setdefault(dia, {
             "tot": 0.0, "va": 0.0, "desp": 0.0, "duvida": 0.0, "sem_evidencia": 0.0,
+            "duvida_resolvida": 0.0, "sem_evidencia_resolvida": 0.0,
             "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
             "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "desp": 0.0,
                                           "vazio": 0.0}),
@@ -7366,15 +7387,29 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             d["va"] += dur
         elif cat == "desperdicio":
             d["desp"] += dur
-        # B5: o KPI que responde à pergunta do negócio — quanto do tempo
-        # observado o sistema NÃO SABE. Calculado na leitura (limiar vivo).
-        _dv, _, _tp = (evento_em_duvida(e, _lim_duvida, _assumidos)
+        # B5 — A CURVA DO VEREDITO. Fase 66: `incluir_resolvidas=True`.
+        #
+        # Antes, validar um trecho o APAGAVA do histórico: a curva media "o que
+        # ainda está em dúvida hoje", não "o que o sistema não soube naquele
+        # dia". O passado se reescrevia a cada validação, e o gráfico que existe
+        # para provar aprendizado era zerado justamente pelo ato de aprender —
+        # nunca poderia mostrar uma queda, só um chão liso em 0%.
+        #
+        # Agora a curva é histórica (não se reescreve) e a parte já julgada vem
+        # separada, para a tela mostrar o trabalho feito em vez de escondê-lo.
+        _dv, _, _tp = (evento_em_duvida(e, _lim_duvida, _assumidos,
+                                        incluir_resolvidas=True)
                        if _lim_duvida is not None else (False, "", ""))
         if _dv:
+            _resolvida = bool(e.get("validado_humano"))
             if _tp == "sem_evidencia":
                 d["sem_evidencia"] += dur
+                if _resolvida:
+                    d["sem_evidencia_resolvida"] += dur
             else:
                 d["duvida"] += dur
+                if _resolvida:
+                    d["duvida_resolvida"] += dur
         if e.get("papel_pessoa") == "visitante":
             d["visitas"] += 1
         if not eh_vazio:
@@ -7423,6 +7458,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 "dia": iso, "rot": rot, "dow": dow, "tempo_obs_s": 0.0,
                 "va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0,
                 "duvida_pct": 0.0, "sem_evidencia_pct": 0.0,
+                "duvida_resolvida_pct": 0.0, "sem_evidencia_resolvida_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
                 "top_acoes": [], "linha_tempo": [],
@@ -7487,6 +7523,11 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 # semana o sistema aprende; se estabiliza em 20-30%, a tese
                 # está errada. Fica VISÍVEL e permanente, não escondida.
                 "duvida_pct": round(d["duvida"] / tot * 100, 1),
+                # Quanto dessa dúvida JÁ foi julgada por gente. A curva total
+                # não se mexe; esta sobe conforme a fila é trabalhada.
+                "duvida_resolvida_pct": round(d["duvida_resolvida"] / tot * 100, 1),
+                "sem_evidencia_resolvida_pct": round(
+                    d["sem_evidencia_resolvida"] / tot * 100, 1),
                 # Trecho curto demais para afirmar OU duvidar — resolve-se com
                 # mais amostragem, não com melhor decisão.
                 "sem_evidencia_pct": round(d["sem_evidencia"] / tot * 100, 1),

@@ -541,7 +541,13 @@ export interface DiaAnalise {
   vazio_pct: number;
   // B5: % do tempo observado em DÚVIDA (concordância abaixo do limiar ou
   // camada ativa). É o veredito do produto — cai = o sistema aprende.
+  // Fase 66: `duvida_pct` é a dúvida LEVANTADA naquele dia — histórica, não
+  // se reescreve quando alguém valida. `duvida_resolvida_pct` é a parte dela
+  // já julgada por gente. Antes validar apagava o dia do histórico, e a curva
+  // que existe para provar aprendizado era zerada pelo ato de aprender.
   duvida_pct: number;
+  duvida_resolvida_pct?: number;
+  sem_evidencia_resolvida_pct?: number;
   // Trecho curto demais para afirmar OU duvidar — resolve-se com mais
   // amostragem, não com melhor decisão. Caso DIFERENTE de duvida_pct.
   sem_evidencia_pct: number;

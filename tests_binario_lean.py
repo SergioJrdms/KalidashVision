@@ -292,7 +292,8 @@ eventos_d = [
     ev_dash(6, "conferir_peca", 300),
     ev_dash(7, "posto_vazio", 360, papel="posto_vazio"),
 ]
-videos_d = [{"id": "v1", "processado_em": "2026-07-21T13:00:00+00:00",
+videos_d = [{"id": "v1", "empresa": "U", "processo": "T",
+             "processado_em": "2026-07-21T13:00:00+00:00",
              "nome": "seg_20260721_130000.mp4", "duracao_s": 420}]
 dist_d = [
     {"comportamento": "operar_torno", "tempo_total_s": 120, "pct_tempo": 20.0,
@@ -355,6 +356,8 @@ except Exception as e:  # noqa: BLE001
 check("montar_analise_diaria não explode", erro_dias is None, erro_dias)
 if dias:
     com_trab = [d for d in dias["dias"] if d["tempo_obs_s"] > 0]
+    check("há dia com trabalho (senão as checagens abaixo passam no vácuo)",
+          len(com_trab) > 0, len(dias["dias"]))
     check("dia com trabalho: va+desp fecham 100%",
           all(abs(d["va_pct"] + d["desp_pct"] - 100) < 0.5 for d in com_trab),
           [(d["dia"], d["va_pct"], d["desp_pct"]) for d in com_trab])
@@ -366,6 +369,107 @@ if dias:
     check("linha_tempo só usa categorias vivas",
           all(f["cat"] in ("va", "desp", "vazio")
               for d in dias["dias"] for f in d["linha_tempo"]))
+
+
+# ════════════════════════════════════════════════════════════════════════
+# [9] Fase 66 — A CURVA DA DÚVIDA É HISTÓRICA.
+#
+# Antes, validar um trecho o APAGAVA do histórico: a curva media "o que ainda
+# está em dúvida hoje" em vez de "o que o sistema não soube naquele dia". O
+# passado se reescrevia a cada validação e o gráfico que existe para provar
+# aprendizado era zerado justamente pelo ato de aprender.
+# ════════════════════════════════════════════════════════════════════════
+print("\n[9] A curva da dúvida não se reescreve quando alguém valida")
+
+
+def ev_dv(id_, ini_s, *, conf=0.4, n_am=5, validado=False, origem=None,
+          label="conferir_peca", papel=None):
+    return {
+        "id": id_, "video_id": "v1", "empresa": "U", "processo": "T",
+        "comportamento_label": label, "label_corrigido": None,
+        "tempo_inicio_s": ini_s, "tempo_fim_s": ini_s + 60,
+        "zona_contexto": "torno", "papel_pessoa": papel, "principal": True,
+        "n_amostras": n_am, "confianca": conf, "validacao_correto": None,
+        "validado_humano": validado, "origem_validacao": origem,
+        "pessoa_track_id": 1, "em_duvida": None, "duvida_motivo": None,
+        "n_rotulos_no_minuto": 3, "camadas_disparadas": None,
+    }
+
+
+VIDS = [{"id": "v1", "empresa": "U", "processo": "T",
+         "processado_em": "2026-07-21T13:00:00+00:00",
+         "nome": "seg_20260721_130000.mp4", "duracao_s": 600}]
+COMPS = [{"label": "conferir_peca", "categoria_lean": "desperdicio",
+          "categoria_lean_origem": "ia", "empresa": "U", "processo": "T"}]
+
+
+def dias_de(eventos):
+    sb = FakeSB({
+        "eventos": eventos, "videos": VIDS, "comportamentos": COMPS,
+        "contexto_processo": [{"empresa": "U", "processo": "T", "duvida_limiar": 0.65}],
+    })
+    d = pl.montar_analise_diaria(sb, "U", "T", dias=30)
+    return next(x for x in d["dias"] if x["tempo_obs_s"] > 0)
+
+
+# 4 minutos: 2 em dúvida (concordância 0.4 < 0.65), 2 sem dúvida.
+abertos = [ev_dv("a", 0), ev_dv("b", 60), ev_dv("c", 120, conf=0.95),
+           ev_dv("d", 180, conf=0.95)]
+dia = dias_de(abertos)
+check("com tudo em aberto, 50% do dia está em dúvida",
+      abs(dia["duvida_pct"] - 50.0) < 0.6, dia["duvida_pct"])
+check("nada julgado ainda", dia["duvida_resolvida_pct"] == 0.0, dia)
+
+# O gestor valida os DOIS trechos duvidosos. O dia NÃO pode virar 0%.
+validados = [ev_dv("a", 0, validado=True, origem="humano"),
+             ev_dv("b", 60, validado=True, origem="humano"),
+             ev_dv("c", 120, conf=0.95), ev_dv("d", 180, conf=0.95)]
+dia2 = dias_de(validados)
+check("validar NÃO apaga a dúvida do histórico (era o bug)",
+      abs(dia2["duvida_pct"] - 50.0) < 0.6, dia2["duvida_pct"])
+check("a curva do dia fica IDÊNTICA antes e depois de validar",
+      dia2["duvida_pct"] == dia["duvida_pct"], (dia["duvida_pct"], dia2["duvida_pct"]))
+check("e o julgado aparece separado, para a tela mostrar o trabalho feito",
+      abs(dia2["duvida_resolvida_pct"] - 50.0) < 0.6, dia2["duvida_resolvida_pct"])
+check("resolvida nunca passa da levantada",
+      dia2["duvida_resolvida_pct"] <= dia2["duvida_pct"] + 0.05, dia2)
+
+print("\n[10] A fila continua sendo só o que FALTA julgar")
+check("na fila, evento julgado sai",
+      pl.evento_em_duvida(ev_dv("a", 0, validado=True), 0.65)[0] is False)
+check("no histórico, o mesmo evento continua contando",
+      pl.evento_em_duvida(ev_dv("a", 0, validado=True), 0.65,
+                          incluir_resolvidas=True)[0] is True)
+check("o motivo é preservado no histórico",
+      "discordaram" in pl.evento_em_duvida(ev_dv("a", 0, validado=True), 0.65,
+                                           incluir_resolvidas=True)[1])
+
+print("\n[11] Determinístico nunca foi dúvida — nem no histórico")
+for orig in ("posto_vazio", "auditoria"):
+    check(f"{orig}: fora da fila",
+          pl.evento_em_duvida(ev_dv("x", 0, n_am=1, validado=True, origem=orig),
+                              0.65)[0] is False)
+    check(f"{orig}: fora do histórico (não vira 'dúvida resolvida')",
+          pl.evento_em_duvida(ev_dv("x", 0, n_am=1, validado=True, origem=orig),
+                              0.65, incluir_resolvidas=True)[0] is False)
+
+vazios = [ev_dv("v1", 0, n_am=1, validado=True, origem="posto_vazio",
+                label="posto_vazio", papel="posto_vazio"),
+          ev_dv("c", 60, conf=0.95)]
+dia3 = dias_de(vazios)
+check("posto vazio não infla a curva do dia",
+      dia3["duvida_pct"] == 0.0 and dia3["sem_evidencia_pct"] == 0.0, dia3)
+
+print("\n[12] 'sem evidência' voltou a ser medido no dia")
+# A consulta do dia não trazia `n_amostras`: o ramo nunca disparava e o KPI
+# mostrava 0 para sempre, independentemente dos dados.
+poucas = [ev_dv("p", 0, n_am=1), ev_dv("q", 60, n_am=1),
+          ev_dv("r", 120, conf=0.95), ev_dv("s", 180, conf=0.95)]
+dia4 = dias_de(poucas)
+check("1 amostra vira 'sem evidência', não 'dúvida'",
+      dia4["sem_evidencia_pct"] > 0 and dia4["duvida_pct"] == 0.0, dia4)
+check("50% do dia sem evidência", abs(dia4["sem_evidencia_pct"] - 50.0) < 0.6,
+      dia4["sem_evidencia_pct"])
 
 print(f"\n{'='*56}\n  TOTAL {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

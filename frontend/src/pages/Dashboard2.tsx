@@ -477,8 +477,16 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
   const n = pts.length;
   const x = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
   const y = (v: number) => padT + (1 - Math.min(100, Math.max(0, v)) / 100) * plotH;
-  const atual = pts[pts.length - 1].duvida_pct;
-  const semEvid = pts[pts.length - 1].sem_evidencia_pct || 0;
+  const ultimo = pts[pts.length - 1];
+  const atual = ultimo.duvida_pct;
+  const semEvid = ultimo.sem_evidencia_pct || 0;
+  // Fase 66: a curva é HISTÓRICA — validar um trecho não o apaga do dia em que
+  // aconteceu. O que muda é quanto dela já foi julgado, e isso vira a área
+  // preenchida sob a linha: o trabalho feito fica visível em vez de sumir.
+  const resolvidoAgora = ultimo.duvida_resolvida_pct || 0;
+  const totalLevantado = pts.reduce((t, d) => t + d.duvida_pct, 0);
+  const totalResolvido = pts.reduce((t, d) => t + (d.duvida_resolvida_pct || 0), 0);
+  const pctJulgado = totalLevantado > 0 ? (totalResolvido / totalLevantado) * 100 : 0;
   // Tendência simples: média da 1ª metade contra a 2ª.
   const meio = Math.floor(n / 2);
   const m = (a: DiaAnalise[]) => (a.length ? a.reduce((s, d) => s + d.duvida_pct, 0) / a.length : 0);
@@ -488,7 +496,7 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
         titulo="Quanto o sistema não sabe"
-        ajuda="Parte do tempo observado em que a leitura ficou em dúvida — as amostras do minuto discordaram entre si, ou uma verificação da cena contradisse o rótulo. Esses trechos vão para a fila de validação, ordenados por impacto."
+        ajuda="Parte do tempo observado em que a leitura ficou em dúvida naquele dia — as amostras do minuto discordaram, uma verificação da cena contradisse o rótulo, ou ninguém decidiu se o comportamento agrega valor. A curva é HISTÓRICA: validar um trecho não o apaga do dia em que aconteceu, só o marca como julgado (a área preenchida)."
         leitura="Esta curva é o veredito: caindo semana a semana, o sistema está aprendendo."
       />
       <div className="row gap2" style={{ alignItems: "baseline", marginBottom: 6 }}>
@@ -497,6 +505,14 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
         </span>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>do tempo observado, no último dia</span>
       </div>
+      {totalLevantado > 0 && (
+        <p style={{ fontSize: 11.5, color: "var(--muted)", margin: "0 0 6px" }}>
+          <b className="tnum" style={{ color: leanCor("va") }}>{pctJulgado.toFixed(0)}%</b> da
+          dúvida do período já foi julgada por você
+          {resolvidoAgora > 0 && ` · ${resolvidoAgora.toFixed(0)} pts do último dia`}
+          {" "}— o julgado continua no gráfico, preenchido.
+        </p>
+      )}
       {semEvid > 0 && (
         // Caso DIFERENTE: trecho curto demais para afirmar ou duvidar. Resolve-se
         // com mais amostragem, não com melhor decisão — por isso fica separado.
@@ -516,11 +532,23 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
         {/* faixa 20-30%: acima disso, o dono do processo disse que não há produto */}
         <rect x={padL} y={y(30)} width={plotW} height={Math.max(0, y(20) - y(30))}
               fill="var(--desp)" opacity={0.07} />
+        {/* Área do que JÁ foi julgado, sob a linha do total levantado. É o
+            trabalho de validação ficando visível — antes ele sumia do gráfico
+            justamente por ter sido feito. */}
+        <polygon fill={leanCor("va")} opacity={0.18}
+                 points={[
+                   `${x(0)},${y(0)}`,
+                   ...pts.map((d, i) => `${x(i)},${y(d.duvida_resolvida_pct || 0)}`),
+                   `${x(n - 1)},${y(0)}`,
+                 ].join(" ")} />
+        <polyline fill="none" stroke={leanCor("va")} strokeWidth={1.4} strokeLinejoin="round"
+                  strokeDasharray="3 3" opacity={0.85}
+                  points={pts.map((d, i) => `${x(i)},${y(d.duvida_resolvida_pct || 0)}`).join(" ")} />
         <polyline fill="none" stroke={cor} strokeWidth={2.2} strokeLinejoin="round"
                   points={pts.map((d, i) => `${x(i)},${y(d.duvida_pct)}`).join(" ")} />
         {pts.map((d, i) => (
           <circle key={d.dia} cx={x(i)} cy={y(d.duvida_pct)} r={3} fill="#fff" stroke={cor} strokeWidth={1.6}>
-            <title>{`${d.dow} ${d.rot} — ${d.duvida_pct.toFixed(0)}% em dúvida`}</title>
+            <title>{`${d.dow} ${d.rot} — ${d.duvida_pct.toFixed(0)}% em dúvida · ${(d.duvida_resolvida_pct || 0).toFixed(0)}% já julgado`}</title>
           </circle>
         ))}
         {pts.map((d, i) => {
@@ -531,6 +559,14 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
           ) : null;
         })}
       </svg>
+      <div className="row wrap" style={{ gap: 12, fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
+        <span className="row" style={{ gap: 5 }}>
+          <i style={{ width: 14, height: 2.5, borderRadius: 2, background: cor }} /> dúvida levantada
+        </span>
+        <span className="row" style={{ gap: 5 }}>
+          <i style={{ width: 14, height: 8, borderRadius: 2, background: leanCor("va"), opacity: 0.35 }} /> já julgada
+        </span>
+      </div>
       <p style={{ fontSize: 12, color: "var(--text)", margin: "6px 0 0" }}>
         {delta == null ? (
           <span style={{ color: "var(--muted)" }}>Poucos dias para dizer se está caindo.</span>
