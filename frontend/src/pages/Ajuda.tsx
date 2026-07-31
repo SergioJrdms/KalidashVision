@@ -145,6 +145,10 @@ function ComoValida() {
     { icon: "pencil", cor: "var(--accent)", bg: "var(--accent-soft)", titulo: "Corrigir", txt: "Você dá o nome certo da sua operação. Ele para de errar e usa o seu vocabulário dali pra frente." },
     { icon: "x", cor: "var(--desp)", bg: "var(--desp-bg)", titulo: "Descartar", txt: "Era um falso alarme. Ele aprende a não marcar mais coisas parecidas." },
     { icon: "message-circle", cor: "var(--accent)", bg: "var(--accent-soft)", titulo: "Responder o Prism", txt: "Quando ele tem dúvida, pergunta. Sua resposta vira contexto permanente e melhora as próximas análises." },
+    // Fase 80: a quinta ação não é uma decisão — é a única que só OLHA. Existe
+    // porque nem tudo passa pela fila: um dia inteiro de posto vazio sai dela
+    // por mecanismo e ficaria invisível sem alguém abrir para conferir.
+    { icon: "search", cor: "var(--muted)", bg: "var(--soft)", titulo: "Auditar um dia", txt: "Nem tudo passa pela fila: um dia inteiro de posto vazio sai dela sozinho. Na Auditoria do dia você abre um dia qualquer e confere por amostragem — sem julgar nada, só para ver se a leitura bate com a realidade." },
   ];
   return (
     <section className="col" style={{ gap: 12 }}>

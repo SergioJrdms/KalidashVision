@@ -6,7 +6,7 @@ import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
 export type Screen = "login" | "processos" | "processo" | "ajuda" | "fila-global";
-export type Tab = "dashboard" | "diaadia" | "duvidas" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
+export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
 
@@ -62,6 +62,10 @@ export function Sidebar({
   const procNav = [
     { tab: "dashboard", label: "Dashboard", icon: "layout-dashboard" },
     { tab: "diaadia", label: "Dia a dia", icon: "calendar-days" },
+    // Fase 80: auditar é olhar um dia por amostragem, sem julgar nada. Fica ao
+    // lado do "Dia a dia" porque é o aprofundamento de um dia específico — e
+    // antes das telas que gravam decisão, porque não grava nenhuma.
+    { tab: "auditoria", label: "Auditoria do dia", icon: "search" },
     // Fase 59: a fila da dúvida vem ANTES da validação geral — é o trabalho de
     // maior alavancagem: cada trecho julgado aqui derruba a curva de "não sei".
     { tab: "duvidas", label: "Dúvidas", icon: "help-circle" },
@@ -195,7 +199,7 @@ export function Sidebar({
 
 export function Topbar({ route, proc, go, onOpenPrism, action, isMobile = false, onMenu }: { route: Route; proc?: ProcHeaderMock | null; go: Go; onOpenPrism: () => void; action?: ReactNode; isMobile?: boolean; onMenu?: () => void }) {
   const inProc = route.screen === "processo";
-  const tabLabels: Record<string, string> = { dashboard: "Dashboard", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
+  const tabLabels: Record<string, string> = { dashboard: "Dashboard", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
   return (
     <header className="row" style={{ height: isMobile ? 54 : 60, padding: isMobile ? "0 12px" : "0 26px", borderBottom: "1px solid var(--line)", background: "rgba(255,255,255,.82)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 30, justifyContent: "space-between", gap: isMobile ? 8 : 16 }}>
       <div className="row gap2" style={{ fontSize: 13.5, color: "var(--muted)", minWidth: 0 }}>

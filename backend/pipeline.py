@@ -4307,8 +4307,12 @@ def auditar_dia(sb, empresa: str, processo: str, dia: str,
     do_dia.sort(key=lambda x: x["_inst"])
 
     if not do_dia:
-        return {"dia": dia, "eventos": 0, "videos": [], "blocos": [],
-                "amostras": [], "atipico": False}
+        # Mesmo contrato do caminho cheio: a tela não pode ter que adivinhar
+        # quais campos existem num dia vazio.
+        return {"dia": dia, "eventos": 0, "minutos": 0.0, "posto_vazio_pct": 0.0,
+                "atipico": False, "limiar_atipico": VAZIO_ATIPICO_PCT,
+                "contradicoes_c1": 0, "videos": [], "blocos": [], "amostras": [],
+                "nota": "Nenhum vídeo processado com gravação nesta data."}
 
     # ── Blocos contíguos do mesmo rótulo ──
     blocos: list[dict] = []

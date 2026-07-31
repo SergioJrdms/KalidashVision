@@ -9,11 +9,12 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, PanelHead, Ring, Icon, Empty, LeanBar } from "../design/ui";
 import { leanCor, leanLabel, type LeanShort } from "../design/helpers";
+import { pedirAuditoriaDoDia } from "./Auditoria";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { Go } from "../design/Shell";
 import type { AnaliseDiaria, DiaAnalise, JanelaAgregada } from "../lib/types";
 
-export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
+export default function Dashboard2({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const q = useQuery({ queryKey: ["diaadia", proc.id], queryFn: () => api.diaadia.analise(proc.id, 30) });
   const dados = q.data || null;
   const dias = useMemo(() => dados?.dias || [], [dados]);
@@ -39,7 +40,7 @@ export default function Dashboard2({ proc }: { proc: ProcHeaderMock; go: Go }) {
   return (
     <div className="col" style={{ gap: 16 }}>
       <VereditoHero dados={dados} />
-      <EvolucaoPorDia dias={dias} selecionado={selecionado} alvo={alvo} ehAgregado={ehAgregado} onSelecionar={toggleDia} trabalhados={trabalhados} />
+      <EvolucaoPorDia dias={dias} selecionado={selecionado} alvo={alvo} ehAgregado={ehAgregado} onSelecionar={toggleDia} trabalhados={trabalhados} onAuditar={(d) => { pedirAuditoriaDoDia(d); go("processo", proc.id, "auditoria"); }} />
       {alvo && !alvo.sem_trabalho && (alvo.linha_tempo.length > 0 || alvo.top_acoes.length > 0) && (
         <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
           {alvo.linha_tempo.length > 0 && <div style={{ flex: "1.4 1 420px" }}><JornadaDoDia d={alvo} agregado={ehAgregado} /></div>}
@@ -231,8 +232,8 @@ function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
   };
 }
 
-function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, trabalhados }: {
-  dias: DiaAnalise[]; selecionado: DiaAnalise | null; alvo: DiaAnalise | null; ehAgregado: boolean; onSelecionar: (d: DiaAnalise) => void; trabalhados: DiaAnalise[];
+function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, trabalhados, onAuditar }: {
+  dias: DiaAnalise[]; selecionado: DiaAnalise | null; alvo: DiaAnalise | null; ehAgregado: boolean; onSelecionar: (d: DiaAnalise) => void; trabalhados: DiaAnalise[]; onAuditar: (dia: string) => void;
 }) {
   const W = 720, H = 220, padT = 8, padB = 26, padL = 8, padR = 8;
   const n = Math.max(1, dias.length);
@@ -262,12 +263,14 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
           if (d.sem_trabalho) {
             const cor = d.sem_trabalho === "posto_vazio" ? leanCor("desp") : "var(--line)";
             const tip = d.sem_trabalho === "posto_vazio"
-              ? `${d.dow} ${d.rot} — máquina vazia o dia todo (posto vazio)`
+              ? `${d.dow} ${d.rot} — máquina vazia o dia todo (posto vazio) · clique e audite: nenhum destes trechos passou por gente`
               : `${d.dow} ${d.rot} — sem captura neste dia`;
             return (
               <g key={d.dia} onClick={() => onSelecionar(d)} style={{ cursor: "pointer" }}>
+                {sel && <rect x={x - 3} y={padT - 3} width={bw + 6} height={plotH + 6} rx="5" fill="none" stroke="var(--accent)" strokeWidth={1.6} />}
                 <rect x={x} y={padT} width={bw} height={plotH} rx="3" fill={cor} opacity={0.16}><title>{tip}</title></rect>
                 <text x={x + bw / 2} y={padT + plotH / 2} fontSize="11" textAnchor="middle" fill={d.sem_trabalho === "posto_vazio" ? leanCor("desp") : "var(--faint)"}>✕</text>
+                {d.atipico_vazio && <MarcaAtipico x={x + bw / 2} y={padT + 5} tip={tip} />}
                 {mostraRotulo && <text x={x + bw / 2} y={H - padB + 14} fontSize="9" textAnchor="middle" fill="var(--muted)" fontFamily="var(--mono)">{d.rot}</text>}
               </g>
             );
@@ -282,7 +285,8 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
             vazio_pct: vazioDia,
           };
           let yTopo = H - padB;
-          const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · desperdício ${Math.round(d.desp_pct)}%`;
+          const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · desperdício ${Math.round(d.desp_pct)}%`
+            + (d.atipico_vazio ? ` · ${Math.round(d.posto_vazio_pct)}% de posto vazio — dia atípico, vale auditar` : "");
           return (
             <g key={d.dia} onClick={() => onSelecionar(d)} style={{ cursor: "pointer" }}>
               {sel && <rect x={x - 3} y={padT - 3} width={bw + 6} height={plotH + 6} rx="5" fill="none" stroke="var(--accent)" strokeWidth={1.6} />}
@@ -292,6 +296,7 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
                 yTopo -= h;
                 return <rect key={k} x={x} y={yTopo + 1} width={bw} height={Math.max(1, h - 2)} rx="2.5" fill={leanCor(cat)} opacity={0.92}><title>{tip}</title></rect>;
               })}
+              {d.atipico_vazio && <MarcaAtipico x={x + bw / 2} y={padT + 5} tip={tip} />}
               {mostraRotulo && <text x={x + bw / 2} y={H - padB + 14} fontSize="9" textAnchor="middle" fill={sel ? "var(--accent)" : "var(--muted)"} fontFamily="var(--mono)" fontWeight={sel ? 700 : 400}>{d.rot}</text>}
             </g>
           );
@@ -304,6 +309,11 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
           </span>
         ))}
         <span className="row" style={{ gap: 5 }}><span style={{ color: "var(--faint)" }}>✕</span> sem trabalho</span>
+        {dias.some((d) => d.atipico_vazio) && (
+          <span className="row" style={{ gap: 5 }} title="Dia quase todo posto vazio: ou é falta real, ou é falha de detecção. Clique no dia para auditá-lo.">
+            <span style={{ color: leanCor("desp"), fontWeight: 800 }}>!</span> dia atípico (audite)
+          </span>
+        )}
         {selecionado ? (
           <button
             onClick={() => onSelecionar(selecionado)}
@@ -320,17 +330,54 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
       {/* ── Ritmo + resumão — do dia selecionado OU do agregado de tudo ── */}
       {alvo && (
         <div style={{ marginTop: 18, borderTop: "1px dashed var(--line)", paddingTop: 16 }}>
-          <RitmoDoDiaSelecionado d={alvo} mediaJanela={mediaJanela} agregado={ehAgregado} />
+          <RitmoDoDiaSelecionado d={alvo} mediaJanela={mediaJanela} agregado={ehAgregado} onAuditar={onAuditar} />
         </div>
       )}
     </Card>
   );
 }
 
-function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; mediaJanela: number; agregado?: boolean }) {
+// Fase 80: a marca do dia atípico. Um dia quase todo posto vazio é INVISÍVEL
+// por construção — os eventos saem da fila por mecanismo, ninguém os julga, e
+// o dia vira só um número. Este "!" é o convite para abrir e conferir.
+function MarcaAtipico({ x, y, tip }: { x: number; y: number; tip: string }) {
+  return (
+    <g style={{ pointerEvents: "none" }}>
+      <circle cx={x} cy={y} r={5.5} fill={leanCor("desp")} opacity={0.92}><title>{tip}</title></circle>
+      <text x={x} y={y + 3.2} fontSize="8" fontWeight="800" textAnchor="middle" fill="#fff">!</text>
+    </g>
+  );
+}
+
+// O convite explícito, no dia selecionado. Sai no MESMO lugar nos dois ramos
+// (dia trabalhado e dia sem trabalho) porque o caso do dia 29 caiu no segundo.
+function ConviteAuditar({ d, onAuditar }: { d: DiaAnalise; onAuditar: (dia: string) => void }) {
+  return (
+    <div className="row gap2 wrap" style={{ alignItems: "center", background: "var(--desp-bg)", border: `1px solid ${leanCor("desp")}33`, borderRadius: 10, padding: "10px 12px" }}>
+      <Icon name="alert-triangle" size={16} color={leanCor("desp")} />
+      <span className="grow" style={{ fontSize: 12.5, color: "var(--text)", minWidth: 200 }}>
+        <b>{Math.round(d.posto_vazio_pct)}% do dia como posto vazio.</b>{" "}
+        Nenhum destes trechos passou por uma pessoa — eles saem da fila por
+        mecanismo. Ou é falta real, ou é falha de detecção.
+      </span>
+      <button
+        onClick={() => onAuditar(d.dia)}
+        className="row gap1 click"
+        style={{ border: `1px solid ${leanCor("desp")}`, background: "#fff", color: leanCor("desp"), borderRadius: 99, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", flex: "none" }}
+      >
+        <Icon name="search" size={13} /> Auditar este dia
+      </button>
+    </div>
+  );
+}
+
+function RitmoDoDiaSelecionado({ d, mediaJanela, agregado, onAuditar }: { d: DiaAnalise; mediaJanela: number; agregado?: boolean; onAuditar: (dia: string) => void }) {
+  // O convite só faz sentido num dia REAL: o agregado é um dia sintético
+  // (dia="__agg__") e não existe para auditar.
+  const convite = !agregado && d.atipico_vazio && d.dia !== "__agg__";
   if (d.sem_trabalho) {
     return (
-      <div className="col" style={{ gap: 6 }}>
+      <div className="col" style={{ gap: 10 }}>
         <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>
           {d.dow} {d.rot} — <span style={{ color: d.sem_trabalho === "posto_vazio" ? leanCor("desp") : "var(--muted)" }}>
             {d.sem_trabalho === "posto_vazio" ? "máquina vazia o dia todo" : "sem captura neste dia"}
@@ -341,6 +388,7 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; me
             ? "As câmeras filmaram, mas o operador não trabalhou no posto — o dia inteiro ficou como posto vazio."
             : "Nenhuma captura chegou deste dia — câmera desligada, feriado ou falha no Pi."}
         </p>
+        {convite && <ConviteAuditar d={d} onAuditar={onAuditar} />}
       </div>
     );
   }
@@ -374,6 +422,7 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado }: { d: DiaAnalise; me
           <ChipStat icon="trending-up" texto={`pico ${String(pico.hora).padStart(2, "0")}h (${pico.va_pct.toFixed(0)}%) · vale ${String(vale.hora).padStart(2, "0")}h (${vale.va_pct.toFixed(0)}%)`} />
         )}
       </div>
+      {convite && <ConviteAuditar d={d} onAuditar={onAuditar} />}
       {/* Ritmo hora a hora */}
       {horas.length >= 2 ? (
         <ul className="col" style={{ gap: 8, listStyle: "none", padding: 0, margin: 0 }}>

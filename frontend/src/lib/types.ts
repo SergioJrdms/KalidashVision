@@ -553,6 +553,7 @@ export interface DiaAnalise {
   // já julgada por gente. Antes validar apagava o dia do histórico, e a curva
   // que existe para provar aprendizado era zerada pelo ato de aprender.
   duvida_pct: number;
+  atipico_vazio?: boolean;
   duvida_resolvida_pct?: number;
   sem_evidencia_resolvida_pct?: number;
   // Trecho curto demais para afirmar OU duvidar — resolve-se com mais
@@ -665,4 +666,28 @@ export interface UsoDescricao {
   rotulos: { rotulo: string; eventos: number }[];
   ja_queimada: boolean;
   reversivel: boolean;
+}
+
+
+// Fase 79 — auditoria de um dia. SÓ LEITURA: nada aqui entra na fila.
+export interface AmostraAuditoria {
+  id: string; video_id: string; video_nome: string | null; cam_id: string | null;
+  rotulo: string; descricao: string | null;
+  ini: number; fim: number; hora: string;
+  papel: string | null; origem: string | null;
+  posicao: "inicio" | "meio" | "fim" | "unico";
+  bloco_eventos: number; bloco_minutos: number;
+}
+export interface AuditoriaDia {
+  dia: string;
+  eventos: number;
+  minutos: number;
+  posto_vazio_pct: number;
+  atipico: boolean;
+  limiar_atipico: number;
+  contradicoes_c1: number;
+  videos: { id: string; nome: string | null; cam_id: string | null; duracao_s: number | null }[];
+  blocos: { rotulo: string; eventos: number; minutos: number; de: string; ate: string }[];
+  amostras: AmostraAuditoria[];
+  nota: string;
 }

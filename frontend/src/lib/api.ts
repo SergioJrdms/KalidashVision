@@ -32,6 +32,7 @@ import type {
   EstadoAprendizado,
   FusoProcesso,
   UsoDescricao,
+  AuditoriaDia,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -264,6 +265,13 @@ export const api = {
       req<FilaDuvidas>(`/processos/${processoId}/duvidas`
         + `?limite=200${rotulo ? `&rotulo=${encodeURIComponent(rotulo)}` : ""}`
         + `${tipo ? `&tipo=${encodeURIComponent(tipo)}` : ""}`),
+  },
+  auditoria: {
+    // Auditar não é validar: GET, nada entra na fila.
+    dia: (processoId: string, dia: string, porBloco = 3) =>
+      req<AuditoriaDia>(
+        `/processos/${processoId}/auditoria/dia?dia=${dia}&por_bloco=${porBloco}`,
+      ),
   },
   descricoes: {
     // Custo de queimar uma frase — consultado ANTES de marcar como inválida.

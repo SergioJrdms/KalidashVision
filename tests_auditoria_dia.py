@@ -146,6 +146,10 @@ check("outro dia não devolve nada",
 check("dia vazio não quebra",
       pl.auditar_dia(SB, "U", "T", "2026-07-28")["atipico"] is False)
 check("outra empresa não vaza", pl.auditar_dia(SB, "OUTRA", "T", "2026-07-29")["eventos"] == 0)
+# A tela lê `minutos`, `nota` e `limiar_atipico` sem checar antes; dia vazio
+# devolvendo meio contrato quebraria a renderização em vez de mostrar o vazio.
+check("dia vazio devolve o MESMO contrato do dia cheio",
+      set(pl.auditar_dia(SB, "U", "T", "2026-07-28")) == set(r))
 
 from pathlib import Path  # noqa: E402
 mn = Path("backend/main.py").read_text()
@@ -154,6 +158,43 @@ check("e o docstring diz por que existe",
       "INVIS" in mn.upper() and "Auditar não é validar" in mn)
 pipe = Path("backend/pipeline.py").read_text()
 check("a análise diária marca o dia atípico", '"atipico_vazio"' in pipe)
+
+print("\n[6] Fase 80 — a tela existe E é alcançável")
+# Endpoint pronto e tela órfã é o mesmo que nada: o dia 29 continuaria
+# invisível. Estes checks são sobre CHEGAR na tela, não sobre estética.
+import re as _re  # noqa: E402
+
+
+def _visivel(txt: str) -> str:
+    txt = _re.sub(r"\{/\*.*?\*/\}", " ", txt, flags=_re.S)
+    txt = _re.sub(r"/\*.*?\*/", " ", txt, flags=_re.S)
+    txt = _re.sub(r"^\s*//.*$", " ", txt, flags=_re.M)
+    return _re.sub(r"\s+", " ", txt)
+
+
+shell = Path("frontend/src/design/Shell.tsx").read_text()
+app = Path("frontend/src/App.tsx").read_text()
+tela = Path("frontend/src/pages/Auditoria.tsx").read_text()
+d2 = Path("frontend/src/pages/Dashboard2.tsx").read_text()
+apits = Path("frontend/src/lib/api.ts").read_text()
+
+check("a aba 'auditoria' existe no tipo Tab",
+      _re.search(r"export type Tab =[^;]*\"auditoria\"", shell) is not None)
+check("e tem entrada no menu lateral",
+      _re.search(r"\{\s*tab:\s*\"auditoria\"", shell) is not None)
+check("o roteador leva a aba até a tela",
+      'route.tab === "auditoria"' in app and "<Auditoria" in app)
+check("a tela chama o endpoint de auditoria", "api.auditoria.dia" in tela)
+check("o cliente tem o método", "auditoria:" in apits and "/auditoria/dia?" in apits)
+check("a tela NÃO grava nada (auditar não é validar)",
+      "useMutation" not in tela and "api.validacao" not in tela)
+check("o dia atípico é marcado no gráfico do dia a dia", "atipico_vazio" in d2)
+check("com convite explícito para auditar",
+      "Auditar este dia" in _visivel(d2) and "pedirAuditoriaDoDia" in d2)
+check("o dia clicado viaja até a tela de auditoria",
+      "pedirAuditoriaDoDia" in tela and "AUDITORIA_DIA_KEY" in tela)
+check("hoje() usa o relógio local, não UTC (às 21h de Brasília o UTC já virou o dia)",
+      "toISOString" not in _visivel(tela) and "getFullYear" in tela)
 
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)
