@@ -4245,6 +4245,141 @@ def propagar_categoria_para_eventos(
     return n
 
 
+VAZIO_ATIPICO_PCT = float(os.environ.get("KV_VAZIO_ATIPICO_PCT", "80"))
+
+
+def auditar_dia(sb, empresa: str, processo: str, dia: str,
+                por_bloco: int = 3, limite: int = 60) -> dict:
+    """Fase 79 — AUDITAR não é VALIDAR.
+
+    O dia 29 sumiu das telas com 463 eventos: 245 de origem `posto_vazio` e 163
+    de `auditoria`. Nos dois casos `validado_humano=True` é o MECANISMO que os
+    mantém fora da fila — ninguém os julgou. O dia estava correto (o operador
+    faltou), mas se estivesse errado não haveria como perceber: um dia
+    inteiramente classificado como posto vazio fica invisível por construção.
+
+    Esta função abre o dia SEM tocar em validação nenhuma. Só leitura.
+
+    AMOSTRAGEM, não lista: 245 trechos de posto vazio não se auditam um a um.
+    Blocos contíguos do mesmo rótulo são detectados e de cada um saem até
+    `por_bloco` trechos — início, meio e fim. Se o operador estivesse lá, ele
+    apareceria em algum: o começo pega a transição que originou o bloco, o fim
+    pega a que o encerrou, e o meio pega o regime.
+    """
+    def _fab():
+        return (
+            sb.table("eventos")
+            .select("id, video_id, comportamento_label, label_corrigido, "
+                    "descricao_bruta, tempo_inicio_s, tempo_fim_s, principal, "
+                    "papel_pessoa, origem_validacao, validado_humano, "
+                    "validacao_correto, confianca, n_amostras, pessoa_track_id")
+            .eq("empresa", empresa).eq("processo", processo).order("id")
+        )
+    try:
+        todos = _scan_todos(_fab)
+    except Exception as e:  # noqa: BLE001
+        return {"erro": f"leitura de eventos falhou: {e}"}
+
+    vids = sorted({e.get("video_id") for e in todos if e.get("video_id")})
+    meta: dict = {}
+    try:
+        for i in range(0, len(vids), 100):
+            for v in (sb.table("videos")
+                      .select("id, nome, cam_id, gravado_em, processado_em, duracao_s")
+                      .in_("id", vids[i : i + 100]).execute().data or []):
+                meta[v["id"]] = v
+    except Exception as e:  # noqa: BLE001
+        log.warning("[auditoria] metadados de vídeo não lidos (%s).", e)
+
+    # Recorta o dia pelo instante REAL de gravação (relógio do Pi no nome).
+    do_dia, videos_dia = [], {}
+    for e in todos:
+        if e.get("principal") is False:
+            continue
+        v = meta.get(e.get("video_id")) or {}
+        dt0 = _inicio_video_dt(v)
+        if not dt0 or dt0.date().isoformat() != dia:
+            continue
+        inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
+        e = {**e, "_inst": inst}
+        do_dia.append(e)
+        videos_dia.setdefault(e["video_id"], v)
+    do_dia.sort(key=lambda x: x["_inst"])
+
+    if not do_dia:
+        return {"dia": dia, "eventos": 0, "videos": [], "blocos": [],
+                "amostras": [], "atipico": False}
+
+    # ── Blocos contíguos do mesmo rótulo ──
+    blocos: list[dict] = []
+    for e in do_dia:
+        lbl = e.get("label_corrigido") or e.get("comportamento_label")
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        if blocos and blocos[-1]["rotulo"] == lbl:
+            blocos[-1]["eventos"].append(e)
+            blocos[-1]["segundos"] += dur
+            blocos[-1]["fim"] = e["_inst"]
+        else:
+            blocos.append({"rotulo": lbl, "eventos": [e], "segundos": dur,
+                           "ini": e["_inst"], "fim": e["_inst"]})
+
+    amostras = []
+    for b in sorted(blocos, key=lambda x: -x["segundos"]):
+        evs = b["eventos"]
+        n = len(evs)
+        # Início, meio e fim: as transições e o regime.
+        idxs = sorted({0, n // 2, n - 1})[:max(1, por_bloco)]
+        for pos, i in enumerate(idxs):
+            e = evs[i]
+            v = videos_dia.get(e["video_id"], {})
+            amostras.append({
+                "id": e["id"], "video_id": e["video_id"],
+                "video_nome": v.get("nome"), "cam_id": v.get("cam_id"),
+                "rotulo": b["rotulo"], "descricao": e.get("descricao_bruta"),
+                "ini": e.get("tempo_inicio_s"), "fim": e.get("tempo_fim_s"),
+                "hora": e["_inst"].strftime("%H:%M"),
+                "papel": e.get("papel_pessoa"),
+                "origem": e.get("origem_validacao"),
+                "posicao": ("inicio", "meio", "fim")[min(pos, 2)] if n > 1 else "unico",
+                "bloco_eventos": n,
+                "bloco_minutos": round(b["segundos"] / 60, 1),
+            })
+        if len(amostras) >= limite:
+            break
+
+    seg_total = sum(b["segundos"] for b in blocos)
+    seg_vazio = sum(b["segundos"] for b in blocos
+                    if b["rotulo"] == POSTO_VAZIO_LABEL)
+    pct_vazio = round(seg_vazio / seg_total * 100, 1) if seg_total else 0.0
+    # A contradição da C1 sobre o que JÁ está gravado: rótulo posto_vazio com o
+    # rastreamento dizendo que o operador estava lá.
+    contradicoes = [e for e in do_dia
+                    if (e.get("label_corrigido") or e.get("comportamento_label")) == POSTO_VAZIO_LABEL
+                    and e.get("papel_pessoa") == "operador"]
+    return {
+        "dia": dia,
+        "eventos": len(do_dia),
+        "minutos": round(seg_total / 60, 1),
+        "posto_vazio_pct": pct_vazio,
+        # Dia assim ou é falta real, ou é falha grave de detecção. As duas
+        # merecem olhada, e nenhuma das duas chamava atenção antes.
+        "atipico": pct_vazio >= VAZIO_ATIPICO_PCT,
+        "limiar_atipico": VAZIO_ATIPICO_PCT,
+        "contradicoes_c1": len(contradicoes),
+        "videos": [{"id": k, "nome": v.get("nome"), "cam_id": v.get("cam_id"),
+                    "duracao_s": v.get("duracao_s")}
+                   for k, v in sorted(videos_dia.items(), key=lambda kv: kv[1].get("nome") or "")],
+        "blocos": [{"rotulo": b["rotulo"], "eventos": len(b["eventos"]),
+                    "minutos": round(b["segundos"] / 60, 1),
+                    "de": b["ini"].strftime("%H:%M"), "ate": b["fim"].strftime("%H:%M")}
+                   for b in blocos],
+        "amostras": amostras,
+        "nota": ("Auditoria é só leitura: nada aqui entra na fila nem muda "
+                 "validação. Os trechos são AMOSTRAS (início/meio/fim de cada "
+                 "bloco), não a lista completa."),
+    }
+
+
 def relatorio_reprocesso_por_video(
     sb, empresa: str, processo: str, custo_por_min: float = 0.02,
 ) -> dict:
@@ -8022,7 +8157,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 "va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0,
                 "duvida_pct": 0.0, "sem_evidencia_pct": 0.0,
                 "duvida_resolvida_pct": 0.0, "sem_evidencia_resolvida_pct": 0.0,
-                "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0, "n_videos": len(videos_por_dia.get(iso, ())),
+                "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0,
+                "atipico_vazio": False, "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
                 "top_acoes": [], "linha_tempo": [],
                 "por_hora": [],
@@ -8096,6 +8232,11 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 "sem_evidencia_pct": round(d["sem_evidencia"] / tot * 100, 1),
                 "posto_vazio_s": round(d["vazio"], 1),
                 "posto_vazio_pct": round(vazio_pct, 1),
+                # Fase 79: dia quase todo posto vazio ou é falta real, ou é
+                # falha grave de detecção. As duas merecem olhada — e nenhuma
+                # chamava atenção, porque esses eventos saem da fila por
+                # mecanismo e o dia fica invisível.
+                "atipico_vazio": bool(vazio_pct >= VAZIO_ATIPICO_PCT),
                 "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": d["visitas"],
                 "primeira_h": d["primeiro"].strftime("%H:%M"),

@@ -62,6 +62,8 @@ from .pipeline import (
     reverter_auto_validacao_maquina,
     diagnosticar_contagio_por_descricao,
     relatorio_reprocesso_por_video,
+    auditar_dia,
+    VAZIO_ATIPICO_PCT,
     aprendizado_automatico,
     APRENDIZADO_AUTO_PADRAO,
     categoria_efetiva,
@@ -1126,6 +1128,32 @@ def setar_aprendizado(
         "configurado": body.ativo,
         "efetivo": aprendizado_automatico(sb, user.empresa, nome),
     }
+
+
+@app.get("/processos/{processo_id}/auditoria/dia")
+def auditoria_do_dia(
+    processo_id: str,
+    dia: str = Query(..., description="AAAA-MM-DD no relógio da fábrica"),
+    por_bloco: int = Query(3, ge=1, le=10),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 79 — abre um dia para AUDITORIA. Só leitura, GET de propósito.
+
+    Auditar não é validar: nada aqui entra na fila nem muda `validado_humano`.
+    Existe porque um dia inteiramente classificado como posto vazio fica
+    INVISÍVEL — os eventos saem da fila por mecanismo (origem `posto_vazio` e
+    `auditoria` nascem com validado_humano=True) e o dia só sobrevive como
+    número agregado. Se a classificação estiver errada, não há como perceber.
+
+    Devolve os vídeos do dia, os blocos contíguos por rótulo e uma AMOSTRA de
+    cada bloco (início/meio/fim) — 245 trechos de posto vazio não se auditam um
+    a um, mas se o operador estivesse lá apareceria em algum."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    rel = auditar_dia(sb, user.empresa, nome, dia, por_bloco=por_bloco)
+    if "erro" in rel:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
+    return {"ok": True, **rel}
 
 
 @app.get("/processos/{processo_id}/manutencao/reprocesso/relatorio")
