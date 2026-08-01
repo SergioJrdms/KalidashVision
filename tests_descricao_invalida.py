@@ -68,10 +68,18 @@ class FakeQ:
     def limit(self, *a, **k): return self
     def eq(self, c, v): self.eqs[c] = v; return self
 
+    # Fase 81: o cliente real pagina por .range(); o dublê tem de paginar
+    # também, senão a varredura "passa" no teste e trunca em produção.
+    def range(self, ini, fim): self._rng = (ini, fim); return self
+
+    def _fatia(self, linhas):
+        r = getattr(self, "_rng", None)
+        return linhas if r is None else linhas[r[0]: r[1] + 1]
+
     def execute(self):
         linhas = self.sb.dados.setdefault(self.tabela, [])
         casam = [l for l in linhas if all(l.get(c) == v for c, v in self.eqs.items())]
-        return types.SimpleNamespace(data=[dict(l) for l in casam])
+        return types.SimpleNamespace(data=self._fatia([dict(l) for l in casam]))
 
 
 class FakeSB:
@@ -253,7 +261,7 @@ i = mn_src.index("def uso_da_descricao(")
 bloco = mn_src[i:i + 3000]
 check("é GET (não muda nada)", '@app.get("/processos/{processo_id}/descricoes/uso")' in mn_src)
 check("filtra por empresa E processo",
-      '.eq("empresa", user.empresa).eq("processo", nome)' in bloco)
+      "empresa=user.empresa, processo=nome" in bloco)
 check("conta só os PRINCIPAIS (auditoria não é trecho de trabalho)",
       'l.get("principal") is not False' in bloco)
 check("devolve os rótulos que a frase produziu", '"rotulos"' in bloco)

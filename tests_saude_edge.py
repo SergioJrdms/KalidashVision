@@ -56,7 +56,15 @@ class FakeQ:
     def limit(self, *a, **k): return self
     def delete(self, *a, **k): return self
     def insert(self, d, *a, **k): self._ins = d; return self
-    def execute(self): return types.SimpleNamespace(data=self._d)
+    # Fase 81: o cliente real pagina por .range(); o dublê tem de paginar
+    # também, senão a varredura "passa" no teste e trunca em produção.
+    def range(self, ini, fim): self._rng = (ini, fim); return self
+
+    def _fatia(self, linhas):
+        r = getattr(self, "_rng", None)
+        return linhas if r is None else linhas[r[0]: r[1] + 1]
+
+    def execute(self): return types.SimpleNamespace(data=self._fatia(self._d))
 
 
 class FakeSB:

@@ -56,6 +56,14 @@ class FakeQ:
     def gte(self, *a, **k): return self
     def eq(self, c, v): self.eqs[c] = v; return self
 
+    # Fase 81: o cliente real pagina por .range(); o dublê tem de paginar
+    # também, senão a varredura "passa" no teste e trunca em produção.
+    def range(self, ini, fim): self._rng = (ini, fim); return self
+
+    def _fatia(self, linhas):
+        r = getattr(self, "_rng", None)
+        return linhas if r is None else linhas[r[0]: r[1] + 1]
+
     def execute(self):
         linhas = self.sb.dados.setdefault(self.tabela, [])
         casam = [l for l in linhas
@@ -64,7 +72,7 @@ class FakeQ:
             for l in casam:
                 l.update(self.payload)
                 self.sb.escritas.append((self.tabela, dict(self.payload)))
-        return types.SimpleNamespace(data=[dict(l) for l in casam])
+        return types.SimpleNamespace(data=self._fatia([dict(l) for l in casam]))
 
 
 class FakeSB:

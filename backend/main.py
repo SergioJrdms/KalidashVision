@@ -72,6 +72,8 @@ from .pipeline import (
     placar_camadas,
     montar_fila_duvidas,
     limiar_duvida,
+    varrer,
+    TETO_POSTGREST,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -367,15 +369,9 @@ def detalhe_processo(processo_id: str, user: CurrentUser = Depends(get_current_u
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Processo não encontrado")
     p = r.data[0]
 
-    videos = (
-        sb.table("videos")
-        .select("id, nome, duracao_s, total_eventos, processado_em")
-        .eq("empresa", user.empresa)
-        .eq("processo", p["processo"])
-        .order("processado_em", desc=True)
-        .execute()
-        .data
-    ) or []
+    videos = varrer(sb, "videos", "id, nome, duracao_s, total_eventos, processado_em",
+                    empresa=user.empresa, processo=p["processo"])
+    videos.sort(key=lambda v: v.get("processado_em") or "", reverse=True)
     p["videos"] = videos
     p["n_videos"] = len(videos)
     # enriquecimento (maturidade, pendências, composição) para a sidebar/dashboard.
@@ -644,14 +640,13 @@ def uso_da_descricao(
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
     try:
-        linhas = (
-            sb.table("eventos")
-            .select("id, comportamento_label, label_corrigido, tempo_inicio_s, "
-                    "tempo_fim_s, principal, descricao_invalida")
-            .eq("empresa", user.empresa).eq("processo", nome)
-            .eq("descricao_bruta", alvo)
-            .limit(5000).execute().data
-        ) or []
+        linhas = varrer(
+            sb, "eventos",
+            "id, comportamento_label, label_corrigido, tempo_inicio_s, "
+            "tempo_fim_s, principal, descricao_invalida",
+            empresa=user.empresa, processo=nome,
+            ajustes=lambda q: q.eq("descricao_bruta", alvo),
+        )
     except Exception as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
                             f"Falha ao consultar a descrição: {e}")
@@ -1382,19 +1377,20 @@ def saude_edge(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     desde = (agora - timedelta(hours=24)).isoformat()
 
     try:
-        hbs = (
-            sb.table("heartbeats_edge")
-            .select("device_id, runner_versao, estado, cameras, disco_livre_gb, "
-                    "disco_uso_pct, cpu_temp_c, uptime_s, turno_janela, "
-                    "turno_deadline, recebido_em")
-            .eq("empresa", user.empresa)
-            .eq("processo", processo_nome)
-            .gte("recebido_em", desde)
-            .order("recebido_em", desc=True)
-            .limit(2000)
-            .execute()
-            .data
-        ) or []
+        # Janela fechada de 24h: com pulso de 5 min são ~288 linhas por câmera,
+        # bem abaixo do teto — mas paginado por regra, não por sorte.
+        hbs = varrer(
+            sb, "heartbeats_edge",
+            "device_id, runner_versao, estado, cameras, disco_livre_gb, "
+            "disco_uso_pct, cpu_temp_c, uptime_s, turno_janela, "
+            "turno_deadline, recebido_em",
+            empresa=user.empresa, processo=processo_nome, ordem="id",
+            ajustes=lambda q: q.gte("recebido_em", desde),
+        )
+        # Pagina por `id` (chave única — `recebido_em` empata entre câmeras e a
+        # paginação pularia linhas) e ordena aqui: o resto da função espera do
+        # mais novo para o mais velho.
+        hbs.sort(key=lambda h: h.get("recebido_em") or "", reverse=True)
     except Exception as e:
         log.warning(f"[saude] leitura de heartbeats falhou: {e}")
         hbs = []
@@ -1729,16 +1725,9 @@ def listar_cameras(processo_id: str, user: CurrentUser = Depends(get_current_use
     cams: set[str] = set()
     for tbl in ("videos", "segmentos"):
         try:
-            r = (
-                sb.table(tbl)
-                .select("cam_id")
-                .eq("empresa", user.empresa)
-                .eq("processo", nome)
-                .not_.is_("cam_id", "null")
-                .limit(2000)
-                .execute()
-            )
-            cams.update(row["cam_id"] for row in (r.data or []) if row.get("cam_id"))
+            linhas = varrer(sb, tbl, "id, cam_id", empresa=user.empresa, processo=nome,
+                            ajustes=lambda q: q.not_.is_("cam_id", "null"))
+            cams.update(row["cam_id"] for row in linhas if row.get("cam_id"))
         except Exception as e:
             log.warning(f"listar_cameras: falha em {tbl}: {e}")
     return {"cameras": sorted(cams)}
@@ -1937,14 +1926,9 @@ def excluir_processo_endpoint(
     # 1) Remove os vídeos do Storage (lê os caminhos antes de apagar as linhas)
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
     try:
-        vids = (
-            sb.table("videos")
-            .select("caminho")
-            .eq("empresa", user.empresa)
-            .eq("processo", nome)
-            .execute()
-            .data
-        ) or []
+        # Exclusão de processo: ler pela metade deixaria metade dos binários
+        # órfãos no bucket para sempre.
+        vids = varrer(sb, "videos", "id, caminho", empresa=user.empresa, processo=nome)
         caminhos = [
             v["caminho"]
             for v in vids
@@ -2325,16 +2309,8 @@ def reprocessar_erros(processo_id: str, user: CurrentUser = Depends(get_current_
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
     try:
-        alvo = (
-            sb.table("segmentos")
-            .select("id")
-            .eq("empresa", user.empresa)
-            .eq("processo", nome)
-            .eq("status", "erro")
-            .limit(20000)
-            .execute()
-            .data
-        ) or []
+        alvo = varrer(sb, "segmentos", "id", empresa=user.empresa, processo=nome,
+                      ajustes=lambda q: q.eq("status", "erro"))
         for s in alvo:
             sb.table("segmentos").update({"status": "pendente", "erro": None}).eq("id", s["id"]).execute()
     except Exception as e:
@@ -2374,14 +2350,7 @@ def fila_global(user: CurrentUser = Depends(get_current_user)):
 
     # Puxa só (processo, status) de todos os segmentos da empresa e agrega em Python.
     try:
-        rows = (
-            sb.table("segmentos")
-            .select("processo, status")
-            .eq("empresa", user.empresa)
-            .limit(100000)
-            .execute()
-            .data
-        ) or []
+        rows = varrer(sb, "segmentos", "id, processo, status", empresa=user.empresa)
     except Exception as e:
         log.warning("fila_global: falha ao ler segmentos (%s)", e)
         rows = []
@@ -2445,36 +2414,27 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     # Superset = união das colunas usadas pelo snapshot e pelo dashboard.
     from collections import Counter
 
-    evs = (
-        sb.table("eventos")
-        .select(
-            "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
-            "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-            "origem_validacao, confianca, principal, zona_contexto"
-        )
-        .eq("empresa", user.empresa)
-        .eq("processo", nome)
-        .limit(50000)
-        .execute()
-        .data
-    ) or []
-    videos = (
-        sb.table("videos")
-        .select("id, nome, duracao_s, total_eventos, total_pessoas, processado_em")
-        .eq("empresa", user.empresa)
-        .eq("processo", nome)
-        .order("processado_em", desc=True)
-        .execute()
-        .data
-    ) or []
-    comps_full = (
-        sb.table("comportamentos")
-        .select("id, label, descricao, categoria_lean, categoria_lean_origem")
-        .eq("empresa", user.empresa)
-        .eq("processo", nome)
-        .execute()
-        .data
-    ) or []
+    # Fase 81 — TUDO paginado. O `.limit(50000)` daqui não pedia 50 mil linhas:
+    # pedia as 1000 primeiras, e o dashboard inteiro (placar, composição,
+    # comportamentos, snapshot do chat) era calculado sobre esse pedaço.
+    # `videos` era pior ainda: sem `.limit()` nenhum, o teto do PostgREST
+    # aplicava-se igual e em silêncio.
+    evs = varrer(
+        sb, "eventos",
+        "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
+        "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
+        "origem_validacao, confianca, principal, zona_contexto",
+        empresa=user.empresa, processo=nome,
+    )
+    videos = varrer(
+        sb, "videos", "id, nome, duracao_s, total_eventos, total_pessoas, processado_em",
+        empresa=user.empresa, processo=nome,
+    )
+    videos.sort(key=lambda v: v.get("processado_em") or "", reverse=True)
+    comps_full = varrer(
+        sb, "comportamentos", "id, label, descricao, categoria_lean, categoria_lean_origem",
+        empresa=user.empresa, processo=nome, 
+    )
 
     snapshot = montar_snapshot_chat(
         sb, user.empresa, nome,

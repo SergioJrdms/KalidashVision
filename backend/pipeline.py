@@ -515,21 +515,21 @@ def carregar_memoria_do_negocio(
         "total_eventos_validados": 0,
     }
 
-    r = (
-        sb.table("eventos")
-        .select(
-            "comportamento_label, label_corrigido, descricao_bruta, validacao_correto, "
-            "principal, origem_validacao, descricao_invalida"
-        )
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .eq("validado_humano", True)
-        .limit(limite_eventos)
-        .execute()
-    )
+    # Fase 81 — a MEMÓRIA do processo não pode ser lida pela metade: é ela que
+    # vai no prompt como "o que esta fábrica já ensinou". Truncada, o modelo
+    # reaprende do zero o que já foi corrigido. `limite_eventos` deixa de ser
+    # um teto de leitura (o PostgREST cortava em 1000 de qualquer jeito) e passa
+    # a ser o corte aplicado DEPOIS, sobre o conjunto completo.
+    linhas_val = varrer(
+        sb, "eventos",
+        "id, comportamento_label, label_corrigido, descricao_bruta, validacao_correto, "
+        "principal, origem_validacao, descricao_invalida",
+        empresa=empresa, processo=processo,
+        ajustes=lambda q: q.eq("validado_humano", True),
+    )[:max(1, limite_eventos)]
     # Fase 16: crus de auditoria entram como validado_humano=True; remove-os do
     # aprendizado (só principais/antigos contam).
-    eventos = [e for e in (r.data or []) if e.get("principal") is not False]
+    eventos = [e for e in linhas_val if e.get("principal") is not False]
     # Fase 61 — A MÁQUINA NÃO CONFIRMA A SI MESMA.
     # Todo evento auto-validado entrava aqui como "confirmação humana" e somava
     # em `n_confirmacoes` — o mesmo contador que libera a auto-validação. Ou
@@ -2980,12 +2980,8 @@ def labels_com_categoria_assumida(sb: Client, empresa: str, processo: str) -> se
     e é de lá que o dashboard a lê. Perguntar ao banco por evento traria
     milhares de linhas para responder uma pergunta que tem dezenas."""
     try:
-        r = (
-            sb.table("comportamentos")
-            .select("label, categoria_lean, categoria_lean_origem")
-            .eq("empresa", empresa).eq("processo", processo)
-            .limit(2000).execute().data
-        ) or []
+        r = varrer(sb, "comportamentos", "label, categoria_lean, categoria_lean_origem",
+                   empresa=empresa, processo=processo)
     except Exception as e:
         log.warning("[duvidas] catálogo não lido (%s) — sem dúvida de categoria.", e)
         return set()
@@ -3301,14 +3297,8 @@ def etapa_persistir(
     # propósito desde a Fase 49) simplesmente não entra no mapa — nunca é chutado.
     cat_ingestao: dict[str, str] = {}
     try:
-        _cats = (
-            sb.table("comportamentos")
-            .select("label, categoria_lean")
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .execute()
-            .data
-        ) or []
+        _cats = varrer(sb, "comportamentos", "label, categoria_lean",
+                       empresa=empresa, processo=processo)
         cat_ingestao = {c["label"]: c["categoria_lean"]
                         for c in _cats if c.get("categoria_lean")}
     except Exception as e:
@@ -3868,17 +3858,11 @@ def montar_contexto_agregado(
     conhecimento_adquirido_texto: str = "",
     video_recem_processado: dict | None = None,
 ) -> dict:
-    todos_eventos = (
-        sb.table("eventos")
-        .select(
-            "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, pessoa_track_id, validacao_correto, validado_humano, principal"
-        )
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .limit(50000)
-        .execute()
-        .data
+    todos_eventos = varrer(
+        sb, "eventos",
+        "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
+        "tempo_fim_s, pessoa_track_id, validacao_correto, validado_humano, principal",
+        empresa=empresa, processo=processo,
     )
     # Fase 16: só os PRINCIPAIS (1/min); crus de auditoria (principal=False) fora.
     base = [
@@ -3886,27 +3870,15 @@ def montar_contexto_agregado(
         if e.get("validacao_correto") is not False and e.get("principal") is not False
     ]
 
-    videos_ctx = (
-        sb.table("videos")
-        .select("id, duracao_s, processado_em")
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .execute()
-        .data
-    )
+    videos_ctx = varrer(sb, "videos", "id, duracao_s, processado_em",
+                        empresa=empresa, processo=processo)
     n_videos_ctx = len(videos_ctx)
     duracao_total_ctx = sum((v.get("duracao_s") or 0) for v in videos_ctx)
 
     catalogo = catalogo or {}
     if not catalogo:
-        comps = (
-            sb.table("comportamentos")
-            .select("label, descricao")
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .execute()
-            .data
-        )
+        comps = varrer(sb, "comportamentos", "label, descricao",
+                       empresa=empresa, processo=processo)
         catalogo = {c["label"]: c.get("descricao", "") for c in comps}
 
     agg: dict = defaultdict(
@@ -4817,13 +4789,8 @@ def relatorio_propagacao_lean(
     except Exception as e:
         return {"erro": f"leitura de eventos falhou: {e}"}
     try:
-        comps = (
-            sb.table("comportamentos")
-            .select("label, categoria_lean, categoria_lean_origem")
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .execute().data
-        ) or []
+        comps = varrer(sb, "comportamentos", "label, categoria_lean, categoria_lean_origem",
+                       empresa=empresa, processo=processo)
     except Exception as e:
         return {"erro": f"leitura de comportamentos falhou: {e}"}
     cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
@@ -4921,15 +4888,11 @@ def carregar_memoria_categoria(
     """
     memoria = {"mapa_humano": {}, "exemplos_por_cat": {}, "n_decisoes": 0}
     try:
-        r = (
-            sb.table("comportamentos")
-            .select("label, categoria_lean, categoria_lean_origem, processo")
-            .eq("empresa", empresa)
-            .eq("categoria_lean_origem", "humano")
-            .limit(2000)
-            .execute()
+        humanos = varrer(
+            sb, "comportamentos", "label, categoria_lean, categoria_lean_origem, processo",
+            empresa=empresa, 
+            ajustes=lambda q: q.eq("categoria_lean_origem", "humano"),
         )
-        humanos = r.data or []
     except Exception as e:
         log.warning(f"Lean: falha ao carregar memória de categoria: {e}")
         return memoria
@@ -5522,21 +5485,14 @@ def gerar_pergunta_divergencia_camera(
         from datetime import datetime, timedelta, timezone
 
         corte = (datetime.now(timezone.utc) - timedelta(hours=janela_horas)).isoformat()
-        evs = (
-            sb.table("eventos")
-            .select(
-                "id, video_id, comportamento_label, label_corrigido, "
-                "tempo_inicio_s, tempo_fim_s, confianca, validado_humano, "
-                "validacao_correto, criado_em"
-            )
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .is_("validado_humano", "null")
-            .gte("criado_em", corte)
-            .limit(2000)
-            .execute()
-            .data
-        ) or []
+        evs = varrer(
+            sb, "eventos",
+            "id, video_id, comportamento_label, label_corrigido, "
+            "tempo_inicio_s, tempo_fim_s, confianca, validado_humano, "
+            "validacao_correto, criado_em",
+            empresa=empresa, processo=processo,
+            ajustes=lambda q: (q.is_("validado_humano", "null").gte("criado_em", corte)),
+        )
         if not evs:
             return 0
 
@@ -5546,15 +5502,8 @@ def gerar_pergunta_divergencia_camera(
             return 0
 
         # Coleta pares (A↔B) divergentes — uma signatura por par único.
-        existentes = (
-            sb.table("perguntas_processo")
-            .select("pergunta")
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .limit(2000)
-            .execute()
-            .data
-        ) or []
+        existentes = varrer(sb, "perguntas_processo", "id, pergunta",
+                            empresa=empresa, processo=processo)
         ja_feitas: set[str] = set()
         for x in existentes:
             t = x.get("pergunta") or ""
@@ -6367,19 +6316,13 @@ def montar_snapshot_chat(
     como /dashboard não busquem os mesmos dados duas vezes.
     """
     if eventos is None:
-        evs = (
-            sb.table("eventos")
-            .select(
-                "id, video_id, comportamento_label, label_corrigido, "
-                "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-                "confianca, principal"
-            )
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .limit(50000)
-            .execute()
-            .data
-        ) or []
+        evs = varrer(
+            sb, "eventos",
+            "id, video_id, comportamento_label, label_corrigido, "
+            "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
+            "confianca, principal",
+            empresa=empresa, processo=processo,
+        )
     else:
         evs = eventos
     base = [
@@ -6392,27 +6335,14 @@ def montar_snapshot_chat(
     base = consolidar_eventos_para_metricas(base)
 
     if videos is None:
-        vids = (
-            sb.table("videos")
-            .select("id, duracao_s")
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .execute()
-            .data
-        ) or []
+        vids = varrer(sb, "videos", "id, duracao_s", empresa=empresa, processo=processo)
     else:
         vids = videos
     dur_total = sum((v.get("duracao_s") or 0) for v in vids)
 
     if comportamentos is None:
-        comps = (
-            sb.table("comportamentos")
-            .select("label, descricao")
-            .eq("empresa", empresa)
-            .eq("processo", processo)
-            .execute()
-            .data
-        ) or []
+        comps = varrer(sb, "comportamentos", "label, descricao",
+                       empresa=empresa, processo=processo)
     else:
         comps = comportamentos
     desc_por_label = {c["label"]: c.get("descricao", "") for c in comps}
@@ -6721,6 +6651,43 @@ def _scan_todos(fabrica, pagina: int = 1000) -> list[dict]:
     return linhas
 
 
+# Teto real do PostgREST. `.limit(50000)` NÃO é um pedido de 50 mil linhas: é um
+# pedido que o servidor corta em `max-rows` sem avisar ninguém — sem erro, sem
+# header, sem nada. A resposta truncada tem a mesma cara de uma resposta
+# completa, e é por isso que este bug sobreviveu tanto tempo.
+TETO_POSTGREST = 1000
+
+
+def varrer(sb, tabela: str, colunas: str, *, empresa: str | None = None,
+           processo: str | None = None, ordem: str = "id",
+           ajustes=None) -> list[dict]:
+    """Lê a tabela INTEIRA (paginando), com o filtro de empresa/processo.
+
+    Fase 81 — por que toda leitura de tabela grande passa por aqui.
+    O "Dia a dia" lia `eventos` com `.limit(100000)` e `videos` com
+    `.limit(50000)`, acreditando estar lendo tudo. O PostgREST devolvia as
+    primeiras 1000 linhas de cada um. Com a campanha rodando, os vídeos
+    passaram de 1000: os que ficaram de fora não tinham instante de gravação
+    conhecido, e TODOS os eventos deles foram descartados no laço
+    (`dt0 is None: continue`). O resultado na tela era um dia gravado o dia
+    inteiro aparecendo como algumas faixinhas soltas — e um dia que estava
+    cheio ontem ganhando um buraco hoje, conforme o corte se desloca.
+
+    Nenhuma leitura nova deve usar `.limit()` acima de TETO_POSTGREST; há teste
+    varrendo o fonte para impedir a volta do padrão.
+    """
+    def _fab():
+        q = sb.table(tabela).select(colunas)
+        if empresa is not None:
+            q = q.eq("empresa", empresa)
+        if processo is not None:
+            q = q.eq("processo", processo)
+        if ajustes is not None:
+            q = ajustes(q)
+        return q.order(ordem)
+    return _scan_todos(_fab, pagina=TETO_POSTGREST)
+
+
 def agregar_portfolio(
     sb: Client, empresa: str, processo: str | None = None
 ) -> dict[str, dict]:
@@ -6877,14 +6844,8 @@ def agregar_portfolio(
     # Padrões com confiança alta — entram na fórmula de maturidade
     n_padroes_alta: dict[str, int] = defaultdict(int)
     try:
-        q_pad = (
-            sb.table("padroes_processo")
-            .select("processo, confianca")
-            .eq("empresa", empresa)
-        )
-        if processo is not None:
-            q_pad = q_pad.eq("processo", processo)
-        pads = q_pad.limit(5000).execute().data or []
+        pads = varrer(sb, "padroes_processo", "id, processo, confianca",
+                      empresa=empresa, processo=processo)
         for r in pads:
             if (r.get("confianca") or "").lower() == "alta":
                 n_padroes_alta[r.get("processo")] += 1
@@ -6896,15 +6857,9 @@ def agregar_portfolio(
     # então tem que pesar na maturidade do Prism sobre o processo.
     n_respostas: dict[str, int] = defaultdict(int)
     try:
-        q_perg = (
-            sb.table("perguntas_processo")
-            .select("processo, status")
-            .eq("empresa", empresa)
-            .eq("status", "respondida")
-        )
-        if processo is not None:
-            q_perg = q_perg.eq("processo", processo)
-        perg = q_perg.limit(5000).execute().data or []
+        perg = varrer(sb, "perguntas_processo", "id, processo, status",
+                      empresa=empresa, processo=processo,
+                      ajustes=lambda q: q.eq("status", "respondida"))
         for r in perg:
             n_respostas[r.get("processo")] += 1
     except Exception:
@@ -7992,15 +7947,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                  (agregado + delta de % produtivo)
       tendencia: inclinação (pts de produtivo por dia trabalhado) + direção.
     """
-    videos = (
-        sb.table("videos")
-        .select("id, nome, duracao_s, gravado_em, processado_em")
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .limit(50000)
-        .execute()
-        .data
-    ) or []
+    videos = varrer(sb, "videos", "id, nome, duracao_s, gravado_em, processado_em",
+                    empresa=empresa, processo=processo)
     inicio_por_video: dict[str, datetime] = {}
     for v in videos:
         dt0 = _inicio_video_dt(v)
@@ -8009,35 +7957,22 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
     if not inicio_por_video:
         return {"dias": [], "janelas": None, "tendencia": None}
 
-    comps = (
-        sb.table("comportamentos")
-        .select("label, categoria_lean")
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .limit(5000)
-        .execute()
-        .data
-    ) or []
+    comps = varrer(sb, "comportamentos", "label, categoria_lean",
+                   empresa=empresa, processo=processo)
     cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
 
-    eventos = (
-        sb.table("eventos")
-        .select(
-            "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, validacao_correto, principal, papel_pessoa, "
-            "confianca, em_duvida, duvida_motivo, validado_humano, n_rotulos_no_minuto, "
-            # Fase 66: sem `n_amostras` o ramo 'sem_evidencia' nunca disparava
-            # aqui (vinha None) e o KPI mostrava 0 para sempre; sem
-            # `origem_validacao` não dava para excluir o determinístico;
-            # sem `camadas_disparadas` a garantia da sombra caía no fallback.
-            "n_amostras, origem_validacao, camadas_disparadas"
-        )
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .limit(100000)
-        .execute()
-        .data
-    ) or []
+    eventos = varrer(
+        sb, "eventos",
+        "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
+        "tempo_fim_s, validacao_correto, principal, papel_pessoa, "
+        "confianca, em_duvida, duvida_motivo, validado_humano, n_rotulos_no_minuto, "
+        # Fase 66: sem `n_amostras` o ramo 'sem_evidencia' nunca disparava
+        # aqui (vinha None) e o KPI mostrava 0 para sempre; sem
+        # `origem_validacao` não dava para excluir o determinístico;
+        # sem `camadas_disparadas` a garantia da sombra caía no fallback.
+        "n_amostras, origem_validacao, camadas_disparadas",
+        empresa=empresa, processo=processo,
+    )
     eventos = [
         e for e in eventos
         if e.get("validacao_correto") is not False and e.get("principal") is not False
@@ -8320,38 +8255,31 @@ def montar_serie_temporal(sb: Client, empresa: str, processo: str) -> dict:
     tempo por comportamento (label efetivo) e por categoria Lean. Tudo
     normalizado para ser comparável entre turnos de durações diferentes.
     """
+    # Fase 81 — os 500 eram os 500 MAIS ANTIGOS (`desc=False` + `limit`). Passados
+    # 500 vídeos, a "evolução" congelava no começo da campanha e nenhum turno
+    # novo entrava mais na curva. Pega os mais recentes e reinverte para plotar
+    # em ordem cronológica.
     videos = (
         sb.table("videos")
         .select("id, nome, duracao_s, processado_em")
         .eq("empresa", empresa)
         .eq("processo", processo)
-        .order("processado_em", desc=False)
+        .order("processado_em", desc=True)
         .limit(500)
         .execute()
         .data
     ) or []
+    videos = list(reversed(videos))
 
-    eventos = (
-        sb.table("eventos")
-        .select(
-            "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
-            "tempo_fim_s, validacao_correto, pessoa_track_id, principal"
-        )
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .limit(100000)
-        .execute()
-        .data
-    ) or []
+    eventos = varrer(
+        sb, "eventos",
+        "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
+        "tempo_fim_s, validacao_correto, pessoa_track_id, principal",
+        empresa=empresa, processo=processo,
+    )
 
-    comps = (
-        sb.table("comportamentos")
-        .select("label, categoria_lean")
-        .eq("empresa", empresa)
-        .eq("processo", processo)
-        .execute()
-        .data
-    ) or []
+    comps = varrer(sb, "comportamentos", "label, categoria_lean",
+                   empresa=empresa, processo=processo)
     cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
 
     # agrupa eventos por vídeo (Fase 16: só principais; crus de auditoria fora)

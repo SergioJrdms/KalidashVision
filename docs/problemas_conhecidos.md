@@ -134,6 +134,66 @@ escrita. Endpoint sem gatilho é dívida, não funcionalidade.
 
 ---
 
+## 5. O teto de linhas do PostgREST comia dias inteiros de gravação
+
+**Estado:** corrigido (Fase 81). Fica registrado porque a falha é invisível por
+natureza e o padrão errado é o que qualquer um escreveria.
+
+O dono abriu o dia 29 — gravado do começo ao fim — e a plataforma mostrou
+algumas faixinhas soltas. Pior: o dia 28, que na véspera aparecia completo,
+tinha ganhado um buraco entre 8:48 e 9:00. Nada tinha sido apagado.
+
+`.limit(50000)` **não pede 50 mil linhas**. O PostgREST corta toda resposta no
+seu `max-rows` (1000 no Supabase) e devolve as primeiras 1000 **sem erro, sem
+aviso, sem header**. Uma resposta truncada é indistinguível de uma completa —
+é por isso que isto sobreviveu tanto tempo e por isso que nenhum teste pegava:
+os dublês devolviam tudo o que tinham.
+
+O caminho do estrago no "Dia a dia":
+
+```
+videos  → .limit(50000)  → volta só 1000
+        → inicio_por_video fica sem os demais
+eventos → dt0 is None    → continue   ← o dia do operador desaparece aqui
+```
+
+Como o corte segue a ordem física da tabela, ele **se move a cada gravação
+nova**: um dia cheio ontem vira um dia esburacado hoje. Não havia bug de
+exibição nenhum — a tela desenhava fielmente os dados que recebia.
+
+Alcance: além do "Dia a dia", estavam truncados o **dashboard principal**, a
+**série temporal**, o **snapshot do chat** e o **contexto agregado** (que vai no
+prompt do modelo — memória lida pela metade faz o sistema reaprender o que já
+foi corrigido). A leitura de segmentos pendentes do orquestrador também: um par
+cam1/cam2 podia cair dos dois lados do corte e o vídeo era processado com um
+ângulo só.
+
+### A correção
+
+`varrer()` (em `pipeline.py`, sobre o `_scan_todos` que já existia) — pagina por
+`.range()` com `.order()` numa chave única. Toda leitura de tabela que cresce
+passa por lá.
+
+Dois defeitos vizinhos apareceram junto e foram corrigidos:
+
+- `montar_serie_temporal` pegava os **500 vídeos mais antigos**
+  (`order(processado_em, desc=False).limit(500)`): passados 500 vídeos, a curva
+  de evolução congelava no começo da campanha;
+- consultas **sem `.limit()` nenhum** sofrem o mesmo teto — `videos` no
+  dashboard era uma delas.
+
+### Regra que fica
+
+Toda leitura de `eventos`, `videos`, `segmentos` e afins passa por `varrer()`.
+`.limit(n)` só vale como **corte deliberado** com `n` ≤ 1000 (ex.: "as 12
+sugestões mais recentes"). `tests_teto_postgrest.py` varre o fonte e falha se o
+padrão voltar — e o dublê dele **aplica o teto**, como o servidor faz.
+
+Corolário mais amplo: um dublê de teste que é mais generoso que o serviço real
+não testa nada. Se o servidor corta, o dublê corta.
+
+---
+
 ## 2. `gravado_em` carimba a tz do servidor no timestamp do nome
 
 **Estado:** não corrigido. Sem efeito visível hoje.

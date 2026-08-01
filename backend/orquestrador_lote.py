@@ -81,16 +81,17 @@ def processar_lote(sb, empresa: str, processo: str) -> dict:
 
     with _LOCK:
         try:
-            pend = (
-                sb.table("segmentos")
-                .select("id, storage_path, nome, cam_id, gravado_em, status, recebido_em")
-                .eq("empresa", empresa)
-                .eq("processo", processo)
-                .eq("status", "pendente")
-                .limit(20000)
-                .execute()
-                .data
-            ) or []
+            # Fase 81 — paginado. Truncar aqui não era só "processa menos": o
+            # par cam1/cam2 podia ficar dos dois lados do corte, e o segmento
+            # cujo par ficou de fora seguia como SOLO — vídeo processado com
+            # um ângulo só, sem ninguém saber.
+            from .pipeline import varrer
+            pend = varrer(
+                sb, "segmentos",
+                "id, storage_path, nome, cam_id, gravado_em, status, recebido_em",
+                empresa=empresa, processo=processo,
+                ajustes=lambda q: q.eq("status", "pendente"),
+            )
         except Exception as e:
             log.warning(f"[lote] falha ao ler pendentes de {empresa}/{processo}: {e}")
             return {"pares": 0, "solo": 0, "itens": 0}
@@ -221,14 +222,9 @@ def _sweep_uma_vez() -> None:
     quiet_s = _env_int("KV_LOTE_QUIET_S", 900)   # 15min sem upload novo = lote "quieto"
     sb = make_supabase_client()
     try:
-        rows = (
-            sb.table("segmentos")
-            .select("empresa, processo, recebido_em")
-            .eq("status", "pendente")
-            .limit(20000)
-            .execute()
-            .data
-        ) or []
+        from .pipeline import varrer
+        rows = varrer(sb, "segmentos", "id, empresa, processo, recebido_em",
+                      ajustes=lambda q: q.eq("status", "pendente"))
     except Exception as e:
         log.warning(f"[lote] sweep: falha ao ler pendentes: {e}")
         return
