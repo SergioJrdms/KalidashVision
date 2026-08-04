@@ -1229,7 +1229,10 @@ def exportar_descritores_do_dia(
                "ombro_tronco", "ombro_tronco_mad", "ombro_tronco_n",
                "quadril_ombro", "quadril_ombro_mad", "quadril_ombro_n",
                "cabeca_tronco", "cabeca_tronco_mad", "cabeca_tronco_n",
-               "recorte"]
+               # Fase 84: o n do histograma é outro que o das razões — cor sai
+               # de qualquer amostra com caixa; razão exige ombros E quadris
+               # visíveis, que atrás do torno é bem mais raro.
+               "n_hist_sup", "n_hist_inf", "recorte"]
         linhas_csv.append(";".join(cab))
 
         for d in descs:
@@ -1262,6 +1265,8 @@ def exportar_descritores_do_dia(
                 _r("ombro_tronco"), _r("ombro_tronco", "mad"), _r("ombro_tronco", "n"),
                 _r("quadril_ombro"), _r("quadril_ombro", "mad"), _r("quadril_ombro", "n"),
                 _r("cabeca_tronco"), _r("cabeca_tronco", "mad"), _r("cabeca_tronco", "n"),
+                (d.get("hist_bins") or {}).get("n_sup", ""),
+                (d.get("hist_bins") or {}).get("n_inf", ""),
                 arq_recorte,
             ]))
 
@@ -1348,8 +1353,9 @@ foi formado. Os números são o que a detecção já calculava e descartava.
 | `ombro_tronco` | largura dos ombros ÷ comprimento do tronco |
 | `quadril_ombro` | largura do quadril ÷ largura dos ombros |
 | `cabeca_tronco` | nariz→pescoço ÷ comprimento do tronco |
-| `*_mad` | dispersão (desvio absoluto mediano) da razão NESTE track |
+| `*_mad` | dispersão da razão NESTE track — **vazio quando n < 3** |
 | `*_n` | em quantas amostras a razão pôde ser medida |
+| `n_hist_sup` / `n_hist_inf` | amostras que entraram em cada histograma |
 | `altura_rel` | altura da caixa ÷ altura do frame |
 | `tempo_posto_s` | tempo estimado dentro da zona do posto |
 | `hist_sup` / `hist_inf` | cor HSV (matiz × saturação) da metade de cima e de baixo |
@@ -1364,6 +1370,13 @@ foi formado. Os números são o que a detecção já calculava e descartava.
 3. **`*_mad` alto significa que a razão não está estável neste ambiente.**
    Se a dispersão DENTRO de um track é da ordem da diferença ENTRE tracks, o
    sinal não separa — e isso é a resposta do experimento, não uma falha dele.
+   `*_mad` **vazio** é outra coisa: o track tem menos de 3 medidas e não há
+   dispersão para estimar. Não leia vazio como zero.
+4. **Track curto é a regra, não a exceção.** Num dia medido, 57 de 90 tracks da
+   cam1 tinham UMA amostra. Isso não invalida o descritor como unidade de
+   agrupamento — é justamente por isso que se agrupa primeiro e só depois se
+   soma o tempo —, mas invalida qualquer leitura de "este track é assim".
+   Trate cada linha como uma observação fraca, não como uma pessoa.
 
 ## O que o resultado decide
 

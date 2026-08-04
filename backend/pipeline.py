@@ -796,6 +796,7 @@ def _anexar_segundo_angulo(
     yolo=None,
     rois_sec: dict | None = None,
     offset_s: float = 0.0,
+    desc_acc: dict | None = None,
 ) -> int:
     """Fase 6: para cada Amostra (da cam1), pega o frame da cam2 no MESMO
     instante REAL e guarda em `img_b64_secundario`. Retorna quantas amostras
@@ -814,6 +815,11 @@ def _anexar_segundo_angulo(
     """
     n = 0
     posto_sec = None
+    # Fase 84: o passe da cam2 passa a RASTREAR (e não só detectar) para que o
+    # descritor tenha uma chave de agrupamento. Ver o comentário no laço.
+    if yolo is not None and desc_acc is not None:
+        log.debug("[descritor] tracker zerado antes do passe da cam2: %s",
+                  resetar_tracker(yolo))
     if yolo is not None and rois_sec:
         _tem_posto = any(i.get("papel") == "posto_operador" for i in rois_sec.values())
         posto_sec = rois_sec if (_OPERADOR_FILTRO_ENABLE and _tem_posto) else None
@@ -859,14 +865,29 @@ def _anexar_segundo_angulo(
                          if i.get("papel") == "maquina"},
                         w2, h2,
                     )
-                res = yolo.predict(
-                    frame, classes=[0], conf=_CAM2_CONF, imgsz=416, verbose=False
+                # Fase 84 — `track` no lugar de `predict`. Mesmo detector, mesmos
+                # parâmetros, mesmas caixas: o veredito `op_cam2` não muda. O que
+                # se ganha é o ID, sem o qual não existe "descritor POR TRACK" na
+                # cam2 — e sem cam2 metade do experimento não existe.
+                # Os frames vêm por seek, não em sequência: a associação erra
+                # mais que na cam1 e os tracks da cam2 fragmentam mais. Para
+                # agrupar-por-aparência-primeiro isso é aceitável; para contar
+                # tempo por track, não seria.
+                res = yolo.track(
+                    frame, classes=[0], conf=_CAM2_CONF, imgsz=416,
+                    persist=True, tracker=TRACKER_CONFIG, verbose=False,
                 )
                 achou = False
                 maos = False
                 bbox_no_posto = None      # Fase 82: a caixa de quem está no posto
                 if res and res[0].boxes is not None and len(res[0].boxes) > 0:
                     boxes2 = res[0].boxes.xyxy.cpu().numpy()
+                    ids2 = None
+                    if res[0].boxes.id is not None:
+                        try:
+                            ids2 = res[0].boxes.id.cpu().numpy().astype(int)
+                        except Exception:
+                            ids2 = None
                     kpts2 = None
                     if getattr(res[0], "keypoints", None) is not None and \
                             res[0].keypoints.xyn is not None:
@@ -898,6 +919,17 @@ def _anexar_segundo_angulo(
                         # Fase 44: punho na zona 'maquina' da cam2 = operando.
                         if rois2_maq and not maos and _maos_na_maquina(pessoa2, rois2_maq, w2, h2):
                             maos = True
+                        # Fase 84: descritor da cam2, do MESMO frame já decodificado
+                        # e da MESMA inferência — custo adicional zero.
+                        # Detecção sem id não vira descritor: sem chave estável,
+                        # a linha seria uma pessoa diferente a cada amostra.
+                        if desc_acc is not None and ids2 is not None and j < len(ids2):
+                            pessoa2["frame_idx"] = None
+                            acumular_descritor(
+                                desc_acc, int(ids2[j]), frame=frame, pessoa=pessoa2,
+                                w=w2, h=h2, tempo_s=am.tempo_s,
+                                no_posto=no_posto2, papel=None,
+                            )
                     if bbox_no_posto is not None:
                         am.bbox_cam2 = bbox_no_posto[0]
                         am.dim_cam2 = (w2, h2)
@@ -1768,10 +1800,26 @@ def _mediana(v: list) -> float | None:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
-def _mad(v: list, med: float) -> float:
+# Abaixo disto não há dispersão para medir: 1 amostra dá MAD 0, e 2 dão um
+# número que é metade da diferença entre duas medidas — nenhum dos dois é uma
+# estimativa de estabilidade.
+_MAD_MIN_N = 3
+
+
+def _mad(v: list, med: float) -> float | None:
     """Desvio absoluto mediano — dispersão que não é sequestrada por um frame
-    ruim. É o que diz se a razão é estável NESTE ambiente, e é isso que decide
-    se o sinal serve ou não."""
+    ruim. É o que diz se a razão é estável NESTE ambiente.
+
+    Fase 84 — devolve None com menos de `_MAD_MIN_N` amostras. Antes devolvia
+    0.0, e 0.0 lido numa planilha é "perfeitamente estável" — exatamente a
+    leitura oposta da verdade, que é "não há como saber". Com 57 dos 90 tracks
+    de um dia tendo UMA amostra, esse zero seria a maioria da coluna: o
+    experimento concluiria que as razões são estáveis quando ninguém as mediu
+    duas vezes. É o mesmo erro do bbox (0,0,0,0) da Fase 82 — ausência de
+    medida vestida de medida.
+    """
+    if len(v) < _MAD_MIN_N:
+        return None
     return _mediana([abs(x - med) for x in v]) or 0.0
 
 
@@ -1855,7 +1903,9 @@ def fechar_descritores(acc: dict, intervalo_s: float, cam_id: str | None,
             med = _mediana(vals)
             if med is None:
                 continue
-            razoes[nome] = {"med": round(med, 4), "mad": round(_mad(vals, med), 4),
+            _m = _mad(vals, med)
+            razoes[nome] = {"med": round(med, 4),
+                            "mad": (round(_m, 4) if _m is not None else None),
                             "n": len(vals)}
         alt_rel = _mediana(d["alturas_rel"])
         asp = _mediana(d["aspectos"])
@@ -3923,10 +3973,14 @@ def etapa_persistir(
             linhas_desc = [{
                 "empresa": empresa, "processo": processo, "video_id": video_id,
                 "gravado_em": gravado_em,
-                **{k: v for k, v in d.items()},
+                # Fase 84: a chave PRECISA incluir a câmera. cam1 e cam2 numeram
+                # tracks de forma independente — as duas têm um track 1, e sem a
+                # câmera na chave o upsert de uma sobrescreveria a outra.
+                # `cam_id` nunca nulo: coluna de chave com NULL não deduplica.
+                **{**d, "cam_id": (d.get("cam_id") or cam_id or "cam1")},
             } for d in descritores_track]
             sb.table("descritores_track").upsert(
-                linhas_desc, on_conflict="video_id,pessoa_track_id"
+                linhas_desc, on_conflict="video_id,cam_id,pessoa_track_id"
             ).execute()
             log.info("[descritor] %d track(s) descritos neste vídeo.", len(linhas_desc))
         except Exception as e:   # noqa: BLE001
@@ -9359,12 +9413,32 @@ def processar_video(
         # com segundos/minutos de diferença) — sem isso a confirmação e o frame
         # do 2º ângulo olham o instante errado.
         offset_cam2 = _offset_entre_nomes(nome_video, nome_secundario)
+        desc_acc_cam2: dict = {}
         n_sec = _anexar_segundo_angulo(
             amostras, video_path_secundario,
             yolo=(yolo if zona_posto else None),
             rois_sec=rois_contexto_secundario,
             offset_s=offset_cam2,
+            desc_acc=desc_acc_cam2,
         )
+        # Fase 84 — o descritor da cam2. Antes disto, `descritores_track` só
+        # tinha a câmera PRIMÁRIA: o pareamento elege sempre a de menor id
+        # (cam1) para dirigir detecção/tracking, e a cam2 entrava só como
+        # imagem de confirmação — sem tracker, sem id, sem descritor. As
+        # únicas linhas de cam2 no banco eram de segmentos processados SOLO,
+        # quando a cam2 virava primária por não ter par.
+        if desc_acc_cam2:
+            _int_cam2 = intervalo_amostragem_s * _CAM2_CONFIRM_STRIDE
+            try:
+                _info2 = inspecionar_video(video_path_secundario)
+                _w2, _h2 = int(_info2["largura"]), int(_info2["altura"])
+            except Exception:
+                _w2 = _h2 = 0
+            descritores_track = list(descritores_track) + fechar_descritores(
+                desc_acc_cam2, _int_cam2, cam_id_secundario, _w2, _h2,
+            )
+            log.info("[descritor] cam2 (%s): %d track(s) descritos.",
+                     cam_id_secundario or "cam2", len(desc_acc_cam2))
         log.info(
             f"[dual-angle] {cam_id or 'cam1'} + {cam_id_secundario or 'cam2'}: "
             f"2º ângulo em {n_sec}/{len(amostras)} amostras"

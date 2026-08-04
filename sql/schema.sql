@@ -1014,3 +1014,28 @@ create policy descritores_track_modify on descritores_track
 -- ⚠️ GRANT EXPLÍCITO: sem ele a Data API devolve VAZIO e sem erro.
 grant select, insert, update, delete on table descritores_track to service_role;
 grant select on table descritores_track to authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 84 — a CÂMERA entra na chave do descritor.
+--
+-- O descritor só existia para a câmera PRIMÁRIA. O pareamento elege sempre a
+-- de menor id (cam1) para dirigir detecção e tracking; a cam2 entrava apenas
+-- como imagem de confirmação — `predict` sem tracker, sem id, e portanto sem
+-- nada que pudesse ser chaveado por track. As únicas linhas de cam2 no banco
+-- vinham de segmentos processados SOLO, quando a cam2 virava primária por não
+-- ter par. Dia 04/08: 90 tracks de cam1 e 4 de cam2, todos de um vídeo só.
+--
+-- Agora o passe da cam2 usa `track` (mesmo detector, mesmas caixas, mesmo
+-- veredito) e produz descritor. Como cam1 e cam2 numeram tracks de forma
+-- INDEPENDENTE — as duas têm um track 1 —, a chave única passa a incluir a
+-- câmera, senão o upsert de uma sobrescreveria a outra.
+-- ════════════════════════════════════════════════════════════════════════
+alter table descritores_track add column if not exists segmento_id uuid;
+update descritores_track set cam_id = 'cam1' where cam_id is null;
+alter table descritores_track alter column cam_id set default 'cam1';
+alter table descritores_track alter column cam_id set not null;
+alter table descritores_track
+    drop constraint if exists descritores_track_video_id_pessoa_track_id_key;
+create unique index if not exists uq_desc_track_video_cam
+    on descritores_track(video_id, cam_id, pessoa_track_id);

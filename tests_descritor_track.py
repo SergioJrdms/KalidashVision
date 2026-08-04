@@ -246,13 +246,16 @@ check("a detecção devolve os descritores",
       "return amostras, info, ids_unicos, descritores" in src)
 check("e o processamento os repassa à persistência",
       "descritores_track=descritores_track" in src)
-check("a gravação é upsert na chave (video_id, track)",
-      'on_conflict="video_id,pessoa_track_id"' in src)
+check("a gravação é upsert na chave (video_id, CÂMERA, track) — cam1 e cam2 "
+      "numeram tracks de forma independente",
+      'on_conflict="video_id,cam_id,pessoa_track_id"' in src)
 check("e é NÃO-FATAL (experimento não derruba vídeo da campanha)",
       "o vídeo segue normal" in src)
-check("a tabela existe com a chave única",
+check("a tabela existe e a chave única inclui a câmera",
       "create table if not exists descritores_track" in sql
-      and "unique (video_id, pessoa_track_id)" in sql)
+      and "on descritores_track(video_id, cam_id, pessoa_track_id)" in sql)
+check("e cam_id não pode ser nulo (coluna de chave com NULL não deduplica)",
+      "alter column cam_id set not null" in sql)
 check("com RLS e GRANT explícito (sem grant a Data API devolve vazio)",
       "descritores_track enable row level security" in sql
       and "grant select, insert, update, delete on table descritores_track" in sql)
@@ -275,6 +278,52 @@ check("e que diz o que significa dispersão alta",
 doc = Path("docs/sinais_por_track.md").read_text()
 check("o levantamento foi atualizado com o que passou a existir",
       "Fase 83" in doc)
+
+
+print("\n[10] Fase 84 — a cam2 também produz descritor")
+i_sec = src.index("def _anexar_segundo_angulo(")
+corpo_sec = src[i_sec:src.index("def etapa_confirmar_operador(")]
+check("o passe da cam2 RASTREIA (predict não dá id, e sem id não há track)",
+      "yolo.track(" in corpo_sec and "yolo.predict(" not in corpo_sec)
+check("com o mesmo detector e os mesmos parâmetros (o veredito op_cam2 não muda)",
+      "conf=_CAM2_CONF" in corpo_sec and "imgsz=416" in corpo_sec)
+check("o tracker é zerado antes do passe (ids da cam2 não continuam os da cam1)",
+      "resetar_tracker(yolo)" in corpo_sec)
+check("acumula descritor do MESMO frame já decodificado (custo adicional zero)",
+      "acumular_descritor(" in corpo_sec)
+check("detecção sem id NÃO vira descritor",
+      "ids2 is not None and j < len(ids2)" in corpo_sec)
+check("o processamento fecha o descritor da cam2 com a câmera dela",
+      "fechar_descritores(\n                desc_acc_cam2, _int_cam2, cam_id_secundario" in src)
+check("e usa o intervalo efetivo da cam2 (o stride da confirmação conta)",
+      "intervalo_amostragem_s * _CAM2_CONFIRM_STRIDE" in src)
+check("o comentário registra a causa (só a câmera PRIMÁRIA era descrita)",
+      "tinha a câmera PRIMÁRIA" in src)
+
+print("\n[11] Fase 84 — MAD com uma amostra é ausência, não estabilidade")
+check("1 amostra não tem dispersão", pl._mad([0.5], 0.5) is None)
+check("2 amostras também não", pl._mad([0.5, 0.7], 0.6) is None)
+check("3 já tem", pl._mad([0.5, 0.5, 0.9], 0.5) == 0.0)
+um_so = {}
+pl.acumular_descritor(um_so, 3, frame=None if not TEM_CV else frame_bicolor(AZUL, VERMELHO, 640, 480),
+                      pessoa={"bbox": (100, 60, 160, 380), "kpts": pessoa_padrao(1.0)},
+                      w=W, h=H, tempo_s=0.0, no_posto=True, papel="operador")
+d1 = pl.fechar_descritores(um_so, 8.0, "cam1", W, H)[0]
+check("track de UMA amostra ainda tem a razão medida",
+      d1["razoes"]["ombro_tronco"]["med"] == 0.5, d1["razoes"])
+check("mas a dispersão vem NULA, não zero — zero seria 'perfeitamente estável'",
+      d1["razoes"]["ombro_tronco"]["mad"] is None, d1["razoes"])
+check("e o n denuncia a fragilidade", d1["razoes"]["ombro_tronco"]["n"] == 1)
+check("tempo visível = 1 amostra x intervalo (o track de 8s do dono)",
+      d1["tempo_visivel_s"] == 8.0, d1["tempo_visivel_s"])
+
+print("\n[12] Fase 84 — a exportação conta o n de cada sinal separado")
+check("csv traz o n dos histogramas (cor sai de mais amostras que razão)",
+      '"n_hist_sup", "n_hist_inf"' in mn)
+check("o LEIA-ME diz para não ler mad vazio como zero",
+      "Não leia vazio como zero" in mn)
+check("e avisa que track curto é a regra",
+      "57 de 90 tracks" in mn)
 
 print(f"\n{'=' * 60}\n  {ok} ok · {fail} falha(s)"
       + (" · [6-8] pulados (sem cv2)" if pulados else "") + f"\n{'=' * 60}")

@@ -209,17 +209,90 @@ que importa depois de o bucket ter estourado uma vez nesta campanha.
 
 ---
 
+## 6. Fase 84 — a cam2 não estava sendo descrita
+
+**Sintoma:** num dia com 53 segmentos de cada câmera e 54 vídeos processados,
+`descritores_track` tinha 90 tracks de cam1 e **4 de cam2**, todos de um único
+vídeo, sem nada novo desde o dia anterior.
+
+**Causa — estrutural, não de zona.** O pareamento elege como primária a câmera
+de **menor id**: `# primário = câmera de MENOR id (cam1) — dirige a
+detecção/tracking`. O tracking (e, com ele, o acumulador do descritor) roda em
+`etapa_detectar_e_amostrar`, que só vê o vídeo primário. A cam2 entrava apenas
+em `_anexar_segundo_angulo`, com `yolo.predict` — **sem tracker, logo sem id**,
+e do resultado só sobreviviam dois booleanos (`op_cam2`, `maos_cam2`).
+
+As 4 linhas de cam2 que existiam vieram de um segmento processado **solo**:
+sem par, a cam2 vira primária e é rastreada como qualquer vídeo. Por isso eram
+de um vídeo só e de um horário só.
+
+**Correção:** o passe da cam2 usa `track` no lugar de `predict` — mesmo
+detector, mesmos parâmetros, mesmas caixas (o veredito `op_cam2` não muda), no
+mesmo frame já decodificado e na mesma inferência que já acontecia. Custo
+adicional: o overhead do associador, desprezível.
+
+**Três consequências que precisam estar ditas:**
+
+1. **Os tracks da cam2 fragmentam mais que os da cam1.** Os frames da cam2 vêm
+   por *seek* (instante alvo = `tempo_s + offset`), não em sequência: a predição
+   de movimento do BoT-SORT erra mais e troca de id com mais frequência. Para
+   agrupar-por-aparência-primeiro isso é aceitável. Para contar tempo por track
+   na cam2, **não é** — não faça isso.
+2. **Depende das zonas da cam2.** A inferência na cam2 só roda quando há zona de
+   `posto_operador` desenhada nela (`posto_sec`). Sem zona na cam2, não há
+   descritor de cam2 — a suspeita de dependência de ROI existe, só não era a
+   causa principal.
+3. **A chave mudou.** cam1 e cam2 numeram tracks de forma independente: as duas
+   têm um track 1. A unicidade passou a ser `(video_id, cam_id,
+   pessoa_track_id)`, e `cam_id` virou `not null` — coluna de chave com NULL não
+   deduplica.
+
+---
+
+## 7. Fragmentação: o que ela faz com o descritor
+
+Medição do dono num turno de 8h48 na cam1: **57 de 90 tracks com 8 segundos** (o
+mínimo — que, com o intervalo de amostragem configurado, é **uma única
+amostra**), média 17 s, só 3 acima de 60 s.
+
+O que isso faz com cada sinal:
+
+| sinal | com n=1 | por quê |
+|---|---|---|
+| histograma de cor | **utilizável** | uma amostra são milhares de pixels; a distribuição já é densa |
+| `altura_rel`, `aspecto` | utilizável, ruidoso | uma medida de um instante; postura entra inteira |
+| razões corporais | **frágil** | exigem ombros **e** quadris detectados no mesmo frame — atrás do torno, muitas amostras não produzem razão nenhuma |
+| `*_mad` | **inexistente** | não há dispersão em uma medida |
+
+**Correção que veio junto:** `_mad` devolvia `0.0` com uma amostra. Numa planilha,
+0 lê-se como "perfeitamente estável" — a leitura oposta da verdade, que é "não
+há como saber". Com 57 de 90 tracks nessa situação, esse zero seria a maioria da
+coluna e o experimento concluiria estabilidade onde ninguém mediu duas vezes.
+Agora vem **nulo** abaixo de 3 amostras. É o mesmo erro do `bbox` (0,0,0,0) da
+Fase 82: ausência de medida vestida de medida.
+
+**O descritor continua servindo — como unidade fraca.** Agrupar primeiro e somar
+o tempo depois é justamente o desenho que tolera n baixo: 90 observações fracas
+formam grupos fortes, enquanto 90 julgamentos por track não formariam nada. O
+que não se pode fazer é ler uma linha isolada como "esta pessoa é assim".
+
+---
+
 ## Ordem sugerida para o experimento
 
-1. **Altura relativa por câmera** (`bbox_stats.altura_rel`), condicionada por
-   rótulo e por região do frame. É o que já está gravado a partir de agora.
-2. **Razões de keypoints** — invariantes de escala, custo zero, só não estão
-   persistidas.
-3. **Histograma de cor** — o único que exige acrescentar código de captura, e
-   ainda assim trivial.
-4. `presenca_zona` como âncora de rótulo fraco: quem ficou o turno inteiro é o
-   titular *daquele vídeo*, e serve para rotular os dados do experimento sem
-   ninguém marcar à mão.
+Revista depois da medição de fragmentação (Fase 84). A ordem antiga supunha
+tracks longos; com 57 de 90 tracks de uma amostra só, a robustez a n baixo passa
+a ser o primeiro critério de escolha.
+
+1. **Histograma de cor** — o mais robusto com n=1, porque uma amostra já são
+   milhares de pixels. Comece por ele, **uma câmera de cada vez**.
+2. **Razões corporais**, filtrando por `*_n` — a razão só existe quando ombros e
+   quadris aparecem no mesmo frame, o que atrás do torno é minoria. Espere
+   perder linhas; é melhor perder do que preencher.
+3. **`altura_rel`** condicionada por região do frame (o confundidor da distância
+   continua lá; as razões existem justamente para não depender disto).
+4. **`tempo_posto_s` como rótulo fraco**, não como sinal de agrupamento: some o
+   tempo *depois* de agrupar. Somar antes é a ordem que a fragmentação quebrou.
 
 Dado que só vale a partir de agora: eventos anteriores à Fase 82 têm
 `bbox_stats` nulo e `bbox_inicio` zerado nos papéis 'operador' e 'posto_vazio', e
