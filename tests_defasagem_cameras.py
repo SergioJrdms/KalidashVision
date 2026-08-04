@@ -61,7 +61,9 @@ check("nome sem token → 0.0 (assume alinhado)",
 print("\n[2] O PIPELINE já compensa — a defasagem NÃO corrompe a análise")
 src = Path("backend/pipeline.py").read_text()
 i = src.index("def _anexar_segundo_angulo(")
-corpo = src[i:i + 6000]
+# Recorta até a PRÓXIMA função, não por contagem de caracteres: uma janela fixa
+# passa a mentir assim que alguém acrescenta duas linhas na função.
+corpo = src[i:src.index("def etapa_confirmar_operador(")]
 check("o alvo na cam2 soma o offset",
       "alvo_ms = (am.tempo_s + offset_s) * 1000.0" in corpo, )
 check("instante fora do segmento é detectado",

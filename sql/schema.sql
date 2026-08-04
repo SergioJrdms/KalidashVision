@@ -908,3 +908,40 @@ on conflict (empresa, processo, nome) do update
 alter table eventos add column if not exists descricao_invalida boolean not null default false;
 create index if not exists idx_eventos_desc_invalida
     on eventos(empresa, processo) where descricao_invalida;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 82 — A CAIXA DA PESSOA VOLTA A SER UMA MEDIDA.
+--
+-- `bbox_inicio` vinha {x1:0,y1:0,x2:0,y2:0} em todo evento de 'operador' e
+-- 'posto_vazio'; só 'visitante' tinha coordenada real. Duas causas, ambas de
+-- escrita, nenhuma de leitura:
+--
+--   1. RESGATE PELA CAM2 — quando a cam1 não vê o operador (atrás do torno) e
+--      a cam2 vê, o evento nasce do 2º ângulo. O detector da cam2 CALCULAVA a
+--      caixa e ela era jogada fora: o laço guardava só o booleano `achou`.
+--      A observação era gravada com (0,0,0,0).
+--   2. POSTO VAZIO — não há pessoa, e mesmo assim gravava-se (0,0,0,0).
+--
+-- Zero não é ausência: é a afirmação de uma pessoa de tamanho nenhum no canto
+-- superior esquerdo da imagem. E ela era lida como medida — `montar_fato_evento`
+-- somava esse ponto fantasma no cálculo de deslocamento, o que fazia o sinal
+-- `movimento` dizer "andando" em minuto de gente parada.
+--
+-- Agora: caixa que não mede nada → NULL. Ausência declarada.
+--
+-- `bbox_cam` diz de QUAL câmera são as coordenadas. Sem isso, altura da cam1 e
+-- altura da cam2 seriam comparadas como se fossem a mesma régua — e não são:
+-- ângulo, distância e resolução diferentes.
+--
+-- `bbox_stats` é o resumo do corpo no evento (mediana das amostras, não um
+-- frame só) com `altura_rel` = altura ÷ altura do frame, que é o que torna a
+-- medida comparável entre vídeos e resoluções.
+--
+-- HISTÓRICO: os zeros antigos ficam como estão. Não se apaga dado de produção
+-- no meio de campanha, e a distinção importa — o filtro para qualquer análise é
+--   where bbox_inicio is not null
+--     and (bbox_inicio->>'y2')::numeric - (bbox_inicio->>'y1')::numeric > 1
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists bbox_cam   text;
+alter table eventos add column if not exists bbox_stats jsonb;

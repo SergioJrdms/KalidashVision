@@ -388,6 +388,11 @@ create index if not exists idx_zonas_ctx on zonas_camera(empresa, processo, cam_
 alter table eventos add column if not exists papel_pessoa text;
 create index if not exists idx_eventos_papel on eventos(papel_pessoa);
 
+-- Fase 82: de qual câmera são as coordenadas de `bbox_inicio` ('cam1'|'cam2')
+-- e o resumo do corpo no evento (mediana das amostras + altura relativa).
+alter table eventos add column if not exists bbox_cam   text;
+alter table eventos add column if not exists bbox_stats jsonb;
+
 -- Prism: suporte a conversas de escopo global (visão de toda a empresa).
 -- Conversas globais têm escopo='global' e processo = null.
 alter table prism_conversas add column if not exists escopo text not null default 'processo';
@@ -859,6 +864,7 @@ def _anexar_segundo_angulo(
                 )
                 achou = False
                 maos = False
+                bbox_no_posto = None      # Fase 82: a caixa de quem está no posto
                 if res and res[0].boxes is not None and len(res[0].boxes) > 0:
                     boxes2 = res[0].boxes.xyxy.cpu().numpy()
                     kpts2 = None
@@ -870,19 +876,31 @@ def _anexar_segundo_angulo(
                             kpts2 = None
                     h2, w2 = frame.shape[:2]
                     for j, b in enumerate(boxes2):
-                        pessoa2 = {"bbox": tuple(b.astype(int))}
+                        pessoa2 = {"bbox": tuple(int(v) for v in b.astype(int))}
                         if kpts2 is not None and j < len(kpts2):
                             pessoa2["kpts"] = kpts2[j].astype("float32")
                         # Fase 31: qualquer parte do corpo no posto conta.
                         pontos2 = _pontos_da_pessoa(pessoa2, w2, h2)
-                        if not achou and any(
+                        no_posto2 = any(
                             _ponto_em_roi(px, py, i["polygon"])
                             for i in rois2.values() for px, py in pontos2
-                        ):
+                        )
+                        if no_posto2:
                             achou = True
+                            # Fase 82: guarda a MAIOR caixa dentro do posto. Com
+                            # duas pessoas na zona, a maior é a mais próxima da
+                            # câmera — mesmo critério de desempate que a eleição
+                            # do titular já usa na cam1.
+                            bx1, by1, bx2, by2 = pessoa2["bbox"]
+                            area2 = max(0, bx2 - bx1) * max(0, by2 - by1)
+                            if bbox_no_posto is None or area2 > bbox_no_posto[1]:
+                                bbox_no_posto = (pessoa2["bbox"], area2)
                         # Fase 44: punho na zona 'maquina' da cam2 = operando.
                         if rois2_maq and not maos and _maos_na_maquina(pessoa2, rois2_maq, w2, h2):
                             maos = True
+                    if bbox_no_posto is not None:
+                        am.bbox_cam2 = bbox_no_posto[0]
+                        am.dim_cam2 = (w2, h2)
                 am.op_cam2 = achou
                 am.maos_cam2 = maos
             except Exception as e:
@@ -1549,6 +1567,17 @@ class Amostra:
     maos_cam2: bool = False                  # Fase 44: punho na zona 'maquina' pela cam2
     operador_presente: bool | None = None   # Fase 28: veredito do slot (pós-confirmação)
     operador_ponte: bool = False            # Fase 34: presença por PONTE temporal
+    # Fase 82: a caixa da pessoa que ESTABELECEU a presença na cam2. O detector
+    # já a calculava e ela era descartada no `if` que só guardava o booleano —
+    # no resgate pela cam2 o evento nascia sem nenhuma medida do corpo.
+    # Coordenadas no referencial da CAM2; `dim_cam2` = (largura, altura) do
+    # frame, sem o qual a caixa não é comparável entre câmeras/resoluções.
+    bbox_cam2: tuple | None = None
+    dim_cam2: tuple | None = None
+    # Dimensões do frame da cam1 (largura, altura). Uma altura de bbox em pixels
+    # não significa nada sem a altura do quadro: 300px num frame de 480 e num de
+    # 1080 são pessoas de tamanhos aparentes completamente diferentes.
+    dim: tuple | None = None
 
 
 def inspecionar_video(video_path: str) -> dict:
@@ -1877,6 +1906,7 @@ def etapa_detectar_e_amostrar(
                             tempo_s=tempo_s,
                             img_b64=img_b64,
                             pessoas=pessoas,
+                            dim=(w, h),
                         )
                     )
                 elif modo_op:
@@ -1885,7 +1915,7 @@ def etapa_detectar_e_amostrar(
                     # e da confirmação pela cam2.
                     amostras.append(
                         Amostra(frame_idx=frame_idx, tempo_s=tempo_s,
-                                img_b64="", pessoas=[])
+                                img_b64="", pessoas=[], dim=(w, h))
                     )
         frame_idx += 1
         if frame_idx % 60 == 0:
@@ -2061,6 +2091,15 @@ def etapa_analise_vlm(
                     origem_resgate = "indefinida_herdada"
                     n_herdadas += 1
             if desc_cam2:
+                # Fase 82 — A CAIXA VEM DA CÂMERA QUE VIU A PESSOA.
+                # Aqui a cam1 não vê o operador (é o caso do resgate); a caixa
+                # que existe é a da cam2, e ela vinha sendo substituída por
+                # (0,0,0,0). Zero não é "sem medida": é uma medida FALSA de uma
+                # pessoa de tamanho nenhum na origem da imagem, e ela contamina
+                # tudo que lê bbox (o `deslocamento_rel` do fato do evento
+                # inclusive). Na ponte temporal ninguém foi visto em instante
+                # nenhum — ali a caixa é NULA de verdade.
+                bbox_obs = am.bbox_cam2 if origem_resgate != "ponte_temporal" else None
                 observacoes.append(
                     {
                         "tempo_s": am.tempo_s,
@@ -2068,7 +2107,9 @@ def etapa_analise_vlm(
                         "track_id": (ultimo_tid_op if origem_resgate == "ponte_temporal"
                                      and ultimo_tid_op is not None else OPERADOR_CAM2_TID),
                         "descricao": desc_cam2,
-                        "bbox": (0, 0, 0, 0),
+                        "bbox": bbox_obs,
+                        "bbox_cam": "cam2" if bbox_obs else None,
+                        "bbox_dim": am.dim_cam2 if bbox_obs else None,
                         "zona": zona_posto,
                         "papel": "operador",
                         "origem_gate": origem_resgate,
@@ -2089,7 +2130,12 @@ def etapa_analise_vlm(
                         "frame_idx": am.frame_idx,
                         "track_id": POSTO_VAZIO_TID,
                         "descricao": POSTO_VAZIO_DESC,
-                        "bbox": (0, 0, 0, 0),
+                        # Fase 82: não há pessoa — a caixa é NULA, não zerada.
+                        # Zerada, ela entrava nos cálculos como um corpo de
+                        # altura 1px na origem.
+                        "bbox": None,
+                        "bbox_cam": None,
+                        "bbox_dim": None,
                         "zona": zona_posto,
                         "papel": "posto_vazio",
                         "origem_gate": "posto_vazio",
@@ -2174,8 +2220,15 @@ def etapa_analise_vlm(
                     "track_id": tid,
                     "descricao": desc,
                     "bbox": p["bbox"],
+                    "bbox_cam": "cam1",
+                    "bbox_dim": am.dim,
                     "zona": p["zona"],
                     "papel": p.get("papel"),
+                    # Fase 82: `maos_maquina` era LIDO em montar_fato_evento
+                    # (`e.get("maos_maquina")`) e nunca chegava lá — a chave
+                    # morria aqui e o sinal do punho na zona da máquina nunca
+                    # entrou em fato nenhum. Custo zero: já estava calculado.
+                    "maos_maquina": p.get("maos_maquina"),
                     "origem_gate": origem_gate,
                     "mudanca_contexto": origem_gate == "analisado",
                 }
@@ -2369,6 +2422,85 @@ def etapa_clusterizar(
 # ═════════════════════════════════════════════════════════════════════════
 # ETAPA 4 · Segmentação em eventos
 # ═════════════════════════════════════════════════════════════════════════
+def _bbox_valido(b) -> bool:
+    """Fase 82: caixa que MEDE alguma coisa. (0,0,0,0) não mede — era o valor
+    que o resgate pela cam2 e o posto vazio gravavam quando não havia caixa, e
+    ele passava por qualquer checagem de existência."""
+    if not b or len(b) < 4:
+        return False
+    x1, y1, x2, y2 = (float(v) for v in b[:4])
+    return (x2 - x1) > 1 and (y2 - y1) > 1
+
+
+def _resumo_bbox(caixas: list, dim: tuple | None, cam: str | None) -> dict | None:
+    """Estatística das caixas de UM evento — o insumo do experimento de
+    separabilidade. Uma caixa de um único frame é uma amostra de tamanho 1;
+    a mediana sobre as amostras do evento resiste ao frame em que o operador
+    está agachado ou meio ocluso.
+
+    `altura_rel` = altura da caixa ÷ altura do frame: é o que permite comparar
+    dois vídeos, duas resoluções e duas câmeras. Altura em pixel crua vai junto
+    porque a normalização pode estar errada e é bom poder conferir.
+    """
+    validas = [b for b in caixas if _bbox_valido(b)]
+    if not validas:
+        return None
+    alturas = sorted(float(b[3]) - float(b[1]) for b in validas)
+    larguras = sorted(float(b[2]) - float(b[0]) for b in validas)
+
+    def _med(v):
+        n = len(v)
+        return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+
+    alt_med = _med(alturas)
+    h_frame = float(dim[1]) if dim and len(dim) > 1 and dim[1] else 0.0
+    out = {
+        "n": len(validas),
+        "cam": cam,
+        "altura_med": round(alt_med, 1),
+        "altura_min": round(alturas[0], 1),
+        "altura_max": round(alturas[-1], 1),
+        "largura_med": round(_med(larguras), 1),
+        # Proporção do corpo: quem está de pé é mais "magro" que quem se abaixa.
+        "aspecto_med": round(_med(larguras) / max(1.0, alt_med), 3),
+    }
+    if h_frame > 0:
+        out["altura_rel"] = round(alt_med / h_frame, 4)
+        out["frame_h"] = int(h_frame)
+    return out
+
+
+def _bbox_jsonb(b) -> dict | None:
+    """Caixa → jsonb, ou NULL. Só grava o que mede alguma coisa."""
+    if not _bbox_valido(b):
+        return None
+    return {"x1": int(b[0]), "y1": int(b[1]), "x2": int(b[2]), "y2": int(b[3])}
+
+
+def _abrir_evento(tid: int, o: dict) -> dict:
+    """Abre um evento a partir da 1ª observação dele. `bbox_inicio` fica NULO
+    quando a observação não tem caixa (posto vazio, ponte temporal) — antes
+    virava (0,0,0,0), que é uma medida falsa, não uma ausência."""
+    tem = _bbox_valido(o.get("bbox"))
+    return {
+        "pessoa_track_id": tid,
+        "comportamento_label": o["label"],
+        "descricao_bruta": o["descricao"],
+        "tempo_inicio_s": o["tempo_s"],
+        "tempo_fim_s": o["tempo_s"],
+        "frame_inicio": o["frame_idx"],
+        "frame_fim": o["frame_idx"],
+        "bbox_inicio": list(o["bbox"]) if tem else None,
+        "bbox_cam": o.get("bbox_cam") if tem else None,
+        "_dim": o.get("bbox_dim") if tem else None,
+        "_caixas": [list(o["bbox"])] if tem else [],
+        "maos_maquina": o.get("maos_maquina"),
+        "zona_contexto": o["zona"],
+        "papel_pessoa": o.get("papel"),
+        "n_amostras": 1,
+    }
+
+
 def etapa_segmentar_eventos(
     observacoes_brutas: list[dict],
     label_de: Callable[[str], str],
@@ -2389,19 +2521,7 @@ def etapa_segmentar_eventos(
     for tid, obs_lista in por_pessoa.items():
         if not obs_lista:
             continue
-        atual = {
-            "pessoa_track_id": tid,
-            "comportamento_label": obs_lista[0]["label"],
-            "descricao_bruta": obs_lista[0]["descricao"],
-            "tempo_inicio_s": obs_lista[0]["tempo_s"],
-            "tempo_fim_s": obs_lista[0]["tempo_s"],
-            "frame_inicio": obs_lista[0]["frame_idx"],
-            "frame_fim": obs_lista[0]["frame_idx"],
-            "bbox_inicio": list(obs_lista[0]["bbox"]),
-            "zona_contexto": obs_lista[0]["zona"],
-            "papel_pessoa": obs_lista[0].get("papel"),
-            "n_amostras": 1,
-        }
+        atual = _abrir_evento(tid, obs_lista[0])
         for o in obs_lista[1:]:
             gap = o["tempo_s"] - atual["tempo_fim_s"]
             # Fase 28: mudança de PAPEL (operador↔visitante) quebra o evento —
@@ -2414,21 +2534,22 @@ def etapa_segmentar_eventos(
                 atual["tempo_fim_s"] = o["tempo_s"]
                 atual["frame_fim"] = o["frame_idx"]
                 atual["n_amostras"] += 1
+                # Fase 82: a caixa de CADA amostra do evento, não só a primeira.
+                if _bbox_valido(o.get("bbox")):
+                    atual["_caixas"].append(list(o["bbox"]))
+                    if atual["bbox_inicio"] is None:
+                        # A 1ª amostra pode não ter tido caixa (oclusão no
+                        # instante inicial); a 1ª caixa REAL do evento vale mais
+                        # que um None herdado do primeiro frame.
+                        atual["bbox_inicio"] = list(o["bbox"])
+                        atual["bbox_cam"] = o.get("bbox_cam")
+                        atual["_dim"] = o.get("bbox_dim")
+                if o.get("maos_maquina") is not None:
+                    atual["maos_maquina"] = bool(
+                        atual.get("maos_maquina")) or bool(o["maos_maquina"])
             else:
                 eventos.append(atual)
-                atual = {
-                    "pessoa_track_id": tid,
-                    "comportamento_label": o["label"],
-                    "descricao_bruta": o["descricao"],
-                    "tempo_inicio_s": o["tempo_s"],
-                    "tempo_fim_s": o["tempo_s"],
-                    "frame_inicio": o["frame_idx"],
-                    "frame_fim": o["frame_idx"],
-                    "bbox_inicio": list(o["bbox"]),
-                    "zona_contexto": o["zona"],
-                    "papel_pessoa": o.get("papel"),
-                    "n_amostras": 1,
-                }
+                atual = _abrir_evento(tid, o)
         eventos.append(atual)
 
     for e in eventos:
@@ -2441,6 +2562,9 @@ def etapa_segmentar_eventos(
         # sequência do MESMO rótulo: a concordância é total. O que pode faltar
         # é EVIDÊNCIA — e isso `n_amostras` já diz, sem precisar fingir de %.
         e["confianca"] = 1.0 if e["n_amostras"] >= MIN_AMOSTRAS_EVIDENCIA else None
+        # Fase 82: fecha o resumo do corpo com as caixas acumuladas do evento.
+        e["bbox_stats"] = _resumo_bbox(e.pop("_caixas", []), e.pop("_dim", None),
+                                       e.get("bbox_cam"))
 
     return eventos
 
@@ -2448,6 +2572,44 @@ def etapa_segmentar_eventos(
 # ═════════════════════════════════════════════════════════════════════════
 # ETAPA 4b · Consolidação em 1 evento PRINCIPAL por minuto (Fase 16)
 # ═════════════════════════════════════════════════════════════════════════
+def _merge_bbox_stats(eventos: list[dict]) -> dict | None:
+    """Junta os resumos de caixa de vários eventos crus num só (o do minuto).
+
+    Ponderação por `n`: um cru com 8 amostras vale 8× um com 1 na média das
+    alturas. Sem isso, um trecho curto de oclusão puxaria a mediana do minuto
+    tanto quanto o trecho longo em que a pessoa aparece inteira.
+    """
+    partes = [e["bbox_stats"] for e in eventos if e.get("bbox_stats")]
+    if not partes:
+        return None
+    n_tot = sum(p["n"] for p in partes) or 1
+    cams = {p.get("cam") for p in partes if p.get("cam")}
+    frames_h = {p.get("frame_h") for p in partes if p.get("frame_h")}
+
+    def _pond(chave):
+        vals = [(p[chave], p["n"]) for p in partes if p.get(chave) is not None]
+        return round(sum(v * n for v, n in vals) / max(1, sum(n for _, n in vals)), 3) \
+            if vals else None
+
+    out = {
+        "n": n_tot,
+        # Caixa medida por mais de uma câmera no mesmo minuto não é comparável
+        # em pixel; o consumidor precisa saber disso em vez de descobrir depois.
+        "cam": (cams.pop() if len(cams) == 1 else "misto") if cams else None,
+        "altura_med": _pond("altura_med"),
+        "altura_min": min(p["altura_min"] for p in partes),
+        "altura_max": max(p["altura_max"] for p in partes),
+        "largura_med": _pond("largura_med"),
+        "aspecto_med": _pond("aspecto_med"),
+    }
+    rel = _pond("altura_rel")
+    if rel is not None:
+        out["altura_rel"] = rel
+        if len(frames_h) == 1:
+            out["frame_h"] = frames_h.pop()
+    return out
+
+
 def _principal_por_ia(no_bucket: list[tuple[dict, float]], catalogo: dict[str, str]) -> str | None:
     """1 chamada de IA p/ escolher a ação que RESUME um minuto fragmentado.
     Devolve um rótulo presente no minuto (ou None se falhar). Não-fatal."""
@@ -2529,7 +2691,19 @@ def etapa_consolidar_principais(
             "tempo_fim_s": round(we, 2),
             "frame_inicio": rep["frame_inicio"],
             "frame_fim": rep["frame_fim"],
-            "bbox_inicio": list(rep["bbox_inicio"]),
+            # Fase 82 — o principal representa o MINUTO, então o corpo dele
+            # também: a caixa vem do representante (pode ser nula), mas a
+            # estatística junta as caixas de todos os crus do MESMO track no
+            # minuto. Misturar tracks aqui seria misturar pessoas — é
+            # exatamente o que a identificação do titular vai querer separar.
+            "bbox_inicio": (list(rep["bbox_inicio"]) if rep.get("bbox_inicio")
+                            else None),
+            "bbox_cam": rep.get("bbox_cam"),
+            "bbox_stats": _merge_bbox_stats(
+                [e for e, _ in no_bucket
+                 if e.get("pessoa_track_id") == rep.get("pessoa_track_id")]),
+            "maos_maquina": (True if any(e.get("maos_maquina")
+                                         for e, _ in no_bucket) else None),
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": rep.get("papel_pessoa"),
             "n_amostras": _n_votos,
@@ -2694,7 +2868,12 @@ def montar_fato_evento(rep: dict, no_bucket: list, share: float,
         centros = []
         for e in eventos:
             b = e.get("bbox_inicio")
-            if not b or len(b) < 4:
+            # Fase 82: `not b` NÃO pegava (0,0,0,0) — lista de quatro zeros é
+            # verdadeira. Um posto_vazio ou um resgate pela cam2 no mesmo minuto
+            # injetava um ponto fantasma na origem com altura 1px, e a distância
+            # até a pessoa real virava um deslocamento enorme: o `movimento`
+            # dizia "andando" em minuto de gente parada.
+            if not _bbox_valido(b):
                 continue
             x1, y1, x2, y2 = (float(v) for v in b[:4])
             alt = max(1.0, y2 - y1)
@@ -3339,12 +3518,12 @@ def etapa_persistir(
             "tempo_fim_s": e["tempo_fim_s"],
             "frame_inicio": e["frame_inicio"],
             "frame_fim": e["frame_fim"],
-            "bbox_inicio": {
-                "x1": e["bbox_inicio"][0],
-                "y1": e["bbox_inicio"][1],
-                "x2": e["bbox_inicio"][2],
-                "y2": e["bbox_inicio"][3],
-            },
+            # Fase 82: NULL quando não há caixa. O dict de zeros que ficava aqui
+            # afirmava uma pessoa de tamanho nenhum na origem da imagem — e
+            # qualquer leitor a tratava como medida válida.
+            "bbox_inicio": _bbox_jsonb(e.get("bbox_inicio")),
+            "bbox_cam": e.get("bbox_cam"),
+            "bbox_stats": e.get("bbox_stats"),
             "zona_contexto": e["zona_contexto"],
             "papel_pessoa": e.get("papel_pessoa"),
             "n_amostras": e["n_amostras"],
@@ -3407,10 +3586,9 @@ def etapa_persistir(
             "descricao_bruta": e["descricao_bruta"],
             "tempo_inicio_s": e["tempo_inicio_s"], "tempo_fim_s": e["tempo_fim_s"],
             "frame_inicio": e["frame_inicio"], "frame_fim": e["frame_fim"],
-            "bbox_inicio": {
-                "x1": e["bbox_inicio"][0], "y1": e["bbox_inicio"][1],
-                "x2": e["bbox_inicio"][2], "y2": e["bbox_inicio"][3],
-            },
+            "bbox_inicio": _bbox_jsonb(e.get("bbox_inicio")),
+            "bbox_cam": e.get("bbox_cam"),
+            "bbox_stats": e.get("bbox_stats"),
             "zona_contexto": e["zona_contexto"],
             "papel_pessoa": e.get("papel_pessoa"),
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
@@ -5732,11 +5910,16 @@ def extrair_3_frames_evento(evento: dict, video_path: str) -> list[np.ndarray]:
     fmid = (fi + ff) // 2
     alvos = [fi, fmid, ff]  # sempre 3 posições (podem coincidir em eventos curtos)
 
-    bbox = evento["bbox_inicio"]
+    # Fase 82: `bbox_inicio` agora pode ser NULL (posto vazio, ponte temporal —
+    # e todo evento antigo cujo zero foi corrigido). Cai no mesmo caminho que o
+    # bbox degenerado já tinha: frame inteiro, sem retângulo desenhado.
+    bbox = evento.get("bbox_inicio")
     if isinstance(bbox, dict):
         x1, y1, x2, y2 = int(bbox["x1"]), int(bbox["y1"]), int(bbox["x2"]), int(bbox["y2"])
-    else:
+    elif bbox:
         x1, y1, x2, y2 = (int(v) for v in bbox)
+    else:
+        x1 = y1 = x2 = y2 = 0
 
     # Leitura SEQUENCIAL a partir do frame inicial: o seek por índice
     # (cap.set(POS_FRAMES)) é instável em vários codecs e costuma falhar nos
