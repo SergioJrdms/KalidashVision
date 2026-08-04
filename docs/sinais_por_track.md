@@ -11,18 +11,25 @@ lista e estava indo a zero).
 
 ## Resumo em uma tabela
 
-| Sinal | Onde nasce | Custo | Persistido hoje | Serve de descritor? |
+| Sinal | Onde nasce | Custo | Persistido | Serve de descritor? |
 |---|---|---|---|---|
-| `bbox` (x1,y1,x2,y2) | YOLO, toda amostra | zero (já vem) | **sim** (Fase 82) | **sim** — altura aparente |
-| `bbox_stats` | agregado do evento | zero | **sim** (Fase 82) | **sim** — mediana + dispersão |
-| `kpts` (17 COCO, normalizados) | yolo11n-**pose**, toda amostra | zero (já vem) | **não** | **sim** — proporções do corpo |
+| `bbox` (x1,y1,x2,y2) | YOLO, toda amostra | zero (já vem) | **sim** (F82) | **sim** — altura aparente |
+| `bbox_stats` | agregado do evento | zero | **sim** (F82) | **sim** — mediana + dispersão |
+| razões corporais | kpts do yolo11n-**pose** | zero (já vêm) | **sim** (F83) | **sim** — invariantes à escala |
+| histograma de cor sup/inf | recorte HSV do frame | ~0 | **sim** (F83) | talvez — depende do uniforme |
+| `altura_rel` / `aspecto` por track | agregado do track | zero | **sim** (F83) | **sim**, com ressalvas |
+| tempo na zona do posto | contador da eleição | zero | **sim** (F83) | **sim** — "quem fica" |
+| `kpts` crus (17 pontos) | yolo11n-pose | zero | **não** (só as razões) | matéria-prima |
 | `crop` 32×32 **cinza** | `_crop_cinza_pequeno` | ~0 | **não** | fraco (sem cor) |
-| histograma de cor | **não existe** | ~0 se adicionado | não | **sim** — uniforme/cabelo |
-| `centro` (cx, cy) | derivado do bbox | zero | não (dá pra derivar) | fraco sozinho |
+| `centro` (cx, cy) | derivado do bbox | zero | não | fraco sozinho |
 | `zona` / `papel` | ROIs desenhadas | zero | **sim** | contexto, não aparência |
-| `maos_maquina` | punho na zona 'maquina' | zero | **sim** (Fase 82) | não |
-| `presenca_zona[tid]` | contador da eleição | zero | **não** | **sim** — "quem fica" |
+| `maos_maquina` | punho na zona 'maquina' | zero | **sim** (F82) | não |
 | `track_id` | BoT-SORT | zero | **sim** | só dentro do vídeo |
+
+> **Atualizado na Fase 83.** O que era "não persistido" nas linhas de razões,
+> cor e tempo de posto passou a ser gravado em `descritores_track`, chaveado por
+> `(video_id, pessoa_track_id)` e com `cam_id` junto. Continua sem identificar
+> ninguém: é insumo do experimento de separabilidade.
 
 ---
 
@@ -81,55 +88,109 @@ where bbox_inicio is not null
 
 ---
 
-## 2. `kpts` — 17 keypoints COCO, normalizados. **O mais promissor não usado.**
+## 2. Razões corporais (dos `kpts`) — **persistidas na Fase 83**
 
-O modelo é `yolo11n-pose`: os keypoints **já vêm em toda detecção**, custo zero.
-Hoje são lidos em `etapa_detectar` (`results[0].keypoints.xyn`) e usados em dois
-lugares — o teste de zona (`_pontos_da_pessoa`) e o gate de repetição
-(`_dist_pose`) — e depois **descartados**. Nunca chegam ao evento.
+O modelo é `yolo11n-pose`: os keypoints já vêm em toda detecção, custo zero.
+Eram usados só no teste de zona e no gate, e descartados. Agora viram três
+razões, medianadas por track.
 
-Por que interessam mais que a altura da caixa: **razões entre partes do corpo
-são invariantes de escala**. Ombro/quadril, tronco/perna, largura de ombros ÷
-altura do tronco não mudam com a distância à câmera — que é exatamente o
-confundidor que estraga a altura aparente.
+### O critério de escolha (a pergunta que você fez)
 
-Estão em coordenada **normalizada pelo frame** (`xyn`, 0–1) e um keypoint não
-detectado vem `(0,0)` — tem de ser filtrado, senão vira o mesmo tipo de ponto
-fantasma que a caixa zerada era.
+1. **Só landmarks rígidos.** Ombro, quadril e nariz não se articulam entre si.
+   Cotovelo, punho, joelho e tornozelo estão **fora**: mudam com a ação, não com
+   a pessoa — e neste enquadramento ficam atrás do torno a maior parte do tempo.
+2. **Razão, nunca medida absoluta.** Dividir cancela a escala. É o ponto inteiro
+   de trocar a altura aparente por isto.
+3. **Mesmo eixo quando dá.** `quadril_ombro` é horizontal ÷ horizontal: não muda
+   quando a pessoa se inclina para a frente (o que encurta a projeção vertical do
+   tronco). As que misturam eixos são mais informativas e menos estáveis — por
+   isso cada uma vai com a **sua dispersão**, e o experimento decide o peso.
+4. **Denominador com tamanho mínimo** (`KV_RAZAO_MIN_PX`, 12px): abaixo disso é
+   ruído dividido por ruído e a razão explode.
 
-Para o experimento: derivar por amostra, medianar por evento. Não persistidos
-hoje; se o experimento pedir, o custo de gravar é uma coluna jsonb.
+| razão | o que é | eixo |
+|---|---|---|
+| `ombro_tronco` | largura dos ombros ÷ tronco | horizontal ÷ vertical |
+| `quadril_ombro` | largura do quadril ÷ ombros | horizontal ÷ horizontal |
+| `cabeca_tronco` | nariz→pescoço ÷ tronco | vertical ÷ vertical |
+
+### Duas armadilhas resolvidas no caminho
+
+- **`xyn` normaliza x pela largura e y pela altura.** Medir distância direto no
+  normalizado, num frame 640×480, estica o eixo horizontal em 33% e a razão vira
+  ficção. O código volta para pixel antes de qualquer distância — há teste.
+- **Keypoint não detectado vem `(0,0)`** — o mesmo zero mentiroso da caixa na
+  Fase 82. Filtrado; um nariz ausente não vira `cabeca_tronco`.
+
+### O que NÃO é invariante, e precisa estar dito
+
+Nada disto sobrevive a uma **rotação grande do corpo** (yaw). De costas, a
+largura de ombros projetada encolhe e `ombro_tronco` cai junto. A dispersão por
+track (`*_mad`) é a medida disso — e é ela que responde se o sinal serve neste
+ambiente.
 
 ---
 
-## 3. `crop` — 32×32, **em tons de cinza**
+## 3. Histograma de cor — **acrescentado na Fase 83**
 
-`_crop_cinza_pequeno` já recorta a pessoa e reduz para 32×32, para o termo de
-movimento do gate. É uma assinatura visual, mas **converte para cinza** — joga
-fora exatamente a informação que distinguiria um uniforme azul de um cinza.
+O recorte do gate (`_crop_cinza_pequeno`) continua existindo e continua cinza:
+ele serve ao gate, não ao descritor. Ao lado dele, `histograma_cor` tira do
+**mesmo frame BGR** dois histogramas HSV — metade superior (camisa) e metade
+inferior (calça), separadas.
 
-Vive só em memória (dicionário `ancoras`), por track, durante o vídeo.
+Três decisões que valem a pena conhecer antes de interpretar os números:
 
-**Histograma de cor não existe hoje.** O frame BGR está em mãos nesse ponto: um
-histograma HSV de 3×8 bins sobre o recorte (ou sobre o terço superior, para
-pegar camisa e cabelo) custa microssegundos e é o descritor de aparência clássico
-para reidentificação com câmera fixa. É o acréscimo mais barato de todos, mas é
-acréscimo — não está lá.
+- **Sem o canal V (brilho).** Só matiz × saturação. É o brilho que muda entre a
+  luz das 6h e a das 15h; deixá-lo entrar faria a mesma pessoa virar duas ao
+  longo do dia. Há teste: a mesma roupa com 45% menos luz continua parecida
+  consigo mesma.
+- **Faixa central da caixa** (60% da largura, `KV_HIST_FAIXA`). A bbox de uma
+  pessoa tem fundo nos cantos; a coluna do meio é quase toda corpo.
+- **Média dos histogramas do track**, renormalizada — histograma é distribuição,
+  somar amostras é o agregado natural.
 
-Ressalvas conhecidas: iluminação de galpão muda ao longo do dia; se os dois
-torneiros usam o mesmo uniforme, a cor da camisa não separa (cabelo e pele
-talvez, num recorte de cabeça).
+**Ressalva que não muda:** com uniforme igual nos dois torneiros, isto não separa
+ninguém. Vai junto porque é o mais barato de todos e porque "não separa" também
+é resultado do experimento.
 
 ---
 
-## 4. `presenca_zona` — quem FICA no posto
+## 4. Tempo na zona do posto — **persistido na Fase 83**
 
-Contador `track_id → nº de amostras dentro da zona do posto`, mantido em
-`etapa_detectar` e usado para eleger o titular do vídeo (desempate: maior área).
+`tempo_posto_s` = nº de amostras do track dentro da zona × intervalo de
+amostragem. É **estimativa**, não cronometragem: a amostragem é sistemática.
 
-É um sinal comportamental forte — o titular é quem passa o turno ali, o visitante
-passa minutos — e some no fim do vídeo. Não é aparência, mas para o problema
-real ("medir o torneiro, não o posto") pode valer mais que aparência.
+É um sinal comportamental forte — o titular passa o turno ali, o visitante passa
+minutos — e some no fim do vídeo. Não é aparência, mas para o problema real
+("medir o torneiro, não o posto") pode valer mais que aparência. Serve também
+como **rótulo fraco** para montar o dataset do experimento sem marcar nada à mão.
+
+---
+
+## 4b. Onde tudo isso é gravado
+
+Tabela `descritores_track`, uma linha por `(video_id, pessoa_track_id)`:
+
+```
+cam_id, papel_predominante, n_amostras, n_amostras_posto,
+tempo_posto_s, tempo_visivel_s, altura_rel, aspecto,
+razoes {nome: {med, mad, n}}, hist_sup[32], hist_inf[32], hist_bins,
+bbox_ref (NORMALIZADA 0-1), frame_ref, frame_w, frame_h
+```
+
+`upsert` na chave, e a gravação é **não-fatal**: um experimento não pode ser o
+motivo de um vídeo da campanha falhar.
+
+### Exportação
+
+```
+GET /processos/{id}/descritores/dia?dia=AAAA-MM-DD
+```
+
+Devolve um `.zip` com `descritores.csv`, `descritores.json`, `recortes/*.jpg`
+(um por track) e um `LEIA-ME.md`. Os recortes saem do frame que **já está** no
+Storage, cortados pela `bbox_ref` normalizada — nenhum byte novo é gravado, o
+que importa depois de o bucket ter estourado uma vez nesta campanha.
 
 ---
 
@@ -160,6 +221,7 @@ real ("medir o torneiro, não o posto") pode valer mais que aparência.
    titular *daquele vídeo*, e serve para rotular os dados do experimento sem
    ninguém marcar à mão.
 
-Dado que só vale a partir de agora: os eventos anteriores à Fase 82 têm
-`bbox_stats` nulo e `bbox_inicio` zerado nos papéis 'operador' e 'posto_vazio'.
-O experimento precisa de vídeos processados **depois** deste deploy.
+Dado que só vale a partir de agora: eventos anteriores à Fase 82 têm
+`bbox_stats` nulo e `bbox_inicio` zerado nos papéis 'operador' e 'posto_vazio', e
+não existe `descritores_track` nenhum antes da Fase 83. O experimento precisa de
+vídeos processados **depois** destes deploys.

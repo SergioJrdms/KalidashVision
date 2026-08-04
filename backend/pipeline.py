@@ -1613,6 +1613,279 @@ _GATE_PESO_MOV = float(os.environ.get("KV_GATE_PESO_MOV", "0.4"))
 _GATE_MOV_REF = float(os.environ.get("KV_GATE_MOV_REF", "18.0"))   # absdiff cinza "muito diferente"
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 83 — DESCRITOR POR TRACK. Só o que a detecção JÁ calcula.
+#
+# Nenhum modelo novo, nenhuma inferência a mais: os keypoints vêm do
+# yolo11n-POSE em toda detecção e eram descartados; o recorte já é feito para o
+# gate (e virava cinza, jogando a cor fora); altura e aspecto já estavam no
+# bbox_stats; o tempo na zona já era contado para eleger o titular.
+#
+# NÃO identifica ninguém. É o insumo do experimento de separabilidade.
+# ═════════════════════════════════════════════════════════════════════════
+
+# COCO-17: 0 nariz · 5/6 ombros · 11/12 quadris.
+_KP_NARIZ, _KP_OMB_E, _KP_OMB_D, _KP_QUA_E, _KP_QUA_D = 0, 5, 6, 11, 12
+
+# Segmento mínimo, em pixels, para uma razão ser aceita. Abaixo disso o
+# denominador é ruído de detecção e a razão explode.
+_RAZAO_MIN_PX = float(os.environ.get("KV_RAZAO_MIN_PX", "12"))
+
+
+def _kp_px(kpts, i: int, w: int, h: int):
+    """Keypoint i em PIXELS, ou None se não detectado.
+
+    `xyn` é normalizado pela LARGURA em x e pela ALTURA em y — escalas
+    diferentes num frame não quadrado. Medir distância direto no normalizado
+    distorce o eixo horizontal contra o vertical e estraga justamente as razões
+    que deveriam ser invariantes. Voltar para pixel é obrigatório, não detalhe.
+
+    Keypoint não detectado vem (0,0) — o mesmo tipo de zero mentiroso que a
+    caixa tinha. Filtrado aqui.
+    """
+    try:
+        x, y = float(kpts[i][0]), float(kpts[i][1])
+    except Exception:
+        return None
+    if x <= 0.0 or y <= 0.0:
+        return None
+    return (x * w, y * h)
+
+
+def _dist(a, b) -> float | None:
+    if a is None or b is None:
+        return None
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _meio(a, b):
+    if a is None or b is None:
+        return None
+    return ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+
+
+def razoes_corporais(kpts, w: int, h: int) -> dict:
+    """Razões entre segmentos do corpo — adimensionais, logo invariantes à
+    distância da câmera (que é o confundidor que a altura aparente não resolve).
+
+    CRITÉRIO DE ESCOLHA (por que estas e não outras):
+      1. Só landmarks RÍGIDOS. Ombro, quadril e nariz não se articulam entre si.
+         Cotovelo, punho, joelho e tornozelo estão fora: mudam de posição com a
+         ação, não com a pessoa — e, neste enquadramento, ficam atrás do torno
+         na maior parte do tempo.
+      2. Razão, nunca medida absoluta. Dividir cancela a escala; é o ponto
+         inteiro do exercício.
+      3. Preferir MESMO EIXO quando dá. `quadril_ombro` é horizontal ÷
+         horizontal: não se altera quando a pessoa se inclina para a frente
+         (o que encurta a projeção vertical do tronco). As razões que misturam
+         eixos são mais informativas e menos estáveis — por isso cada uma vai
+         com a sua dispersão, e o experimento decide o peso.
+      4. Denominador com tamanho mínimo (`_RAZAO_MIN_PX`), senão a razão é
+         ruído dividido por ruído.
+
+    O que NÃO é invariante e precisa estar dito: nada disto sobrevive a uma
+    rotação grande do corpo (yaw). De costas, a largura de ombros projetada
+    encolhe. A dispersão por track é a medida disso.
+    """
+    if kpts is None:
+        return {}
+    omb_e, omb_d = _kp_px(kpts, _KP_OMB_E, w, h), _kp_px(kpts, _KP_OMB_D, w, h)
+    qua_e, qua_d = _kp_px(kpts, _KP_QUA_E, w, h), _kp_px(kpts, _KP_QUA_D, w, h)
+    nariz = _kp_px(kpts, _KP_NARIZ, w, h)
+    ombros = _dist(omb_e, omb_d)
+    quadris = _dist(qua_e, qua_d)
+    tronco = _dist(_meio(omb_e, omb_d), _meio(qua_e, qua_d))
+    cabeca = _dist(nariz, _meio(omb_e, omb_d))
+
+    out: dict[str, float] = {}
+    if ombros and tronco and tronco >= _RAZAO_MIN_PX:
+        out["ombro_tronco"] = round(ombros / tronco, 4)
+    if quadris and ombros and ombros >= _RAZAO_MIN_PX:
+        out["quadril_ombro"] = round(quadris / ombros, 4)
+    if cabeca and tronco and tronco >= _RAZAO_MIN_PX:
+        out["cabeca_tronco"] = round(cabeca / tronco, 4)
+    return out
+
+
+# Histograma de cor: HSV, matiz × saturação. V (brilho) fica de fora de
+# propósito — é ele que muda entre a luz das 6h e a das 15h, exatamente a
+# variação que não pode virar "outra pessoa".
+_HIST_BINS_H = int(os.environ.get("KV_HIST_BINS_H", "8"))
+_HIST_BINS_S = int(os.environ.get("KV_HIST_BINS_S", "4"))
+# Faixa central da caixa usada no histograma. A bbox de uma pessoa é um
+# retângulo com fundo nos cantos; a coluna central é quase toda corpo.
+_HIST_FAIXA = float(os.environ.get("KV_HIST_FAIXA", "0.6"))
+
+
+def _hist_hs(sub) -> list | None:
+    """Histograma H×S normalizado (soma 1) de um recorte BGR."""
+    if sub is None or sub.size == 0:
+        return None
+    try:
+        hsv = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None,
+                            [_HIST_BINS_H, _HIST_BINS_S], [0, 180, 0, 256])
+        total = float(hist.sum())
+        if total <= 0:
+            return None
+        return [round(float(v) / total, 5) for v in hist.flatten()]
+    except Exception:
+        return None
+
+
+def histograma_cor(frame, bbox) -> dict | None:
+    """Cor da METADE SUPERIOR e da METADE INFERIOR da pessoa, separadas —
+    camisa e calça. O recorte do gate existe desde a Fase 23 mas é convertido
+    para CINZA (`_crop_cinza_pequeno`): a cor, que é o descritor clássico de
+    reidentificação com câmera fixa, era jogada fora ali.
+
+    Ressalva honesta para o experimento: com uniforme igual nos dois torneiros,
+    isto não separa ninguém. Vai junto porque é o mais barato de todos e porque
+    a resposta "não separa" também é resultado.
+    """
+    if not _bbox_valido(bbox):
+        return None
+    x1, y1, x2, y2 = (int(v) for v in bbox[:4])
+    h, w = frame.shape[:2]
+    x1 = max(0, min(x1, w - 1)); x2 = max(x1 + 1, min(x2, w))
+    y1 = max(0, min(y1, h - 1)); y2 = max(y1 + 1, min(y2, h))
+    larg = x2 - x1
+    margem = int(larg * (1.0 - _HIST_FAIXA) / 2)
+    cx1, cx2 = x1 + margem, max(x1 + margem + 1, x2 - margem)
+    meio = y1 + (y2 - y1) // 2
+    sup = _hist_hs(frame[y1:meio, cx1:cx2])
+    inf = _hist_hs(frame[meio:y2, cx1:cx2])
+    if sup is None and inf is None:
+        return None
+    return {"sup": sup, "inf": inf}
+
+
+def _mediana(v: list) -> float | None:
+    if not v:
+        return None
+    s = sorted(v)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+def _mad(v: list, med: float) -> float:
+    """Desvio absoluto mediano — dispersão que não é sequestrada por um frame
+    ruim. É o que diz se a razão é estável NESTE ambiente, e é isso que decide
+    se o sinal serve ou não."""
+    return _mediana([abs(x - med) for x in v]) or 0.0
+
+
+def acumular_descritor(acc: dict, tid: int, *, frame, pessoa: dict,
+                       w: int, h: int, tempo_s: float, no_posto: bool,
+                       papel: str | None) -> None:
+    """Junta os sinais de UMA amostra no acumulador do track. Chamado dentro do
+    laço de detecção, onde o frame ainda existe — depois dele, não há mais
+    imagem para tirar cor nenhuma."""
+    d = acc.setdefault(tid, {
+        "razoes": defaultdict(list), "hist_sup": [], "hist_inf": [],
+        "alturas_rel": [], "aspectos": [], "n": 0, "n_posto": 0,
+        "papeis": Counter(), "t_ini": tempo_s, "t_fim": tempo_s,
+        "melhor_area": -1.0, "bbox_ref": None, "frame_ref": None,
+    })
+    d["n"] += 1
+    d["t_fim"] = max(d["t_fim"], tempo_s)
+    d["t_ini"] = min(d["t_ini"], tempo_s)
+    if no_posto:
+        d["n_posto"] += 1
+    if papel:
+        d["papeis"][papel] += 1
+
+    bbox = pessoa.get("bbox")
+    if _bbox_valido(bbox):
+        x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+        alt, larg = y2 - y1, x2 - x1
+        d["alturas_rel"].append(alt / max(1.0, float(h)))
+        d["aspectos"].append(larg / max(1.0, alt))
+        area = alt * larg
+        if area > d["melhor_area"]:
+            # Recorte de referência para o EXPORT: a amostra em que a pessoa
+            # aparece maior é a que dá a imagem mais legível para olhar.
+            # Normalizado (0-1) para funcionar sobre o frame já redimensionado
+            # que está no Storage.
+            d["melhor_area"] = area
+            d["bbox_ref"] = [round(x1 / max(1, w), 5), round(y1 / max(1, h), 5),
+                             round(x2 / max(1, w), 5), round(y2 / max(1, h), 5)]
+            d["frame_ref"] = pessoa.get("frame_idx")
+        hc = histograma_cor(frame, bbox)
+        if hc:
+            if hc.get("sup"):
+                d["hist_sup"].append(hc["sup"])
+            if hc.get("inf"):
+                d["hist_inf"].append(hc["inf"])
+    for k, v in razoes_corporais(pessoa.get("kpts"), w, h).items():
+        d["razoes"][k].append(v)
+
+
+def _media_hist(hists: list) -> list | None:
+    """Média bin a bin, renormalizada. Média (e não mediana) porque histograma
+    é distribuição: somar amostras é o agregado natural."""
+    if not hists:
+        return None
+    n_bins = len(hists[0])
+    soma = [0.0] * n_bins
+    for hh in hists:
+        if len(hh) != n_bins:
+            continue
+        for i, v in enumerate(hh):
+            soma[i] += v
+    tot = sum(soma)
+    if tot <= 0:
+        return None
+    return [round(v / tot, 5) for v in soma]
+
+
+def fechar_descritores(acc: dict, intervalo_s: float, cam_id: str | None,
+                       w: int, h: int) -> list[dict]:
+    """Fecha o acumulador em um descritor por track.
+
+    Mediana para as razões (robusta ao frame em que a pessoa está torta),
+    dispersão junto, e o `n` de cada razão — uma razão medida 3 vezes num track
+    de 200 amostras não vale o mesmo que uma medida 180 vezes, e quem for
+    agrupar precisa saber disso.
+    """
+    saida: list[dict] = []
+    for tid, d in sorted(acc.items()):
+        razoes: dict[str, dict] = {}
+        for nome, vals in d["razoes"].items():
+            med = _mediana(vals)
+            if med is None:
+                continue
+            razoes[nome] = {"med": round(med, 4), "mad": round(_mad(vals, med), 4),
+                            "n": len(vals)}
+        alt_rel = _mediana(d["alturas_rel"])
+        asp = _mediana(d["aspectos"])
+        papel = d["papeis"].most_common(1)[0][0] if d["papeis"] else None
+        saida.append({
+            "pessoa_track_id": int(tid),
+            "cam_id": cam_id,
+            "n_amostras": d["n"],
+            "n_amostras_posto": d["n_posto"],
+            # Tempo é nº de amostras × intervalo de amostragem: a amostragem é
+            # sistemática, então isto é uma ESTIMATIVA do tempo real na zona,
+            # não uma cronometragem.
+            "tempo_posto_s": round(d["n_posto"] * float(intervalo_s), 1),
+            "tempo_visivel_s": round(d["n"] * float(intervalo_s), 1),
+            "papel_predominante": papel,
+            "altura_rel": round(alt_rel, 5) if alt_rel is not None else None,
+            "aspecto": round(asp, 4) if asp is not None else None,
+            "razoes": razoes or None,
+            "hist_sup": _media_hist(d["hist_sup"]),
+            "hist_inf": _media_hist(d["hist_inf"]),
+            "hist_bins": {"espaco": "hsv", "h": _HIST_BINS_H, "s": _HIST_BINS_S,
+                          "faixa_central": _HIST_FAIXA,
+                          "n_sup": len(d["hist_sup"]), "n_inf": len(d["hist_inf"])},
+            "bbox_ref": d["bbox_ref"],
+            "frame_ref": d["frame_ref"],
+            "frame_w": int(w), "frame_h": int(h),
+        })
+    return saida
+
+
 def _crop_cinza_pequeno(frame, bbox, lado: int = 32):
     """Recorte cinza pequeno (lado×lado) da pessoa — assinatura visual barata
     p/ o termo de movimento do gate. None se o bbox for degenerado."""
@@ -1752,7 +2025,8 @@ def etapa_detectar_e_amostrar(
     intervalo_s: float,
     rois_contexto: dict,
     progress_cb: ProgressCb,
-) -> tuple[list[Amostra], dict, list[int]]:
+    cam_id: str | None = None,
+) -> tuple[list[Amostra], dict, list[int], list[dict]]:
     # Cada vídeo começa com o tracker limpo. Ver `resetar_tracker` para o
     # porquê — em resumo: `persist=True` é certo dentro do vídeo e errado
     # entre vídeos.
@@ -1767,11 +2041,19 @@ def etapa_detectar_e_amostrar(
     # Fase 28: com zona de posto_operador configurada, a análise foca no
     # operador titular — transeuntes (fora das zonas) morrem aqui na raiz.
     modo_op = _modo_operador(rois)
+    # Nome da zona de posto (Fase 83: o descritor conta o tempo do track DENTRO
+    # dela — é o sinal de "quem fica", que separa titular de visitante melhor
+    # que qualquer aparência).
+    zona_posto_nome = next(
+        (n for n, i in rois.items() if i.get("papel") == "posto_operador"), None)
     # Fase 45: em modo operador, corta MENOS na detecção (recall do titular
     # ocluso); as zonas já filtram os transeuntes. Fora do modo, corte normal.
     area_min_px = (_OPERADOR_AREA_MIN_RATIO if modo_op else AREA_MIN_RATIO) * (w * h)
     conf_deteccao = _OPERADOR_CONF if modo_op else YOLO_CONF_MIN
     presenca_zona: dict[int, int] = {}   # track_id → nº de amostras no posto
+    # Fase 83: acumulador do descritor por track. Vive só aqui, onde o frame
+    # ainda está na mão — depois desta etapa não há mais imagem para tirar cor.
+    desc_acc: dict[int, dict] = {}
     if modo_op:
         log.info("[operador] modo operador ATIVO — zonas: "
                  + ", ".join(f"{n}({i.get('papel')})" for n, i in rois.items()))
@@ -1862,6 +2144,7 @@ def etapa_detectar_e_amostrar(
                             pessoa["zona"] = _zona_contexto(cx, cy, rois)
                         if _GATE_ENABLE:
                             pessoa["crop"] = _crop_cinza_pequeno(frame, pessoa["bbox"])
+                        pessoa["frame_idx"] = frame_idx
                         pessoas.append(pessoa)
                     if modo_op and pessoas:
                         # Eleição do OPERADOR: entre quem está no posto, vence o
@@ -1890,6 +2173,17 @@ def etapa_detectar_e_amostrar(
                             p.pop("_papel_zona", None)
                     for i, p in enumerate(pessoas):
                         p["rotulo"] = f"P{i + 1}"
+                    # Fase 83: descritor por track, DEPOIS da eleição de papel
+                    # (para o descritor saber se este track é o titular) e ainda
+                    # com o frame vivo.
+                    for p in pessoas:
+                        acumular_descritor(
+                            desc_acc, p["track_id"], frame=frame, pessoa=p,
+                            w=w, h=h, tempo_s=tempo_s,
+                            no_posto=(p.get("papel") == "operador"
+                                      or p.get("zona") == zona_posto_nome),
+                            papel=p.get("papel"),
+                        )
                 if pessoas:
                     # Codifica imediatamente em base64 (mesma pipeline:
                     # anotar→resize→JPEG, com defaults max_lado=1024 e
@@ -1928,8 +2222,9 @@ def etapa_detectar_e_amostrar(
 
     cap.release()
     ids_unicos = sorted({p["track_id"] for a in amostras for p in a.pessoas})
+    descritores = fechar_descritores(desc_acc, intervalo_s, cam_id, w, h)
     progress_cb("deteccao", 100, f"{len(amostras)} amostras · {len(ids_unicos)} pessoas")
-    return amostras, info, ids_unicos
+    return amostras, info, ids_unicos, descritores
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -3388,6 +3683,7 @@ def etapa_persistir(
     cam_id: str | None = None,
     gravado_em: str | None = None,
     eventos_auditoria: list[dict] | None = None,
+    descritores_track: list[dict] | None = None,
 ) -> tuple[str, int]:
     """Persiste vídeo, comportamentos, eventos. Retorna (video_id, n_auto_validados).
 
@@ -3616,6 +3912,25 @@ def etapa_persistir(
     # Fase 36: ids dos PRINCIPAIS (mesma ordem de `eventos` — os primeiros N
     # de linhas_eventos), p/ pré-extrair os frames enquanto o vídeo é local.
     ids_principais = [r.get("id") for r in inseridos[: len(eventos)]]
+
+    # Fase 83 — descritor por track. NÃO-FATAL de propósito: é insumo de
+    # experimento, e um experimento não pode ser motivo para um vídeo da
+    # campanha falhar. `upsert` na chave (video_id, pessoa_track_id) para que
+    # reprocessar não duplique linha (o vídeo duplicaria os eventos — problema
+    # conhecido nº 1 — mas o descritor, não).
+    if descritores_track:
+        try:
+            linhas_desc = [{
+                "empresa": empresa, "processo": processo, "video_id": video_id,
+                "gravado_em": gravado_em,
+                **{k: v for k, v in d.items()},
+            } for d in descritores_track]
+            sb.table("descritores_track").upsert(
+                linhas_desc, on_conflict="video_id,pessoa_track_id"
+            ).execute()
+            log.info("[descritor] %d track(s) descritos neste vídeo.", len(linhas_desc))
+        except Exception as e:   # noqa: BLE001
+            log.warning("[descritor] não gravado (%s) — o vídeo segue normal.", e)
 
     return video_id, n_auto_validados, ids_principais
 
@@ -9011,8 +9326,9 @@ def processar_video(
         + (f" · {conhecimento.count('- P:')} respostas no domínio" if conhecimento else ""),
     )
 
-    amostras, info_video, ids_unicos = etapa_detectar_e_amostrar(
-        yolo, video_path, intervalo_amostragem_s, rois_contexto, progress_cb
+    amostras, info_video, ids_unicos, descritores_track = etapa_detectar_e_amostrar(
+        yolo, video_path, intervalo_amostragem_s, rois_contexto, progress_cb,
+        cam_id=cam_id,
     )
 
     if not amostras:
@@ -9138,6 +9454,7 @@ def processar_video(
         cam_id=cam_id,
         gravado_em=gravado_em,
         eventos_auditoria=eventos_auditoria,
+        descritores_track=descritores_track,
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
 

@@ -74,6 +74,7 @@ from .pipeline import (
     limiar_duvida,
     varrer,
     TETO_POSTGREST,
+    _inicio_video_dt,
 )
 from .worker import executar_job, _baixar_video  # noqa: F401
 
@@ -1149,6 +1150,228 @@ def auditoria_do_dia(
     if "erro" in rel:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
     return {"ok": True, **rel}
+
+
+@app.get("/processos/{processo_id}/descritores/dia")
+def exportar_descritores_do_dia(
+    processo_id: str,
+    dia: str = Query(..., description="AAAA-MM-DD no relógio da fábrica"),
+    limite: int = Query(400, ge=1, le=2000),
+    com_recortes: bool = Query(True, description="Inclui um JPEG por track"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 83 — EXPORTA os descritores de um dia num .zip, com um recorte de
+    imagem por track, para o experimento de separabilidade rodar por fora.
+
+    Por que .zip e não JSON na tela: o experimento é agrupar e OLHAR. Sem a
+    imagem ao lado do vetor não dá para dizer se um grupo é uma pessoa ou virou
+    sopa — e essa é a pergunta que decide o projeto inteiro.
+
+    Não identifica ninguém, não consolida nada, não escreve nada.
+
+    O recorte sai do frame que JÁ está no Storage (cache dos eventos), cortado
+    pela `bbox_ref` normalizada. Nenhum byte novo é gravado: o bucket já
+    estourou uma vez nesta campanha e um exportador não vai ser a causa da
+    segunda.
+    """
+    import io
+    import zipfile
+    import json as _json
+    import posixpath
+
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+
+    # ── 1) Descritores do dia, recortados pelo relógio REAL de gravação ──
+    videos = varrer(sb, "videos", "id, nome, cam_id, caminho, duracao_s, processado_em",
+                    empresa=user.empresa, processo=nome)
+    do_dia = {}
+    for v in videos:
+        dt0 = _inicio_video_dt(v)
+        if dt0 and dt0.date().isoformat() == dia:
+            do_dia[v["id"]] = v
+    if not do_dia:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"Nenhum vídeo processado com gravação em {dia}.")
+
+    descs = varrer(sb, "descritores_track", "*", empresa=user.empresa, processo=nome)
+    descs = [d for d in descs if d.get("video_id") in do_dia][:limite]
+    if not descs:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Vídeos existem em {dia}, mas nenhum descritor — eles só passaram a "
+            "ser gravados na Fase 83. Rode um vídeo depois deste deploy.",
+        )
+
+    # ── 2) Um evento por track, para achar o frame já aquecido no Storage ──
+    ev_por_track: dict[tuple, dict] = {}
+    if com_recortes:
+        eventos = varrer(
+            sb, "eventos", "id, video_id, pessoa_track_id, n_amostras, principal",
+            empresa=user.empresa, processo=nome,
+            ajustes=lambda q: q.in_("video_id", list(do_dia)[:100]),
+        )
+        for e in eventos:
+            k = (e.get("video_id"), e.get("pessoa_track_id"))
+            atual = ev_por_track.get(k)
+            if atual is None or (e.get("n_amostras") or 0) > (atual.get("n_amostras") or 0):
+                ev_por_track[k] = e
+
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    buf = io.BytesIO()
+    n_recortes = 0
+    sem_recorte: list[str] = []
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        linhas_csv = []
+        cab = ["track", "video_id", "cam_id", "papel", "n_amostras",
+               "tempo_posto_s", "tempo_visivel_s", "altura_rel", "aspecto",
+               "ombro_tronco", "ombro_tronco_mad", "ombro_tronco_n",
+               "quadril_ombro", "quadril_ombro_mad", "quadril_ombro_n",
+               "cabeca_tronco", "cabeca_tronco_mad", "cabeca_tronco_n",
+               "recorte"]
+        linhas_csv.append(";".join(cab))
+
+        for d in descs:
+            v = do_dia.get(d["video_id"]) or {}
+            chave = f"{(v.get('nome') or d['video_id'])[:40]}__t{d['pessoa_track_id']}"
+            chave = "".join(c if c.isalnum() or c in "-_." else "_" for c in chave)
+            razoes = d.get("razoes") or {}
+
+            def _r(k, campo="med"):
+                return (razoes.get(k) or {}).get(campo, "")
+
+            arq_recorte = ""
+            if com_recortes:
+                jpg = _recorte_do_track(
+                    sb, bucket, v, ev_por_track.get((d["video_id"], d["pessoa_track_id"])),
+                    d.get("bbox_ref"),
+                )
+                if jpg:
+                    arq_recorte = f"recortes/{chave}.jpg"
+                    z.writestr(arq_recorte, jpg)
+                    n_recortes += 1
+                else:
+                    sem_recorte.append(chave)
+
+            linhas_csv.append(";".join(str(x) for x in [
+                d["pessoa_track_id"], d["video_id"], d.get("cam_id") or "",
+                d.get("papel_predominante") or "", d.get("n_amostras") or 0,
+                d.get("tempo_posto_s") or 0, d.get("tempo_visivel_s") or 0,
+                d.get("altura_rel") or "", d.get("aspecto") or "",
+                _r("ombro_tronco"), _r("ombro_tronco", "mad"), _r("ombro_tronco", "n"),
+                _r("quadril_ombro"), _r("quadril_ombro", "mad"), _r("quadril_ombro", "n"),
+                _r("cabeca_tronco"), _r("cabeca_tronco", "mad"), _r("cabeca_tronco", "n"),
+                arq_recorte,
+            ]))
+
+        z.writestr("descritores.csv", "\n".join(linhas_csv))
+        z.writestr("descritores.json", _json.dumps(
+            {"dia": dia, "processo": nome, "n_tracks": len(descs),
+             "n_recortes": n_recortes, "tracks": descs},
+            ensure_ascii=False, indent=1, default=str))
+        z.writestr("LEIA-ME.md", _LEIAME_EXPORT.format(
+            dia=dia, processo=nome, n=len(descs), n_rec=n_recortes,
+            n_sem=len(sem_recorte),
+            cams=", ".join(sorted({str(d.get("cam_id")) for d in descs})),
+        ))
+
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition":
+                 f'attachment; filename="descritores_{nome}_{dia}.zip"'},
+    )
+
+
+def _recorte_do_track(sb, bucket: str, video: dict, evento: dict | None,
+                      bbox_ref) -> bytes | None:
+    """JPEG do track, cortado do frame que JÁ está no Storage.
+
+    `bbox_ref` é NORMALIZADA (0-1) de propósito: o frame guardado foi
+    redimensionado (FRAME_MAX_W), então coordenada em pixel do vídeo original
+    cortaria o lugar errado. Normalizada, funciona em qualquer tamanho.
+    """
+    if not evento or not bbox_ref or not video.get("caminho"):
+        return None
+    caminho = video["caminho"]
+    if str(caminho).startswith(("/", "\\")):
+        return None                      # upload legado com path local
+    try:
+        # k=1 é o frame do MEIO do evento — o menos provável de pegar a pessoa
+        # entrando ou saindo de quadro.
+        dados = sb.storage.from_(bucket).download(
+            chave_frame_evento(caminho, evento["id"], 1))
+        if not dados:
+            return None
+        import numpy as _np
+        import cv2 as _cv2
+        img = _cv2.imdecode(_np.frombuffer(dados, dtype=_np.uint8), _cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        x1 = max(0, int(float(bbox_ref[0]) * w)); x2 = min(w, int(float(bbox_ref[2]) * w))
+        y1 = max(0, int(float(bbox_ref[1]) * h)); y2 = min(h, int(float(bbox_ref[3]) * h))
+        # Folga de 8% em volta: o experimento é OLHAR, e um recorte colado no
+        # corpo esconde justamente o contexto que ajuda a reconhecer a pessoa.
+        mx, my = int((x2 - x1) * 0.08), int((y2 - y1) * 0.08)
+        x1, x2 = max(0, x1 - mx), min(w, x2 + mx)
+        y1, y2 = max(0, y1 - my), min(h, y2 + my)
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return None
+        ok, enc = _cv2.imencode(".jpg", img[y1:y2, x1:x2],
+                                [int(_cv2.IMWRITE_JPEG_QUALITY), 80])
+        return enc.tobytes() if ok else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("[descritor] recorte falhou (%s)", e)
+        return None
+
+
+_LEIAME_EXPORT = """# Descritores por track — {processo} · {dia}
+
+{n} track(s) · {n_rec} recorte(s) · {n_sem} sem recorte · câmeras: {cams}
+
+Isto é insumo de EXPERIMENTO. Nenhuma identificação foi feita, nenhum grupo
+foi formado. Os números são o que a detecção já calculava e descartava.
+
+## Arquivos
+
+- `descritores.csv` — uma linha por track, para abrir em planilha
+- `descritores.json` — tudo, inclusive os histogramas (32 bins cada)
+- `recortes/*.jpg` — uma imagem por track, cortada do frame já guardado
+
+## Colunas que importam
+
+| campo | o que é |
+|---|---|
+| `ombro_tronco` | largura dos ombros ÷ comprimento do tronco |
+| `quadril_ombro` | largura do quadril ÷ largura dos ombros |
+| `cabeca_tronco` | nariz→pescoço ÷ comprimento do tronco |
+| `*_mad` | dispersão (desvio absoluto mediano) da razão NESTE track |
+| `*_n` | em quantas amostras a razão pôde ser medida |
+| `altura_rel` | altura da caixa ÷ altura do frame |
+| `tempo_posto_s` | tempo estimado dentro da zona do posto |
+| `hist_sup` / `hist_inf` | cor HSV (matiz × saturação) da metade de cima e de baixo |
+
+## Antes de agrupar — três armadilhas
+
+1. **NÃO misture câmeras.** `cam1` e `cam2` têm ângulo, distância e resolução
+   diferentes. Agrupe cada uma separada, ou a primeira divisão que aparecer
+   vai ser "câmera", não "pessoa".
+2. **`*_n` baixo é ruído.** Uma razão medida em 3 amostras de um track de 200
+   não vale o mesmo que uma medida em 180. Corte por `n` antes de agrupar.
+3. **`*_mad` alto significa que a razão não está estável neste ambiente.**
+   Se a dispersão DENTRO de um track é da ordem da diferença ENTRE tracks, o
+   sinal não separa — e isso é a resposta do experimento, não uma falha dele.
+
+## O que o resultado decide
+
+Se os grupos baterem com as pessoas ao olhar os recortes, o caminho barato
+(sem modelo de reidentificação) está de pé. Se virar sopa — uniformes iguais,
+luz das 6h contra a das 15h — o caminho barato morreu, e é melhor saber agora
+do que depois de construir consolidação diária em cima.
+"""
 
 
 @app.get("/processos/{processo_id}/manutencao/reprocesso/relatorio")

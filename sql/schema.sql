@@ -945,3 +945,72 @@ create index if not exists idx_eventos_desc_invalida
 -- ════════════════════════════════════════════════════════════════════════
 alter table eventos add column if not exists bbox_cam   text;
 alter table eventos add column if not exists bbox_stats jsonb;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 83 — DESCRITOR POR TRACK. Insumo do experimento de separabilidade.
+--
+-- NÃO identifica ninguém e não consolida nada. Guarda, por (video_id,
+-- pessoa_track_id), o que a detecção JÁ calculava e jogava fora:
+--
+--   razoes    — razões entre segmentos rígidos do corpo (ombro/tronco,
+--               quadril/ombro, cabeça/tronco), medianas + dispersão + n.
+--               Adimensionais: cancelam a distância à câmera, que é o
+--               confundidor que a altura aparente sozinha não resolve.
+--               Vêm dos keypoints do yolo11n-POSE, que já saem em toda
+--               detecção e eram descartados.
+--   hist_sup  — histograma de cor HSV (matiz × saturação) da METADE SUPERIOR
+--   hist_inf  — idem da METADE INFERIOR (camisa e calça, separadas).
+--               V (brilho) fica FORA de propósito: é ele que muda entre a luz
+--               das 6h e a das 15h, e essa variação não pode virar "outra
+--               pessoa". Faixa central da caixa, para não medir o fundo.
+--   altura_rel/aspecto — o que já estava no bbox_stats, por track.
+--   tempo_posto_s — tempo estimado do track DENTRO da zona posto_operador
+--               (nº de amostras × intervalo). É o sinal de "quem fica", e
+--               provavelmente separa titular de visitante melhor que qualquer
+--               aparência.
+--
+-- `cam_id` é obrigatório na leitura: cam1 e cam2 não são a mesma régua.
+-- Nunca compare pixels — nem histogramas — entre câmeras diferentes.
+--
+-- Custo: zero de inferência. Nenhum modelo novo.
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists descritores_track (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    video_id uuid references videos(id) on delete cascade,
+    pessoa_track_id int not null,
+    cam_id text,
+    gravado_em timestamptz,
+    n_amostras int not null default 0,
+    n_amostras_posto int not null default 0,
+    tempo_posto_s numeric,
+    tempo_visivel_s numeric,
+    papel_predominante text,
+    altura_rel numeric,
+    aspecto numeric,
+    razoes jsonb,
+    hist_sup jsonb,
+    hist_inf jsonb,
+    hist_bins jsonb,
+    bbox_ref jsonb,          -- caixa NORMALIZADA (0-1) do melhor frame do track
+    frame_ref int,
+    frame_w int,
+    frame_h int,
+    criado_em timestamptz default now(),
+    unique (video_id, pessoa_track_id)
+);
+create index if not exists idx_desc_track_ctx
+    on descritores_track(empresa, processo, gravado_em);
+alter table descritores_track enable row level security;
+drop policy if exists descritores_track_select on descritores_track;
+drop policy if exists descritores_track_modify on descritores_track;
+create policy descritores_track_select on descritores_track
+    for select using (empresa = auth_empresa());
+create policy descritores_track_modify on descritores_track
+    for all using (empresa = auth_empresa()) with check (empresa = auth_empresa());
+
+-- ⚠️ GRANT EXPLÍCITO: sem ele a Data API devolve VAZIO e sem erro.
+grant select, insert, update, delete on table descritores_track to service_role;
+grant select on table descritores_track to authenticated;

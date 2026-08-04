@@ -53,6 +53,12 @@ class FakeQ:
     def limit(self, *a, **k): return self
     def eq(self, c, v): self.eqs[c] = v; return self
 
+    def range(self, ini, fim): self._rng = (ini, fim); return self
+
+    def _fatia(self, linhas):
+        r = getattr(self, "_rng", None)
+        return linhas if r is None else linhas[r[0]: r[1] + 1]
+
     def execute(self):
         linhas = self.sb.dados.setdefault(self.tabela, [])
         if self.modo == "insert":
@@ -66,7 +72,7 @@ class FakeQ:
                 self.sb.escritas.append((self.tabela, n["id"]))
             return types.SimpleNamespace(data=novas)
         casam = [l for l in linhas if all(l.get(c) == v for c, v in self.eqs.items())]
-        return types.SimpleNamespace(data=[dict(l) for l in casam])
+        return types.SimpleNamespace(data=self._fatia([dict(l) for l in casam]))
 
 
 class FakeSB:
@@ -158,7 +164,7 @@ check("e os eventos entram", len(sb3.dados.get("eventos") or []) == 1)
 print("\n[4] A guarda roda ANTES da inferência (não paga VLM para recusar)")
 src = Path("backend/pipeline.py").read_text()
 i_guarda = src.index('_barrar_duplicata(sb, empresa, processo, caminho_storage)\n\n    progress_cb("setup", 0')
-i_detecta = src.index("amostras, info_video, ids_unicos = etapa_detectar_e_amostrar(")
+i_detecta = src.index("etapa_detectar_e_amostrar(\n        yolo, video_path")
 check("a checagem precede a detecção", i_guarda < i_detecta)
 check("e também existe no ponto do insert",
       src.count("_barrar_duplicata(sb, empresa, processo, caminho_storage)") == 2)
