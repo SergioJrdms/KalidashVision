@@ -72,6 +72,7 @@ from .pipeline import (
     placar_camadas,
     montar_fila_duvidas,
     limiar_duvida,
+    rotulos_sem_categoria,
     varrer,
     TETO_POSTGREST,
     _inicio_video_dt,
@@ -1385,6 +1386,32 @@ Se os grupos baterem com as pessoas ao olhar os recortes, o caminho barato
 luz das 6h contra a das 15h — o caminho barato morreu, e é melhor saber agora
 do que depois de construir consolidação diária em cima.
 """
+
+
+@app.get("/processos/{processo_id}/rotulos/sem-categoria")
+def listar_rotulos_sem_categoria(
+    processo_id: str,
+    limite: int = Query(60, ge=1, le=500),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 85 — rótulos sem categoria Lean, do mais CARO para o mais barato.
+
+    Só leitura. Existe porque rótulo novo nasce sem categoria e, sem categoria,
+    o tempo conta como NÃO-PRODUTIVO (`categoria_efetiva`, Fase 63). Quando a
+    mudança de prompt fizer nascer vários rótulos de uma vez, parte deles será
+    trabalho produtivo de verdade — e a produtividade cai por CONTABILIDADE
+    antes de cair por MEDIÇÃO. No gráfico de um dia as duas quedas são
+    indistinguíveis; a saída é classificar rápido, começando pelo rótulo que
+    representa mais tempo.
+
+    A classificação em si é o `PUT /processos/{id}/comportamentos/categoria`.
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    rel = rotulos_sem_categoria(sb, user.empresa, nome, limite=limite)
+    if "erro" in rel:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
+    return {"ok": True, **rel}
 
 
 @app.get("/processos/{processo_id}/manutencao/reprocesso/relatorio")

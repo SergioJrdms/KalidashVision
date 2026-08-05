@@ -554,6 +554,9 @@ export interface DiaAnalise {
   // que existe para provar aprendizado era zerada pelo ato de aprender.
   duvida_pct: number;
   atipico_vazio?: boolean;
+  // Fase 85: versões do instrumento presentes no dia. Mais de uma = dia do
+  // deploy; o número dos dois lados não é comparável.
+  versoes_instrumento?: number[];
   duvida_resolvida_pct?: number;
   sem_evidencia_resolvida_pct?: number;
   // Trecho curto demais para afirmar OU duvidar — resolve-se com mais
@@ -689,5 +692,31 @@ export interface AuditoriaDia {
   videos: { id: string; nome: string | null; cam_id: string | null; duracao_s: number | null }[];
   blocos: { rotulo: string; eventos: number; minutos: number; de: string; ate: string }[];
   amostras: AmostraAuditoria[];
+  nota: string;
+}
+
+
+// Fase 85 — rótulos sem categoria Lean, do mais CARO para o mais barato.
+// Sem categoria, o tempo conta como NÃO-PRODUTIVO: quando nascem vários
+// rótulos de uma vez, a produtividade cai por CONTABILIDADE antes de cair por
+// medição, e no gráfico de um dia as duas quedas são iguais.
+export interface RotuloSemCategoria {
+  label: string;
+  comportamento_id: string | null;
+  descricao: string | null;
+  categoria_atual: CategoriaLean | null;
+  origem_atual: string | null;
+  n_eventos: number;
+  minutos: number;
+  pct_do_tempo: number;
+  exemplos: string[];
+  versoes: number[];
+}
+export interface RotulosSemCategoria {
+  itens: RotuloSemCategoria[];
+  n_rotulos: number;
+  minutos_sem_categoria: number;
+  pct_sem_categoria: number;
+  minutos_observados: number;
   nota: string;
 }

@@ -6,7 +6,7 @@ import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
 export type Screen = "login" | "processos" | "processo" | "ajuda" | "fila-global";
-export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
+export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "rotulos" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
 
@@ -69,6 +69,10 @@ export function Sidebar({
     // Fase 59: a fila da dúvida vem ANTES da validação geral — é o trabalho de
     // maior alavancagem: cada trecho julgado aqui derruba a curva de "não sei".
     { tab: "duvidas", label: "Dúvidas", icon: "help-circle" },
+    // Fase 85: rótulo sem categoria conta como NÃO-PRODUTIVO. A tela fica ao
+    // lado das dúvidas porque é o mesmo tipo de trabalho: decisão pendente que
+    // está mexendo no número enquanto ninguém decide.
+    { tab: "rotulos", label: "Classificar rótulos", icon: "tags" },
     { tab: "validacao", label: "Validação", icon: "git-pull-request-arrow", badge: proc?.pendencias },
     { tab: "eventos", label: "Eventos", icon: "table-2" },
     { tab: "padroes", label: "Padrões", icon: "activity" },
@@ -199,7 +203,7 @@ export function Sidebar({
 
 export function Topbar({ route, proc, go, onOpenPrism, action, isMobile = false, onMenu }: { route: Route; proc?: ProcHeaderMock | null; go: Go; onOpenPrism: () => void; action?: ReactNode; isMobile?: boolean; onMenu?: () => void }) {
   const inProc = route.screen === "processo";
-  const tabLabels: Record<string, string> = { dashboard: "Dashboard", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
+  const tabLabels: Record<string, string> = { dashboard: "Dashboard", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", rotulos: "Classificar rótulos", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
   return (
     <header className="row" style={{ height: isMobile ? 54 : 60, padding: isMobile ? "0 12px" : "0 26px", borderBottom: "1px solid var(--line)", background: "rgba(255,255,255,.82)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 30, justifyContent: "space-between", gap: isMobile ? 8 : 16 }}>
       <div className="row gap2" style={{ fontSize: 13.5, color: "var(--muted)", minWidth: 0 }}>

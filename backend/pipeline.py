@@ -393,6 +393,10 @@ create index if not exists idx_eventos_papel on eventos(papel_pessoa);
 alter table eventos add column if not exists bbox_cam   text;
 alter table eventos add column if not exists bbox_stats jsonb;
 
+-- Fase 85: com qual instrumento o evento foi medido (1 = instante isolado,
+-- 2 = sequência por minuto). A quebra da série fica DENTRO do dado.
+alter table eventos add column if not exists versao_instrumento int default 1;
+
 -- Prism: suporte a conversas de escopo global (visão de toda a empresa).
 -- Conversas globais têm escopo='global' e processo = null.
 alter table prism_conversas add column if not exists escopo text not null default 'processo';
@@ -1443,6 +1447,94 @@ Responda APENAS um JSON no formato:
 {{"acao": "..."}}"""
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 85 — SEQUÊNCIA, e o fim do desempate que só tinha saídas produtivas.
+#
+# O prompt anterior MANDAVA o rótulo produtivo no caso ambíguo:
+#   "Se ele está PARADO ... é 'monitorando o ciclo da máquina' ou 'observando
+#    a operação' ... Na dúvida entre operar e monitorar, escolha MONITORAR."
+# Duas saídas, as duas produtivas. Era por isso que `monitorar_maquina` comia
+# 31% do tempo e concentrava 100% da dúvida: a dúvida não tinha para onde ir.
+#
+# A correção de fundo NÃO é acrescentar rótulos improdutivos — é devolver o
+# VLM ao papel dele. "é monitorando" já é uma ESCOLHA DE RÓTULO feita na etapa
+# que deveria só DESCREVER. A arquitetura é descrição → cluster → rótulo →
+# categoria Lean; com a descrição no lugar, o vocabulário aberto volta a
+# funcionar sozinho e a improdutividade nasce sem lista fechada.
+#
+# A calibração está nos EXEMPLOS, e ela é deliberadamente simétrica: duas das
+# frases têm a MESMA postura e diferem só no estado da máquina. É esse o
+# discriminador entre esperar ciclo (produtivo, regra do dono do processo) e
+# ociosidade — e o prompt nunca diz qual é qual.
+#
+# A sequência é o que torna imobilidade OBSERVÁVEL: três frames idênticos ao
+# longo de 24s são evidência; um frame só nunca foi.
+# ═════════════════════════════════════════════════════════════════════════
+_BLOCO_EXEMPLOS_DESCRICAO = """EXEMPLOS DE DESCRIÇÃO (o que se vê, não o julgamento):
+- "operando o torno, mãos na peça"
+- "parado de frente ao torno, máquina em ciclo"
+- "parado ao lado do torno, máquina parada"
+- "medindo a peça com paquímetro"
+- "de costas para o posto, mexendo no celular"
+- "conversando com colega, sem tocar na máquina"
+- "sem mudança de posição na sequência, olhando para o lado"
+- "andando entre o posto e a bancada, mãos vazias"
+"""
+
+_REGRAS_DESCRICAO = """- Descreva o OBSERVÁVEL, em UMA FRASE CURTA (até 10 palavras) por instante.
+  NÃO classifique o trabalho como produtivo ou improdutivo, e não escolha
+  rótulos de eficiência: isso é decidido depois, por outra etapa, a partir da
+  sua descrição.
+- AUSÊNCIA DE MUDANÇA É UMA OBSERVAÇÃO, não uma falha da imagem. Se a pessoa
+  está na mesma posição em todas as imagens, diga isso. NÃO preencha com a
+  ação mais provável nem com a ação anterior.
+- Diga também o que a MÁQUINA está fazendo quando der para ver (luz de ciclo,
+  eixo girando, porta aberta, peça na castanha) — é o que separa espera de
+  ociosidade, e sem isso a descrição fica ambígua.
+- Só diga que ele OPERA, manipula, prepara, ajusta ou mede se você VÊ as MÃOS
+  dele na máquina, na ferramenta ou na peça, em ação, em alguma das imagens.
+- EXCEÇÃO (o CONTEXTO manda): se o CONTEXTO disser que ele está com as MÃOS na
+  máquina, isso vem da posição REAL das mãos (sensor) — ele ESTÁ operando,
+  mesmo que o corpo pareça parado.
+- Se não der para dizer o que acontece, escreva "ação não identificada".
+- NÃO invente o que não está visível."""
+
+
+PROMPT_VLM_SEQUENCIA = """Você é um analista de processos industriais observando UM posto de trabalho.
+
+Você recebe uma SEQUÊNCIA de {n_frames} imagens da câmera principal, EM ORDEM CRONOLÓGICA, cobrindo {duracao_s} segundos ({intervalo_s}s entre imagens consecutivas).{linha_cam2}
+
+P1 é o OPERADOR TITULAR do posto. P2, P3... são outras pessoas dentro da área do posto. ATENÇÃO: os rótulos são desenhados em CADA imagem separadamente — sempre se refira à pessoa pelo rótulo que aparece NAQUELA imagem.
+
+Sua tarefa é dizer o que aconteceu AO LONGO da sequência, não o que se vê num frame isolado. COMPARE as imagens entre si: o que mudou de uma para a outra? O que ficou igual?
+
+{bloco_processo}{bloco_vocabulario}REGRAS:
+{regras}
+
+{exemplos}
+CONTEXTO: {contexto_zonas}
+
+Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira):
+{{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}}}, {{"i": 1, "acoes": {{"P1": "..."}}}}]}}"""
+
+
+PROMPT_VLM_SEQUENCIA_CAM2 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
+O OPERADOR TITULAR está DENTRO da área de trabalho dele, atrás da máquina — visível nestas imagens (a câmera frontal não o enxerga nestes instantes porque a máquina o esconde).
+
+Você recebe uma SEQUÊNCIA de {n_frames} imagens EM ORDEM CRONOLÓGICA, cobrindo {duracao_s} segundos ({intervalo_s}s entre imagens consecutivas).
+
+Diga o que o operador fez AO LONGO da sequência, não o que se vê num frame isolado. COMPARE as imagens entre si: o que mudou? O que ficou igual?
+
+{bloco_processo}{bloco_vocabulario}REGRAS:
+{regras}
+
+{exemplos}
+CONTEXTO: {contexto_zonas}
+
+Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira):
+{{"trechos": [{{"i": 0, "acao": "..."}}, {{"i": 1, "acao": "..."}}]}}"""
+
+
 def _analisar_operador_cam2(
     groq_client: Groq,
     img_cam2_b64: str,
@@ -1643,6 +1735,43 @@ _GATE_LIMIAR_DIFERENTE = float(os.environ.get("KV_GATE_LIMIAR_DIFERENTE", "0.30"
 _GATE_PESO_POSE = float(os.environ.get("KV_GATE_PESO_POSE", "0.6"))
 _GATE_PESO_MOV = float(os.environ.get("KV_GATE_PESO_MOV", "0.4"))
 _GATE_MOV_REF = float(os.environ.get("KV_GATE_MOV_REF", "18.0"))   # absdiff cinza "muito diferente"
+
+# ── Fase 85 · SEQUÊNCIA e os TETOS DE HERANÇA ───────────────────────────
+# Uma amostra a cada 8s, cada uma julgada sozinha: uma foto de alguém em pé
+# perto do torno é ambígua por natureza. Agrupar as amostras consecutivas de
+# um minuto numa única chamada troca "o que se vê" por "o que aconteceu" — e
+# de quebra sai mais barato, porque o texto do prompt passa a ser pago 1× por
+# minuto em vez de 7,5×.
+_SEQ_ENABLE = os.environ.get("KV_SEQUENCIA_ENABLE", "on") not in ("off", "0", "false", "False", "")
+_SEQ_BUCKET_S = float(os.environ.get("KV_SEQUENCIA_BUCKET_S", "60"))
+# Teto de imagens por chamada. A API aceita 100 (modelos de 200k) e nós usamos
+# 8-12; o teto existe para o caso de intervalo de amostragem pequeno, não por
+# limite de plataforma. Acima de 20 imagens/requisição entraria um limite de
+# dimensão mais estrito (2000px), que nunca alcançamos.
+_SEQ_MAX_IMG = max(2, int(os.environ.get("KV_SEQUENCIA_MAX_IMG", "12")))
+
+# ── OS TRÊS TETOS ───────────────────────────────────────────────────────
+# Um princípio, três lugares: HERDAR É ACEITÁVEL POR INSTANTES, NÃO POR
+# MINUTOS. Toda herança sem evidência nova tem um limite de quantas amostras
+# seguidas pode durar; passado o limite, o sistema volta a OLHAR.
+#
+# Sem isso, três caminhos independentes fabricam produtividade:
+#   1. o gate suprime pose idêntica — que é exatamente o sinal de imobilidade;
+#   2. "ação não identificada" herda a última ação conhecida (Fase 34), o que
+#      converte DESCONHECIDO em PRODUTIVO;
+#   3. a ponte temporal herda sem ver imagem nenhuma.
+_GATE_MAX_REPETICOES = max(1, int(os.environ.get("KV_GATE_MAX_REPETICOES", "6")))
+_HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2")))
+
+# ── VERSÃO DO INSTRUMENTO ───────────────────────────────────────────────
+# A Fase 85 muda o instrumento de medição no meio de uma campanha de 30 dias:
+# a produtividade ANTES e DEPOIS não são a mesma medida. Carimbar a versão em
+# cada evento põe a quebra da série DENTRO DO DADO, onde ela é consultável —
+# em vez de depender da memória de alguém ou de uma linha num documento.
+#
+#   1 = instante isolado; o desempate do prompt só tinha saídas produtivas
+#   2 = sequência por minuto; o VLM descreve e não classifica; heranças com teto
+VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "2"))
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -2349,6 +2478,201 @@ def _analisar_amostra_vlm(
     }
 
 
+def _subamostrar(itens: list, teto: int) -> list:
+    """Reduz a lista a `teto` itens preservando SEMPRE o primeiro e o último —
+    são eles que carregam o 'começou assim, terminou assado' da sequência."""
+    if len(itens) <= teto:
+        return list(itens)
+    if teto == 1:
+        return [itens[0]]
+    passo = (len(itens) - 1) / (teto - 1)
+    return [itens[int(round(i * passo))] for i in range(teto)]
+
+
+def _contexto_zonas(amostra: Amostra, modo_op: bool) -> str:
+    """Linha de CONTEXTO do prompt para UMA amostra (zonas + mãos na máquina)."""
+    maos_cam2 = getattr(amostra, "maos_cam2", False)
+    partes = []
+    for p in amostra.pessoas:
+        zona_txt = p.get("zona_desc") or p.get("zona")
+        if not zona_txt:
+            continue
+        quem = "o OPERADOR" if p.get("papel") == "operador" else p["rotulo"]
+        linha = (f"{p['rotulo']} ({quem}) está em: {zona_txt}"
+                 if modo_op else f"{p['rotulo']} está em {zona_txt}")
+        op_maos = p.get("maos_maquina") or (p.get("papel") == "operador" and maos_cam2)
+        if op_maos:
+            linha += (" — e está com as MÃOS na máquina (torno), tocando/"
+                      "manipulando o equipamento (logo, OPERANDO, não apenas monitorando)")
+        partes.append(linha)
+    return ". ".join(partes) if partes else "sem zonas pré-definidas"
+
+
+def _analisar_sequencia_vlm(
+    groq_client: Groq,
+    grupo: list[Amostra],
+    descricao_processo: str,
+    memoria: dict,
+    intervalo_s: float,
+    conhecimento_adquirido: str = "",
+) -> dict[int, dict[int, str]]:
+    """Fase 85 — UMA chamada para a sequência inteira de um minuto.
+
+    Devolve {índice da amostra no grupo → {track_id → descrição}} — uma
+    observação POR INSTANTE, exatamente como antes. Isso é o que mantém
+    `etapa_segmentar_eventos` capaz de quebrar o evento no meio do minuto se a
+    ação mudar, e o que preserva a `concordancia` (que é a fração do minuto do
+    rótulo vencedor e precisa de várias observações para existir).
+
+    A cam2 entra com UM frame, o do meio — ela existe para desambiguar oclusão,
+    e para isso um instante resolve. Mandá-la em todos os instantes dobraria as
+    imagens e comeria o ganho de custo.
+    """
+    if not grupo:
+        return {}
+    usados = _subamostrar(grupo, _SEQ_MAX_IMG - 1)
+    imgs = [a.img_b64 for a in usados if a.img_b64]
+    if not imgs:
+        return {}
+
+    meio = usados[len(usados) // 2]
+    img_cam2 = meio.img_b64_secundario
+    linha_cam2 = ""
+    if img_cam2:
+        imgs.append(img_cam2)
+        linha_cam2 = (
+            f"\nA ÚLTIMA imagem ({len(imgs)}ª) é da CÂMERA LATERAL, tirada no instante "
+            "do meio da sequência — use-a para ver o que a máquina esconde na "
+            "câmera principal. Ela NÃO é um instante a mais: não gere entrada "
+            "para ela."
+        )
+
+    modo_op = any(p.get("papel") for a in usados for p in a.pessoas)
+    tem_operador = any(p.get("papel") == "operador" for a in usados for p in a.pessoas)
+    n_cam1 = len(usados)
+    dur = round((n_cam1 - 1) * float(intervalo_s), 1) if n_cam1 > 1 else float(intervalo_s)
+
+    prompt = PROMPT_VLM_SEQUENCIA.format(
+        n_frames=n_cam1,
+        duracao_s=dur,
+        intervalo_s=round(float(intervalo_s), 1),
+        linha_cam2=linha_cam2,
+        bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
+        bloco_vocabulario=construir_bloco_vocabulario(memoria),
+        regras=_REGRAS_DESCRICAO,
+        exemplos=_BLOCO_EXEMPLOS_DESCRICAO,
+        contexto_zonas=_contexto_zonas(meio, modo_op),
+    )
+    if not tem_operador:
+        prompt = prompt.replace(
+            "P1 é o OPERADOR TITULAR do posto. P2, P3... são outras pessoas "
+            "dentro da área do posto.",
+            "P1, P2, P3... são as pessoas marcadas.",
+        )
+
+    try:
+        resposta = groq_vision_call(
+            groq_client, imgs[0], prompt, json_mode=True,
+            max_tokens=180 * max(1, n_cam1),
+            imagens_extra=imgs[1:],
+        )
+        trechos = (json.loads(resposta) or {}).get("trechos", [])
+    except json.JSONDecodeError:
+        log.warning("[sequencia] JSON inválido no grupo de %d frames", n_cam1)
+        return {}
+    except Exception as e:   # noqa: BLE001
+        log.warning("[sequencia] falha na análise do grupo (%s)", e)
+        return {}
+
+    # O índice devolvido é o da imagem NA SEQUÊNCIA — mapeia de volta para a
+    # amostra correspondente. Rótulos (P1, P2...) são desenhados em CADA imagem
+    # separadamente, então a tradução rótulo→track usa o mapa DAQUELA amostra.
+    idx_no_grupo = {id(a): i for i, a in enumerate(grupo)}
+    saida: dict[int, dict[int, str]] = {}
+    for t in trechos if isinstance(trechos, list) else []:
+        try:
+            i = int(t.get("i"))
+        except Exception:   # noqa: BLE001
+            continue
+        if not (0 <= i < len(usados)):
+            continue
+        am = usados[i]
+        mapa = {p["rotulo"]: p["track_id"] for p in am.pessoas}
+        por_track = {
+            mapa[rot]: d.strip().lower()
+            for rot, d in (t.get("acoes") or {}).items()
+            if rot in mapa and isinstance(d, str) and d.strip()
+        }
+        if por_track:
+            saida[idx_no_grupo[id(am)]] = por_track
+    return saida
+
+
+def _analisar_sequencia_cam2(
+    groq_client: Groq,
+    grupo: list[Amostra],
+    descricao_processo: str,
+    memoria: dict,
+    intervalo_s: float,
+    conhecimento_adquirido: str = "",
+    zona_desc: str | None = None,
+) -> dict[int, str]:
+    """Fase 85 — o RESGATE pela cam2 também vira sequência.
+
+    Terceira porta dos fundos: sem isto, o caminho do resgate continuaria com o
+    prompt antigo (o do desempate que só tinha saídas produtivas) e viraria a
+    rota preferencial da produtividade — justamente nos instantes em que a cam1
+    não vê nada.
+    """
+    if not grupo:
+        return {}
+    usados = _subamostrar(grupo, _SEQ_MAX_IMG)
+    imgs = [a.img_b64_secundario for a in usados if a.img_b64_secundario]
+    if not imgs:
+        return {}
+    usados = [a for a in usados if a.img_b64_secundario]
+
+    contexto = zona_desc or "área de trabalho do operador, atrás da máquina"
+    if any(getattr(a, "maos_cam2", False) for a in usados):
+        contexto += (" — em algum destes instantes ele está com as MÃOS na máquina "
+                     "(torno), tocando/manipulando o equipamento")
+    n = len(usados)
+    dur = round((n - 1) * float(intervalo_s), 1) if n > 1 else float(intervalo_s)
+    prompt = PROMPT_VLM_SEQUENCIA_CAM2.format(
+        n_frames=n,
+        duracao_s=dur,
+        intervalo_s=round(float(intervalo_s), 1),
+        bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
+        bloco_vocabulario=construir_bloco_vocabulario(memoria),
+        regras=_REGRAS_DESCRICAO,
+        exemplos=_BLOCO_EXEMPLOS_DESCRICAO,
+        contexto_zonas=contexto,
+    )
+    try:
+        resposta = groq_vision_call(
+            groq_client, imgs[0], prompt, json_mode=True,
+            max_tokens=120 * max(1, n), imagens_extra=imgs[1:],
+        )
+        trechos = (json.loads(resposta) or {}).get("trechos", [])
+    except Exception as e:   # noqa: BLE001
+        log.warning("[sequencia] resgate pela cam2 falhou (%s)", e)
+        return {}
+
+    idx_no_grupo = {id(a): i for i, a in enumerate(grupo)}
+    saida: dict[int, str] = {}
+    for t in trechos if isinstance(trechos, list) else []:
+        try:
+            i = int(t.get("i"))
+        except Exception:   # noqa: BLE001
+            continue
+        if not (0 <= i < len(usados)):
+            continue
+        acao = (t.get("acao") or "").strip().lower()
+        if acao:
+            saida[idx_no_grupo[id(usados[i])]] = acao
+    return saida
+
+
 def _gate_vlm_binario(groq_client, amostra: Amostra, desc_ancora: str) -> bool:
     """Desempate BARATO do gate (só na fronteira): mostra o frame e pergunta
     se a pessoa AINDA está fazendo a ação da âncora — resposta sim/não
@@ -2373,6 +2697,30 @@ def _gate_vlm_binario(groq_client, amostra: Amostra, desc_ancora: str) -> bool:
         return False
 
 
+def _agrupar_amostras(amostras: list, bucket_s: float) -> list[list]:
+    """Fase 85 — agrupa amostras consecutivas em blocos do mesmo MINUTO.
+
+    O minuto não é arbitrário: é o mesmo balde da consolidação
+    (`etapa_consolidar_principais`), então a chamada da sequência cobre
+    exatamente o intervalo que vira um evento principal.
+    """
+    if bucket_s <= 0:
+        return [[a] for a in amostras]
+    grupos: list[list] = []
+    atual: list = []
+    balde_atual = None
+    for am in amostras:
+        b = int(float(am.tempo_s) // bucket_s)
+        if balde_atual is None or b != balde_atual:
+            if atual:
+                grupos.append(atual)
+            atual, balde_atual = [], b
+        atual.append(am)
+    if atual:
+        grupos.append(atual)
+    return grupos
+
+
 def etapa_analise_vlm(
     groq_client: Groq,
     amostras: list[Amostra],
@@ -2381,75 +2729,163 @@ def etapa_analise_vlm(
     progress_cb: ProgressCb,
     conhecimento_adquirido: str = "",
     zona_posto: str | None = None,
+    intervalo_s: float = DEFAULT_INTERVALO_AMOSTRAGEM_S,
 ) -> list[dict]:
-    """Analisa as amostras com o VLM. Com KV_GATE_ENABLE=on (Fase 23), um gate
-    de repetição evita reanalisar o PADRÃO: por track, mantém uma ÂNCORA (a
-    última amostra analisada) e, para cada nova amostra, decide barato —
-      • pose+movimento local (grátis) muito parecidos → REPETIÇÃO: herda a
-        descrição da âncora, sem chamar o VLM (só contabiliza o tempo);
-      • muito diferentes → analisa (VLM completo), vira a nova âncora;
-      • na fronteira → 1 VLM BINÁRIO barato (sim/não) desempata.
-    TODA amostra continua gerando observação (tempo 100% preservado); as
-    suprimidas herdam o rótulo e estendem o mesmo evento downstream.
+    """Analisa as amostras com o VLM.
+
+    Fase 85 — SEQUÊNCIA. As amostras consecutivas de um mesmo minuto vão numa
+    ÚNICA chamada, em ordem cronológica, e a pergunta deixa de ser "o que se vê
+    neste frame" para ser "o que aconteceu ao longo destes 60 segundos". Uma
+    foto de alguém em pé perto do torno é ambígua por natureza — nenhum humano
+    acertaria com uma foto só. Três frames idênticos, por outro lado, são
+    evidência de imobilidade, e é isso que torna a improdutividade OBSERVÁVEL.
+    A saída continua sendo UMA OBSERVAÇÃO POR INSTANTE: o downstream não muda,
+    e o trecho segue divisível no meio do minuto se a ação mudar.
+    De quebra, sai mais barato — o texto do prompt passa a ser pago 1× por
+    minuto em vez de 1× por amostra.
+
+    Gate de repetição (Fase 23, KV_GATE_ENABLE): por track, mantém uma ÂNCORA e
+    decide barato se a amostra REPETE o padrão — herdando a descrição sem gastar
+    VLM. Fase 85 põe um TETO nessa herança (`KV_GATE_MAX_REPETICOES`): passado o
+    teto, o gate PARA de herdar e força uma chamada, porque "parado há 2
+    minutos" é informação e não é a mesma coisa que "parado há 8 segundos".
 
     Fase 28: `zona_posto` (nome da zona posto_operador) liga a síntese de
     POSTO VAZIO — amostras vazias viram observação determinística sem VLM."""
     progress_cb("vlm", 0, f"Analisando {len(amostras)} amostras com VLM"
+                + (" · sequência ON" if _SEQ_ENABLE else "")
                 + (" · gate ON" if _GATE_ENABLE else ""))
     observacoes: list[dict] = []
     ancoras: dict[int, dict] = {}   # track_id → {kpts, crop, zona, descricao}
-    n_completo = n_binario = n_repeticao = 0
+    # Fase 85: quantas amostras SEGUIDAS cada track já herdou do gate. É o
+    # contador que faz o teto existir.
+    repeticoes_seguidas: dict[int, int] = {}
+    n_completo = n_binario = n_repeticao = n_teto_gate = 0
     # Fase 34: última ação CONHECIDA do operador (qualquer track) — herdada
-    # nas pontes temporais e quando o VLM devolve "ação não identificada"
-    # (operador ocluso é difícil de ler; indefinida só fica sem histórico).
+    # nas pontes temporais e quando o VLM devolve "ação não identificada".
+    # Fase 85: com TETO — ver `_HERANCA_MAX_SEGUIDAS`.
     ultima_desc_op: str | None = None
     ultimo_tid_op: int | None = None
-    n_herdadas = 0
+    n_herdadas = n_teto_heranca = 0
+    heranca_seguidas = 0
 
     def _eh_indefinida(d: str | None) -> bool:
         return bool(d) and ("não identificada" in d or "nao identificada" in d)
 
-    for i, am in enumerate(amostras):
-        # Fase 33: RESGATE pela lateral — a cam2 ESTABELECEU a presença mas a
-        # cam1 não tem pessoa 'operador' neste slot (oclusão total): a ação é
-        # descrita pela IMAGEM DA CAM2 (track sintético). Visitantes que
-        # existam na cam1 seguem no fluxo normal abaixo.
-        tem_op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
-        if zona_posto and am.operador_presente and not tem_op_cam1:
-            desc_cam2 = None
-            origem_resgate = "resgate_cam2"
-            if am.operador_ponte:
-                # Fase 34: PONTE — presença por continuidade temporal; herda a
-                # última ação conhecida SEM chamada de VLM (custo zero).
-                desc_cam2 = ultima_desc_op
-                origem_resgate = "ponte_temporal"
-            elif am.img_b64_secundario:
-                desc_cam2 = _analisar_operador_cam2(
-                    groq_client, am.img_b64_secundario, descricao_processo,
-                    memoria, conhecimento_adquirido, zona_desc=zona_posto,
-                    maos_maquina=getattr(am, "maos_cam2", False),
-                )
+    grupos = _agrupar_amostras(amostras, _SEQ_BUCKET_S if _SEQ_ENABLE else 0.0)
+    feitas = 0
+    for grupo in grupos:
+        # ── 1) Classifica cada amostra do grupo, sem chamar nada ainda ──
+        plano: list[tuple[str, Amostra]] = []
+        for am in grupo:
+            tem_op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
+            if zona_posto and am.operador_presente and not tem_op_cam1:
+                # Fase 33: RESGATE pela lateral — a cam1 não vê o operador
+                # (oclusão total) e a cam2 vê.
+                plano.append(("ponte" if am.operador_ponte else "resgate", am))
+            elif not am.pessoas:
+                plano.append(("vazio", am))
+            else:
+                plano.append(("cam1", am))
+
+        # ── 2) Gate sobre o GRUPO: alguém aqui precisa de VLM? ──
+        # A decisão continua sendo por amostra/track (é ela que dá a economia),
+        # mas a CHAMADA é uma só para o grupo inteiro.
+        decisoes: dict[int, dict[int, tuple[str, str]]] = {}
+        precisa_vlm = False
+        idx_cam1 = [i for i, (tipo, _) in enumerate(plano) if tipo == "cam1"]
+        for i in idx_cam1:
+            am = plano[i][1]
+            if not _GATE_ENABLE:
+                precisa_vlm = True
+                continue
+            d_am: dict[int, tuple[str, str]] = {}
+            for p in am.pessoas:
+                tid = p["track_id"]
+                anc = ancoras.get(tid)
+                if anc is None:
+                    d_am[tid] = ("analisar", "")      # 1ª vez do track → analisa
+                    precisa_vlm = True
+                    continue
+                if repeticoes_seguidas.get(tid, 0) >= _GATE_MAX_REPETICOES:
+                    # TETO: já herdou demais seguidas. Parar de herdar aqui é o
+                    # que transforma "parado há 2 minutos" numa observação em
+                    # vez de num eco da última coisa que ele fez de fato.
+                    d_am[tid] = ("analisar", "")
+                    precisa_vlm = True
+                    n_teto_gate += 1
+                    continue
+                dist = _gate_distancia(anc, p)
+                if dist <= _GATE_LIMIAR_IGUAL:
+                    d_am[tid] = ("repeticao_pose", anc["descricao"])
+                elif dist >= _GATE_LIMIAR_DIFERENTE:
+                    d_am[tid] = ("analisar", "")
+                    precisa_vlm = True
+                else:
+                    n_binario += 1
+                    if _gate_vlm_binario(groq_client, am, anc["descricao"]):
+                        d_am[tid] = ("repeticao_gate", anc["descricao"])
+                    else:
+                        d_am[tid] = ("analisar", "")
+                        precisa_vlm = True
+            decisoes[i] = d_am
+
+        # ── 3) As chamadas do grupo: no máximo uma cam1 + uma cam2 ──
+        descricoes_seq: dict[int, dict[int, str]] = {}
+        if idx_cam1 and precisa_vlm:
+            descricoes_seq = _analisar_sequencia_vlm(
+                groq_client, [plano[i][1] for i in idx_cam1], descricao_processo,
+                memoria, intervalo_s, conhecimento_adquirido,
+            )
+            # Reindexa: a função devolve o índice DENTRO da lista que recebeu.
+            descricoes_seq = {idx_cam1[k]: v for k, v in descricoes_seq.items()
+                              if 0 <= k < len(idx_cam1)}
+            n_completo += 1
+
+        idx_resg = [i for i, (tipo, _) in enumerate(plano) if tipo == "resgate"]
+        desc_resgate: dict[int, str] = {}
+        if idx_resg:
+            bruto = _analisar_sequencia_cam2(
+                groq_client, [plano[i][1] for i in idx_resg], descricao_processo,
+                memoria, intervalo_s, conhecimento_adquirido, zona_desc=zona_posto,
+            )
+            desc_resgate = {idx_resg[k]: v for k, v in bruto.items()
+                            if 0 <= k < len(idx_resg)}
+            n_completo += 1
+
+        # ── 4) Emite as observações, em ordem de tempo ──
+        for i, (tipo, am) in enumerate(plano):
+            if tipo in ("resgate", "ponte"):
+                origem_resgate = "resgate_cam2" if tipo == "resgate" else "ponte_temporal"
+                desc_cam2 = desc_resgate.get(i) if tipo == "resgate" else ultima_desc_op
+                if tipo == "ponte":
+                    # A ponte herda SEM ver imagem nenhuma. Com teto, como todo
+                    # o resto: passado o limite, o operador presente por
+                    # continuidade deixa de "estar operando" por herança.
+                    if heranca_seguidas >= _HERANCA_MAX_SEGUIDAS:
+                        desc_cam2 = None
+                        n_teto_heranca += 1
+                    else:
+                        heranca_seguidas += 1
+                        n_herdadas += 1
+                elif _eh_indefinida(desc_cam2) and ultima_desc_op:
+                    if heranca_seguidas >= _HERANCA_MAX_SEGUIDAS:
+                        n_teto_heranca += 1      # fica "ação não identificada"
+                    else:
+                        desc_cam2 = ultima_desc_op
+                        origem_resgate = "indefinida_herdada"
+                        heranca_seguidas += 1
+                        n_herdadas += 1
+                elif desc_cam2 and not _eh_indefinida(desc_cam2):
+                    heranca_seguidas = 0
                 if desc_cam2:
-                    n_completo += 1
-                if _eh_indefinida(desc_cam2) and ultima_desc_op:
-                    desc_cam2 = ultima_desc_op   # Fase 34: herda o padrão
-                    origem_resgate = "indefinida_herdada"
-                    n_herdadas += 1
-            if desc_cam2:
-                # Fase 82 — A CAIXA VEM DA CÂMERA QUE VIU A PESSOA.
-                # Aqui a cam1 não vê o operador (é o caso do resgate); a caixa
-                # que existe é a da cam2, e ela vinha sendo substituída por
-                # (0,0,0,0). Zero não é "sem medida": é uma medida FALSA de uma
-                # pessoa de tamanho nenhum na origem da imagem, e ela contamina
-                # tudo que lê bbox (o `deslocamento_rel` do fato do evento
-                # inclusive). Na ponte temporal ninguém foi visto em instante
-                # nenhum — ali a caixa é NULA de verdade.
-                bbox_obs = am.bbox_cam2 if origem_resgate != "ponte_temporal" else None
-                observacoes.append(
-                    {
+                    # Fase 82: a caixa vem da câmera que VIU a pessoa; na ponte
+                    # ninguém foi visto em instante nenhum, e ali ela é nula.
+                    bbox_obs = am.bbox_cam2 if tipo == "resgate" else None
+                    observacoes.append({
                         "tempo_s": am.tempo_s,
                         "frame_idx": am.frame_idx,
-                        "track_id": (ultimo_tid_op if origem_resgate == "ponte_temporal"
+                        "track_id": (ultimo_tid_op if tipo == "ponte"
                                      and ultimo_tid_op is not None else OPERADOR_CAM2_TID),
                         "descricao": desc_cam2,
                         "bbox": bbox_obs,
@@ -2459,107 +2895,75 @@ def etapa_analise_vlm(
                         "papel": "operador",
                         "origem_gate": origem_resgate,
                         "mudanca_contexto": origem_resgate == "resgate_cam2",
-                    }
-                )
-                if not _eh_indefinida(desc_cam2):
-                    ultima_desc_op = desc_cam2
-                    if origem_resgate == "resgate_cam2":
-                        ultimo_tid_op = OPERADOR_CAM2_TID
-        # Fase 28/33: slot sem ninguém de interesse E sem operador confirmado
-        # por NENHUMA das câmeras → POSTO VAZIO sintético (custo zero).
-        if not am.pessoas:
-            if _POSTO_VAZIO_ENABLE and zona_posto and not am.operador_presente:
-                observacoes.append(
-                    {
+                    })
+                    if not _eh_indefinida(desc_cam2):
+                        ultima_desc_op = desc_cam2
+                        if origem_resgate == "resgate_cam2":
+                            ultimo_tid_op = OPERADOR_CAM2_TID
+                continue
+
+            if tipo == "vazio":
+                if _POSTO_VAZIO_ENABLE and zona_posto and not am.operador_presente:
+                    observacoes.append({
                         "tempo_s": am.tempo_s,
                         "frame_idx": am.frame_idx,
                         "track_id": POSTO_VAZIO_TID,
                         "descricao": POSTO_VAZIO_DESC,
                         # Fase 82: não há pessoa — a caixa é NULA, não zerada.
-                        # Zerada, ela entrava nos cálculos como um corpo de
-                        # altura 1px na origem.
-                        "bbox": None,
-                        "bbox_cam": None,
-                        "bbox_dim": None,
+                        "bbox": None, "bbox_cam": None, "bbox_dim": None,
                         "zona": zona_posto,
                         "papel": "posto_vazio",
                         "origem_gate": "posto_vazio",
                         "mudanca_contexto": False,
-                    }
-                )
-            continue
-        # Quais tracks desta amostra podem ser servidos pela âncora (repetição)?
-        analisar_agora = not _GATE_ENABLE
-        decisao: dict[int, tuple[str, str]] = {}   # track_id → (origem, descricao_ou_"")
-        if _GATE_ENABLE:
-            precisa_vlm = False
+                    })
+                continue
+
+            # tipo == "cam1"
+            do_instante = descricoes_seq.get(i, {})
+            d_am = decisoes.get(i, {})
             for p in am.pessoas:
                 tid = p["track_id"]
-                anc = ancoras.get(tid)
-                if anc is None:
-                    decisao[tid] = ("analisar", "")      # 1ª vez do track → analisa
-                    precisa_vlm = True
-                    continue
-                d = _gate_distancia(anc, p)
-                if d <= _GATE_LIMIAR_IGUAL:
-                    decisao[tid] = ("repeticao_pose", anc["descricao"])
-                elif d >= _GATE_LIMIAR_DIFERENTE:
-                    decisao[tid] = ("analisar", "")
-                    precisa_vlm = True
-                else:
-                    # fronteira: desempata com 1 VLM binário barato
-                    n_binario += 1
-                    if _gate_vlm_binario(groq_client, am, anc["descricao"]):
-                        decisao[tid] = ("repeticao_gate", anc["descricao"])
-                    else:
-                        decisao[tid] = ("analisar", "")
-                        precisa_vlm = True
-            analisar_agora = precisa_vlm
-
-        descricoes = (
-            _analisar_amostra_vlm(
-                groq_client, am, descricao_processo, memoria, conhecimento_adquirido
-            )
-            if analisar_agora else {}
-        )
-        if analisar_agora:
-            n_completo += 1
-
-        for p in am.pessoas:
-            tid = p["track_id"]
-            if not _GATE_ENABLE:
-                desc = descricoes.get(tid)
-                origem_gate = "analisado"
-            else:
-                origem, desc_ancora = decisao.get(tid, ("analisar", ""))
-                if origem == "analisar":
-                    desc = descricoes.get(tid)
+                if not _GATE_ENABLE:
+                    desc = do_instante.get(tid)
                     origem_gate = "analisado"
                 else:
-                    desc = desc_ancora            # herda o padrão (sem token)
-                    origem_gate = origem
-                    n_repeticao += 1
-            if not desc:
-                continue
-            # Fase 34: operador com "ação não identificada" HERDA a última
-            # ação conhecida (ocluso é difícil de ler; indefinida de verdade
-            # só quando ainda não há histórico no vídeo).
-            if p.get("papel") == "operador":
-                if _eh_indefinida(desc) and ultima_desc_op:
-                    desc = ultima_desc_op
-                    origem_gate = "indefinida_herdada"
-                    n_herdadas += 1
-                elif not _eh_indefinida(desc):
-                    ultima_desc_op = desc
-                    ultimo_tid_op = tid
-            # Atualiza/instala a âncora quando a amostra foi de fato ANALISADA.
-            if _GATE_ENABLE and origem_gate == "analisado":
-                ancoras[tid] = {
-                    "kpts": p.get("kpts"), "crop": p.get("crop"),
-                    "zona": p.get("zona"), "descricao": desc,
-                }
-            observacoes.append(
-                {
+                    origem, desc_ancora = d_am.get(tid, ("analisar", ""))
+                    if origem == "analisar":
+                        desc = do_instante.get(tid)
+                        origem_gate = "analisado"
+                        repeticoes_seguidas[tid] = 0
+                    else:
+                        desc = desc_ancora            # herda o padrão (sem token)
+                        origem_gate = origem
+                        n_repeticao += 1
+                        repeticoes_seguidas[tid] = repeticoes_seguidas.get(tid, 0) + 1
+                if not desc:
+                    continue
+                # Fase 34/85: operador com "ação não identificada" herda a última
+                # ação conhecida — mas só por `_HERANCA_MAX_SEGUIDAS` amostras.
+                # Sem o teto, um trecho longo de ilegível vira trabalho
+                # produtivo por eco, que é a conversão mais silenciosa de
+                # DESCONHECIDO em PRODUTIVO que este sistema tinha.
+                if p.get("papel") == "operador":
+                    if _eh_indefinida(desc) and ultima_desc_op:
+                        if heranca_seguidas >= _HERANCA_MAX_SEGUIDAS:
+                            n_teto_heranca += 1      # fica "ação não identificada"
+                        else:
+                            desc = ultima_desc_op
+                            origem_gate = "indefinida_herdada"
+                            heranca_seguidas += 1
+                            n_herdadas += 1
+                    elif not _eh_indefinida(desc):
+                        ultima_desc_op = desc
+                        ultimo_tid_op = tid
+                        heranca_seguidas = 0
+                # Âncora só se instala quando a amostra foi de fato ANALISADA.
+                if _GATE_ENABLE and origem_gate == "analisado":
+                    ancoras[tid] = {
+                        "kpts": p.get("kpts"), "crop": p.get("crop"),
+                        "zona": p.get("zona"), "descricao": desc,
+                    }
+                observacoes.append({
                     "tempo_s": am.tempo_s,
                     "frame_idx": am.frame_idx,
                     "track_id": tid,
@@ -2569,35 +2973,38 @@ def etapa_analise_vlm(
                     "bbox_dim": am.dim,
                     "zona": p["zona"],
                     "papel": p.get("papel"),
-                    # Fase 82: `maos_maquina` era LIDO em montar_fato_evento
-                    # (`e.get("maos_maquina")`) e nunca chegava lá — a chave
-                    # morria aqui e o sinal do punho na zona da máquina nunca
-                    # entrou em fato nenhum. Custo zero: já estava calculado.
+                    # Fase 82: `maos_maquina` era LIDO em montar_fato_evento e a
+                    # chave morria aqui — o sinal do punho na zona da máquina
+                    # nunca entrou em fato nenhum.
                     "maos_maquina": p.get("maos_maquina"),
                     "origem_gate": origem_gate,
                     "mudanca_contexto": origem_gate == "analisado",
-                }
-            )
-        pct = int((i + 1) / max(1, len(amostras)) * 100)
-        progress_cb(
-            "vlm", pct, f"{i + 1}/{len(amostras)} amostras · {len(observacoes)} observações"
-        )
+                })
 
-    if n_herdadas:
-        log.info("[operador] %d observação(ões) herdaram a última ação conhecida "
-                 "(indefinida/ponte — operador ocluso).", n_herdadas)
+        feitas += len(grupo)
+        pct = int(feitas / max(1, len(amostras)) * 100)
+        progress_cb("vlm", pct,
+                    f"{feitas}/{len(amostras)} amostras · {len(observacoes)} observações")
+
+    if n_herdadas or n_teto_heranca:
+        log.info("[operador] %d observação(ões) herdaram a última ação conhecida; "
+                 "%d recusadas pelo teto de herança (KV_HERANCA_MAX_SEGUIDAS=%d).",
+                 n_herdadas, n_teto_heranca, _HERANCA_MAX_SEGUIDAS)
     if _GATE_ENABLE:
         chamadas = n_completo + n_binario
         base = len(amostras)
         economia = round((1 - chamadas / max(1, base)) * 100, 1)
         log.info(
-            "[gate] %d amostras → %d VLM completo + %d binário (%d repetições contadas) "
-            "· ~%.0f%% menos chamadas de amostragem",
-            base, n_completo, n_binario, n_repeticao, economia,
+            "[gate] %d amostras em %d grupo(s) → %d chamada(s) de sequência + %d "
+            "binário (%d repetições herdadas, %d forçadas pelo teto) · ~%.0f%% "
+            "menos chamadas",
+            base, len(grupos), n_completo, n_binario, n_repeticao, n_teto_gate, economia,
         )
         etapa_analise_vlm._ultima_economia = {   # type: ignore[attr-defined]
-            "amostras": base, "vlm_completo": n_completo, "vlm_binario": n_binario,
-            "repeticoes": n_repeticao, "economia_pct": economia,
+            "amostras": base, "grupos": len(grupos), "vlm_completo": n_completo,
+            "vlm_binario": n_binario, "repeticoes": n_repeticao,
+            "teto_gate": n_teto_gate, "teto_heranca": n_teto_heranca,
+            "economia_pct": economia,
         }
     return observacoes
 
@@ -3872,6 +4279,8 @@ def etapa_persistir(
             "bbox_stats": e.get("bbox_stats"),
             "zona_contexto": e["zona_contexto"],
             "papel_pessoa": e.get("papel_pessoa"),
+            # Fase 85: com qual instrumento este número foi medido.
+            "versao_instrumento": VERSAO_INSTRUMENTO,
             "n_amostras": e["n_amostras"],
             "confianca": e["confianca"],
             "origem_validacao": origem,
@@ -3937,6 +4346,7 @@ def etapa_persistir(
             "bbox_stats": e.get("bbox_stats"),
             "zona_contexto": e["zona_contexto"],
             "papel_pessoa": e.get("papel_pessoa"),
+            "versao_instrumento": VERSAO_INSTRUMENTO,
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
             "origem_validacao": "auditoria",
             # Mesmo lote dos principais: a coluna NOT NULL tem de vir explícita
@@ -5302,6 +5712,99 @@ def reverter_auto_validacao_maquina(
         "por_rotulo": [
             {"rotulo": r, "eventos": n} for r, n in por_rotulo.most_common(30)
         ],
+    }
+
+
+def rotulos_sem_categoria(sb: Client, empresa: str, processo: str,
+                          limite: int = 60) -> dict:
+    """Fase 85 — SÓ LEITURA. Rótulos sem categoria Lean, do mais CARO para o
+    mais barato em tempo acumulado.
+
+    POR QUE ESTA TELA EXISTE, e por que ela entra JUNTO com a mudança do prompt.
+
+    Rótulo novo nasce sem categoria. Desde a Fase 63 `categoria_efetiva()` nunca
+    devolve None: sem categoria, o tempo conta como NÃO-PRODUTIVO. Isso é a
+    convenção certa (sem prova de que agrega valor, não agrega), mas cria um
+    efeito perverso no dia do deploy: se a mudança de prompt fizer nascer seis
+    rótulos de uma vez, parte deles será de trabalho produtivo de verdade — e a
+    produtividade cai por CONTABILIDADE antes de cair por MEDIÇÃO.
+
+    Num dia de campanha as duas quedas são indistinguíveis no gráfico. A saída
+    não é adiar a mudança: é conseguir classificar rápido, e começar pelo rótulo
+    que representa mais tempo — porque é ele que move o número.
+
+    Ordenado por SEGUNDOS, não por número de eventos: 4 eventos de 15 min pesam
+    mais que 300 de 8 s, e é o peso que decide a ordem de trabalho.
+    """
+    def _fab_ev():
+        return (
+            sb.table("eventos")
+            .select("id, comportamento_label, label_corrigido, descricao_bruta, "
+                    "tempo_inicio_s, tempo_fim_s, principal, validacao_correto, "
+                    "video_id, criado_em, versao_instrumento")
+            .eq("empresa", empresa).eq("processo", processo).order("id")
+        )
+    try:
+        eventos = _scan_todos(_fab_ev)
+    except Exception as e:   # noqa: BLE001
+        return {"erro": f"leitura de eventos falhou: {e}"}
+    try:
+        comps = varrer(sb, "comportamentos",
+                       "id, label, descricao, categoria_lean, categoria_lean_origem, "
+                       "total_ocorrencias",
+                       empresa=empresa, processo=processo)
+    except Exception as e:   # noqa: BLE001
+        return {"erro": f"leitura de comportamentos falhou: {e}"}
+
+    por_label = {c["label"]: c for c in comps}
+    agg: dict[str, dict] = {}
+    seg_total = 0.0
+    for e in eventos:
+        # Mesmo filtro de toda métrica: crus de auditoria e descartados fora.
+        if e.get("principal") is False or e.get("validacao_correto") is False:
+            continue
+        lbl = e.get("label_corrigido") or e.get("comportamento_label")
+        if not lbl:
+            continue
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        seg_total += dur
+        c = por_label.get(lbl) or {}
+        if categoria_tem_evidencia(c.get("categoria_lean"), c.get("categoria_lean_origem")):
+            continue
+        a = agg.setdefault(lbl, {
+            "label": lbl,
+            "comportamento_id": c.get("id"),
+            "descricao": c.get("descricao"),
+            # Distingue "nunca foi classificado" de "foi ASSUMIDO pelo fallback".
+            # São dois problemas: o primeiro espera decisão, o segundo esconde
+            # uma decisão que a máquina tomou sozinha.
+            "categoria_atual": c.get("categoria_lean"),
+            "origem_atual": c.get("categoria_lean_origem"),
+            "n_eventos": 0, "segundos": 0.0, "exemplos": [], "versoes": set(),
+        })
+        a["n_eventos"] += 1
+        a["segundos"] += dur
+        a["versoes"].add(int(e.get("versao_instrumento") or 1))
+        d = (e.get("descricao_bruta") or "").strip()
+        if d and len(a["exemplos"]) < 3 and d not in a["exemplos"]:
+            a["exemplos"].append(d)
+
+    itens = sorted(agg.values(), key=lambda x: -x["segundos"])[:limite]
+    for a in itens:
+        a["minutos"] = round(a["segundos"] / 60, 1)
+        a["pct_do_tempo"] = round(a["segundos"] / seg_total * 100, 1) if seg_total else 0.0
+        a["versoes"] = sorted(a.pop("versoes"))
+        a.pop("segundos", None)
+    seg_sem_cat = sum(v["segundos"] for v in agg.values())
+    return {
+        "itens": itens,
+        "n_rotulos": len(agg),
+        "minutos_sem_categoria": round(seg_sem_cat / 60, 1),
+        "pct_sem_categoria": (round(seg_sem_cat / seg_total * 100, 1) if seg_total else 0.0),
+        "minutos_observados": round(seg_total / 60, 1),
+        "nota": ("Sem categoria, o tempo conta como NÃO-PRODUTIVO. Classificar do "
+                 "topo para baixo é o que separa queda por medição de queda por "
+                 "contabilidade."),
     }
 
 
@@ -8522,7 +9025,10 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         # aqui (vinha None) e o KPI mostrava 0 para sempre; sem
         # `origem_validacao` não dava para excluir o determinístico;
         # sem `camadas_disparadas` a garantia da sombra caía no fallback.
-        "n_amostras, origem_validacao, camadas_disparadas",
+        # Fase 85: a versão do instrumento entra na análise diária para a tela
+        # poder MARCAR o dia em que a medição mudou. Sem isso, a queda de
+        # produtividade do deploy seria indistinguível de queda real.
+        "n_amostras, origem_validacao, camadas_disparadas, versao_instrumento",
         empresa=empresa, processo=processo,
     )
     eventos = [
@@ -8559,6 +9065,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             "tot": 0.0, "va": 0.0, "desp": 0.0, "duvida": 0.0, "sem_evidencia": 0.0,
             "duvida_resolvida": 0.0, "sem_evidencia_resolvida": 0.0,
             "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
+            "versoes": set(),
             "horas": defaultdict(lambda: {"seg": 0.0, "va": 0.0, "desp": 0.0,
                                           "vazio": 0.0}),
             # Fase 35.2: "jornada" — buckets de 15 min do dia (96) com segundos
@@ -8569,6 +9076,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
             "primeiro": inst, "ultimo": inst,
         })
         d["tot"] += dur
+        d["versoes"].add(int(e.get("versao_instrumento") or 1))
         eh_vazio = (e.get("papel_pessoa") == "posto_vazio") or (label == POSTO_VAZIO_LABEL)
         if eh_vazio:
             d["vazio"] += dur
@@ -8649,7 +9157,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 "duvida_pct": 0.0, "sem_evidencia_pct": 0.0,
                 "duvida_resolvida_pct": 0.0, "sem_evidencia_resolvida_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0,
-                "atipico_vazio": False, "n_videos": len(videos_por_dia.get(iso, ())),
+                "atipico_vazio": False, "versoes_instrumento": [],
+                "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": 0, "primeira_h": None, "ultima_h": None, "top_acao": None,
                 "top_acoes": [], "linha_tempo": [],
                 "por_hora": [],
@@ -8728,6 +9237,10 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 # chamava atenção, porque esses eventos saem da fila por
                 # mecanismo e o dia fica invisível.
                 "atipico_vazio": bool(vazio_pct >= VAZIO_ATIPICO_PCT),
+                # Fase 85: mais de uma versão no mesmo dia = o dia do deploy.
+                # A tela marca a quebra; o número dos dois lados não é
+                # comparável porque não foi medido com o mesmo instrumento.
+                "versoes_instrumento": sorted(d["versoes"]),
                 "n_videos": len(videos_por_dia.get(iso, ())),
                 "visitas": d["visitas"],
                 "primeira_h": d["primeiro"].strftime("%H:%M"),
@@ -9464,6 +9977,9 @@ def processar_video(
         groq_client, amostras, descricao, memoria, progress_cb,
         conhecimento_adquirido=conhecimento,
         zona_posto=zona_posto,
+        # Fase 85: o prompt da sequência diz quantos segundos separam as
+        # imagens — sem isso o modelo não tem como julgar "parado há quanto".
+        intervalo_s=intervalo_amostragem_s,
     )
 
     if not observacoes:

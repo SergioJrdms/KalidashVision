@@ -1039,3 +1039,33 @@ alter table descritores_track
     drop constraint if exists descritores_track_video_id_pessoa_track_id_key;
 create unique index if not exists uq_desc_track_video_cam
     on descritores_track(video_id, cam_id, pessoa_track_id);
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 85 — A VERSÃO DO INSTRUMENTO, carimbada no evento.
+--
+-- Esta fase muda o instrumento de medição no MEIO de uma campanha de 30 dias.
+-- Duas mudanças ligadas:
+--   • o VLM passa a julgar uma SEQUÊNCIA de instantes em vez de um frame
+--     isolado — "o que aconteceu nestes 60s", não "o que se vê nesta foto";
+--   • o prompt para de escolher o rótulo no caso ambíguo. O anterior mandava:
+--     "Se ele está PARADO ... é 'monitorando o ciclo da máquina' ... Na dúvida
+--     entre operar e monitorar, escolha MONITORAR" — duas saídas, as duas
+--     produtivas. Era por isso que a dúvida não tinha para onde ir.
+--
+-- A produtividade ANTES e DEPOIS não são a mesma medida. Carimbar a versão põe
+-- a quebra da série DENTRO DO DADO, consultável, em vez de depender da memória
+-- de alguém:
+--
+--   select versao_instrumento, count(*), round(avg(duracao_s)::numeric,1)
+--     from eventos where empresa = ? group by 1;
+--
+--   1 = instante isolado (até a Fase 85)
+--   2 = sequência por minuto, VLM descrevendo em vez de classificar
+--
+-- O default é 1 porque todo evento que já existe foi medido com o instrumento
+-- antigo — e essa é a afirmação verdadeira sobre eles.
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists versao_instrumento int default 1;
+create index if not exists idx_eventos_versao
+    on eventos(empresa, processo, versao_instrumento);

@@ -33,6 +33,7 @@ import type {
   FusoProcesso,
   UsoDescricao,
   AuditoriaDia,
+  RotulosSemCategoria,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -265,6 +266,12 @@ export const api = {
       req<FilaDuvidas>(`/processos/${processoId}/duvidas`
         + `?limite=200${rotulo ? `&rotulo=${encodeURIComponent(rotulo)}` : ""}`
         + `${tipo ? `&tipo=${encodeURIComponent(tipo)}` : ""}`),
+  },
+  rotulos: {
+    // Fase 85: só leitura. A classificação usa setCategoriaPorLabel.
+    semCategoria: (processoId: string, limite = 60) =>
+      req<RotulosSemCategoria>(
+        `/processos/${processoId}/rotulos/sem-categoria?limite=${limite}`),
   },
   auditoria: {
     // Auditar não é validar: GET, nada entra na fila.

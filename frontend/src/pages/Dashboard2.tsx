@@ -271,6 +271,16 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
                 <rect x={x} y={padT} width={bw} height={plotH} rx="3" fill={cor} opacity={0.16}><title>{tip}</title></rect>
                 <text x={x + bw / 2} y={padT + plotH / 2} fontSize="11" textAnchor="middle" fill={d.sem_trabalho === "posto_vazio" ? leanCor("desp") : "var(--faint)"}>✕</text>
                 {d.atipico_vazio && <MarcaAtipico x={x + bw / 2} y={padT + 5} tip={tip} />}
+              {(d.versoes_instrumento || []).length > 1 && (
+                // Fase 85: o dia em que o instrumento mudou. A linha existe
+                // para que ninguém compare os dois lados sem saber.
+                <g style={{ pointerEvents: "none" }}>
+                  <line x1={x - 2} x2={x - 2} y1={padT} y2={H - padB}
+                        stroke="var(--accent)" strokeWidth={1.6} strokeDasharray="3 3">
+                    <title>{`${d.dow} ${d.rot} — a MEDIÇÃO mudou neste dia (instrumento ${(d.versoes_instrumento || []).join(" → ")}). O número antes e depois não é comparável.`}</title>
+                  </line>
+                </g>
+              )}
                 {mostraRotulo && <text x={x + bw / 2} y={H - padB + 14} fontSize="9" textAnchor="middle" fill="var(--muted)" fontFamily="var(--mono)">{d.rot}</text>}
               </g>
             );
@@ -297,6 +307,16 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
                 return <rect key={k} x={x} y={yTopo + 1} width={bw} height={Math.max(1, h - 2)} rx="2.5" fill={leanCor(cat)} opacity={0.92}><title>{tip}</title></rect>;
               })}
               {d.atipico_vazio && <MarcaAtipico x={x + bw / 2} y={padT + 5} tip={tip} />}
+              {(d.versoes_instrumento || []).length > 1 && (
+                // Fase 85: o dia em que o instrumento mudou. A linha existe
+                // para que ninguém compare os dois lados sem saber.
+                <g style={{ pointerEvents: "none" }}>
+                  <line x1={x - 2} x2={x - 2} y1={padT} y2={H - padB}
+                        stroke="var(--accent)" strokeWidth={1.6} strokeDasharray="3 3">
+                    <title>{`${d.dow} ${d.rot} — a MEDIÇÃO mudou neste dia (instrumento ${(d.versoes_instrumento || []).join(" → ")}). O número antes e depois não é comparável.`}</title>
+                  </line>
+                </g>
+              )}
               {mostraRotulo && <text x={x + bw / 2} y={H - padB + 14} fontSize="9" textAnchor="middle" fill={sel ? "var(--accent)" : "var(--muted)"} fontFamily="var(--mono)" fontWeight={sel ? 700 : 400}>{d.rot}</text>}
             </g>
           );
@@ -309,6 +329,11 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
           </span>
         ))}
         <span className="row" style={{ gap: 5 }}><span style={{ color: "var(--faint)" }}>✕</span> sem trabalho</span>
+        {dias.some((d) => (d.versoes_instrumento || []).length > 1) && (
+          <span className="row" style={{ gap: 5 }} title="Neste dia o sistema passou a medir de outro jeito. Comparar os dois lados da linha é comparar instrumentos diferentes, não desempenhos diferentes.">
+            <span style={{ color: "var(--accent)", fontWeight: 800 }}>┆</span> a medição mudou aqui
+          </span>
+        )}
         {dias.some((d) => d.atipico_vazio) && (
           <span className="row" style={{ gap: 5 }} title="Dia quase todo posto vazio: ou é falta real, ou é falha de detecção. Clique no dia para auditá-lo.">
             <span style={{ color: leanCor("desp"), fontWeight: 800 }}>!</span> dia atípico (audite)

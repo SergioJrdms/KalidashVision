@@ -177,7 +177,7 @@ check("a caixa da cam2 é guardada, não descartada",
       "am.bbox_cam2 = bbox_no_posto[0]" in src)
 check("com as dimensões do frame da cam2 junto", "am.dim_cam2 = (w2, h2)" in src)
 check("a ponte temporal continua SEM caixa (ninguém foi visto)",
-      'bbox_obs = am.bbox_cam2 if origem_resgate != "ponte_temporal" else None' in src)
+      'bbox_obs = am.bbox_cam2 if tipo == "resgate" else None' in src)
 check("as colunas novas existem no schema",
       "add column if not exists bbox_cam" in Path("sql/schema.sql").read_text()
       and "add column if not exists bbox_stats" in Path("sql/schema.sql").read_text())

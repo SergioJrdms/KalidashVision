@@ -194,6 +194,94 @@ não testa nada. Se o servidor corta, o dublê corta.
 
 ---
 
+## 6. O prompt escolhia o lado — e o teto de 75% era do instrumento
+
+**Estado:** corrigido (Fase 85). Fica registrado porque a causa é sutil e o
+padrão errado é o que qualquer um escreveria.
+
+**O sintoma medido pelo dono:** dos 5 comportamentos existentes, 4 eram
+produtivos e o único improdutivo era `posto_vazio`. `monitorar_maquina` comia
+31% do tempo e concentrava **100% da dúvida**. O sistema não tinha como
+registrar improdutividade com o operador presente, e a produtividade de 75% era
+**o teto do que o instrumento media**, não um resultado.
+
+**A causa não era (só) viés do modelo.** O prompt *mandava* o rótulo produtivo:
+
+> "Se ele está PARADO, de pé, braços ao lado do corpo, apenas OLHANDO/
+> acompanhando a máquina ou a área, é 'monitorando o ciclo da máquina' ou
+> 'observando a operação' — NÃO é operar. **Na dúvida entre operar e monitorar,
+> escolha MONITORAR.**"
+
+Duas saídas, as duas produtivas. Não existia terceira — a dúvida não tinha para
+onde ir, e por isso se acumulava toda num rótulo só.
+
+### A correção de fundo: o VLM estava classificando, não descrevendo
+
+"é monitorando o ciclo da máquina" já é uma **escolha de rótulo**, feita na
+etapa que deveria só descrever. A arquitetura é descrição → cluster → rótulo →
+categoria Lean. Devolvendo a descrição ao seu lugar, o vocabulário aberto (que
+já existia — foi assim que `limpando_cavaco` e `medir_peca` nasceram) volta a
+funcionar sozinho, sem lista fechada de rótulos improdutivos.
+
+A calibração vive nos **exemplos**, e é deliberadamente simétrica: dois deles
+têm a **mesma postura** e diferem só no estado da máquina —
+`"parado de frente ao torno, máquina em ciclo"` contra
+`"parado ao lado do torno, máquina parada"`. O prompt nunca diz qual é
+produtivo. Esperar ciclo é produtivo por decisão do dono do processo, tomada na
+categoria Lean; ociosidade não é. O discriminador (a máquina) é o que torna os
+dois separáveis.
+
+### As três portas dos fundos
+
+Prompt novo sozinho nasceria pela metade. Três caminhos independentes
+convertiam ausência de informação em trabalho produtivo:
+
+1. **O gate de repetição** (Fase 23) suprime pose idêntica sem chamar o VLM —
+   que é *exatamente* o sinal de imobilidade que a mudança precisa observar.
+2. **`_eh_indefinida` herda a última ação conhecida** (Fase 34): "ação não
+   identificada" virava `operar_torno`. É a conversão mais silenciosa de
+   DESCONHECIDO em PRODUTIVO que o sistema tinha.
+3. **A ponte temporal** herda sem ver imagem nenhuma.
+
+**Um princípio resolve os três: herdar é aceitável por instantes, não por
+minutos.** Toda herança sem evidência nova ganhou um teto
+(`KV_GATE_MAX_REPETICOES`, `KV_HERANCA_MAX_SEGUIDAS`); passado o teto, o sistema
+volta a OLHAR. "Parado há 2 minutos" é informação; não é a mesma coisa que
+"parado há 8 segundos".
+
+### Regra que fica
+
+Prompt que oferece um conjunto fechado de saídas está classificando, não
+descrevendo — e o conjunto que ele oferece vira o teto do que o sistema
+consegue medir. Antes de acreditar num número, pergunte que respostas o
+instrumento *permitia*.
+
+---
+
+## 7. Rótulo novo nasce como não-produtivo — e isso mexe no número
+
+**Estado:** mitigado (Fase 85, tela "Classificar rótulos"). Não é bug: é uma
+convenção certa com um efeito colateral que precisa de tela.
+
+Desde a Fase 63 `categoria_efetiva()` nunca devolve None: rótulo sem categoria
+Lean conta como **NÃO-PRODUTIVO** (`CATEGORIA_SEM_EVIDENCIA`). A convenção está
+certa — sem prova de que agrega valor, não agrega — e é melhor que a anterior,
+em que `limpando_cavaco` ficava fora dos dois lados da conta.
+
+O efeito colateral aparece quando o vocabulário cresce de uma vez: parte dos
+rótulos novos é trabalho produtivo de verdade, e **a produtividade cai por
+CONTABILIDADE antes de cair por MEDIÇÃO**. No gráfico de um dia as duas quedas
+são indistinguíveis.
+
+A saída não é adiar a mudança do instrumento — é conseguir classificar rápido, e
+**do mais caro para o mais barato em tempo acumulado**, porque é o tempo que move
+o número. A tela ordena por minutos (não por contagem de eventos: 4 eventos de
+15 min pesam mais que 300 de 8 s) e distingue *nunca classificado* de
+*assumido pelo fallback* — o primeiro espera decisão, o segundo esconde uma
+decisão que a máquina tomou sozinha.
+
+---
+
 ## 2. `gravado_em` carimba a tz do servidor no timestamp do nome
 
 **Estado:** não corrigido. Sem efeito visível hoje.
