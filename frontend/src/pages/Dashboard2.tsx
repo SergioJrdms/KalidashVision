@@ -827,7 +827,7 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
         </span>
         {b && (
           <span style={{ fontSize: 12, color: "var(--muted)" }}>
-            {b.n_eventos} evento(s) · {(b.segundos / 60).toFixed(1)} min medidos
+            {b.n_eventos} evento(s)
             {b.truncado ? ` · mostrando ${b.itens.length}` : ""}
           </span>
         )}
@@ -869,7 +869,6 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
                 <span key={c} className="row" style={{ gap: 5, color: "var(--muted)" }}>
                   <i style={{ width: 9, height: 9, borderRadius: 3, background: CAT_CORES[c] }} />
                   {CAT_NOMES[c]} <b className="tnum" style={{ color: "var(--ink)" }}>{p.pct.toFixed(0)}%</b>
-                  <span className="tnum">({(p.segundos / 60).toFixed(1)} min)</span>
                 </span>
               );
             })}
@@ -881,8 +880,8 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
                 <li key={a.rotulo} className="row gap2" style={{ alignItems: "baseline" }}>
                   <i style={{ width: 8, height: 8, borderRadius: 2, background: CAT_CORES[a.cat], flex: "none" }} />
                   <code className="font-mono" style={{ fontSize: 11.5, background: "var(--line-2)", padding: "1px 7px", borderRadius: 5 }}>{a.rotulo}</code>
-                  <span className="tnum" style={{ fontSize: 11.5, color: "var(--ink)", fontWeight: 700 }}>{(a.segundos / 60).toFixed(1)} min</span>
-                  <span style={{ fontSize: 11, color: "var(--muted)" }}>{a.pct.toFixed(0)}% do bloco · {a.n} trecho(s)</span>
+                  <span className="tnum" style={{ fontSize: 11.5, color: "var(--ink)", fontWeight: 700 }}>{a.pct.toFixed(0)}%</span>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>do bloco · {a.n} trecho(s)</span>
                 </li>
               ))}
             </ul>
@@ -897,12 +896,12 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
                     <code className="font-mono" style={{ fontSize: 11.5, fontWeight: 700, background: "var(--line-2)", padding: "1px 7px", borderRadius: 5 }}>
                       {it.rotulo}
                     </code>
-                    <span className="tnum" style={{ fontSize: 11, color: "var(--muted)" }}>
-                      {it.segundos_no_bin.toFixed(0)}s
-                      {/* Evento que atravessa a borda entra só com a fatia dele — sem
-                          isso o bloco parece "ter" um evento inteiro de 4 min. */}
-                      {it.parcial ? ` de ${it.segundos.toFixed(0)}s` : ""}
-                    </span>
+                    {/* A duração saiu da tela: com a sequência, todo trecho é o
+                        minuto, e "60s" em cada linha era ruído. O evento que
+                        atravessa a borda do bloco ainda precisa se anunciar —
+                        senão o bloco parece conter um trecho que só encostou
+                        nele — mas isso é uma MARCA, não um número. */}
+                    {it.parcial && <TagBin texto="atravessa o bloco" cor="var(--faint)" />}
                     {it.corrigido && <TagBin texto="corrigido" cor="var(--va)" />}
                     {it.papel && it.papel !== "operador" && <TagBin texto={it.papel} cor="var(--apoio)" />}
                     {it.em_duvida && <TagBin texto="em dúvida" cor="var(--apoio)" />}
