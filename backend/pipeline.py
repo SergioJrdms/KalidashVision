@@ -22,7 +22,7 @@ except ImportError:
     pass
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -9355,6 +9355,188 @@ def montar_insights_quantitativos(
         "placar": placar,
         "perguntas": perguntas,
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 87 — ABRIR O BIN DA JORNADA
+#
+# A faixa "A jornada de …" é desenhada a partir de buckets de 15 min, e cada
+# bucket é FATIADO na proporção de cada categoria. Isso quer dizer uma coisa
+# que a tela precisa dizer em voz alta: a largura da fatia é PROPORÇÃO, não
+# horário. Uma fatia vermelha desenhada em 09:07–09:10 não afirma que o
+# desperdício aconteceu às 09:07 — afirma que, dentro do bloco 09:00–09:15,
+# aquele tanto do tempo foi desperdício.
+#
+# Por isso o clique abre o BLOCO DE 15 MIN inteiro, não a fatia: é a menor
+# janela sobre a qual o dado desenhado faz alguma afirmação. Dentro dela vêm
+# os eventos de verdade, com hora, rótulo e descrição — que é o que permite
+# conferir se a cor bate com o que aconteceu.
+#
+# Mesmo filtro e mesma conta de `montar_analise_diaria`: se divergirem, o
+# detalhe desmente o desenho e as duas telas ficam inúteis.
+# ═════════════════════════════════════════════════════════════════════════
+BIN_JORNADA_MIN = 15          # tem de ser o MESMO passo do bucket da linha_tempo
+
+
+def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
+                   minuto: float, limite: int = 300) -> dict:
+    """Os eventos que compõem UM bloco de 15 min da jornada de um dia.
+
+    `minuto` é qualquer minuto-do-dia dentro do bloco (a tela manda o ponto
+    clicado); o bloco é derivado dele. Só leitura — não toca em validação,
+    não entra na fila, não muda categoria.
+    """
+    try:
+        date.fromisoformat(dia)
+    except Exception:
+        return {"erro": f"data inválida: {dia!r} (esperado AAAA-MM-DD)"}
+    b = int(max(0.0, min(1439.0, float(minuto))) // BIN_JORNADA_MIN)
+    jan_ini = b * float(BIN_JORNADA_MIN)
+    jan_fim = jan_ini + BIN_JORNADA_MIN
+
+    videos = varrer(sb, "videos", "id, nome, cam_id, duracao_s, gravado_em, processado_em",
+                    empresa=empresa, processo=processo)
+    # A véspera entra porque o vídeo que começa 23:5x carrega eventos que caem
+    # no dia seguinte — e é assim que `montar_analise_diaria` os conta. Quem
+    # decide o dia é o instante do EVENTO, não o do vídeo.
+    dias_fonte = {dia, (date.fromisoformat(dia) - timedelta(days=1)).isoformat()}
+    inicio_por_video: dict[str, datetime] = {}
+    meta_video: dict[str, dict] = {}
+    for v in videos:
+        dt0 = _inicio_video_dt(v)
+        if v.get("id") and dt0 and dt0.date().isoformat() in dias_fonte:
+            inicio_por_video[v["id"]] = dt0
+            meta_video[v["id"]] = v
+    if not inicio_por_video:
+        return {"dia": dia, "bin": b, "de": _hhmm_do_minuto(jan_ini),
+                "ate": _hhmm_do_minuto(jan_fim), "n_eventos": 0, "segundos": 0.0,
+                "por_categoria": {}, "acoes": [], "itens": [], "truncado": False,
+                "nota": "Nenhum vídeo com gravação nesta data."}
+
+    comps = varrer(sb, "comportamentos", "label, categoria_lean",
+                   empresa=empresa, processo=processo)
+    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+
+    ids = sorted(inicio_por_video)
+    eventos: list[dict] = []
+    # Filtra pelos vídeos DO DIA no servidor: o bin é uma janela de 15 min, não
+    # faz sentido arrastar o processo inteiro para dentro do processo web.
+    for i in range(0, len(ids), 200):
+        lote = ids[i : i + 200]
+        eventos += varrer(
+            sb, "eventos",
+            "id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
+            "tempo_inicio_s, tempo_fim_s, validacao_correto, principal, papel_pessoa, "
+            "confianca, em_duvida, validado_humano, origem_validacao, n_amostras, "
+            "pessoa_track_id, versao_instrumento",
+            empresa=empresa, processo=processo,
+            ajustes=lambda q, _l=lote: q.in_("video_id", _l),
+        )
+
+    por_cat = {"va": 0.0, "desp": 0.0, "vazio": 0.0}
+    acoes: dict[str, dict] = {}
+    itens: list[dict] = []
+    for e in eventos:
+        if e.get("validacao_correto") is False or e.get("principal") is False:
+            continue
+        dt0 = inicio_por_video.get(e.get("video_id"))
+        if dt0 is None:
+            continue
+        label, cat, dur = _cat_do_evento(e, cat_por_label)
+        if dur <= 0:
+            continue
+        inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
+        if inst.date().isoformat() != dia:
+            continue
+        # Mesma aritmética de `montar_analise_diaria`: o evento é pintado a
+        # partir do minuto do relógio em que COMEÇA e é cortado à meia-noite.
+        m_ini = inst.hour * 60 + inst.minute + inst.second / 60.0
+        m_fim = min(1440.0, m_ini + dur / 60.0)
+        ov_min = min(m_fim, jan_fim) - max(m_ini, jan_ini)
+        if ov_min <= 0:
+            continue
+        eh_vazio = (e.get("papel_pessoa") == "posto_vazio") or (label == POSTO_VAZIO_LABEL)
+        chave = "vazio" if eh_vazio else ("va" if cat == "valor_agregado" else "desp")
+        seg_bin = ov_min * 60.0
+        por_cat[chave] += seg_bin
+        a = acoes.setdefault(label, {"rotulo": label, "cat": chave,
+                                     "segundos": 0.0, "n": 0})
+        a["segundos"] += seg_bin
+        a["n"] += 1
+        v = meta_video.get(e["video_id"]) or {}
+        itens.append({
+            "id": e.get("id"), "video_id": e.get("video_id"),
+            "video_nome": v.get("nome"), "cam_id": v.get("cam_id"),
+            "rotulo": label,
+            # O rótulo é o que o cluster decidiu; a descrição é o que o VLM viu.
+            # Sem a segunda não dá para saber se a primeira faz sentido.
+            "descricao": e.get("descricao_bruta"),
+            "cat": chave,
+            "corrigido": bool(e.get("label_corrigido")),
+            "hora": _hhmm_do_minuto(m_ini, com_segundos=True),
+            "hora_fim": _hhmm_do_minuto(m_fim, com_segundos=True),
+            "ini": e.get("tempo_inicio_s"), "fim": e.get("tempo_fim_s"),
+            "segundos": round(dur, 1),
+            "segundos_no_bin": round(seg_bin, 1),
+            # Um evento que começa antes ou termina depois do bloco entra só com
+            # a fatia dele — dizer isso evita a leitura de que o bloco "tem" um
+            # evento de 4 min quando só 40 s caíram aqui dentro.
+            "parcial": bool(m_ini < jan_ini - 1e-6 or m_fim > jan_fim + 1e-6),
+            "papel": e.get("papel_pessoa"),
+            "origem": e.get("origem_validacao"),
+            "validado": bool(e.get("validado_humano")),
+            "em_duvida": bool(e.get("em_duvida")),
+            "confianca": e.get("confianca"),
+            "n_amostras": e.get("n_amostras"),
+            "track": e.get("pessoa_track_id"),
+            "versao_instrumento": int(e.get("versao_instrumento") or 1),
+            "_m": m_ini,
+        })
+
+    itens.sort(key=lambda x: x["_m"])
+    n_total = len(itens)
+    for it in itens:
+        it.pop("_m", None)
+    seg_total = sum(por_cat.values())
+    return {
+        "dia": dia,
+        "bin": b,
+        "de": _hhmm_do_minuto(jan_ini),
+        "ate": _hhmm_do_minuto(jan_fim),
+        "minutos_bin": BIN_JORNADA_MIN,
+        "n_eventos": n_total,
+        "segundos": round(seg_total, 1),
+        "por_categoria": {
+            k: {"segundos": round(s, 1),
+                "pct": round(s / seg_total * 100, 1) if seg_total else 0.0}
+            for k, s in por_cat.items() if s > 0
+        },
+        "acoes": sorted(
+            ({**a, "segundos": round(a["segundos"], 1),
+              "pct": round(a["segundos"] / seg_total * 100, 1) if seg_total else 0.0}
+             for a in acoes.values()),
+            key=lambda a: -a["segundos"],
+        ),
+        "itens": itens[:limite],
+        "truncado": n_total > limite,
+        # O bucket com menos de 1 min de cobertura é BURACO no desenho (a
+        # `montar_analise_diaria` o pula). O detalhe não pode fingir que há
+        # jornada ali — mas também não some, senão o clique parece quebrado.
+        "buraco": bool(seg_total < 60),
+        "nota": ("As larguras desenhadas dentro do bloco são PROPORÇÃO de tempo, "
+                 "não horário: a ordem das cores na faixa é fixa (produtivo, "
+                 "desperdício, posto vazio). A hora de verdade de cada trecho "
+                 "está na lista abaixo."),
+    }
+
+
+def _hhmm_do_minuto(m: float, com_segundos: bool = False) -> str:
+    m = max(0.0, min(1440.0, float(m)))
+    h, resto = int(m // 60), m - int(m // 60) * 60
+    if not com_segundos:
+        return f"{h:02d}:{int(resto):02d}"
+    mi = int(resto)
+    return f"{h:02d}:{mi:02d}:{int(round((resto - mi) * 60)) % 60:02d}"
 
 
 # ═════════════════════════════════════════════════════════════════════════

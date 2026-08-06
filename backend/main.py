@@ -63,6 +63,8 @@ from .pipeline import (
     diagnosticar_contagio_por_descricao,
     relatorio_reprocesso_por_video,
     auditar_dia,
+    eventos_do_bin,
+    BIN_JORNADA_MIN,
     VAZIO_ATIPICO_PCT,
     aprendizado_automatico,
     APRENDIZADO_AUTO_PADRAO,
@@ -1154,6 +1156,33 @@ def auditoria_do_dia(
     rel = auditar_dia(sb, user.empresa, nome, dia, por_bloco=por_bloco)
     if "erro" in rel:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
+    return {"ok": True, **rel}
+
+
+@app.get("/processos/{processo_id}/jornada/bin")
+def jornada_do_bin(
+    processo_id: str,
+    dia: str = Query(..., description="AAAA-MM-DD no relógio da fábrica"),
+    minuto: float = Query(..., ge=0, le=1439.99,
+                          description="Minuto-do-dia clicado; o bloco de "
+                                      f"{BIN_JORNADA_MIN} min é derivado dele"),
+    limite: int = Query(300, ge=1, le=1000),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 87 — abre um BLOCO da faixa "A jornada de …". Só leitura.
+
+    A faixa é desenhada em buckets de 15 min fatiados por PROPORÇÃO de
+    categoria — a largura de uma cor não é horário. Este endpoint devolve o
+    bloco inteiro que contém o minuto clicado, com os eventos que o compõem:
+    hora real, rótulo, descrição do VLM, papel, origem e quanto de cada um
+    caiu DENTRO do bloco. É o que permite conferir se a cor bate com o que
+    aconteceu — e, durante os testes do instrumento, ver qual descrição virou
+    qual rótulo."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    rel = eventos_do_bin(sb, user.empresa, nome, dia, minuto, limite=limite)
+    if "erro" in rel:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, rel["erro"])
     return {"ok": True, **rel}
 
 

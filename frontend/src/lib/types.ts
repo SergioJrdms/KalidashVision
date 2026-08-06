@@ -701,6 +701,53 @@ export interface AuditoriaDia {
 }
 
 
+// Fase 87 — o que compõe UM bloco de 15 min da faixa "A jornada de …".
+// A largura da cor dentro do bloco é PROPORÇÃO, não horário; a hora de
+// verdade de cada trecho está aqui.
+export type CatJornada = "va" | "desp" | "vazio";
+export interface ItemBinJornada {
+  id: string;
+  video_id: string;
+  video_nome: string | null;
+  cam_id: string | null;
+  rotulo: string;
+  descricao: string | null;
+  cat: CatJornada;
+  corrigido: boolean;
+  hora: string;
+  hora_fim: string;
+  ini: number | null;
+  fim: number | null;
+  segundos: number;
+  // Evento que atravessa a borda do bloco entra só com a fatia dele.
+  segundos_no_bin: number;
+  parcial: boolean;
+  papel: string | null;
+  origem: string | null;
+  validado: boolean;
+  em_duvida: boolean;
+  confianca: number | null;
+  n_amostras: number | null;
+  track: number | null;
+  versao_instrumento: number;
+}
+export interface BinJornada {
+  dia: string;
+  bin: number;
+  de: string;
+  ate: string;
+  minutos_bin: number;
+  n_eventos: number;
+  segundos: number;
+  por_categoria: Partial<Record<CatJornada, { segundos: number; pct: number }>>;
+  acoes: { rotulo: string; cat: CatJornada; segundos: number; n: number; pct: number }[];
+  itens: ItemBinJornada[];
+  truncado: boolean;
+  buraco: boolean;
+  nota: string;
+}
+
+
 // Fase 85 — rótulos sem categoria Lean, do mais CARO para o mais barato.
 // Sem categoria, o tempo conta como NÃO-PRODUTIVO: quando nascem vários
 // rótulos de uma vez, a produtividade cai por CONTABILIDADE antes de cair por

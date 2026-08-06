@@ -33,6 +33,7 @@ import type {
   FusoProcesso,
   UsoDescricao,
   AuditoriaDia,
+  BinJornada,
   RotulosSemCategoria,
 } from "./types";
 
@@ -278,6 +279,14 @@ export const api = {
     dia: (processoId: string, dia: string, porBloco = 3) =>
       req<AuditoriaDia>(
         `/processos/${processoId}/auditoria/dia?dia=${dia}&por_bloco=${porBloco}`,
+      ),
+  },
+  jornada: {
+    // Fase 87: o bloco de 15 min por trás de um pedaço da faixa. Só leitura —
+    // clicar no gráfico não pode mudar nada do que o gráfico mostra.
+    bin: (processoId: string, dia: string, minuto: number) =>
+      req<BinJornada>(
+        `/processos/${processoId}/jornada/bin?dia=${dia}&minuto=${minuto}`,
       ),
   },
   descricoes: {

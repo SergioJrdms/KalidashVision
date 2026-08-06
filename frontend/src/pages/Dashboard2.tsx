@@ -43,7 +43,7 @@ export default function Dashboard2({ proc, go }: { proc: ProcHeaderMock; go: Go 
       <EvolucaoPorDia dias={dias} selecionado={selecionado} alvo={alvo} ehAgregado={ehAgregado} onSelecionar={toggleDia} trabalhados={trabalhados} onAuditar={(d) => { pedirAuditoriaDoDia(d); go("processo", proc.id, "auditoria"); }} />
       {alvo && !alvo.sem_trabalho && (alvo.linha_tempo.length > 0 || alvo.top_acoes.length > 0) && (
         <div className="row gap4 wrap" style={{ alignItems: "stretch" }}>
-          {alvo.linha_tempo.length > 0 && <div style={{ flex: "1.4 1 420px" }}><JornadaDoDia d={alvo} agregado={ehAgregado} /></div>}
+          {alvo.linha_tempo.length > 0 && <div style={{ flex: "1.4 1 420px" }}><JornadaDoDia d={alvo} agregado={ehAgregado} proc={proc} /></div>}
           <div style={{ flex: "1 1 300px" }}><TopAcoesDia d={alvo} agregado={ehAgregado} /></div>
         </div>
       )}
@@ -713,24 +713,44 @@ function fmtMin(m: number): string {
   return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(Math.round(m % 60)).padStart(2, "0")}`;
 }
 
-function JornadaDoDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
+// Fase 87 — o bloco de 15 min é a MENOR janela sobre a qual a faixa afirma
+// alguma coisa. Dentro dele as larguras são proporção, não horário: uma fatia
+// vermelha desenhada às 09:07 não diz que o desperdício foi às 09:07, diz que
+// aquele tanto do bloco 09:00–09:15 foi desperdício. Por isso o clique abre o
+// BLOCO, nunca a fatia — e o painel repete isso em voz alta, porque a fatia
+// parece um horário e é a leitura errada mais fácil de fazer.
+const BIN_MIN = 15;
+
+function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean; proc: ProcHeaderMock }) {
   const faixas = d.linha_tempo || [];
+  const [binSel, setBinSel] = useState<number | null>(null);
+  // Trocar de dia (ou voltar pro agregado) tem de fechar o detalhe: senão o
+  // painel fica mostrando os eventos de um dia que não está mais no gráfico.
+  const chaveAlvo = agregado ? "@agregado" : d.dia;
+  const [chaveAberta, setChaveAberta] = useState(chaveAlvo);
+  if (chaveAberta !== chaveAlvo) { setChaveAberta(chaveAlvo); setBinSel(null); }
   if (faixas.length === 0) return null;
   const ini = Math.max(0, faixas[0].ini_m - 15);
   const fim = Math.min(1440, faixas[faixas.length - 1].fim_m + 15);
   const span = Math.max(1, fim - ini);
   const marcas: number[] = [];
   for (let h = Math.ceil(ini / 60); h * 60 <= fim; h++) marcas.push(h * 60);
+  // Só os blocos que têm faixa desenhada viram alvo de clique. Clicar num
+  // buraco abriria um painel vazio e pareceria bug.
+  const binsCobertos = new Set<number>();
+  for (const f of faixas) {
+    for (let b = Math.floor(f.ini_m / BIN_MIN); b * BIN_MIN < f.fim_m; b++) binsCobertos.add(b);
+  }
   return (
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
         titulo={agregado ? "A jornada típica — todos os dias" : `A jornada de ${d.dow} ${d.rot}`}
         ajuda={agregado
           ? "O dia TÍPICO do operador: em cada faixa de 15 min, a proporção de cada categoria somando todos os dias. Verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = horário sem filmagem em nenhum dia."
-          : "O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = sem filmagem naquele horário."}
+          : "O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = sem filmagem naquele horário. Clique num bloco para ver os eventos que o compõem — rótulo, descrição e hora."}
         leitura={agregado
           ? "O padrão do posto: onde o dia costuma render, o horário do almoço e as folgas típicas."
-          : "O filme do dia: dá pra ver quando começou, o almoço, os buracos e onde o dia rendeu."}
+          : "O filme do dia: dá pra ver quando começou, o almoço, os buracos e onde o dia rendeu. Clique num bloco de 15 min para abrir o que há dentro dele."}
       />
       <div style={{ position: "relative", height: 46, marginTop: 6 }}>
         <div style={{ position: "absolute", inset: "8px 0 14px", background: "var(--soft)", borderRadius: 8, border: "1px solid var(--line-2)" }} />
@@ -745,6 +765,26 @@ function JornadaDoDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
               borderRadius: 3,
             }} />
         ))}
+        {!agregado && [...binsCobertos].sort((a, b) => a - b).map((b) => {
+          const m0 = b * BIN_MIN;
+          if (m0 + BIN_MIN <= ini || m0 >= fim) return null;
+          const sel = binSel === b;
+          return (
+            <button key={`b${b}`} type="button"
+              title={`${fmtMin(m0)}–${fmtMin(m0 + BIN_MIN)} · ver o que compõe este bloco`}
+              aria-label={`Abrir o bloco de ${fmtMin(m0)} a ${fmtMin(m0 + BIN_MIN)}`}
+              aria-pressed={sel}
+              onClick={() => setBinSel(sel ? null : b)}
+              style={{
+                position: "absolute", top: 4, bottom: 12, padding: 0,
+                left: `${((m0 - ini) / span) * 100}%`,
+                width: `${(BIN_MIN / span) * 100}%`,
+                cursor: "pointer", background: "transparent",
+                border: sel ? "2px solid var(--ink)" : "1px solid transparent",
+                borderRadius: 4,
+              }} />
+          );
+        })}
         {marcas.map((m) => (
           <span key={m} style={{ position: "absolute", bottom: 0, left: `${((m - ini) / span) * 100}%`, transform: "translateX(-50%)", fontSize: 9, color: "var(--faint)", fontFamily: "var(--mono)" }}>
             {Math.floor(m / 60)}h
@@ -757,8 +797,158 @@ function JornadaDoDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
             <i style={{ width: 9, height: 9, borderRadius: 3, background: CAT_CORES[c] }} /> {CAT_NOMES[c]}
           </span>
         ))}
+        {!agregado && (
+          <span style={{ color: "var(--faint)" }}>· clique num bloco de 15 min para abrir</span>
+        )}
       </div>
+      {!agregado && binSel != null && (
+        <DetalheDoBin proc={proc} dia={d.dia} bin={binSel} onFechar={() => setBinSel(null)} />
+      )}
     </Card>
+  );
+}
+
+// ═══ O que compõe um bloco de 15 min ═══
+function DetalheDoBin({ proc, dia, bin, onFechar }: {
+  proc: ProcHeaderMock; dia: string; bin: number; onFechar: () => void;
+}) {
+  const minuto = bin * BIN_MIN + BIN_MIN / 2;
+  const q = useQuery({
+    queryKey: ["jornada-bin", proc.id, dia, bin],
+    queryFn: () => api.jornada.bin(proc.id, dia, minuto),
+  });
+  const b = q.data;
+  const [modo, setModo] = useState<"eventos" | "acoes">("eventos");
+  return (
+    <div className="col" style={{ gap: 10, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line)" }}>
+      <div className="row gap2 wrap" style={{ alignItems: "baseline" }}>
+        <span className="font-mono" style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>
+          {fmtMin(bin * BIN_MIN)}–{fmtMin(bin * BIN_MIN + BIN_MIN)}
+        </span>
+        {b && (
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>
+            {b.n_eventos} evento(s) · {(b.segundos / 60).toFixed(1)} min medidos
+            {b.truncado ? ` · mostrando ${b.itens.length}` : ""}
+          </span>
+        )}
+        <span className="grow" />
+        {b && b.n_eventos > 0 && (
+          <div className="row gap1">
+            <AbaBin ativo={modo === "eventos"} onClick={() => setModo("eventos")} texto="Por evento" />
+            <AbaBin ativo={modo === "acoes"} onClick={() => setModo("acoes")} texto="Por rótulo" />
+          </div>
+        )}
+        <button type="button" onClick={onFechar}
+          style={{ border: "1px solid var(--line)", background: "#fff", borderRadius: 99, padding: "3px 11px", fontSize: 11.5, cursor: "pointer", color: "var(--muted)" }}>
+          fechar
+        </button>
+      </div>
+
+      {q.isLoading && <span style={{ fontSize: 12, color: "var(--muted)" }}>Lendo o bloco…</span>}
+      {!q.isLoading && !b && (
+        // Mostrar o motivo, não só o fato — a tela de rótulos já nos ensinou
+        // que "não foi possível carregar" manda o gestor adivinhar.
+        <span style={{ fontSize: 12, color: "var(--desp)" }}>
+          Não deu para abrir o bloco{q.error ? `: ${String((q.error as Error).message || q.error)}` : "."}
+        </span>
+      )}
+
+      {b && b.n_eventos === 0 && (
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>
+          Sem eventos neste bloco{b.buraco ? " — é um buraco de filmagem, e por isso a faixa está vazia aqui." : "."}
+        </span>
+      )}
+
+      {b && b.n_eventos > 0 && (
+        <>
+          <div className="row gap2 wrap" style={{ fontSize: 11.5 }}>
+            {(["va", "desp", "vazio"] as const).map((c) => {
+              const p = b.por_categoria[c];
+              if (!p) return null;
+              return (
+                <span key={c} className="row" style={{ gap: 5, color: "var(--muted)" }}>
+                  <i style={{ width: 9, height: 9, borderRadius: 3, background: CAT_CORES[c] }} />
+                  {CAT_NOMES[c]} <b className="tnum" style={{ color: "var(--ink)" }}>{p.pct.toFixed(0)}%</b>
+                  <span className="tnum">({(p.segundos / 60).toFixed(1)} min)</span>
+                </span>
+              );
+            })}
+          </div>
+
+          {modo === "acoes" && (
+            <ul className="col" style={{ gap: 6, listStyle: "none", padding: 0, margin: 0 }}>
+              {b.acoes.map((a) => (
+                <li key={a.rotulo} className="row gap2" style={{ alignItems: "baseline" }}>
+                  <i style={{ width: 8, height: 8, borderRadius: 2, background: CAT_CORES[a.cat], flex: "none" }} />
+                  <code className="font-mono" style={{ fontSize: 11.5, background: "var(--line-2)", padding: "1px 7px", borderRadius: 5 }}>{a.rotulo}</code>
+                  <span className="tnum" style={{ fontSize: 11.5, color: "var(--ink)", fontWeight: 700 }}>{(a.segundos / 60).toFixed(1)} min</span>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>{a.pct.toFixed(0)}% do bloco · {a.n} trecho(s)</span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {modo === "eventos" && (
+            <ul className="col" style={{ gap: 8, listStyle: "none", padding: 0, margin: 0, maxHeight: 340, overflowY: "auto" }}>
+              {b.itens.map((it) => (
+                <li key={it.id} className="col" style={{ gap: 3, borderLeft: `3px solid ${CAT_CORES[it.cat]}`, paddingLeft: 9 }}>
+                  <div className="row gap2 wrap" style={{ alignItems: "baseline" }}>
+                    <span className="font-mono tnum" style={{ fontSize: 11.5, color: "var(--muted)" }}>{it.hora}</span>
+                    <code className="font-mono" style={{ fontSize: 11.5, fontWeight: 700, background: "var(--line-2)", padding: "1px 7px", borderRadius: 5 }}>
+                      {it.rotulo}
+                    </code>
+                    <span className="tnum" style={{ fontSize: 11, color: "var(--muted)" }}>
+                      {it.segundos_no_bin.toFixed(0)}s
+                      {/* Evento que atravessa a borda entra só com a fatia dele — sem
+                          isso o bloco parece "ter" um evento inteiro de 4 min. */}
+                      {it.parcial ? ` de ${it.segundos.toFixed(0)}s` : ""}
+                    </span>
+                    {it.corrigido && <TagBin texto="corrigido" cor="var(--va)" />}
+                    {it.papel && it.papel !== "operador" && <TagBin texto={it.papel} cor="var(--apoio)" />}
+                    {it.em_duvida && <TagBin texto="em dúvida" cor="var(--apoio)" />}
+                    {it.versao_instrumento < 3 && <TagBin texto={`instr. v${it.versao_instrumento}`} cor="var(--faint)" />}
+                  </div>
+                  {it.descricao && (
+                    // A descrição é o que o VLM VIU; o rótulo é o que o cluster
+                    // DECIDIU. Ver as duas lado a lado é o único jeito de saber
+                    // se o rótulo faz sentido — e é o motivo desta tela existir.
+                    <span style={{ fontSize: 11.5, color: "var(--text)", lineHeight: 1.45 }}>{it.descricao}</span>
+                  )}
+                  <span style={{ fontSize: 10.5, color: "var(--faint)" }}>
+                    {it.cam_id || "cam?"}{it.origem ? ` · origem ${it.origem}` : ""}
+                    {it.confianca != null ? ` · confiança ${(it.confianca * 100).toFixed(0)}%` : ""}
+                    {it.n_amostras != null ? ` · ${it.n_amostras} amostra(s)` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <span style={{ fontSize: 10.5, color: "var(--faint)", lineHeight: 1.5 }}>{b.nota}</span>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AbaBin({ ativo, texto, onClick }: { ativo: boolean; texto: string; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick}
+      style={{
+        border: `1px solid ${ativo ? "var(--ink)" : "var(--line)"}`,
+        background: ativo ? "var(--ink)" : "#fff", color: ativo ? "#fff" : "var(--muted)",
+        borderRadius: 99, padding: "3px 11px", fontSize: 11.5, cursor: "pointer", fontWeight: 600,
+      }}>
+      {texto}
+    </button>
+  );
+}
+
+function TagBin({ texto, cor }: { texto: string; cor: string }) {
+  return (
+    <span style={{ fontSize: 10, fontWeight: 700, color: cor, border: `1px solid ${cor}`, borderRadius: 99, padding: "0 6px" }}>
+      {texto}
+    </span>
   );
 }
 
