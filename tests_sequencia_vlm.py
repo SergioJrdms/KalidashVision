@@ -336,5 +336,105 @@ finally:
     pl._analisar_sequencia_vlm, pl._analisar_sequencia_cam2, pl._gate_vlm_binario = (
         _seq_real, _cam2_real, _bin_real)
 
+
+print("\n[14] rotulos_sem_categoria EXECUTADA — não só lida")
+# O teste que faltava. A suíte anterior conferia o TEXTO da função e passou
+# limpa enquanto a função levantava KeyError na primeira linha com dado real:
+# `itens` são as mesmas referências que estão em `agg`, então limpar a chave
+# `segundos` nos itens apagava a chave usada logo depois para somar o total.
+# Fonte só prova que o código existe; execução prova que ele roda.
+
+
+class QFake:
+    def __init__(self, sb, tabela):
+        self.sb, self.tabela, self.eqs, self.rng = sb, tabela, {}, None
+
+    def select(self, *a, **k): return self
+    def order(self, *a, **k): return self
+    def limit(self, *a, **k): return self
+    def eq(self, c, v): self.eqs[c] = v; return self
+    def range(self, i, f): self.rng = (i, f); return self
+
+    def execute(self):
+        linhas = [l for l in self.sb.dados.get(self.tabela, [])
+                  if all(l.get(c) == v for c, v in self.eqs.items())]
+        if self.rng is not None:
+            linhas = linhas[self.rng[0]: self.rng[1] + 1]
+        return types.SimpleNamespace(data=[dict(l) for l in linhas])
+
+
+class SBFake:
+    def __init__(self, dados): self.dados = dados
+    def table(self, nome): return QFake(self, nome)
+
+
+def ev(i, label, ini, fim, **kw):
+    base = {"id": f"e{i}", "empresa": "U", "processo": "T",
+            "comportamento_label": label, "label_corrigido": None,
+            "descricao_bruta": f"descricao de {label}",
+            "tempo_inicio_s": ini, "tempo_fim_s": fim, "principal": True,
+            "validacao_correto": None, "video_id": "v1",
+            "criado_em": None, "versao_instrumento": 2}
+    base.update(kw)
+    return base
+
+
+SB = SBFake({
+    "eventos": [
+        # 900s num rótulo sem categoria — é o que deve encabeçar a lista.
+        ev(1, "parado_sem_atividade", 0, 900),
+        # 300 eventos curtos noutro rótulo sem categoria: 300 x 8s = 2400s.
+        # (contagem maior, mas ainda assim tempo maior — o teste do critério
+        #  de ordenação vem no bloco seguinte)
+        *[ev(100 + k, "conversando_colega", k * 8, k * 8 + 8) for k in range(30)],
+        # rótulo COM categoria decidida: não entra
+        ev(2, "operar_torno", 0, 600),
+        # crus de auditoria e descartados: fora, como em toda métrica
+        ev(3, "parado_sem_atividade", 0, 600, principal=False),
+        ev(4, "parado_sem_atividade", 0, 600, validacao_correto=False),
+    ],
+    "comportamentos": [
+        {"id": "c1", "empresa": "U", "processo": "T", "label": "operar_torno",
+         "descricao": "opera", "categoria_lean": "valor_agregado",
+         "categoria_lean_origem": "humano", "total_ocorrencias": 10},
+        {"id": "c2", "empresa": "U", "processo": "T", "label": "parado_sem_atividade",
+         "descricao": None, "categoria_lean": None,
+         "categoria_lean_origem": None, "total_ocorrencias": 1},
+        # ASSUMIDO pelo fallback: tem categoria, mas ninguém decidiu.
+        {"id": "c3", "empresa": "U", "processo": "T", "label": "conversando_colega",
+         "descricao": "conversa", "categoria_lean": "desperdicio",
+         "categoria_lean_origem": "fallback", "total_ocorrencias": 30},
+    ],
+})
+
+r = pl.rotulos_sem_categoria(SB, "U", "T")
+check("a função RODA e não levanta", "erro" not in r, r.get("erro"))
+labels = [i["label"] for i in r["itens"]]
+check("só rótulos sem categoria DECIDIDA entram",
+      set(labels) == {"parado_sem_atividade", "conversando_colega"}, labels)
+check("operar_torno (categoria humana) fica de fora", "operar_torno" not in labels)
+check("ordena por TEMPO, não por contagem: parado tem 1 evento de 900s e "
+      "encabeça; conversando tem 30 eventos de 8s (240s) e vem depois",
+      labels == ["parado_sem_atividade", "conversando_colega"], labels)
+top = r["itens"][0]
+check("minutos do topo = 900s/60", top["minutos"] == 15.0, top)
+check("auditoria e descartado NÃO entram na conta (senão seriam 2100s)",
+      top["n_eventos"] == 1, top)
+check("o assumido pelo fallback aparece marcado como tal",
+      any(i["origem_atual"] == "fallback" for i in r["itens"]))
+check("e o nunca classificado vem sem categoria nenhuma",
+      top["categoria_atual"] is None, top)
+check("traz exemplos de descrição para o gestor reconhecer o rótulo",
+      len(top["exemplos"]) >= 1, top)
+check("o total sem categoria é a soma dos dois (900 + 240 = 1140s = 19min)",
+      r["minutos_sem_categoria"] == 19.0, r["minutos_sem_categoria"])
+check("e o percentual usa o tempo observado TOTAL (com operar_torno dentro)",
+      0 < r["pct_sem_categoria"] < 100, r["pct_sem_categoria"])
+check("o limite corta a lista", len(pl.rotulos_sem_categoria(SB, "U", "T", limite=1)["itens"]) == 1)
+
+vazio = pl.rotulos_sem_categoria(SBFake({"eventos": [], "comportamentos": []}), "U", "T")
+check("processo sem eventos não quebra",
+      vazio["itens"] == [] and vazio["pct_sem_categoria"] == 0.0, vazio)
+
 print(f"\n{'=' * 60}\n  {ok} ok · {fail} falha(s)\n{'=' * 60}")
 sys.exit(1 if fail else 0)

@@ -5789,13 +5789,15 @@ def rotulos_sem_categoria(sb: Client, empresa: str, processo: str,
         if d and len(a["exemplos"]) < 3 and d not in a["exemplos"]:
             a["exemplos"].append(d)
 
+    # O total ANTES de mexer nos itens: `itens` são as MESMAS referências que
+    # estão em `agg`, então limpar `segundos` lá apaga a chave aqui também.
+    seg_sem_cat = sum(v["segundos"] for v in agg.values())
     itens = sorted(agg.values(), key=lambda x: -x["segundos"])[:limite]
     for a in itens:
         a["minutos"] = round(a["segundos"] / 60, 1)
         a["pct_do_tempo"] = round(a["segundos"] / seg_total * 100, 1) if seg_total else 0.0
         a["versoes"] = sorted(a.pop("versoes"))
         a.pop("segundos", None)
-    seg_sem_cat = sum(v["segundos"] for v in agg.values())
     return {
         "itens": itens,
         "n_rotulos": len(agg),

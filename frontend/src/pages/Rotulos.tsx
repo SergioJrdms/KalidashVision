@@ -80,7 +80,16 @@ export default function Rotulos({ proc }: { proc: ProcHeaderMock }) {
       </Card>
 
       {q.isLoading && <Empty icon="loader" title="Lendo os rótulos…" />}
-      {!q.isLoading && !d && <Empty icon="alert-triangle" title="Não foi possível carregar" />}
+      {!q.isLoading && !d && (
+        // Mostrar o motivo, não só o fato. "Não foi possível carregar" manda
+        // o gestor adivinhar entre SQL não rodado, deploy velho e bug — e a
+        // primeira vez que esta tela falhou foi exatamente assim.
+        <Empty
+          icon="alert-triangle"
+          title="Não foi possível carregar os rótulos"
+          desc={q.error ? String((q.error as Error).message || q.error) : undefined}
+        />
+      )}
 
       {d && d.itens.length === 0 && (
         <Empty
