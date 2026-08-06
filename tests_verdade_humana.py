@@ -141,7 +141,7 @@ def persistir(sb, eventos, origem_de):
 print("\n[1] correcao_aprendida PROPÕE, não valida")
 sb = FakeSB()
 evs = [evento("operador de pé olhando a peça", "conversando_colega", i) for i in range(3)]
-_, n_auto, _ = persistir(sb, evs, lambda d: "correcao_aprendida")
+_, n_auto, _ = persistir(sb, evs, lambda d, *_a: "correcao_aprendida")
 gravados = [e for e in sb.dados["eventos"] if e.get("principal") is True]
 check("nenhum evento nasceu validado",
       all(e["validado_humano"] is False for e in gravados), gravados)
@@ -158,7 +158,7 @@ check("os 3 caem na fila (pendente = validado_humano false)",
 print("\n[2] pendente comum também nasce na fila (controle)")
 sb = FakeSB()
 evs = [evento("operando o torno", "operar_torno", i) for i in range(2)]
-_, n_auto, _ = persistir(sb, evs, lambda d: "pendente")
+_, n_auto, _ = persistir(sb, evs, lambda d, *_a: "pendente")
 gravados = [e for e in sb.dados["eventos"] if e.get("principal") is True]
 check("pendente não é validado", all(e["validado_humano"] is False for e in gravados))
 check("n_auto_validados == 0", n_auto == 0, n_auto)
@@ -169,7 +169,7 @@ ev_vazio = evento("posto de trabalho vazio", "posto_vazio", 0)
 ev_vazio["papel_pessoa"] = "posto_vazio"
 _, _, _ = pl.etapa_persistir(
     sb, "U", "Torneamento", "/tmp/v.mp4", INFO, [ev_vazio], [1],
-    {"posto_vazio": "vazio"}, lambda d: "pendente",
+    {"posto_vazio": "vazio"}, lambda d, *_a: "pendente",
     eventos_auditoria=[evento("cru qualquer", "operar_torno", 5)],
 )
 por_origem = {e["origem_validacao"]: e for e in sb.dados["eventos"]}
@@ -350,7 +350,7 @@ check("escopo multi-tenant respeitado",
 print("\n[7] vocabulario_canonico também deixa de assinar verdade humana")
 sb = FakeSB()
 evs = [evento("operando o torno", "operar_torno", i) for i in range(2)]
-_, n_auto, _ = persistir(sb, evs, lambda d: "vocabulario_canonico")
+_, n_auto, _ = persistir(sb, evs, lambda d, *_a: "vocabulario_canonico")
 gravados = [e for e in sb.dados["eventos"] if e.get("principal") is True]
 check("nenhum evento nasce validado",
       all(e["validado_humano"] is False for e in gravados), gravados)
@@ -362,7 +362,7 @@ sb = FakeSB()
 ev_v = evento("posto de trabalho vazio", "posto_vazio", 0)
 ev_v["papel_pessoa"] = "posto_vazio"
 pl.etapa_persistir(sb, "U", "Torneamento", "/tmp/v.mp4", INFO, [ev_v], [1],
-                   {"posto_vazio": "vazio"}, lambda d: "pendente",
+                   {"posto_vazio": "vazio"}, lambda d, *_a: "pendente",
                    eventos_auditoria=[evento("cru", "operar_torno", 5)])
 por_o = {e["origem_validacao"]: e for e in sb.dados["eventos"]}
 check("posto_vazio segue fora da fila (exceção mecânica, não verdade)",

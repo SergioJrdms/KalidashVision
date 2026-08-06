@@ -12,7 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Btn, Card, Icon, Empty, PanelHead, Badge, Modal, toast } from "../design/ui";
 import type { ProcHeaderMock } from "../lib/adapt";
-import type { PapelZona, ZonaCamera, ZonaBody } from "../lib/types";
+import type { PapelZona, ZonaCamera, ZonaBody, FrenteMaquina } from "../lib/types";
 
 const PAPEIS: { valor: PapelZona; rotulo: string; cor: string; desc: string }[] = [
   {
@@ -100,6 +100,10 @@ function ZonasDaCamera({ proc, camId, onMudou }: { proc: ProcHeaderMock; camId: 
   const [editando, setEditando] = useState<ZonaCamera | null>(null);
   const [nome, setNome] = useState("");
   const [papel, setPapel] = useState<PapelZona>("posto_operador");
+  // Fase 86: orientação da máquina em relação à câmera. Sem isto o sistema
+  // afirma só "de costas para a CÂMERA" (que é objetivo) e proíbe o VLM de
+  // falar em relação ao torno — é refinamento, não pré-requisito.
+  const [frenteMaquina, setFrenteMaquina] = useState<FrenteMaquina | null>(null);
   const [descricao, setDescricao] = useState("");
   const [excluir, setExcluir] = useState<ZonaCamera | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -149,6 +153,7 @@ function ZonasDaCamera({ proc, camId, onMudou }: { proc: ProcHeaderMock; camId: 
     setPts(z.pts_rel.map(([x, y]) => [x, y] as Pt));
     setNome(z.nome);
     setPapel(z.papel);
+    setFrenteMaquina(z.frente_maquina ?? null);
     setDescricao(z.descricao_contexto || "");
   }
 
@@ -159,6 +164,7 @@ function ZonasDaCamera({ proc, camId, onMudou }: { proc: ProcHeaderMock; camId: 
       cam_id: camId,
       nome: nome.trim(),
       papel,
+      frente_maquina: papel === "maquina" ? frenteMaquina : null,
       pts_rel: pts,
       descricao_contexto: descricao.trim() || null,
       frame_ref_w: img?.naturalWidth || frameQ.data?.largura || null,
@@ -227,6 +233,35 @@ function ZonasDaCamera({ proc, camId, onMudou }: { proc: ProcHeaderMock; camId: 
               ))}
             </div>
             <span style={{ fontSize: 11, color: "var(--faint)" }}>{PAPEIS.find((p) => p.valor === papel)?.desc}</span>
+            {papel === "maquina" && (
+              <div className="col" style={{ gap: 5, marginTop: 8, paddingTop: 8, borderTop: "1px dashed var(--line)" }}>
+                <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--text)" }}>
+                  Onde está a máquina em relação a esta câmera?
+                </span>
+                <span style={{ fontSize: 11, color: "var(--faint)", lineHeight: 1.5 }}>
+                  A pose diz se o operador está de frente ou de costas para a CÂMERA — isso é medido.
+                  Traduzir isso em “de frente para o torno” depende de onde o torno está, e como
+                  câmera e torno são fixos, é uma constante. Sem preencher, o sistema não afirma
+                  orientação em relação ao torno (e é assim que ele para de inventar “de frente ao torno”).
+                </span>
+                <div className="row gap1 wrap">
+                  {([
+                    { v: null, t: "não sei / não configurar" },
+                    { v: "camera" as const, t: "de frente para a câmera = de frente para o torno" },
+                    { v: "oposta" as const, t: "de costas para a câmera = de frente para o torno" },
+                    { v: "perfil" as const, t: "torno de lado (não dá para inferir)" },
+                  ]).map((o) => (
+                    <button key={String(o.v)} type="button" onClick={() => setFrenteMaquina(o.v)}
+                      style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11.5, cursor: "pointer",
+                               background: "#fff", color: "var(--text)",
+                               fontWeight: frenteMaquina === o.v ? 700 : 500,
+                               border: frenteMaquina === o.v ? "2px solid var(--accent)" : "1px solid var(--line)" }}>
+                      {o.t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
         <div className="col" style={{ gap: 4 }}>

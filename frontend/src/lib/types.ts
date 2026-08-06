@@ -452,9 +452,13 @@ export interface ZonaCamera {
   frame_ref_w: number | null;
   frame_ref_h: number | null;
   ativo: boolean;
+  // Fase 86: só na zona 'maquina'. Onde a máquina está em relação à CÂMERA —
+  // é o que traduz "de costas para a câmera" em "de frente para o torno".
+  frente_maquina: FrenteMaquina | null;
   criado_em: string;
   atualizado_em: string;
 }
+export type FrenteMaquina = "camera" | "oposta" | "perfil";
 
 export interface ZonaBody {
   cam_id: string;
@@ -465,6 +469,7 @@ export interface ZonaBody {
   frame_ref_w?: number | null;
   frame_ref_h?: number | null;
   ativo: boolean;
+  frente_maquina?: FrenteMaquina | null;
 }
 
 // ── Análise diária "Dia a dia" (Fase 35) ────────────────────
@@ -700,8 +705,20 @@ export interface AuditoriaDia {
 // Sem categoria, o tempo conta como NÃO-PRODUTIVO: quando nascem vários
 // rótulos de uma vez, a produtividade cai por CONTABILIDADE antes de cair por
 // medição, e no gráfico de um dia as duas quedas são iguais.
+export interface VarianteFamilia {
+  label: string;
+  minutos: number;
+  categoria: CategoriaLean | null;
+  origem: string | null;
+  versoes: number[];
+}
 export interface RotuloSemCategoria {
   label: string;
+  // Fase 86: raiz da família (`monitorar_maquina_ciclo` → `monitorar_maquina`).
+  // A SOMA da família é comparável entre semanas; a decomposição, não.
+  familia: string;
+  familia_minutos: number;
+  familia_variantes: VarianteFamilia[];
   comportamento_id: string | null;
   descricao: string | null;
   categoria_atual: CategoriaLean | null;

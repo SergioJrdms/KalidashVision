@@ -116,7 +116,7 @@ INFO = {"duracao_s": 300.0, "fps": 10.0, "largura": 640, "altura": 480}
 def persistir(eventos, auditoria=None):
     sb = FakeSB()
     pl.etapa_persistir(sb, "U", "T", "/tmp/v.mp4", INFO, eventos, [1],
-                       {"operar_torno": "torno"}, lambda d: "pendente",
+                       {"operar_torno": "torno"}, lambda d, *_a: "pendente",
                        caminho_storage="u/t/seg.mp4", eventos_auditoria=auditoria)
     return sb
 

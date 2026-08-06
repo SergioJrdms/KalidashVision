@@ -144,7 +144,7 @@ sb2 = FakeSB({"videos": [
 ]})
 try:
     pl.etapa_persistir(sb2, "U", "T", "/tmp/v.mp4", INFO, EV, [1],
-                       {"operar_torno": "torno"}, lambda d: "pendente",
+                       {"operar_torno": "torno"}, lambda d, *_a: "pendente",
                        caminho_storage=CAM)
     barrou = False
 except pl.VideoJaProcessado:
@@ -156,7 +156,7 @@ check("nenhum evento gravado", not sb2.dados.get("eventos"), sb2.dados.get("even
 
 sb3 = FakeSB({"videos": []})
 pl.etapa_persistir(sb3, "U", "T", "/tmp/v.mp4", INFO, EV, [1],
-                   {"operar_torno": "torno"}, lambda d: "pendente",
+                   {"operar_torno": "torno"}, lambda d, *_a: "pendente",
                    caminho_storage=CAM)
 check("caminho inédito grava normalmente", len(sb3.dados["videos"]) == 1)
 check("e os eventos entram", len(sb3.dados.get("eventos") or []) == 1)

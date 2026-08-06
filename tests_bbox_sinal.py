@@ -70,7 +70,7 @@ print("\n[2] O evento guarda a caixa quando ela existe — e NULL quando não")
 evs = pl.etapa_segmentar_eventos(
     [obs(0, (100, 60, 160, 380)), obs(2, (102, 58, 162, 384)),
      obs(4, (98, 62, 158, 376))],
-    lambda d: "operar_torno", 2.0)
+    lambda d, *_a: "operar_torno", 2.0)
 check("um evento contínuo", len(evs) == 1, len(evs))
 e = evs[0]
 check("bbox_inicio é a caixa real", e["bbox_inicio"] == [100, 60, 160, 380])
@@ -79,7 +79,7 @@ check("e diz de qual câmera veio", e["bbox_cam"] == "cam1")
 vazios = pl.etapa_segmentar_eventos(
     [obs(0, None, papel="posto_vazio", label="posto_vazio"),
      obs(2, None, papel="posto_vazio", label="posto_vazio")],
-    lambda d: "posto_vazio", 2.0)
+    lambda d, *_a: "posto_vazio", 2.0)
 check("posto vazio nasce com bbox_inicio NULO",
       vazios[0]["bbox_inicio"] is None, vazios[0]["bbox_inicio"])
 check("e sem câmera atribuída", vazios[0]["bbox_cam"] is None)
@@ -88,7 +88,7 @@ check("e sem estatística de corpo", vazios[0]["bbox_stats"] is None)
 print("\n[3] A 1ª caixa REAL vale mais que um None do primeiro frame")
 tardio = pl.etapa_segmentar_eventos(
     [obs(0, None), obs(2, (10, 20, 60, 260)), obs(4, (12, 22, 62, 262))],
-    lambda d: "operar_torno", 2.0)
+    lambda d, *_a: "operar_torno", 2.0)
 check("evento que começa ocluso adota a 1ª caixa que aparecer",
       tardio[0]["bbox_inicio"] == [10, 20, 60, 260], tardio[0]["bbox_inicio"])
 check("e registra a câmera dela", tardio[0]["bbox_cam"] == "cam1")
@@ -108,9 +108,9 @@ check("uma caixa degenerada no meio não entra na conta",
 print("\n[5] O minuto consolidado herda o corpo do MESMO track")
 crus = pl.etapa_segmentar_eventos(
     [obs(0, (100, 60, 160, 380)), obs(2, (100, 60, 160, 380))],
-    lambda d: "operar_torno", 2.0)
+    lambda d, *_a: "operar_torno", 2.0)
 outra = pl.etapa_segmentar_eventos(
-    [dict(obs(0, (300, 200, 340, 300)), track_id=99)], lambda d: "operar_torno", 2.0)
+    [dict(obs(0, (300, 200, 340, 300)), track_id=99)], lambda d, *_a: "operar_torno", 2.0)
 for c in outra:
     c["pessoa_track_id"] = 99
 principais = pl.etapa_consolidar_principais(crus + outra, {}, 60.0)
@@ -155,7 +155,7 @@ print("\n[7] maos_na_maquina deixou de ser um sinal morto")
 com_maos = pl.etapa_segmentar_eventos(
     [obs(0, (100, 60, 160, 380), maos=False),
      obs(2, (100, 60, 160, 380), maos=True)],
-    lambda d: "operar_torno", 2.0)
+    lambda d, *_a: "operar_torno", 2.0)
 check("o evento cru carrega o punho na zona da máquina",
       com_maos[0].get("maos_maquina") is True, com_maos[0].get("maos_maquina"))
 fato = pl.montar_fato_evento(

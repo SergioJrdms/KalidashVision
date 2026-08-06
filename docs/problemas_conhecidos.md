@@ -282,6 +282,120 @@ decisão que a máquina tomou sozinha.
 
 ---
 
+## 8. O gargalo saiu do VLM e foi para o cluster
+
+**Estado:** corrigido (Fase 86).
+
+Com o prompt novo (Fase 85) as descrições melhoraram — apareceram "sem mudança
+de posição", "máquina parada", "máquina em ciclo". Mas no banco:
+
+```
+"parado ... máquina em ciclo, observando"   → monitorar_maquina (produtivo)
+"sem mudança de posição ... máquina parada" → monitorar_maquina (produtivo)
+```
+
+Situações **opostas** — espera produtiva contra ociosidade — colapsadas no mesmo
+rótulo. É exatamente o par calibrador escrito no prompt do VLM: ele sobrevive à
+descrição e morre no cluster.
+
+**A causa está no `PROMPT_CLUSTER`, e é minha.** Ele foi escrito para colapsar
+sinônimos e diz isso três vezes: o exemplo é `"digitando no PC"` = `"operando o
+computador"`; manda usar labels da AÇÃO *"não da localização"* (e "máquina em
+ciclo" não é verbo+objeto, logo lê-se como enfeite); e tem um
+**"PRIORIDADE MÁXIMA: reuse o label canônico"** com `monitorar_maquina` a 31% do
+tempo servindo de atrator.
+
+### A correção: tornar o colapso impossível, não desencorajá-lo
+
+1. **O discriminador vira CAMPO**, não frase: o VLM devolve `"maquina":
+   "ciclo"|"parada"|null` e `"imovel"` por instante. Extrair "máquina em ciclo"
+   do texto por regra seria frágil — ele escreve "torno girando" com a mesma
+   facilidade.
+2. **Partição determinística**: as descrições são separadas por
+   `(maquina, imovel)` e o cluster roda **uma vez por partição**. Duas situações
+   opostas não caem no mesmo grupo porque **nunca estiveram na mesma lista**.
+3. **Sufixo mecânico por código**: a LLM ainda pode devolver `monitorar_maquina`
+   nas duas partições; o sufixo (`_ciclo`, `_parada`) é aplicado depois.
+   Aplicado **sempre** que o discriminador existe — nunca só quando as duas
+   variantes coexistem no lote, senão a mesma situação ganharia labels
+   diferentes em dias diferentes.
+
+O sufixo **não batiza o Lean**: nada de `esperar_ciclo` ou `ocioso`. Isso seria
+a máquina decidindo produtivo/improdutivo, que é a decisão do gestor.
+
+### O histórico, e por que a família importa
+
+Depois do deploy convivem `monitorar_maquina` (histórico, produtivo, 31% do
+tempo), `monitorar_maquina_ciclo` e `monitorar_maquina_parada`. A tentação é
+tratar o histórico como uma quarta categoria ou renomeá-lo. As duas coisas
+estão erradas.
+
+**A soma da FAMÍLIA é comparável entre semanas; a decomposição não.** Julho tem
+100% da família sem discriminador; agosto tem ciclo/parada/sem. O que mudou foi
+a **resolução** com que sabemos decompor esse tempo — não o tempo. A tela mostra
+a família com as variantes dentro, e o histórico aparece como o que é.
+
+E uma armadilha que ficou registrada: **variante nova NÃO herda a categoria da
+raiz.** Herdar pareceria conveniente e faria `monitorar_maquina_parada` nascer
+*produtivo* — recriando exatamente o que a Fase 85 consertou.
+
+---
+
+## 9. "de frente ao torno" era muleta do VLM
+
+**Estado:** corrigido (Fase 86).
+
+A frase aparecia em quase toda descrição do dia, **inclusive com o operador de
+costas para o torno lendo desenho técnico**. O VLM não enxerga orientação nessa
+resolução e preenche com o plausível — o mesmo mecanismo que produzia
+"monitorando a máquina".
+
+O sinal existe e é grátis: os 17 keypoints do `yolo11n-pose`. Rosto visível =
+de frente para a câmera; ombros sem rosto = de costas; ombros projetados quase
+no mesmo x = de perfil. Injetado no contexto como fato de sensor, igual ao
+`maos_maquina`, e o prompt ganhou **"ORIENTAÇÃO NÃO SE ADIVINHA"**.
+
+**Um erro meu que o teste pegou:** a primeira versão usava a distância entre os
+ombros como referência de escala para decidir "perfil" — mas essa é a própria
+grandeza sendo medida, e a razão dava ~1 sempre. A referência certa é o
+**tronco** (rígido), com a altura da caixa como reserva.
+
+### De frente para a CÂMERA não é de frente para o TORNO
+
+Câmera e torno são fixos, então a relação é uma constante por câmera —
+configurada em `zonas_camera.frente_maquina` (`camera` | `oposta` | `perfil`).
+
+**Sem configuração o sistema afirma só o que sabe** ("de costas para a câmera")
+e proíbe o VLM de falar do torno. Isso já mata a muleta; o campo é refinamento,
+não pré-requisito.
+
+---
+
+## 10. O cluster roda por vídeo — daí a inconsistência
+
+**Estado:** mitigado (Fase 86, `KV_CACHE_CLUSTER`).
+
+A mesma frase virou `monitorar_maquina` em 3 eventos e `lendo_desenho_tecnico`
+em 2. Não é bug: `etapa_clusterizar` roda **dentro de `processar_video`** e
+`mapa_descricao_label` é local. Dentro de um vídeo a frase tem um label só (é
+chave de dict) — a divergência é **entre vídeos**, cada um re-agrupando do zero,
+com lista diferente, num modelo estocástico. Agravantes: `temperatura=0.1` (agora
+`0.0`) e, com a generalização desligada (Fase 62, correto), **nada** fixava o
+label entre vídeos.
+
+**Cache de consistência por match exato:** antes de chamar a LLM, procura a
+frase normalizada no histórico do processo. Se já foi clusterizada, reusa.
+
+**Isto não é a Fase 67.** Lá o problema era propagar uma *decisão humana* por
+semelhança *semântica* e reescrever labels. Aqui: match exato de string, origem
+máquina, não reescreve nada, não toca `validado_humano`. Duas salvaguardas
+adicionais: frase com mais de um label no histórico é **descartada** do cache
+(passado ambíguo não vira decisão), e o cache **só atende a cena cujo sufixo
+bate** — senão ele desfaria a partição recém-construída. Atrás de
+`KV_CACHE_CLUSTER`, ligado por padrão.
+
+---
+
 ## 2. `gravado_em` carimba a tz do servidor no timestamp do nome
 
 **Estado:** não corrigido. Sem efeito visível hoje.

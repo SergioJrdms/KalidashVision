@@ -283,6 +283,10 @@ class ZonaBody(BaseModel):
     frame_ref_w: int | None = None
     frame_ref_h: int | None = None
     ativo: bool = True
+    # Fase 86: só faz sentido na zona 'maquina'. Diz onde a máquina está em
+    # relação à CÂMERA — é a tradução de "de costas para a câmera" em "de
+    # frente para o torno". Câmera e torno são fixos, logo é uma constante.
+    frente_maquina: str | None = None
 
 
 class PrismMensagemBody(BaseModel):
@@ -1837,8 +1841,9 @@ def saude_edge(processo_id: str, user: CurrentUser = Depends(get_current_user)):
 # ═════════════════════════════════════════════════════════════════════════
 _ZONA_CAMPOS = (
     "id, cam_id, nome, papel, pts_rel, descricao_contexto, "
-    "frame_ref_w, frame_ref_h, ativo, criado_em, atualizado_em"
+    "frame_ref_w, frame_ref_h, ativo, frente_maquina, criado_em, atualizado_em"
 )
+_FRENTE_MAQUINA_VALIDOS = ("camera", "oposta", "perfil")
 
 
 def _validar_zona(sb, user: CurrentUser, nome_proc: str, body: ZonaBody,
@@ -1849,6 +1854,17 @@ def _validar_zona(sb, user: CurrentUser, nome_proc: str, body: ZonaBody,
             status.HTTP_400_BAD_REQUEST,
             f"papel deve ser um de: {', '.join(PAPEIS_ZONA)}.",
         )
+    if body.frente_maquina is not None:
+        if body.frente_maquina not in _FRENTE_MAQUINA_VALIDOS:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"frente_maquina deve ser um de: {', '.join(_FRENTE_MAQUINA_VALIDOS)}.",
+            )
+        if body.papel != "maquina":
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "frente_maquina só se aplica à zona de papel 'maquina'.",
+            )
     for pt in body.pts_rel:
         if len(pt) != 2 or not all(0.0 <= v <= 1.0 for v in pt):
             raise HTTPException(
@@ -1917,6 +1933,7 @@ def criar_zona(
                 "descricao_contexto": (body.descricao_contexto or "").strip() or None,
                 "frame_ref_w": body.frame_ref_w,
                 "frame_ref_h": body.frame_ref_h,
+                "frente_maquina": body.frente_maquina,
                 "ativo": bool(body.ativo),
             }
         )
@@ -1962,6 +1979,7 @@ def atualizar_zona(
                 "descricao_contexto": (body.descricao_contexto or "").strip() or None,
                 "frame_ref_w": body.frame_ref_w,
                 "frame_ref_h": body.frame_ref_h,
+                "frente_maquina": body.frente_maquina,
                 "ativo": bool(body.ativo),
                 "atualizado_em": datetime.utcnow().isoformat(),
             }

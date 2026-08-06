@@ -397,6 +397,9 @@ alter table eventos add column if not exists bbox_stats jsonb;
 -- 2 = sequência por minuto). A quebra da série fica DENTRO do dado.
 alter table eventos add column if not exists versao_instrumento int default 1;
 
+-- Fase 86: onde está a máquina em relação à câmera ('camera'|'oposta'|'perfil').
+alter table zonas_camera add column if not exists frente_maquina text;
+
 -- Prism: suporte a conversas de escopo global (visão de toda a empresa).
 -- Conversas globais têm escopo='global' e processo = null.
 alter table prism_conversas add column if not exists escopo text not null default 'processo';
@@ -1175,6 +1178,88 @@ def _zona_da_pessoa(pontos: list[tuple[float, float]], rois: dict) -> tuple[str 
 _MAOS_KPTS = (9, 10)   # punhos COCO (esquerdo, direito)
 
 
+# ── ORIENTAÇÃO ──────────────────────────────────────────────────────────
+# Fase 86. "de frente ao torno" virou muleta: aparecia em quase toda descrição
+# do dia, inclusive quando o operador estava de COSTAS para o torno lendo
+# desenho técnico. O VLM não enxerga orientação nessa resolução e preenche com
+# o plausível — o mesmo mecanismo que produzia "monitorando a máquina".
+#
+# O sinal existe e é grátis: o yolo11n-pose já entrega os 17 keypoints.
+_KP_OLHO_E, _KP_OLHO_D, _KP_ORELHA_E, _KP_ORELHA_D = 1, 2, 3, 4
+
+
+def orientacao_pessoa(pessoa: dict, w: int, h: int) -> str | None:
+    """'frente' | 'costas' | 'perfil' em relação à CÂMERA. None sem pose.
+
+    Rosto visível (nariz ou olhos) → de frente. Ombros presentes sem rosto
+    nenhum → de costas. Ombros quase colados no eixo x → de perfil,
+    independentemente do rosto (é a assinatura de quem está de lado).
+
+    ATENÇÃO: isto é orientação em relação à CÂMERA, que é objetiva. De frente
+    para a câmera NÃO é de frente para a máquina — essa tradução depende de
+    onde a máquina está, e só a configuração da zona sabe (`frente_maquina`).
+    """
+    kpts = pessoa.get("kpts")
+    if kpts is None or len(kpts) <= _KP_ORELHA_D:
+        return None
+    om_e = _kp_px(kpts, _KP_OMB_E, w, h)
+    om_d = _kp_px(kpts, _KP_OMB_D, w, h)
+    if om_e is None or om_d is None:
+        return None
+    largura_ombros = abs(om_e[0] - om_d[0])
+    # A referência de escala NÃO pode ser a distância entre os ombros: ela é a
+    # própria grandeza que estamos medindo, e a razão daria ~1 sempre. Usa o
+    # TRONCO (rígido) e, sem quadril visível, a altura da caixa.
+    tronco = _dist(_meio(om_e, om_d),
+                   _meio(_kp_px(kpts, _KP_QUA_E, w, h), _kp_px(kpts, _KP_QUA_D, w, h)))
+    if not tronco:
+        b = pessoa.get("bbox")
+        tronco = (float(b[3]) - float(b[1])) * 0.35 if _bbox_valido(b) else None
+    rosto = [i for i in (_KP_NARIZ, _KP_OLHO_E, _KP_OLHO_D)
+             if _kp_px(kpts, i, w, h) is not None]
+    orelhas = [i for i in (_KP_ORELHA_E, _KP_ORELHA_D)
+               if _kp_px(kpts, i, w, h) is not None]
+
+    # Ombros projetados quase no mesmo x = corpo de lado.
+    if tronco and largura_ombros < tronco * _PERFIL_RAZAO:
+        return "perfil"
+    if rosto:
+        return "frente"
+    if orelhas:
+        # Uma orelha só, sem nariz nem olhos: cabeça virada — perfil.
+        return "perfil" if len(orelhas) == 1 else "frente"
+    return "costas"
+
+
+# Abaixo desta razão (largura projetada dos ombros ÷ comprimento do tronco) o
+# corpo está de lado. Uma pessoa de frente tem ombros ~0.5-0.7 do tronco; de
+# perfil a projeção colapsa para perto de zero.
+_PERFIL_RAZAO = float(os.environ.get("KV_PERFIL_RAZAO", "0.22"))
+
+# Tradução câmera→máquina, configurada por zona (ver `frente_maquina`).
+_FRENTE_MAQUINA_VALIDOS = ("camera", "oposta", "perfil")
+
+
+def orientacao_vs_maquina(orient_camera: str | None,
+                          frente_maquina: str | None) -> str | None:
+    """Traduz a orientação OBJETIVA (vs câmera) em orientação vs MÁQUINA.
+
+    Sem `frente_maquina` configurado devolve None — e é de propósito: nesse
+    caso o sistema afirma só o que sabe ("de costas para a câmera") e proíbe o
+    VLM de afirmar o resto. É o que mata a muleta sem depender de configuração.
+    """
+    if not orient_camera or frente_maquina not in _FRENTE_MAQUINA_VALIDOS:
+        return None
+    if frente_maquina == "perfil":
+        return None                      # o eixo é perpendicular: não dá para inferir
+    if orient_camera == "perfil":
+        return "de lado para a máquina"
+    if frente_maquina == "camera":
+        return "de frente para a máquina" if orient_camera == "frente" else "de costas para a máquina"
+    # 'oposta': quem está de costas para a câmera está de frente para a máquina
+    return "de costas para a máquina" if orient_camera == "frente" else "de frente para a máquina"
+
+
 def _maos_na_maquina(pessoa: dict, rois: dict, w: int, h: int) -> bool:
     """True se um dos PUNHOS (kpts COCO 9/10) do operador cair em ALGUMA zona
     com papel 'maquina'. Sem pose ou sem punhos válidos → False (o VLM decide
@@ -1472,8 +1557,8 @@ Responda APENAS um JSON no formato:
 # ═════════════════════════════════════════════════════════════════════════
 _BLOCO_EXEMPLOS_DESCRICAO = """EXEMPLOS DE DESCRIÇÃO (o que se vê, não o julgamento):
 - "operando o torno, mãos na peça"
-- "parado de frente ao torno, máquina em ciclo"
-- "parado ao lado do torno, máquina parada"
+- "parado junto ao torno, máquina em ciclo"
+- "parado ao lado do torno, máquina parada"   (orientação só quando o CONTEXTO informa)
 - "medindo a peça com paquímetro"
 - "de costas para o posto, mexendo no celular"
 - "conversando com colega, sem tocar na máquina"
@@ -1496,8 +1581,139 @@ _REGRAS_DESCRICAO = """- Descreva o OBSERVÁVEL, em UMA FRASE CURTA (até 10 pal
 - EXCEÇÃO (o CONTEXTO manda): se o CONTEXTO disser que ele está com as MÃOS na
   máquina, isso vem da posição REAL das mãos (sensor) — ele ESTÁ operando,
   mesmo que o corpo pareça parado.
+- ORIENTAÇÃO NÃO SE ADIVINHA. Só diga que a pessoa está de frente, de costas ou
+  de lado para alguma coisa se o CONTEXTO disser — ele vem da pose (sensor). Se
+  o CONTEXTO não disser, NÃO mencione orientação nenhuma na descrição, e em
+  hipótese alguma escreva "de frente ao torno" por hábito.
 - Se não der para dizer o que acontece, escreva "ação não identificada".
 - NÃO invente o que não está visível."""
+
+
+# ── O DISCRIMINADOR ─────────────────────────────────────────────────────
+# Fase 86. O par calibrador da Fase 85 sobrevivia à DESCRIÇÃO e morria no
+# CLUSTER: "parado ... máquina em ciclo" e "parado ... máquina parada" viravam
+# o mesmo `monitorar_maquina`. O prompt do cluster foi escrito para colapsar
+# SINÔNIMOS ("digitando no PC" = "operando o computador") e manda usar labels
+# de AÇÃO "não da localização" — então o estado da máquina lia-se como enfeite.
+#
+# A correção não é pedir ao cluster que não colapse: é tornar o colapso
+# IMPOSSÍVEL. O estado da máquina e a imobilidade saem da frase e viram CAMPOS;
+# as descrições são PARTICIONADAS por eles antes de chegar à LLM; e o sufixo do
+# label é aplicado por código depois. Duas situações opostas não caem no mesmo
+# grupo porque nunca estiveram na mesma lista.
+_MAQUINA_VALIDOS = ("ciclo", "parada")
+
+# ── CACHE DE CONSISTÊNCIA DO CLUSTER ────────────────────────────────────
+# Fase 86. O cluster roda POR VÍDEO: `mapa_descricao_label` é local, e cada
+# vídeo re-agrupa do zero, com lista diferente, num modelo estocástico. Daí a
+# mesma frase virar `monitorar_maquina` em três eventos e `lendo_desenho_tecnico`
+# em dois — não é bug, é o desenho.
+#
+# ⚠️ ISTO NÃO É A FASE 67. Lá o problema era propagar uma DECISÃO HUMANA por
+# semelhança SEMÂNTICA e reescrever labels ("descrições parecidas"). Aqui:
+#   • match EXATO de string normalizada, sem semelhança nenhuma;
+#   • origem MÁQUINA (o que o próprio cluster já decidiu antes), não humana;
+#   • não reescreve nada — só evita re-perguntar o que já foi perguntado;
+#   • não toca `validado_humano` nem `origem_validacao`.
+# Atrás de flag mesmo assim, ligada por padrão, para poder desligar sem deploy.
+_CACHE_CLUSTER = os.environ.get("KV_CACHE_CLUSTER", "on") not in ("off", "0", "false", "False", "")
+
+
+def cache_desc_label(sb, empresa: str, processo: str) -> dict[str, str]:
+    """{descricao_bruta normalizada → label} do histórico DESTE processo.
+
+    Uma descrição com mais de um label no histórico é DESCARTADA do cache: se o
+    passado já foi ambíguo, fixar um dos lados seria escolher no escuro.
+    """
+    if not _CACHE_CLUSTER:
+        return {}
+    try:
+        linhas = varrer(
+            sb, "eventos", "id, descricao_bruta, comportamento_label",
+            empresa=empresa, processo=processo,
+            ajustes=lambda q: q.not_.is_("descricao_bruta", "null"),
+        )
+    except Exception as e:   # noqa: BLE001
+        log.warning("[cluster] cache não lido (%s) — segue sem.", e)
+        return {}
+    vistos: dict[str, set] = defaultdict(set)
+    for l in linhas:
+        d = (l.get("descricao_bruta") or "").strip().lower()
+        lbl = (l.get("comportamento_label") or "").strip()
+        if d and lbl:
+            vistos[d].add(lbl)
+    return {d: next(iter(ls)) for d, ls in vistos.items() if len(ls) == 1}
+
+
+def _normalizar_maquina(v) -> str | None:
+    """'ciclo' | 'parada' | None. Qualquer outra coisa vira None — desconhecido
+    é uma resposta legítima e não pode ser convertido em discriminador."""
+    t = (str(v or "")).strip().lower()
+    return t if t in _MAQUINA_VALIDOS else None
+
+
+def chave_cena(maquina: str | None, imovel: bool | None) -> str:
+    """Chave de PARTIÇÃO do cluster. Descrições com chaves diferentes nunca
+    entram na mesma chamada, logo não podem ser agrupadas no mesmo label."""
+    return f"{_normalizar_maquina(maquina) or ''}|{'imovel' if imovel else ''}"
+
+
+def sufixo_cena(maquina: str | None, imovel: bool | None) -> str:
+    """Sufixo MECÂNICO do label. Descreve o observado e nada mais.
+
+    Não batiza de `esperar_ciclo` nem de `ocioso`: isso seria a máquina
+    decidindo o Lean, que é a decisão do gestor. `maquina_parada` + `imovel` é
+    um FATO; se isso é ociosidade ou não, quem diz é quem classifica.
+
+    Aplicado SEMPRE que o discriminador existe — nunca só quando as duas
+    variantes coexistem no lote. Se dependesse do conteúdo do vídeo, a mesma
+    situação ganharia labels diferentes em dias diferentes, que é exatamente o
+    problema de inconsistência que estamos consertando em outro lugar.
+    """
+    m = _normalizar_maquina(maquina)
+    partes = []
+    if m:
+        partes.append(m)
+    # A imobilidade só entra como sufixo quando o estado da máquina é
+    # DESCONHECIDO. Com a máquina conhecida ela seria redundante e multiplicaria
+    # o vocabulário por dois sem separar nada que já não esteja separado.
+    elif imovel:
+        partes.append("imovel")
+    return ("_" + "_".join(partes)) if partes else ""
+
+
+def _partes_da_chave(ck: str) -> tuple[str | None, bool]:
+    """Desfaz `chave_cena` — usado para aplicar o sufixo do lado do cluster."""
+    maq, _, imo = (ck or "").partition("|")
+    return (maq or None), (imo == "imovel")
+
+
+def _descricao_com_cena(desc: str, maquina: str | None, imovel: bool | None) -> str:
+    """Descrição humana do catálogo, com o discriminador explícito. É o texto
+    que o gestor lê na hora de classificar o Lean — sem ele, `x_ciclo` e
+    `x_parada` chegariam à tela como dois nomes crípticos."""
+    if maquina == "ciclo":
+        return f"{desc} — com a MÁQUINA EM CICLO (trabalhando)"
+    if maquina == "parada":
+        return f"{desc} — com a MÁQUINA PARADA"
+    if imovel:
+        return f"{desc} — pessoa IMÓVEL, estado da máquina não observado"
+    return desc
+
+
+def familia_label(label: str | None) -> str:
+    """Label RAIZ de uma família (`monitorar_maquina_ciclo` → `monitorar_maquina`).
+
+    É o que mantém a leitura de tendência íntegra depois do deploy: a SOMA da
+    família é comparável entre semanas — julho tem 100% dela sem discriminador,
+    agosto tem 40% ciclo / 50% parada / 10% sem —, o que mudou foi a RESOLUÇÃO
+    com que sabemos decompor esse tempo, não o tempo.
+    """
+    base = (label or "").strip()
+    for suf in ("_ciclo", "_parada", "_imovel"):
+        if base.endswith(suf):
+            return base[: -len(suf)]
+    return base
 
 
 PROMPT_VLM_SEQUENCIA = """Você é um analista de processos industriais observando UM posto de trabalho.
@@ -1514,8 +1730,11 @@ Sua tarefa é dizer o que aconteceu AO LONGO da sequência, não o que se vê nu
 {exemplos}
 CONTEXTO: {contexto_zonas}
 
-Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira):
-{{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}}}, {{"i": 1, "acoes": {{"P1": "..."}}}}]}}"""
+Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira).
+Além da descrição, devolva DOIS CAMPOS SEPARADOS por imagem — eles não são enfeite da frase, são o que distingue espera de ociosidade:
+- "maquina": "ciclo" se a máquina está trabalhando (eixo girando, luz de ciclo, peça sendo usinada), "parada" se está claramente parada, null se você não consegue ver.
+- "imovel": true se a pessoa está na MESMA posição da imagem anterior, false se mudou.
+{{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}, "maquina": "ciclo", "imovel": true}}, {{"i": 1, "acoes": {{"P1": "..."}}, "maquina": null, "imovel": false}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA_CAM2 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
@@ -1531,8 +1750,9 @@ Diga o que o operador fez AO LONGO da sequência, não o que se vê num frame is
 {exemplos}
 CONTEXTO: {contexto_zonas}
 
-Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira):
-{{"trechos": [{{"i": 0, "acao": "..."}}, {{"i": 1, "acao": "..."}}]}}"""
+Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira).
+Devolva também "maquina" ("ciclo" | "parada" | null) e "imovel" (true/false) por imagem — são eles que distinguem espera de ociosidade:
+{{"trechos": [{{"i": 0, "acao": "...", "maquina": "ciclo", "imovel": true}}, {{"i": 1, "acao": "...", "maquina": null, "imovel": false}}]}}"""
 
 
 def _analisar_operador_cam2(
@@ -1771,7 +1991,9 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #
 #   1 = instante isolado; o desempate do prompt só tinha saídas produtivas
 #   2 = sequência por minuto; o VLM descreve e não classifica; heranças com teto
-VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "2"))
+#   3 = discriminador de cena (máquina/imobilidade) particiona o cluster;
+#       orientação vem da pose; cluster com cache exato e temperatura 0
+VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "3"))
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -2319,6 +2541,8 @@ def etapa_detectar_e_amostrar(
                             # Fase 44: punho na zona 'maquina' → mãos no torno
                             # (operando), mesmo com o tronco no posto.
                             pessoa["maos_maquina"] = _maos_na_maquina(pessoa, rois, w, h)
+                            # Fase 86: orientação vs CÂMERA — determinística.
+                            pessoa["orientacao"] = orientacao_pessoa(pessoa, w, h)
                         else:
                             pessoa["zona"] = _zona_contexto(cx, cy, rois)
                         if _GATE_ENABLE:
@@ -2489,8 +2713,9 @@ def _subamostrar(itens: list, teto: int) -> list:
     return [itens[int(round(i * passo))] for i in range(teto)]
 
 
-def _contexto_zonas(amostra: Amostra, modo_op: bool) -> str:
-    """Linha de CONTEXTO do prompt para UMA amostra (zonas + mãos na máquina)."""
+def _contexto_zonas(amostra: Amostra, modo_op: bool,
+                    frente_maquina: str | None = None) -> str:
+    """Linha de CONTEXTO do prompt para UMA amostra (zonas, mãos, orientação)."""
     maos_cam2 = getattr(amostra, "maos_cam2", False)
     partes = []
     for p in amostra.pessoas:
@@ -2504,6 +2729,17 @@ def _contexto_zonas(amostra: Amostra, modo_op: bool) -> str:
         if op_maos:
             linha += (" — e está com as MÃOS na máquina (torno), tocando/"
                       "manipulando o equipamento (logo, OPERANDO, não apenas monitorando)")
+        # Fase 86: a orientação vem do SENSOR (keypoints da pose), não do olho
+        # do modelo. Injetada como fato, do mesmo jeito que as mãos.
+        orient = p.get("orientacao")
+        if orient:
+            _MAPA = {"frente": "DE FRENTE para a câmera",
+                     "costas": "DE COSTAS para a câmera",
+                     "perfil": "DE PERFIL para a câmera"}
+            linha += f" — e está {_MAPA[orient]} (medido pela pose, não é opinião)"
+            vs_maq = orientacao_vs_maquina(orient, frente_maquina)
+            if vs_maq:
+                linha += f", ou seja, {vs_maq}"
         partes.append(linha)
     return ". ".join(partes) if partes else "sem zonas pré-definidas"
 
@@ -2515,7 +2751,8 @@ def _analisar_sequencia_vlm(
     memoria: dict,
     intervalo_s: float,
     conhecimento_adquirido: str = "",
-) -> dict[int, dict[int, str]]:
+    frente_maquina: str | None = None,
+) -> dict[int, dict]:
     """Fase 85 — UMA chamada para a sequência inteira de um minuto.
 
     Devolve {índice da amostra no grupo → {track_id → descrição}} — uma
@@ -2561,7 +2798,7 @@ def _analisar_sequencia_vlm(
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
         regras=_REGRAS_DESCRICAO,
         exemplos=_BLOCO_EXEMPLOS_DESCRICAO,
-        contexto_zonas=_contexto_zonas(meio, modo_op),
+        contexto_zonas=_contexto_zonas(meio, modo_op, frente_maquina),
     )
     if not tem_operador:
         prompt = prompt.replace(
@@ -2588,7 +2825,7 @@ def _analisar_sequencia_vlm(
     # amostra correspondente. Rótulos (P1, P2...) são desenhados em CADA imagem
     # separadamente, então a tradução rótulo→track usa o mapa DAQUELA amostra.
     idx_no_grupo = {id(a): i for i, a in enumerate(grupo)}
-    saida: dict[int, dict[int, str]] = {}
+    saida: dict[int, dict] = {}
     for t in trechos if isinstance(trechos, list) else []:
         try:
             i = int(t.get("i"))
@@ -2604,7 +2841,15 @@ def _analisar_sequencia_vlm(
             if rot in mapa and isinstance(d, str) and d.strip()
         }
         if por_track:
-            saida[idx_no_grupo[id(am)]] = por_track
+            # Fase 86: o discriminador vem em CAMPO, não enterrado na frase.
+            # Extrair "máquina em ciclo" do texto por regra seria frágil (o VLM
+            # escreve "torno girando" com a mesma facilidade); pedir o campo
+            # custa alguns tokens de saída e elimina o parsing por adivinhação.
+            saida[idx_no_grupo[id(am)]] = {
+                "acoes": por_track,
+                "maquina": _normalizar_maquina(t.get("maquina")),
+                "imovel": bool(t.get("imovel")),
+            }
     return saida
 
 
@@ -2616,7 +2861,7 @@ def _analisar_sequencia_cam2(
     intervalo_s: float,
     conhecimento_adquirido: str = "",
     zona_desc: str | None = None,
-) -> dict[int, str]:
+) -> dict[int, dict]:
     """Fase 85 — o RESGATE pela cam2 também vira sequência.
 
     Terceira porta dos fundos: sem isto, o caminho do resgate continuaria com o
@@ -2659,7 +2904,7 @@ def _analisar_sequencia_cam2(
         return {}
 
     idx_no_grupo = {id(a): i for i, a in enumerate(grupo)}
-    saida: dict[int, str] = {}
+    saida: dict[int, dict] = {}
     for t in trechos if isinstance(trechos, list) else []:
         try:
             i = int(t.get("i"))
@@ -2669,7 +2914,11 @@ def _analisar_sequencia_cam2(
             continue
         acao = (t.get("acao") or "").strip().lower()
         if acao:
-            saida[idx_no_grupo[id(usados[i])]] = acao
+            saida[idx_no_grupo[id(usados[i])]] = {
+                "acao": acao,
+                "maquina": _normalizar_maquina(t.get("maquina")),
+                "imovel": bool(t.get("imovel")),
+            }
     return saida
 
 
@@ -2730,6 +2979,7 @@ def etapa_analise_vlm(
     conhecimento_adquirido: str = "",
     zona_posto: str | None = None,
     intervalo_s: float = DEFAULT_INTERVALO_AMOSTRAGEM_S,
+    frente_maquina: str | None = None,
 ) -> list[dict]:
     """Analisa as amostras com o VLM.
 
@@ -2836,6 +3086,7 @@ def etapa_analise_vlm(
             descricoes_seq = _analisar_sequencia_vlm(
                 groq_client, [plano[i][1] for i in idx_cam1], descricao_processo,
                 memoria, intervalo_s, conhecimento_adquirido,
+                frente_maquina=frente_maquina,
             )
             # Reindexa: a função devolve o índice DENTRO da lista que recebeu.
             descricoes_seq = {idx_cam1[k]: v for k, v in descricoes_seq.items()
@@ -2857,7 +3108,9 @@ def etapa_analise_vlm(
         for i, (tipo, am) in enumerate(plano):
             if tipo in ("resgate", "ponte"):
                 origem_resgate = "resgate_cam2" if tipo == "resgate" else "ponte_temporal"
-                desc_cam2 = desc_resgate.get(i) if tipo == "resgate" else ultima_desc_op
+                _r = desc_resgate.get(i) or {}
+                desc_cam2 = _r.get("acao") if tipo == "resgate" else ultima_desc_op
+                cena_maq, cena_imovel = _r.get("maquina"), _r.get("imovel")
                 if tipo == "ponte":
                     # A ponte herda SEM ver imagem nenhuma. Com teto, como todo
                     # o resto: passado o limite, o operador presente por
@@ -2895,6 +3148,8 @@ def etapa_analise_vlm(
                         "papel": "operador",
                         "origem_gate": origem_resgate,
                         "mudanca_contexto": origem_resgate == "resgate_cam2",
+                        "maquina": cena_maq,
+                        "imovel": cena_imovel,
                     })
                     if not _eh_indefinida(desc_cam2):
                         ultima_desc_op = desc_cam2
@@ -2915,11 +3170,14 @@ def etapa_analise_vlm(
                         "papel": "posto_vazio",
                         "origem_gate": "posto_vazio",
                         "mudanca_contexto": False,
+                        "maquina": None, "imovel": None,
                     })
                 continue
 
             # tipo == "cam1"
-            do_instante = descricoes_seq.get(i, {})
+            _bloco = descricoes_seq.get(i) or {}
+            do_instante = _bloco.get("acoes") or {}
+            cena_maq, cena_imovel = _bloco.get("maquina"), _bloco.get("imovel")
             d_am = decisoes.get(i, {})
             for p in am.pessoas:
                 tid = p["track_id"]
@@ -2979,6 +3237,10 @@ def etapa_analise_vlm(
                     "maos_maquina": p.get("maos_maquina"),
                     "origem_gate": origem_gate,
                     "mudanca_contexto": origem_gate == "analisado",
+                    # Fase 86: o discriminador viaja com a observação até o
+                    # cluster, que particiona por ele.
+                    "maquina": cena_maq,
+                    "imovel": cena_imovel,
                 })
 
         feitas += len(grupo)
@@ -3021,8 +3283,14 @@ def etapa_clusterizar(
     progress_cb: ProgressCb,
     conhecimento_adquirido: str = "",
     aprendizado_auto: bool = True,
-) -> tuple[dict[str, str], dict[str, str], Callable[[str], str], Callable[[str], str]]:
+    cache_labels: dict[str, str] | None = None,
+) -> tuple[dict, dict[str, str], Callable[..., str], Callable[..., str]]:
     """Retorna (mapa_desc_label, catalogo, label_de, origem_de).
+
+    Fase 86: `label_de` e `origem_de` passaram a receber o DISCRIMINADOR da
+    cena — `(descricao, maquina, imovel)`. A descrição sozinha deixou de ser
+    chave suficiente: a mesma frase com a máquina em ciclo e com a máquina
+    parada descreve situações opostas.
 
     `aprendizado_auto=False` (Fase 62) desliga a GENERALIZAÇÃO: correções
     humanas não remapeiam descrições e nenhuma origem sai como aprendida —
@@ -3057,42 +3325,68 @@ def etapa_clusterizar(
             "generaliza por descrição (Fase 67).", len(_corr_todas),
         )
 
-    descricoes_conhecidas: dict[str, str] = {}
-    descricoes_novas: list[str] = []
+    # Fase 86 — PARTIÇÃO PELO DISCRIMINADOR. A unidade do cluster deixa de ser
+    # a descrição e passa a ser (descrição, cena). Duas frases idênticas com
+    # estados de máquina diferentes são situações OPOSTAS e não podem cair no
+    # mesmo grupo — aqui elas nem chegam na mesma lista.
+    cenas_por_desc: dict[str, set] = defaultdict(set)
+    for o in observacoes_brutas:
+        cenas_por_desc[(o["descricao"] or "").lower().strip()].add(
+            chave_cena(o.get("maquina"), o.get("imovel")))
+
+    pares: list[tuple[str, str]] = []      # (descricao, chave_cena)
     for d in descricoes_unicas:
+        for ck in sorted(cenas_por_desc.get(d.lower().strip(), {""})):
+            pares.append((d, ck))
+
+    descricoes_conhecidas: dict[tuple[str, str], str] = {}
+    novas_por_cena: dict[str, list[str]] = defaultdict(list)
+    _cache = cache_labels or {}
+    n_cache = 0
+    for d, ck in pares:
         d_lower = d.lower().strip()
         if d_lower == POSTO_VAZIO_DESC:
             # Fase 28: label determinístico — nunca passa pela LLM.
             continue
         if d_lower in correcoes:
-            descricoes_conhecidas[d] = correcoes[d_lower]
-        else:
-            descricoes_novas.append(d)
+            descricoes_conhecidas[(d_lower, ck)] = correcoes[d_lower]
+            continue
+        # Fase 86 — CONSISTÊNCIA. Frase idêntica já clusterizada neste processo
+        # reusa o label, em vez de ser re-perguntada a um modelo estocástico.
+        # Só vale quando a cena BATE com o sufixo do label guardado: um label
+        # sem sufixo não pode servir a uma cena discriminada, senão o cache
+        # desfaria a partição que acabamos de construir.
+        em_cache = _cache.get(d_lower)
+        if em_cache and em_cache == familia_label(em_cache) + sufixo_cena(
+                *_partes_da_chave(ck)):
+            descricoes_conhecidas[(d_lower, ck)] = em_cache
+            n_cache += 1
+            continue
+        novas_por_cena[ck].append(d)
+    if n_cache:
+        log.info("[cluster] %d descrição(ões) reusaram o label do histórico "
+                 "(match exato, KV_CACHE_CLUSTER=on).", n_cache)
+    descricoes_novas = [d for lista in novas_por_cena.values() for d in lista]
 
     # Fase 12: capa a lista enviada ao gpt-oss. Sem isso, um vídeo com MUITAS
     # descrições únicas monta um prompt gigante e a chamada estoura os 8K TPM/req
     # do Free Tier (erro 413 "Request too large"). 120 já cobre vídeos reais; o
     # excedente (raro) só não recebe rótulo canônico (cai no fallback).
     _max_desc = int(os.environ.get("KV_CLUSTER_MAX_DESC", "200"))
-    if len(descricoes_novas) > _max_desc:
-        log.warning(
-            "cluster: %d descrições novas > %d — truncando p/ caber no limite do Groq.",
-            len(descricoes_novas), _max_desc,
-        )
-        descricoes_novas = descricoes_novas[:_max_desc]
 
-    mapa_descricao_label: dict[str, str] = {}
+    mapa_descricao_label: dict[tuple[str, str], str] = {}
     catalogo: dict[str, str] = {}
 
     # Fase 28: posto_vazio é semeado direto (curto-circuito determinístico).
     if any(d.lower().strip() == POSTO_VAZIO_DESC for d in descricoes_unicas):
-        mapa_descricao_label[POSTO_VAZIO_DESC] = POSTO_VAZIO_LABEL
+        for ck in cenas_por_desc.get(POSTO_VAZIO_DESC, {""}):
+            mapa_descricao_label[(POSTO_VAZIO_DESC, ck)] = POSTO_VAZIO_LABEL
         catalogo[POSTO_VAZIO_LABEL] = (
             "Posto de trabalho vazio — operador ausente do posto"
         )
 
-    for desc, label in descricoes_conhecidas.items():
-        mapa_descricao_label[desc.lower().strip()] = label
+    for (d_lower, ck), label in descricoes_conhecidas.items():
+        mapa_descricao_label[(d_lower, ck)] = label
         if label not in catalogo:
             for v in memoria.get("vocabulario", []):
                 if v["label"] == label:
@@ -3101,7 +3395,18 @@ def etapa_clusterizar(
             if label not in catalogo:
                 catalogo[label] = label.replace("_", " ").capitalize()
 
-    if descricoes_novas:
+    # Fase 86 — UMA CHAMADA POR PARTIÇÃO. O modelo continua fazendo o que faz
+    # bem (colapsar sinônimos) DENTRO de cada cena; o discriminador é garantido
+    # por fora. Listas pequenas, modelo de texto: o custo extra é marginal.
+    _n_chamadas = 0
+    for ck, lista in sorted(novas_por_cena.items()):
+        lista = sorted(set(lista))
+        if not lista:
+            continue
+        if len(lista) > _max_desc:
+            log.warning("cluster[%s]: %d descrições > %d — truncando.",
+                        ck or "sem-cena", len(lista), _max_desc)
+            lista = lista[:_max_desc]
         prompt_completo = PROMPT_CLUSTER.format(
             bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
             # `_generalizar` diz ao bloco se `descartados` pode entrar. O
@@ -3111,32 +3416,48 @@ def etapa_clusterizar(
             bloco_memoria=construir_bloco_memoria_cluster(
                 {**memoria, "_generalizar": aprendizado_auto}),
         )
-        lista_formatada = "\n".join(f"- {d}" for d in descricoes_novas)
-        resposta = groq_text_call(
-            groq_client,
-            prompt_completo + lista_formatada,
-            model=GROQ_MODEL_ANALISE,
-            json_mode=True,
-            max_tokens=4000,   # Fase 14: fora do Free Tier — mais espaço p/ qualidade
-            temperatura=0.1,
-        )
-        dados = json.loads(resposta)
-        clusters = dados["comportamentos"]
+        lista_formatada = "\n".join(f"- {d}" for d in lista)
+        try:
+            resposta = groq_text_call(
+                groq_client,
+                prompt_completo + lista_formatada,
+                model=GROQ_MODEL_ANALISE,
+                json_mode=True,
+                max_tokens=4000,
+                # Fase 86: ZERO. Com 0.1 a mesma lista podia sair agrupada de
+                # dois jeitos em vídeos diferentes — parte da inconsistência
+                # que o dono mediu.
+                temperatura=0.0,
+            )
+            clusters = json.loads(resposta)["comportamentos"]
+            _n_chamadas += 1
+        except Exception as e:   # noqa: BLE001
+            log.warning("cluster[%s] falhou (%s) — descrições caem no fallback.",
+                        ck or "sem-cena", e)
+            continue
+        maq, imo = _partes_da_chave(ck)
         for c in clusters:
+            # O SUFIXO É APLICADO AQUI, por código. A LLM pode ter devolvido
+            # `monitorar_maquina` nas duas partições; é este passo que impede
+            # as duas de virarem o mesmo rótulo.
+            label = (c.get("label") or "acao_indefinida").strip() or "acao_indefinida"
+            if label not in ("acao_indefinida", POSTO_VAZIO_LABEL):
+                label = label + sufixo_cena(maq, imo)
             for d in c.get("descricoes_originais", []):
-                mapa_descricao_label[d.strip().lower()] = c["label"]
-            catalogo[c["label"]] = c["descricao"]
+                mapa_descricao_label[(d.strip().lower(), ck)] = label
+            catalogo[label] = _descricao_com_cena(c.get("descricao") or label, maq, imo)
 
-    for d in descricoes_unicas:
-        if d.lower().strip() not in mapa_descricao_label:
-            log.warning(f"Descrição não clusterizada: {d!r}")
-            mapa_descricao_label[d.lower().strip()] = "acao_indefinida"
+    for d, ck in pares:
+        if (d.lower().strip(), ck) not in mapa_descricao_label:
+            log.warning(f"Descrição não clusterizada: {d!r} (cena {ck!r})")
+            mapa_descricao_label[(d.lower().strip(), ck)] = "acao_indefinida"
 
     if "acao_indefinida" not in catalogo:
         catalogo["acao_indefinida"] = "Ação não foi identificada com clareza pelo modelo"
 
-    def label_de(desc: str) -> str:
-        return mapa_descricao_label.get(desc.lower().strip(), "acao_indefinida")
+    def label_de(desc: str, maquina: str | None = None, imovel: bool | None = None) -> str:
+        return mapa_descricao_label.get(
+            (desc.lower().strip(), chave_cena(maquina, imovel)), "acao_indefinida")
 
     # Fase 62: com a generalização desligada, nada é "aprendido" — tudo vai
     # para a fila como pendente. Nota sobre o que NÃO é desligado aqui: o
@@ -3154,20 +3475,24 @@ def etapa_clusterizar(
         if aprendizado_auto
         else set()
     )
-    origem_por_desc: dict[str, str] = {}
-    for desc in descricoes_unicas:
+    origem_por_desc: dict[tuple[str, str], str] = {}
+    for desc, ck in pares:
         d_lower = desc.lower().strip()
         if d_lower in correcoes:
-            origem_por_desc[d_lower] = "correcao_aprendida"
-        elif mapa_descricao_label.get(d_lower) in vocab_estabelecido:
-            origem_por_desc[d_lower] = "vocabulario_canonico"
+            origem_por_desc[(d_lower, ck)] = "correcao_aprendida"
+        elif mapa_descricao_label.get((d_lower, ck)) in vocab_estabelecido:
+            origem_por_desc[(d_lower, ck)] = "vocabulario_canonico"
         else:
-            origem_por_desc[d_lower] = "pendente"
+            origem_por_desc[(d_lower, ck)] = "pendente"
 
-    def origem_de(desc: str) -> str:
-        return origem_por_desc.get(desc.lower().strip(), "pendente")
+    def origem_de(desc: str, maquina: str | None = None,
+                  imovel: bool | None = None) -> str:
+        return origem_por_desc.get(
+            (desc.lower().strip(), chave_cena(maquina, imovel)), "pendente")
 
-    progress_cb("cluster", 100, f"{len(catalogo)} comportamentos canônicos")
+    progress_cb("cluster", 100,
+                f"{len(catalogo)} comportamentos canônicos "
+                f"({_n_chamadas} partição(ões) de cena)")
     return mapa_descricao_label, catalogo, label_de, origem_de
 
 
@@ -3247,6 +3572,10 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         "_dim": o.get("bbox_dim") if tem else None,
         "_caixas": [list(o["bbox"])] if tem else [],
         "maos_maquina": o.get("maos_maquina"),
+        # Fase 86: o discriminador acompanha o evento até a origem/validação e
+        # até o fato das camadas.
+        "maquina": o.get("maquina"),
+        "imovel": o.get("imovel"),
         "zona_contexto": o["zona"],
         "papel_pessoa": o.get("papel"),
         "n_amostras": 1,
@@ -3255,11 +3584,11 @@ def _abrir_evento(tid: int, o: dict) -> dict:
 
 def etapa_segmentar_eventos(
     observacoes_brutas: list[dict],
-    label_de: Callable[[str], str],
+    label_de: Callable[..., str],
     intervalo_s: float,
 ) -> list[dict]:
     for o in observacoes_brutas:
-        o["label"] = label_de(o["descricao"])
+        o["label"] = label_de(o["descricao"], o.get("maquina"), o.get("imovel"))
 
     por_pessoa: dict[int, list[dict]] = defaultdict(list)
     for o in observacoes_brutas:
@@ -3456,6 +3785,8 @@ def etapa_consolidar_principais(
                  if e.get("pessoa_track_id") == rep.get("pessoa_track_id")]),
             "maos_maquina": (True if any(e.get("maos_maquina")
                                          for e, _ in no_bucket) else None),
+            "maquina": rep.get("maquina"),
+            "imovel": rep.get("imovel"),
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": rep.get("papel_pessoa"),
             "n_amostras": _n_votos,
@@ -4134,7 +4465,7 @@ def etapa_persistir(
     eventos: list[dict],
     ids_unicos: list[int],
     catalogo: dict[str, str],
-    origem_de: Callable[[str], str],
+    origem_de: Callable[..., str],
     nome_video: str | None = None,
     caminho_storage: str | None = None,
     cam_id: str | None = None,
@@ -4239,7 +4570,7 @@ def etapa_persistir(
     linhas_eventos: list[dict] = []
     n_auto_validados = 0
     for e in eventos:
-        origem = origem_de(e["descricao_bruta"])
+        origem = origem_de(e["descricao_bruta"], e.get("maquina"), e.get("imovel"))
         # Fase 61/62 — INFERÊNCIA DA MÁQUINA NUNCA É VERDADE HUMANA.
         # NENHUMA origem inferida auto-valida. `correcao_aprendida` e
         # `vocabulario_canonico` PROPÕEM o rótulo; quem confirma é a pessoa.
@@ -5773,6 +6104,11 @@ def rotulos_sem_categoria(sb: Client, empresa: str, processo: str,
             continue
         a = agg.setdefault(lbl, {
             "label": lbl,
+            # Fase 86: a FAMÍLIA é o que mantém a tendência legível. A soma da
+            # família é comparável entre semanas — o histórico tem 100% dela sem
+            # discriminador, hoje tem ciclo/parada/sem —, o que mudou foi a
+            # RESOLUÇÃO com que sabemos decompor esse tempo, não o tempo.
+            "familia": familia_label(lbl),
             "comportamento_id": c.get("id"),
             "descricao": c.get("descricao"),
             # Distingue "nunca foi classificado" de "foi ASSUMIDO pelo fallback".
@@ -5791,12 +6127,45 @@ def rotulos_sem_categoria(sb: Client, empresa: str, processo: str,
 
     # O total ANTES de mexer nos itens: `itens` são as MESMAS referências que
     # estão em `agg`, então limpar `segundos` lá apaga a chave aqui também.
+    # Retrato da FAMÍLIA inteira, incluindo as variantes que já têm categoria.
+    # Sem isto o gestor veria `monitorar_maquina_parada` sozinho e não saberia
+    # que existe um `monitorar_maquina` histórico, produtivo, com 31% do tempo —
+    # e são justamente os dois que ele precisa comparar para decidir.
+    fam_total: dict[str, dict] = {}
+    for e in eventos:
+        if e.get("principal") is False or e.get("validacao_correto") is False:
+            continue
+        lbl = e.get("label_corrigido") or e.get("comportamento_label")
+        if not lbl:
+            continue
+        c = por_label.get(lbl) or {}
+        f = fam_total.setdefault(familia_label(lbl), {"segundos": 0.0, "variantes": {}})
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        f["segundos"] += dur
+        v = f["variantes"].setdefault(lbl, {
+            "label": lbl, "segundos": 0.0,
+            "categoria": c.get("categoria_lean"),
+            "origem": c.get("categoria_lean_origem"),
+            "versoes": set(),
+        })
+        v["segundos"] += dur
+        v["versoes"].add(int(e.get("versao_instrumento") or 1))
+
     seg_sem_cat = sum(v["segundos"] for v in agg.values())
     itens = sorted(agg.values(), key=lambda x: -x["segundos"])[:limite]
     for a in itens:
         a["minutos"] = round(a["segundos"] / 60, 1)
         a["pct_do_tempo"] = round(a["segundos"] / seg_total * 100, 1) if seg_total else 0.0
         a["versoes"] = sorted(a.pop("versoes"))
+        fam = fam_total.get(a["familia"]) or {"segundos": 0.0, "variantes": {}}
+        a["familia_minutos"] = round(fam["segundos"] / 60, 1)
+        a["familia_variantes"] = sorted(
+            ({"label": v["label"], "minutos": round(v["segundos"] / 60, 1),
+              "categoria": v["categoria"], "origem": v["origem"],
+              "versoes": sorted(v["versoes"])}
+             for v in fam["variantes"].values()),
+            key=lambda v: -v["minutos"],
+        )
         a.pop("segundos", None)
     return {
         "itens": itens,
@@ -9917,6 +10286,14 @@ def processar_video(
             (n for n, i in rois_contexto.items() if i.get("papel") == "posto_operador"),
             None,
         )
+    # Fase 86: câmera e torno são fixos, então a relação entre eles é uma
+    # CONSTANTE por câmera — configurada na zona da máquina. Sem ela o sistema
+    # afirma só a orientação vs câmera, que é objetiva.
+    frente_maquina = next(
+        (i.get("frente_maquina") for i in rois_contexto.values()
+         if i.get("papel") == "maquina" and i.get("frente_maquina")),
+        None,
+    )
 
     # Fase 6: 2º ângulo (cam2) anexado a cada amostra para o VLM concluir com os
     # dois pontos de vista. cam1 já dirigiu detecção/tracking acima.
@@ -9982,6 +10359,7 @@ def processar_video(
         # Fase 85: o prompt da sequência diz quantos segundos separam as
         # imagens — sem isso o modelo não tem como julgar "parado há quanto".
         intervalo_s=intervalo_amostragem_s,
+        frente_maquina=frente_maquina,
     )
 
     if not observacoes:
@@ -10001,10 +10379,12 @@ def processar_video(
         "[aprendizado] generalização automática %s para %s/%s",
         "LIGADA" if _aprende else "DESLIGADA", empresa, processo,
     )
+    _cache_labels = cache_desc_label(sb, empresa, processo)
     _, catalogo, label_de, origem_de = etapa_clusterizar(
         groq_client, observacoes, descricao, memoria, limiar_auto_validacao, progress_cb,
         conhecimento_adquirido=conhecimento,
         aprendizado_auto=_aprende,
+        cache_labels=_cache_labels,
     )
 
     progress_cb("segmentar", 0, "Formando eventos contínuos")

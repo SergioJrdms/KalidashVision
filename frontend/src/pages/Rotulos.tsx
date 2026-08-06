@@ -152,6 +152,31 @@ function LinhaRotulo({ r, salvando, onClassificar }: {
               {r.exemplos.map((e) => `“${e}”`).join(" · ")}
             </span>
           )}
+          {r.familia_variantes.length > 1 && (
+            // A resposta ao problema do histórico: o rótulo antigo NÃO vira uma
+            // quarta categoria nem é renomeado. Ele aparece como o que é — a
+            // mesma família, medida com menos resolução. A soma da família é a
+            // série comparável; a decomposição é o detalhe que ganhamos agora.
+            <div className="col" style={{ gap: 3, borderLeft: "2px solid var(--line)", paddingLeft: 9, marginTop: 2 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>
+                família <code className="font-mono">{r.familia}</code> ·{" "}
+                {r.familia_minutos.toFixed(0)} min no total
+              </span>
+              {r.familia_variantes.map((v) => (
+                <span key={v.label} style={{ fontSize: 11, color: "var(--faint)" }}>
+                  <code className="font-mono">{v.label}</code> · {v.minutos.toFixed(0)} min ·{" "}
+                  {v.categoria
+                    ? leanLabel(v.categoria === "valor_agregado" ? "va" : "desp")
+                    : "sem categoria"}
+                  {v.label === r.familia
+                    ? (v.versoes.some((n) => n < 3)
+                        ? " — histórico: o instrumento não coletava o estado da máquina"
+                        : " — o VLM não conseguiu ver o estado da máquina")
+                    : ""}
+                </span>
+              ))}
+            </div>
+          )}
           {r.versoes.length > 0 && (
             // Fase 85: rótulo que só existe na versão 2 nasceu com o
             // instrumento novo — é vocabulário que antes não tinha como nascer.

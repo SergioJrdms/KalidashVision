@@ -1069,3 +1069,32 @@ create unique index if not exists uq_desc_track_video_cam
 alter table eventos add column if not exists versao_instrumento int default 1;
 create index if not exists idx_eventos_versao
     on eventos(empresa, processo, versao_instrumento);
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 86 — ORIENTAÇÃO: o sinal vem da pose, a tradução vem da zona.
+--
+-- "de frente ao torno" virou muleta: aparecia em quase toda descrição do dia,
+-- inclusive com o operador de COSTAS para o torno lendo desenho técnico. O VLM
+-- não enxerga orientação nessa resolução e preenche com o plausível — o mesmo
+-- mecanismo que produzia "monitorando a máquina".
+--
+-- A orientação em relação à CÂMERA sai dos 17 keypoints do yolo11n-pose e é
+-- objetiva (rosto visível = de frente; ombros sem rosto = de costas; ombros
+-- colados em x = de perfil). Mas de frente para a CÂMERA não é de frente para
+-- o TORNO — e essa tradução é uma constante por câmera, porque câmera e torno
+-- são fixos.
+--
+--   'camera'  : quem está de frente para a câmera está de frente para a máquina
+--   'oposta'  : quem está de COSTAS para a câmera está de frente para a máquina
+--   'perfil'  : o eixo operador→máquina é perpendicular à câmera (não dá para inferir)
+--   null      : não configurado
+--
+-- SEM configuração o sistema afirma só o que sabe ("de costas para a câmera") e
+-- PROÍBE o VLM de afirmar orientação em relação ao torno. Isso já mata a muleta;
+-- o campo é refinamento, não pré-requisito.
+-- ════════════════════════════════════════════════════════════════════════
+alter table zonas_camera add column if not exists frente_maquina text;
+alter table zonas_camera drop constraint if exists zonas_frente_maquina_chk;
+alter table zonas_camera add constraint zonas_frente_maquina_chk
+    check (frente_maquina is null or frente_maquina in ('camera','oposta','perfil'));

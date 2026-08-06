@@ -114,7 +114,9 @@ check("a exceção do sensor de mãos continua (esperar ciclo com mãos = operar
 
 print("\n[4] A calibração é SIMÉTRICA — dois exemplos, mesma postura")
 check("parado COM a máquina em ciclo é um exemplo",
-      "parado de frente ao torno, máquina em ciclo" in exemplos)
+      "parado junto ao torno, máquina em ciclo" in exemplos)
+check("Fase 86: o exemplo não carrega mais a muleta 'de frente ao torno'",
+      "de frente ao torno" not in exemplos, exemplos)
 check("parado SEM a máquina trabalhando é outro",
       "parado ao lado do torno, máquina parada" in exemplos)
 check("há exemplos claramente produtivos", "operando o torno, mãos na peça" in exemplos)
@@ -187,7 +189,8 @@ check("cada amostra do grupo ainda emite a sua observação",
       'for i, (tipo, am) in enumerate(plano):' in corpo_vlm)
 
 print("\n[10] versao_instrumento: a quebra da série fica DENTRO do dado")
-check("a constante existe", pl.VERSAO_INSTRUMENTO == 2)
+check("a constante existe e foi bumpada (a medição mudou de novo)",
+      pl.VERSAO_INSTRUMENTO == 3, pl.VERSAO_INSTRUMENTO)
 check("é carimbada nas linhas de evento",
       src.count('"versao_instrumento": VERSAO_INSTRUMENTO') == 2)
 sql = open("sql/schema.sql").read()
@@ -265,15 +268,21 @@ _seq_real, _cam2_real, _bin_real = (pl._analisar_sequencia_vlm,
                                     pl._analisar_sequencia_cam2, pl._gate_vlm_binario)
 
 
+# Fase 86: o dublê acompanha o contrato REAL — a função devolve o bloco com
+# `acoes` + o discriminador da cena, não um dict solto de descrições. Um dublê
+# desatualizado passaria verde enquanto a produção quebra.
 def _fake_seq(cli, grupo, *a, **k):
     chamadas["seq"] += 1
-    return {i: {p["track_id"]: f"acao do instante {int(am_.tempo_s)}"
-                for p in am_.pessoas} for i, am_ in enumerate(grupo)}
+    return {i: {"acoes": {p["track_id"]: f"acao do instante {int(am_.tempo_s)}"
+                          for p in am_.pessoas},
+                "maquina": "ciclo", "imovel": False}
+            for i, am_ in enumerate(grupo)}
 
 
 def _fake_cam2(cli, grupo, *a, **k):
     chamadas["cam2"] += 1
-    return {i: "operador atras da maquina" for i in range(len(grupo))}
+    return {i: {"acao": "operador atras da maquina", "maquina": None,
+                "imovel": True} for i in range(len(grupo))}
 
 
 pl._analisar_sequencia_vlm = _fake_seq
@@ -435,6 +444,158 @@ check("o limite corta a lista", len(pl.rotulos_sem_categoria(SB, "U", "T", limit
 vazio = pl.rotulos_sem_categoria(SBFake({"eventos": [], "comportamentos": []}), "U", "T")
 check("processo sem eventos não quebra",
       vazio["itens"] == [] and vazio["pct_sem_categoria"] == 0.0, vazio)
+
+
+print("\n[15] Fase 86 · O DISCRIMINADOR PARTICIONA — colapso impossível, não desencorajado")
+check("chave de cena separa ciclo de parada",
+      pl.chave_cena("ciclo", False) != pl.chave_cena("parada", False))
+check("valor inválido vira desconhecido (nunca vira discriminador)",
+      pl.chave_cena("girando", False) == pl.chave_cena(None, False))
+check("sufixo mecânico para máquina em ciclo", pl.sufixo_cena("ciclo", False) == "_ciclo")
+check("e para máquina parada", pl.sufixo_cena("parada", True) == "_parada")
+check("imobilidade só vira sufixo quando a máquina é DESCONHECIDA "
+      "(com a máquina conhecida seria redundante e dobraria o vocabulário)",
+      pl.sufixo_cena(None, True) == "_imovel" and pl.sufixo_cena("ciclo", True) == "_ciclo")
+check("sem discriminador não há sufixo — desconhecido é resposta legítima",
+      pl.sufixo_cena(None, False) == "")
+check("o sufixo NÃO batiza o Lean (nada de esperar_ciclo/ocioso)",
+      "ocioso" not in pl.sufixo_cena("parada", True)
+      and "esperar" not in pl.sufixo_cena("ciclo", False))
+check("família desfaz o sufixo",
+      pl.familia_label("monitorar_maquina_ciclo") == "monitorar_maquina"
+      and pl.familia_label("monitorar_maquina_parada") == "monitorar_maquina"
+      and pl.familia_label("monitorar_maquina") == "monitorar_maquina")
+
+print("\n[16] O cluster com partição — executado")
+chamou = []
+
+
+def _fake_cluster(cli, prompt, **k):
+    chamou.append(prompt)
+    # A LLM devolve o MESMO label nas duas partições — é o caso que quebrava.
+    linhas = [l[2:] for l in prompt.splitlines() if l.startswith("- ")]
+    import json as _j
+    return _j.dumps({"comportamentos": [
+        {"label": "monitorar_maquina", "descricao": "operador junto ao torno",
+         "descricoes_originais": linhas}]})
+
+
+_txt_real = pl.groq_text_call
+pl.groq_text_call = _fake_cluster
+try:
+    obs = [
+        {"descricao": "parado junto ao torno, observando", "maquina": "ciclo",
+         "imovel": True, "track_id": 1, "tempo_s": 0, "frame_idx": 0},
+        {"descricao": "parado junto ao torno, observando", "maquina": "parada",
+         "imovel": True, "track_id": 1, "tempo_s": 8, "frame_idx": 80},
+    ]
+    _, catalogo, label_de, _ = pl.etapa_clusterizar(
+        None, obs, "torno", {}, 3, lambda *a, **k: None, aprendizado_auto=False)
+    check("uma chamada POR PARTIÇÃO, não uma para tudo", len(chamou) == 2, len(chamou))
+    l_ciclo = label_de("parado junto ao torno, observando", "ciclo", True)
+    l_parada = label_de("parado junto ao torno, observando", "parada", True)
+    check("a MESMA frase com máquinas diferentes gera labels DIFERENTES",
+          l_ciclo != l_parada, (l_ciclo, l_parada))
+    check("e os labels carregam o discriminador",
+          l_ciclo == "monitorar_maquina_ciclo" and l_parada == "monitorar_maquina_parada",
+          (l_ciclo, l_parada))
+    check("as duas pertencem à mesma família",
+          pl.familia_label(l_ciclo) == pl.familia_label(l_parada) == "monitorar_maquina")
+    check("o catálogo explica o discriminador em português (é o que o gestor lê "
+          "na hora de classificar o Lean)",
+          "MÁQUINA EM CICLO" in catalogo[l_ciclo] and "MÁQUINA PARADA" in catalogo[l_parada],
+          catalogo)
+    check("temperatura ZERO no cluster", "temperatura=0.0" in src)
+
+    # Cache: mesma frase, mesma cena → reusa sem chamar a LLM.
+    chamou.clear()
+    _, _, label_de2, _ = pl.etapa_clusterizar(
+        None, obs, "torno", {}, 3, lambda *a, **k: None, aprendizado_auto=False,
+        cache_labels={"parado junto ao torno, observando": "monitorar_maquina_ciclo"})
+    check("o cache atende a cena que BATE com o sufixo e poupa a chamada",
+          len(chamou) == 1, len(chamou))
+    check("e devolve o label do histórico",
+          label_de2("parado junto ao torno, observando", "ciclo", True)
+          == "monitorar_maquina_ciclo")
+    check("mas NÃO atende a cena que não bate — senão o cache desfaria a "
+          "partição que acabamos de construir",
+          label_de2("parado junto ao torno, observando", "parada", True)
+          != "monitorar_maquina_ciclo")
+finally:
+    pl.groq_text_call = _txt_real
+
+print("\n[17] Fase 86 · ORIENTAÇÃO vem da pose, não do olho do modelo")
+W2, H2 = 640, 480
+
+
+def _kp(pontos):
+    k = [[0.0, 0.0] for _ in range(17)]
+    for i, (x, y) in pontos.items():
+        k[i] = [x, y]
+    return k
+
+
+# Tronco de referência: ombros em y=0.45, quadris em y=0.70 → 120px num
+# frame de 480. De frente, ombros ~77px (0.64 do tronco); de perfil, ~6px.
+_QUADRIS = {11: (0.47, 0.70), 12: (0.53, 0.70)}
+de_frente = {"kpts": _kp({0: (0.5, 0.35), 1: (0.48, 0.34), 2: (0.52, 0.34),
+                          5: (0.56, 0.45), 6: (0.44, 0.45), **_QUADRIS})}
+de_costas = {"kpts": _kp({5: (0.44, 0.45), 6: (0.56, 0.45), **_QUADRIS})}
+de_perfil = {"kpts": _kp({0: (0.5, 0.35), 5: (0.500, 0.45), 6: (0.505, 0.45),
+                          **_QUADRIS})}
+check("rosto visível = de frente para a câmera",
+      pl.orientacao_pessoa(de_frente, W2, H2) == "frente")
+check("ombros sem rosto nenhum = de costas",
+      pl.orientacao_pessoa(de_costas, W2, H2) == "costas")
+check("ombros colados no eixo x = de perfil, MESMO com o rosto visível "
+      "(quem está de lado mostra meio rosto)",
+      pl.orientacao_pessoa(de_perfil, W2, H2) == "perfil")
+check("sem quadril visível, a altura da caixa serve de referência de escala",
+      pl.orientacao_pessoa(
+          {"kpts": _kp({5: (0.500, 0.45), 6: (0.505, 0.45)}),
+           "bbox": (100, 60, 160, 400)}, W2, H2) == "perfil")
+check("sem pose não inventa orientação",
+      pl.orientacao_pessoa({"kpts": None}, W2, H2) is None)
+
+check("sem configuração da zona, NÃO traduz para a máquina",
+      pl.orientacao_vs_maquina("costas", None) is None)
+check("com 'oposta', de costas para a câmera = de frente para a máquina",
+      pl.orientacao_vs_maquina("costas", "oposta") == "de frente para a máquina")
+check("com 'camera', de costas para a câmera = de costas para a máquina",
+      pl.orientacao_vs_maquina("costas", "camera") == "de costas para a máquina")
+check("com 'perfil' o eixo é perpendicular e não dá para inferir",
+      pl.orientacao_vs_maquina("frente", "perfil") is None)
+
+check("o prompt PROÍBE afirmar orientação sem o contexto",
+      "ORIENTAÇÃO NÃO SE ADIVINHA" in regras
+      and "de frente ao torno" in regras)
+check("a orientação é injetada como fato do sensor, junto com as mãos",
+      'medido pela pose, não é opinião' in src)
+check("e a detecção calcula por pessoa", 'pessoa["orientacao"] = orientacao_pessoa' in src)
+
+sql = open("sql/schema.sql").read()
+check("o campo frente_maquina existe na zona",
+      "alter table zonas_camera add column if not exists frente_maquina" in sql)
+check("com constraint dos valores válidos", "zonas_frente_maquina_chk" in sql)
+mn2 = open("backend/main.py").read()
+check("a API recusa frente_maquina fora da zona 'maquina'",
+      "só se aplica à zona de papel 'maquina'" in mn2)
+zonas_tsx = open("frontend/src/pages/ConfiguracoesZonas.tsx").read()
+check("a tela de zonas tem o seletor", "Onde está a máquina em relação a esta câmera?" in zonas_tsx)
+check("e explica que sem preencher o sistema não afirma nada sobre o torno",
+      "não afirma" in re.sub(r"\s+", " ", zonas_tsx))
+
+print("\n[18] Fase 86 · A FAMÍLIA preserva a leitura de tendência")
+check("o endpoint devolve a raiz da família", '"familia": familia_label(lbl)' in src)
+check("e o retrato da família inteira, com as variantes já classificadas",
+      '"familia_variantes"' in src and '"familia_minutos"' in src)
+rot = open("frontend/src/pages/Rotulos.tsx").read()
+check("a tela mostra a família com as variantes",
+      "familia_variantes" in rot and "min no total" in rot)
+check("e explica o histórico sem renomear nada",
+      "o instrumento não coletava o estado da máquina" in rot)
+check("distinguindo 'não perguntávamos' de 'perguntamos e não deu para ver'",
+      "o VLM não conseguiu ver o estado da máquina" in rot)
 
 print(f"\n{'=' * 60}\n  {ok} ok · {fail} falha(s)\n{'=' * 60}")
 sys.exit(1 if fail else 0)

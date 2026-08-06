@@ -80,7 +80,7 @@ def _buscar_zonas_por_cam(sb, empresa: str, processo: str) -> dict[str, dict]:
     try:
         r = (
             sb.table("zonas_camera")
-            .select("cam_id, nome, papel, pts_rel, descricao_contexto")
+            .select("cam_id, nome, papel, pts_rel, descricao_contexto, frente_maquina")
             .eq("empresa", empresa)
             .eq("processo", processo)
             .eq("ativo", True)
@@ -95,6 +95,10 @@ def _buscar_zonas_por_cam(sb, empresa: str, processo: str) -> dict[str, dict]:
                 "pts_rel": pts,
                 "descricao_contexto": z.get("descricao_contexto"),
                 "papel": z.get("papel"),
+                # Fase 86: só a zona sabe onde a máquina está em relação à
+                # câmera — é a tradução de "de costas para a câmera" em "de
+                # frente para o torno".
+                "frente_maquina": z.get("frente_maquina"),
             }
         return zonas
     except Exception as e:
