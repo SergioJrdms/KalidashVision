@@ -509,6 +509,95 @@ do minuto, e fato montado antes do papel) estão refutadas em
 
 ---
 
+## 14. O movimento da máquina não era medido — só adivinhado
+
+**Estado:** medindo em sombra desde a Fase 89. A injeção no prompt está
+DESLIGADA até a calibração.
+
+O item 11 mostrou que o VLM não vê o estado da máquina. A causa não é o modelo
+ser ruim: é a pergunta ser impossível no material que ele recebe. Um torno em
+ciclo e um parado são **idênticos num frame**; a diferença é MOVIMENTO, e frame
+não tem movimento.
+
+**Por que 6 fps e não os frames do VLM.** A sequência manda ~8 imagens por
+minuto, ~5 s entre elas. A 5 s de distância o carro que avança 0,1 mm/rev pode
+ser sub-pixel, e a placa girando tem fase aleatória — o diff satura e não
+informa nada. O laço de tracking **já decodifica a `KV_TRACK_FPS` (6 fps)**:
+~360 pares por minuto contra 7, com as bboxes do YOLO do mesmo instante para
+descontar as pessoas. O custo de decodificação já estava pago; sobrou ~2,2 ms
+por quadro (~8 s num vídeo de 10 min).
+
+E 360 pares compram uma pergunta melhor que ciclo/parada: `intermitente` é a
+assinatura do torno manual (avança, para, mede, avança), diferente do corte
+automático contínuo e diferente da máquina realmente parada.
+
+### Como o movimento é separado do que passa na frente dele
+
+| confundidor | tratamento |
+|---|---|
+| operador passando/trabalhando | máscara da bbox dilatada 10%, fora do numerador **e** do denominador |
+| sombra e oscilação de luz | diff de **gradiente** (Sobel), não de intensidade — sombra desloca brilho e preserva a borda |
+| oclusor grande / mudança global | blob único > 40% da zona válida descarta o par |
+| máquina escura, turno noturno | limiar **relativo** ao contraste da própria zona; abaixo do piso, `indisponivel` |
+| qual parte da máquina se move | grade 16×16 aprendida ao longo dos dias — sem ninguém desenhar sub-região |
+
+### A regra que atravessa tudo
+
+**AUSÊNCIA DE MEDIÇÃO NÃO É MEDIÇÃO DE AUSÊNCIA.** Zona ocupada, contraste
+insuficiente ou par descartado produzem `indisponivel`, **nunca** `ausente`. É a
+mesma lição do `_mad` devolvendo 0.0 com n=1 (Fase 84): um número que diz
+"estável" quando a verdade é "não sei" é pior que nenhum número.
+
+### O que o sensor NÃO faz
+
+Não decide. Entra como **fato no prompt**, ao lado de `maos_maquina` e
+`orientacao`; o VLM continua traduzindo movimento em ciclo/parada. Sobrescrita
+silenciosa é inauditável, e o pixel tem modos de falha próprios que uma regra
+dura herdaria inteiros. Seu único poder é o **veto**: movimento claramente
+ausente + zona desocupada + contraste bom + VLM afirmando `ciclo` manda o evento
+para a fila. Não corrige — recusa-se a ter confiança. E só existe com a injeção
+ligada: sem o fato no prompt o VLM não teve como considerar o movimento.
+
+### Medir e influenciar são chaves separadas
+
+`KV_MOVIMENTO` (on) grava desde o primeiro vídeo. `KV_MOVIMENTO_INJETAR` (off)
+liga a influência sobre o VLM e o veto — por variável de ambiente, sem deploy,
+depois de olhar os números. Todos os limiares saem de `KV_MOV_*` e estão
+listados em `GET /movimento/limiares` com o nome da env ao lado.
+
+---
+
+## 15. Os 82 `posto_vazio` com operador: três coisas diferentes somadas
+
+**Estado:** entendido. A parte que é erro do sistema é menor do que parecia.
+
+Decomposição do que a query juntava num número só:
+
+| o que é | eventos | min | passou pela camada? |
+|---|---:|---:|---|
+| linhas de **auditoria** (`principal=false`) | 254 | 61,7 | não, e nunca entram em métrica |
+| **corrigidos por humano** para `posto_vazio` | 57 | ~51 | não — a camada rodou antes da correção |
+| rótulo `posto_vazio` do **cluster**, principal | 29 | 24,0 | sim: **20 de 29 dispararam** |
+
+**Nada disso é furo do motor de camadas.** As linhas `principal=false` são
+registro de auditoria: todo leitor de métrica as remove por
+`principal is not False`, então **não inflam o desperdício**. Os corrigidos por
+humano foram decisão de gente, tomada DEPOIS da ingestão — a camada avaliou o
+rótulo que existia na hora (`monitorar_maquina`, `operar_torno`), e o rótulo só
+virou `posto_vazio` mais tarde. E dos que são de fato erro do cluster, **69%
+foram pegos**.
+
+O que fica como lacuna real, e é de outra natureza: **as camadas só são
+avaliadas na ingestão, nunca depois de uma correção humana**. Isso é defensável
+(o humano é a autoridade; a camada contradizê-lo seria ruído), mas significa que
+uma correção para `posto_vazio` num minuto com operador rastreado no posto passa
+sem nenhum registro da contradição. Se virar problema, o lugar de resolver é a
+tela de correção, não a camada.
+
+---
+
+---
+
 ## 2. `gravado_em` carimba a tz do servidor no timestamp do nome
 
 **Estado:** não corrigido. Sem efeito visível hoje.

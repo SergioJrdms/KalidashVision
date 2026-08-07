@@ -2493,7 +2493,8 @@ def etapa_detectar_e_amostrar(
     rois_contexto: dict,
     progress_cb: ProgressCb,
     cam_id: str | None = None,
-) -> tuple[list[Amostra], dict, list[int], list[dict]]:
+    mapa_movimento: dict | None = None,
+) -> tuple[list[Amostra], dict, list[int], list[dict], dict, dict]:
     # Cada vídeo começa com o tracker limpo. Ver `resetar_tracker` para o
     # porquê — em resumo: `persist=True` é certo dentro do vídeo e errado
     # entre vídeos.
@@ -2534,6 +2535,14 @@ def etapa_detectar_e_amostrar(
     track_stride = max(1, round(fps / track_fps)) if track_fps > 0 else 1
     imgsz = int(os.environ.get("KV_IMGSZ", "416"))
 
+    # Fase 89: o medidor de movimento vive AQUI porque é aqui que o frame já
+    # está decodificado (a 6 fps) e as bboxes do YOLO do mesmo instante estão
+    # na mão. Fora deste laço, medir movimento custaria decodificar de novo.
+    medidor = MedidorMovimento(rois, w, h, cam_id=cam_id, mapa=mapa_movimento)
+    if medidor.ativo:
+        log.info("[movimento] medindo na zona '%s' (%s) a ~%.0f fps",
+                 medidor.zona_nome, medidor.rect, fps / max(1, track_stride))
+
     amostras: list[Amostra] = []
     cap = cv2.VideoCapture(video_path)
     frame_idx = 0
@@ -2557,6 +2566,17 @@ def etapa_detectar_e_amostrar(
                 verbose=False,
             )
             tempo_s = frame_idx / fps
+            # Fase 89 — TODO frame decodificado alimenta o movimento, não só os
+            # que viram amostra do VLM. São ~360 pares por minuto contra 7: é a
+            # diferença entre conseguir e não conseguir ver "intermitente".
+            if medidor.ativo:
+                _bbs = []
+                try:
+                    if results[0].boxes is not None and len(results[0].boxes):
+                        _bbs = results[0].boxes.xyxy.cpu().numpy().tolist()
+                except Exception:  # noqa: BLE001
+                    _bbs = []
+                medidor.passo(frame, tempo_s, _bbs)
             if tempo_s >= prox_amostra_s:
                 prox_amostra_s += intervalo_s   # consome este slot (~1 amostra / intervalo_s)
                 pessoas = []
@@ -2693,7 +2713,16 @@ def etapa_detectar_e_amostrar(
     ids_unicos = sorted({p["track_id"] for a in amostras for p in a.pessoas})
     descritores = fechar_descritores(desc_acc, intervalo_s, cam_id, w, h)
     progress_cb("deteccao", 100, f"{len(amostras)} amostras · {len(ids_unicos)} pessoas")
-    return amostras, info, ids_unicos, descritores
+    # Fase 89: o veredito por MINUTO (mesma unidade do evento principal) e a
+    # grade deste vídeo, que soma ao mapa do processo.
+    mov_min = medidor.por_minuto()
+    if mov_min:
+        _cont = Counter(v["movimento"] for v in mov_min.values())
+        log.info("[movimento] %d minuto(s): %s", len(mov_min), dict(_cont))
+    grade_video = ({"grade": medidor.grade, "n_pares": medidor.n_pares_grade,
+                    "cam_id": cam_id, "zona": medidor.zona_nome}
+                   if medidor.ativo and medidor.n_pares_grade else {})
+    return amostras, info, ids_unicos, descritores, mov_min, grade_video
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -2780,8 +2809,14 @@ def _subamostrar(itens: list, teto: int) -> list:
 
 
 def _contexto_zonas(amostra: Amostra, modo_op: bool,
-                    frente_maquina: str | None = None) -> str:
-    """Linha de CONTEXTO do prompt para UMA amostra (zonas, mãos, orientação)."""
+                    frente_maquina: str | None = None,
+                    movimento: dict | None = None) -> str:
+    """Linha de CONTEXTO do prompt para UMA amostra (zonas, mãos, orientação).
+
+    Fase 89: o MOVIMENTO da máquina entra aqui, no mesmo lugar e do mesmo
+    jeito que `maos_maquina` e `orientacao` — como FATO do sensor. O VLM
+    continua decidindo se aquilo é ciclo ou parada; ele só deixa de ter que
+    adivinhar a partir de um frame que não tem movimento nenhum."""
     maos_cam2 = getattr(amostra, "maos_cam2", False)
     partes = []
     for p in amostra.pessoas:
@@ -2807,7 +2842,15 @@ def _contexto_zonas(amostra: Amostra, modo_op: bool,
             if vs_maq:
                 linha += f", ou seja, {vs_maq}"
         partes.append(linha)
-    return ". ".join(partes) if partes else "sem zonas pré-definidas"
+    txt = ". ".join(partes) if partes else "sem zonas pré-definidas"
+    # Atrás de `KV_MOVIMENTO_INJETAR`: o sinal GRAVA desde já, mas só passa a
+    # influenciar o modelo quando o dono olhar os números e ligar a chave.
+    # Medir e influenciar são decisões diferentes e não precisam do mesmo deploy.
+    if _MOV_INJETAR and movimento:
+        f = frase_movimento(movimento.get("movimento"), movimento.get("detalhe"))
+        if f:
+            txt += ". " + f
+    return txt
 
 
 def _analisar_sequencia_vlm(
@@ -2818,6 +2861,7 @@ def _analisar_sequencia_vlm(
     intervalo_s: float,
     conhecimento_adquirido: str = "",
     frente_maquina: str | None = None,
+    movimento: dict | None = None,
 ) -> dict[int, dict]:
     """Fase 85 — UMA chamada para a sequência inteira de um minuto.
 
@@ -2864,7 +2908,7 @@ def _analisar_sequencia_vlm(
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
         regras=_REGRAS_DESCRICAO,
         exemplos=_BLOCO_EXEMPLOS_DESCRICAO,
-        contexto_zonas=_contexto_zonas(meio, modo_op, frente_maquina),
+        contexto_zonas=_contexto_zonas(meio, modo_op, frente_maquina, movimento),
     )
     if not tem_operador:
         prompt = prompt.replace(
@@ -3046,6 +3090,7 @@ def etapa_analise_vlm(
     zona_posto: str | None = None,
     intervalo_s: float = DEFAULT_INTERVALO_AMOSTRAGEM_S,
     frente_maquina: str | None = None,
+    movimento_por_minuto: dict | None = None,
 ) -> list[dict]:
     """Analisa as amostras com o VLM.
 
@@ -3091,6 +3136,9 @@ def etapa_analise_vlm(
     grupos = _agrupar_amostras(amostras, _SEQ_BUCKET_S if _SEQ_ENABLE else 0.0)
     feitas = 0
     for grupo in grupos:
+        # Fase 89: o minuto do grupo — a chave do movimento medido. O bucket da
+        # sequência e o do movimento são o mesmo minuto de propósito.
+        minuto = int((grupo[0].tempo_s if grupo else 0.0) // 60.0)
         # ── 1) Classifica cada amostra do grupo, sem chamar nada ainda ──
         plano: list[tuple[str, Amostra]] = []
         for am in grupo:
@@ -3153,6 +3201,7 @@ def etapa_analise_vlm(
                 groq_client, [plano[i][1] for i in idx_cam1], descricao_processo,
                 memoria, intervalo_s, conhecimento_adquirido,
                 frente_maquina=frente_maquina,
+                movimento=(movimento_por_minuto or {}).get(minuto),
             )
             # Reindexa: a função devolve o índice DENTRO da lista que recebeu.
             descricoes_seq = {idx_cam1[k]: v for k, v in descricoes_seq.items()
@@ -3787,6 +3836,7 @@ def etapa_consolidar_principais(
     catalogo: dict[str, str],
     duracao_s: float,
     camadas: list | None = None,
+    movimento_por_minuto: dict | None = None,
 ) -> list[dict]:
     """Fase 16: reduz os ~100 eventos crus a ~1 evento PRINCIPAL por minuto — a
     ação que RESUME o minuto. Por minuto, escolhe o rótulo DOMINANTE (o que mais
@@ -3879,6 +3929,12 @@ def etapa_consolidar_principais(
             "decidido_por_ia": escolhido != top_label,
             "principal": True,
         })
+        # Fase 89: o movimento medido cola no PRINCIPAL porque os dois são o
+        # mesmo minuto. Gravado sempre — a injeção no prompt é que é opcional.
+        _mov = (movimento_por_minuto or {}).get(b)
+        if _mov:
+            principais[-1]["movimento_maquina"] = _mov.get("movimento")
+            principais[-1]["movimento_detalhe"] = _mov.get("detalhe")
         # Fase 57: CAMADAS DE DÚVIDA — determinísticas, em CPU, ZERO chamada
         # extra ao VLM. Camada nunca corrige o rótulo: só marca dúvida.
         if camadas:
@@ -3889,6 +3945,17 @@ def etapa_consolidar_principais(
             # (e principalmente) quando nada disparou. É a única forma de
             # distinguir "nenhuma contradição" de "camada nenhuma foi olhada".
             principais[-1]["camadas_avaliadas"] = avaliacao
+            # Fase 89 — o ÚNICO poder do sensor, e ele não troca rótulo: manda
+            # para a fila. Só existe com a injeção ligada (sem o fato no prompt
+            # o VLM não teve como considerar o movimento).
+            _veto = veto_movimento(principais[-1].get("movimento_maquina"),
+                                   principais[-1].get("movimento_detalhe"),
+                                   principais[-1].get("maquina"))
+            if _veto:
+                disparos = list(disparos) + [
+                    {"nome": "sensor_movimento_contradiz_ciclo",
+                     "modo": "ativa", "motivo": _veto}]
+                em_duvida = True
             if disparos:
                 principais[-1]["camadas_disparadas"] = disparos
                 principais[-1]["em_duvida"] = em_duvida
@@ -4105,6 +4172,552 @@ def montar_fato_evento(rep: dict, no_bucket: list, share: float,
     if maos:
         fato["maos_na_maquina"] = any(maos)
     return fato
+
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 89 — MOVIMENTO DA MÁQUINA, MEDIDO. EM SOMBRA.
+#
+# O discriminador `ciclo`/`parada` do VLM media ruído (Fase 88): em minutos
+# adjacentes com a MESMA ação, o estado trocava tanto quanto uma moeda. A
+# causa não é o modelo ser ruim — é a pergunta ser impossível no material que
+# ele recebe. Um torno em ciclo e um torno parado são IDÊNTICOS num frame; a
+# diferença é MOVIMENTO, e frame não tem movimento.
+#
+# POR QUE 6 fps E NÃO OS FRAMES DO VLM
+# A sequência manda ~8 imagens por minuto, ~5 s entre elas. A 5 s de distância
+# o carro que avança 0,1 mm/rev pode ser sub-pixel, e a placa girando tem fase
+# aleatória — o diff satura e não informa nada. O laço de tracking JÁ decodifica
+# a `KV_TRACK_FPS` (6 fps): ~360 pares de frames por minuto, com as bboxes do
+# YOLO do MESMO instante para a máscara de pessoa. O custo de decodificação já
+# está pago; sobra o diff num recorte pequeno.
+#
+# O QUE É MEDIDO, E O QUE NÃO É
+# Isto NÃO diz "a máquina está em ciclo". Diz "houve movimento na zona da
+# máquina que não é explicado por gente passando na frente". A tradução para
+# ciclo/parada continua sendo do VLM, agora informado — este sinal entra como
+# FATO no prompt, ao lado de `maos_maquina` e `orientacao`, e não sobrescreve
+# nada. Sobrescrita silenciosa é inauditável, e o pixel tem modos de falha
+# próprios (contraste baixo, oclusão, turno noturno) que uma regra dura
+# herdaria inteiros.
+#
+# A REGRA QUE ATRAVESSA TUDO AQUI
+# AUSÊNCIA DE MEDIÇÃO NÃO É MEDIÇÃO DE AUSÊNCIA. Zona ocupada por gente,
+# contraste insuficiente ou par descartado por incoerência produzem
+# `indisponivel` — NUNCA `ausente`. É a mesma lição do `_mad` devolvendo 0.0
+# com n=1 (Fase 84): um número que diz "estável" quando a verdade é "não sei"
+# é pior que nenhum número.
+# ═════════════════════════════════════════════════════════════════════════
+_MOV_ENABLE = os.environ.get("KV_MOVIMENTO", "on") not in ("off", "0", "false", "False", "")
+# A INJEÇÃO no prompt é separada da MEDIÇÃO: o sinal grava desde o primeiro
+# vídeo, e só passa a influenciar o VLM quando o dono olhar os números e ligar
+# a chave. Ligar não precisa de deploy.
+_MOV_INJETAR = os.environ.get("KV_MOVIMENTO_INJETAR", "off") not in ("off", "0", "false", "False", "")
+
+# ── Limiares, todos mexíveis por ambiente (sem deploy) ──────────────────
+# Largura do recorte da zona depois do downscale. Menor = mais barato e menos
+# sensível a ruído de sensor; abaixo de ~120 o cavaco some junto com o ruído.
+_MOV_LARGURA = max(64, int(os.environ.get("KV_MOV_LARGURA", "192")))
+# Limiar do diff de GRADIENTE, RELATIVO ao contraste estrutural da própria
+# zona. Relativo e não absoluto porque uma máquina escura num turno noturno
+# tem gradiente menor em tudo — um limiar fixo mediria a iluminação.
+_MOV_LIMIAR_REL = float(os.environ.get("KV_MOV_LIMIAR_REL", "0.35"))
+# Contraste mínimo para a zona ser mensurável. Abaixo disto não se afirma
+# "parada": se afirma "não dá para ver".
+_MOV_ESCALA_MIN = float(os.environ.get("KV_MOV_ESCALA_MIN", "8.0"))
+# Fração dos pixels VÁLIDOS que precisa mudar para o par contar como "houve
+# movimento". 2% de uma zona de torno é a placa girando; 0,1% é ruído.
+_MOV_FRACAO_PIXEL = float(os.environ.get("KV_MOV_FRACAO_PIXEL", "0.02"))
+# Blob único cobrindo mais que isto da zona válida = iluminação/sombra/oclusor
+# grande, não peça girando. O par é DESCARTADO (não vira "sem movimento").
+_MOV_BLOB_MAX = float(os.environ.get("KV_MOV_BLOB_MAX", "0.40"))
+# Zona coberta por gente acima disto = não dá para medir a máquina.
+_MOV_OCUPACAO_MAX = float(os.environ.get("KV_MOV_OCUPACAO_MAX", "0.50"))
+# Dilatação da bbox da pessoa: a caixa do YOLO é justa e membros escapam.
+_MOV_DILATA_PESSOA = float(os.environ.get("KV_MOV_DILATA_PESSOA", "0.10"))
+# Fração dos pares do minuto que precisa ser válida para o minuto ter veredito.
+_MOV_MIN_VALIDOS = float(os.environ.get("KV_MOV_MIN_VALIDOS", "0.50"))
+# Fronteiras do veredito, sobre a fração de pares VÁLIDOS com movimento.
+_MOV_CONTINUO = float(os.environ.get("KV_MOV_CONTINUO", "0.70"))
+_MOV_INTERMITENTE = float(os.environ.get("KV_MOV_INTERMITENTE", "0.15"))
+# Mapa aprendido: lado da grade e quantos pares acumulados antes de PESAR por
+# ela. Antes disso o agregado sem peso é mais honesto que um mapa de 3 vídeos.
+_MOV_GRADE = max(4, int(os.environ.get("KV_MOV_GRADE", "16")))
+_MOV_MAPA_MIN_PARES = int(os.environ.get("KV_MOV_MAPA_MIN_PARES", "20000"))
+_MOV_MAPA_PESO_MIN = float(os.environ.get("KV_MOV_MAPA_PESO_MIN", "0.25"))
+
+MOV_VALORES = ("continuo", "intermitente", "ausente", "indisponivel")
+
+
+def _retangulo_zonas_maquina(rois: dict, w: int, h: int) -> tuple | None:
+    """Bounding box (x1,y1,x2,y2) que cobre TODAS as zonas com papel 'maquina'.
+
+    Retângulo e não polígono de propósito: o recorte precisa ser um array
+    contíguo para o Sobel, e a máscara do polígono entra depois, como peso.
+    """
+    caixas = []
+    for info in (rois or {}).values():
+        if info.get("papel") != "maquina":
+            continue
+        poly = info.get("polygon")
+        if poly is None or len(poly) < 3:
+            continue
+        xs, ys = poly[:, 0], poly[:, 1]
+        caixas.append((int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())))
+    if not caixas:
+        return None
+    x1 = max(0, min(c[0] for c in caixas))
+    y1 = max(0, min(c[1] for c in caixas))
+    x2 = min(w, max(c[2] for c in caixas))
+    y2 = min(h, max(c[3] for c in caixas))
+    if x2 - x1 < 16 or y2 - y1 < 16:
+        return None
+    return (x1, y1, x2, y2)
+
+
+class MedidorMovimento:
+    """Mede movimento na zona da máquina, quadro a quadro, a 6 fps.
+
+    Vive dentro do laço de tracking, onde o frame já está decodificado e as
+    bboxes das pessoas do MESMO instante estão na mão. Não decodifica nada,
+    não chama modelo nenhum.
+
+    Sem zona 'maquina' desenhada, `ativo` é False e o medidor não produz
+    sinal — do mesmo jeito que `maos_na_maquina` só existe quando há zona.
+    Ausência de zona é ausência de informação, não ausência de movimento.
+    """
+
+    def __init__(self, rois: dict, w: int, h: int, cam_id: str | None = None,
+                 mapa: dict | None = None):
+        self.cam_id = cam_id
+        self.rect = _retangulo_zonas_maquina(rois, w, h) if _MOV_ENABLE else None
+        self.ativo = self.rect is not None
+        self.zona_nome = next((n for n, i in (rois or {}).items()
+                               if i.get("papel") == "maquina"), None)
+        self.pares: list[dict] = []
+        self._ant = None
+        self._t_ant = None
+        # Grade acumulada DESTE vídeo (some ao mapa do processo no fim).
+        self.grade = [[0] * _MOV_GRADE for _ in range(_MOV_GRADE)]
+        self.n_pares_grade = 0
+        self._mapa = self._normalizar_mapa(mapa)
+        self._peso = None            # expansão do mapa, calculada uma vez só
+        if self.ativo:
+            x1, y1, x2, y2 = self.rect
+            self.escala_px = _MOV_LARGURA / max(1, x2 - x1)
+            self.dim = (max(16, int(round((x2 - x1) * self.escala_px))),
+                        max(16, int(round((y2 - y1) * self.escala_px))))
+
+    @staticmethod
+    def _normalizar_mapa(mapa: dict | None) -> list | None:
+        """O mapa só PESA depois de base suficiente. Antes disso devolve None e
+        o agregado roda sem peso — um mapa de três vídeos é mais chute que o
+        próprio agregado."""
+        if not mapa:
+            return None
+        try:
+            if int(mapa.get("n_pares") or 0) < _MOV_MAPA_MIN_PARES:
+                return None
+            g = mapa.get("grade") or []
+            if len(g) != _MOV_GRADE or any(len(l) != _MOV_GRADE for l in g):
+                return None
+            topo = max((max(l) for l in g), default=0) or 1
+            # Peso 0..1 pela frequência com que a célula se mexe, com PISO: uma
+            # célula que nunca se mexeu ainda pode ser onde a peça nova aparece.
+            return [[max(_MOV_MAPA_PESO_MIN, min(1.0, v / topo)) for v in linha]
+                    for linha in g]
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _preparar(self, frame):
+        x1, y1, x2, y2 = self.rect
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        g = cv2.resize(g, self.dim, interpolation=cv2.INTER_AREA)
+        gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+        # GRADIENTE e não intensidade: sombra desloca brilho e preserva a
+        # textura; peça girando e cavaco MOVEM as bordas. É o que separa o
+        # operador fazendo sombra na máquina da máquina trabalhando.
+        return cv2.magnitude(gx, gy)
+
+    def _mascara_pessoas(self, bboxes) -> tuple:
+        """(máscara booleana de pixels VÁLIDOS, fração ocupada por gente)."""
+        alt, larg = self.dim[1], self.dim[0]
+        ocupado = np.zeros((alt, larg), dtype=np.uint8)
+        rx1, ry1, _, _ = self.rect
+        for b in bboxes or []:
+            try:
+                bx1, by1, bx2, by2 = (float(v) for v in b[:4])
+            except Exception:  # noqa: BLE001
+                continue
+            dw = (bx2 - bx1) * _MOV_DILATA_PESSOA
+            dh = (by2 - by1) * _MOV_DILATA_PESSOA
+            cx1 = int((bx1 - dw - rx1) * self.escala_px)
+            cy1 = int((by1 - dh - ry1) * self.escala_px)
+            cx2 = int((bx2 + dw - rx1) * self.escala_px)
+            cy2 = int((by2 + dh - ry1) * self.escala_px)
+            cx1, cy1 = max(0, cx1), max(0, cy1)
+            cx2, cy2 = min(larg, cx2), min(alt, cy2)
+            if cx2 > cx1 and cy2 > cy1:
+                ocupado[cy1:cy2, cx1:cx2] = 1
+        n_ocup = int(ocupado.sum())
+        return (ocupado == 0), n_ocup / float(alt * larg)
+
+    def passo(self, frame, tempo_s: float, bboxes_pessoas) -> None:
+        """Um frame decodificado. Barato: recorte pequeno, dois Sobel, um diff."""
+        if not self.ativo:
+            return
+        try:
+            mag = self._preparar(frame)
+        except Exception as e:  # noqa: BLE001
+            log.debug("[movimento] frame ignorado (%s)", e)
+            return
+        if mag is None:
+            return
+        ant, self._ant = self._ant, mag
+        t_ant, self._t_ant = self._t_ant, tempo_s
+        if ant is None:
+            return
+        validos, ocupacao = self._mascara_pessoas(bboxes_pessoas)
+        n_validos = int(validos.sum())
+        par = {"t": round(tempo_s, 2), "ocupacao": round(ocupacao, 3),
+               "valido": False, "movimento": False, "fracao": 0.0,
+               "motivo": ""}
+        # Zona tomada por gente: não é "sem movimento", é "não dá para ver".
+        if ocupacao > _MOV_OCUPACAO_MAX or n_validos < 64:
+            par["motivo"] = "ocluida"
+            self.pares.append(par)
+            return
+        # Contraste estrutural da própria zona — a régua do limiar relativo.
+        # Amostrado de 4 em 4 pixels: o percentil 90 de um recorte de textura
+        # não muda com a subamostragem, e o percentil cheio era o ponto mais
+        # caro do laço (roda a 6 fps, o vídeo inteiro).
+        escala = float(np.percentile(ant[::2, ::2][validos[::2, ::2]], 90))
+        par["escala"] = round(escala, 2)
+        if escala < _MOV_ESCALA_MIN:
+            # Máquina escura/lisa demais: qualquer veredito aqui seria sobre a
+            # iluminação, não sobre a máquina.
+            par["motivo"] = "contraste_baixo"
+            self.pares.append(par)
+            return
+        d = np.abs(mag - ant)
+        mascara = ((d > (_MOV_LIMIAR_REL * escala)) & validos).astype(np.uint8)
+        n_mov = int(mascara.sum())
+        # Coerência espacial: um blob único cobrindo meia zona é iluminação ou
+        # um oclusor grande; torno se mexe em pedaços pequenos e localizados.
+        if n_mov > 0:
+            n_lab, _, stats, _ = cv2.connectedComponentsWithStats(mascara, 8)
+            maior = int(stats[1:, cv2.CC_STAT_AREA].max()) if n_lab > 1 else 0
+            if maior > _MOV_BLOB_MAX * n_validos:
+                par["motivo"] = "blob_grande"
+                self.pares.append(par)
+                return
+        par["valido"] = True
+        if self._mapa is not None:
+            # Pesa cada pixel pela frequência histórica de movimento da célula.
+            # O mapa não muda dentro do vídeo — expandir a grade a cada quadro
+            # seria refazer o mesmo resize ~3600 vezes por vídeo.
+            if self._peso is None:
+                self._peso = cv2.resize(
+                    np.asarray(self._mapa, dtype=np.float32),
+                    (self.dim[0], self.dim[1]), interpolation=cv2.INTER_NEAREST)
+            fracao = float((mascara * self._peso).sum() / max(1, n_validos))
+        else:
+            fracao = n_mov / float(n_validos)
+        par["fracao"] = round(fracao, 4)
+        par["movimento"] = fracao >= _MOV_FRACAO_PIXEL
+        self.pares.append(par)
+        self._acumular_grade(mascara)
+
+    def _acumular_grade(self, mascara) -> None:
+        """Onde a máquina se mexe, célula a célula. É o mapa que dispensa o
+        dono de desenhar sub-região: as células que se mexem SEMPRE, ao longo
+        dos dias, são as partes móveis."""
+        try:
+            alt, larg = mascara.shape
+            ph, pw = max(1, alt // _MOV_GRADE), max(1, larg // _MOV_GRADE)
+            for gy in range(_MOV_GRADE):
+                for gx in range(_MOV_GRADE):
+                    bloco = mascara[gy * ph:(gy + 1) * ph, gx * pw:(gx + 1) * pw]
+                    if bloco.size and bloco.any():
+                        self.grade[gy][gx] += 1
+            self.n_pares_grade += 1
+        except Exception:  # noqa: BLE001
+            pass
+
+    def por_minuto(self, bucket_s: float = 60.0) -> dict:
+        """{índice do minuto → veredito + detalhe}. O minuto é a mesma unidade
+        do evento principal, então o sinal cola no evento sem interpolação."""
+        if not self.ativo:
+            return {}
+        grupos: dict = defaultdict(list)
+        for p in self.pares:
+            grupos[int(p["t"] // bucket_s)].append(p)
+        saida = {}
+        for m, ps in grupos.items():
+            saida[m] = classificar_movimento(ps, cam_id=self.cam_id,
+                                             zona=self.zona_nome)
+        return saida
+
+
+def classificar_movimento(pares: list, cam_id: str | None = None,
+                          zona: str | None = None) -> dict:
+    """(veredito, detalhe) de uma lista de pares — FUNÇÃO PURA, testável.
+
+    `continuo` × `intermitente` × `ausente` é o que 360 pares por minuto
+    compram e 7 não compravam: `intermitente` é a assinatura do torno manual
+    (avança, para, mede, avança), diferente do corte automático contínuo e
+    diferente da máquina realmente parada.
+    """
+    n = len(pares)
+    validos = [p for p in pares if p.get("valido")]
+    nv = len(validos)
+    ocup = [p.get("ocupacao") for p in pares if p.get("ocupacao") is not None]
+    detalhe = {
+        "pares": n,
+        "pares_validos": nv,
+        "pct_zona_ocupada": round(100.0 * sum(ocup) / len(ocup), 1) if ocup else None,
+        "descartados": {
+            m: sum(1 for p in pares if p.get("motivo") == m)
+            for m in ("ocluida", "contraste_baixo", "blob_grande")
+            if any(p.get("motivo") == m for p in pares)
+        } or None,
+        "cam": cam_id,
+        "zona": zona,
+        "mapa_pesado": False,
+    }
+    if n == 0 or nv < max(1, int(_MOV_MIN_VALIDOS * n)):
+        # Poucos pares mensuráveis: o minuto não recebe veredito. Dizer
+        # "ausente" aqui seria converter oclusão em máquina parada.
+        detalhe["pct_intervalos_com_movimento"] = None
+        return {"movimento": "indisponivel", "detalhe": detalhe}
+    com_mov = sum(1 for p in validos if p.get("movimento"))
+    frac = com_mov / float(nv)
+    detalhe["pct_intervalos_com_movimento"] = round(100.0 * frac, 1)
+    detalhe["contraste"] = round(
+        sum(p.get("escala") or 0 for p in validos) / max(1, nv), 1)
+    if frac >= _MOV_CONTINUO:
+        v = "continuo"
+    elif frac >= _MOV_INTERMITENTE:
+        v = "intermitente"
+    else:
+        v = "ausente"
+    return {"movimento": v, "detalhe": detalhe}
+
+
+def frase_movimento(mov: str | None, detalhe: dict | None) -> str:
+    """Como o fato entra no PROMPT. Descreve o observado e não conclui: quem
+    traduz movimento em ciclo/parada continua sendo o VLM."""
+    if not mov or mov == "indisponivel":
+        return ""
+    pct = (detalhe or {}).get("pct_intervalos_com_movimento")
+    sufixo = f" ({pct:.0f}% dos intervalos do minuto)" if pct is not None else ""
+    return {
+        "continuo": ("SENSOR: houve movimento CONTÍNUO na área da máquina ao "
+                     f"longo do minuto{sufixo} — medido por diferença entre "
+                     "quadros, descontando as pessoas"),
+        "intermitente": ("SENSOR: houve movimento INTERMITENTE na área da "
+                         f"máquina{sufixo} — medido por diferença entre "
+                         "quadros, descontando as pessoas"),
+        "ausente": ("SENSOR: NÃO houve movimento detectável na área da máquina "
+                    f"neste minuto{sufixo} — medido por diferença entre "
+                    "quadros, descontando as pessoas"),
+    }.get(mov, "")
+
+
+def veto_movimento(mov: str | None, detalhe: dict | None,
+                   maquina_vlm: str | None) -> str | None:
+    """Fase 89 — o ÚNICO poder do sinal determinístico, e ele não sobrescreve.
+
+    Movimento claramente ausente, zona pouco ocupada e contraste bom, mas o
+    VLM afirmando `ciclo`: o rótulo NÃO é trocado — o evento é marcado para a
+    fila. Não é corrigir, é recusar-se a ter confiança.
+
+    Só vale com a injeção ligada: sem o fato no prompt o VLM não teve como
+    considerar o movimento, e puni-lo por isso seria injusto e inútil.
+    """
+    if not _MOV_INJETAR or mov != "ausente":
+        return None
+    if _normalizar_maquina(maquina_vlm) != "ciclo":
+        return None
+    d = detalhe or {}
+    ocup = d.get("pct_zona_ocupada")
+    contraste = d.get("contraste")
+    if ocup is None or ocup > 100 * _MOV_OCUPACAO_MAX * 0.5:
+        return None                      # zona muito ocupada: medição fraca
+    if contraste is None or contraste < 2 * _MOV_ESCALA_MIN:
+        return None                      # contraste apertado: medição fraca
+    return ("o VLM afirmou máquina EM CICLO, mas o sensor não viu movimento "
+            "nenhum na área da máquina neste minuto (zona desocupada e "
+            "contraste bom)")
+
+
+def carregar_mapa_movimento(sb, empresa: str, processo: str,
+                            cam_id: str | None) -> dict | None:
+    """Mapa acumulado de ONDE a máquina se mexe, por câmera. Falha → None, e o
+    medidor roda sem peso: um mapa indisponível não pode parar a medição."""
+    if not _MOV_ENABLE:
+        return None
+    try:
+        r = (sb.table("mapa_movimento").select("grade, n_pares")
+             .eq("empresa", empresa).eq("processo", processo)
+             .eq("cam_id", cam_id or "").limit(1).execute().data or [])
+        return r[0] if r else None
+    except Exception as e:  # noqa: BLE001
+        log.debug("[movimento] mapa não lido (%s) — seguindo sem peso.", e)
+        return None
+
+
+def acumular_mapa_movimento(sb, empresa: str, processo: str,
+                            grade_video: dict) -> bool:
+    """Soma a grade deste vídeo ao mapa do processo. NÃO-FATAL: o mapa é
+    refinamento, e uma escrita falha não pode derrubar o processamento.
+
+    Somar em vez de substituir é o que faz o mapa APRENDER ao longo dos dias —
+    e é o que permite exigir base mínima antes de confiar nele.
+    """
+    if not grade_video or not grade_video.get("n_pares"):
+        return False
+    cam = grade_video.get("cam_id") or ""
+    try:
+        atual = (sb.table("mapa_movimento").select("grade, n_pares")
+                 .eq("empresa", empresa).eq("processo", processo)
+                 .eq("cam_id", cam).limit(1).execute().data or [])
+        nova = [list(l) for l in grade_video["grade"]]
+        n = int(grade_video["n_pares"])
+        if atual:
+            velha = atual[0].get("grade") or []
+            if len(velha) == len(nova) and all(
+                    len(a) == len(b) for a, b in zip(velha, nova)):
+                nova = [[int(a) + int(b) for a, b in zip(la, lb)]
+                        for la, lb in zip(velha, nova)]
+            n += int(atual[0].get("n_pares") or 0)
+        sb.table("mapa_movimento").upsert({
+            "empresa": empresa, "processo": processo, "cam_id": cam,
+            "zona": grade_video.get("zona"), "grade": nova, "n_pares": n,
+            "atualizado_em": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="empresa,processo,cam_id").execute()
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("[movimento] mapa não atualizado (%s) — não-fatal.", e)
+        return False
+
+
+
+def calibrar_movimento(sb, empresa: str, processo: str, dia: str | None = None,
+                       limite: int = 200) -> dict:
+    """Fase 89 — a tela de calibração, por MINUTO, ordenada pela DISCORDÂNCIA.
+
+    Concordância não ensina: sensor e VLM podem estar certos ou errados
+    juntos. O que ensina é o minuto em que um diz uma coisa e o outro diz
+    outra — e o link do vídeo ao lado, para o dono decidir quem tem razão
+    olhando a cena.
+
+    Só leitura. Não valida, não corrige, não entra na fila.
+    """
+    eventos = varrer(
+        sb, "eventos",
+        "id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
+        "tempo_inicio_s, tempo_fim_s, movimento_maquina, movimento_detalhe, "
+        "cena_maquina, cena_imovel, papel_pessoa, principal, validacao_correto, "
+        "versao_instrumento",
+        empresa=empresa, processo=processo,
+        ajustes=lambda q: q.not_.is_("movimento_maquina", "null"),
+    )
+    videos = varrer(sb, "videos", "id, nome, cam_id, caminho, processado_em",
+                    empresa=empresa, processo=processo)
+    meta = {v["id"]: v for v in videos}
+
+    def _peso(mov, vlm):
+        # 2 = contradição frontal; 1 = tensão; 0 = concordam ou não dá para ver.
+        if mov == "ausente" and vlm == "ciclo":
+            return 2
+        if mov == "continuo" and vlm == "parada":
+            return 2
+        if mov == "intermitente" and vlm:
+            return 1
+        return 0
+
+    itens, resumo = [], defaultdict(int)
+    for e in eventos:
+        if e.get("principal") is False or e.get("validacao_correto") is False:
+            continue
+        v = meta.get(e.get("video_id")) or {}
+        dt0 = _inicio_video_dt(v)
+        if dia:
+            if not dt0:
+                continue
+            inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
+            if inst.date().isoformat() != dia:
+                continue
+        mov, vlm = e.get("movimento_maquina"), e.get("cena_maquina")
+        d = e.get("movimento_detalhe") or {}
+        resumo[f"{mov}×{vlm or 'null'}"] += 1
+        inst = (dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
+                if dt0 else None)
+        itens.append({
+            "evento_id": e.get("id"), "video_id": e.get("video_id"),
+            "video": v.get("nome"), "cam_id": v.get("cam_id"),
+            "hora": inst.strftime("%H:%M:%S") if inst else None,
+            "dia": inst.date().isoformat() if inst else None,
+            "ini": e.get("tempo_inicio_s"), "fim": e.get("tempo_fim_s"),
+            "sensor": mov,
+            "vlm_afirmou": vlm,
+            "rotulo": e.get("label_corrigido") or e.get("comportamento_label"),
+            "descricao": e.get("descricao_bruta"),
+            "pct_com_movimento": d.get("pct_intervalos_com_movimento"),
+            "pct_zona_ocupada": d.get("pct_zona_ocupada"),
+            "contraste": d.get("contraste"),
+            "pares": d.get("pares"), "pares_validos": d.get("pares_validos"),
+            "descartados": d.get("descartados"),
+            "mapa_pesado": d.get("mapa_pesado"),
+            "versao_instrumento": e.get("versao_instrumento"),
+            "discordam": _peso(mov, vlm),
+        })
+
+    # Discordância primeiro; dentro dela, cronológico — o dono percorre o turno
+    # em ordem em vez de pular pelo vídeo.
+    itens.sort(key=lambda x: (-x["discordam"], x["dia"] or "", x["hora"] or ""))
+    n_med = sum(1 for i in itens if i["sensor"] != "indisponivel")
+    return {
+        "processo": processo, "dia": dia,
+        "minutos": len(itens),
+        "minutos_medidos": n_med,
+        "minutos_indisponiveis": len(itens) - n_med,
+        "discordancias": sum(1 for i in itens if i["discordam"] == 2),
+        "cruzamento": dict(sorted(resumo.items(), key=lambda kv: -kv[1])),
+        "limiares": limiares_movimento(),
+        "injecao_ligada": _MOV_INJETAR,
+        "itens": itens[:limite],
+        "truncado": len(itens) > limite,
+        "nota": ("Ordenado pela DISCORDÂNCIA entre o sensor e o que o VLM "
+                 "afirmou: é onde se aprende. 'indisponivel' não é 'ausente' — "
+                 "é zona ocupada, contraste baixo ou par descartado."),
+    }
+
+
+def limiares_movimento() -> dict:
+    """Os limiares em vigor, com o nome da variável de ambiente ao lado. O dono
+    calibra sem deploy — e sem ter que abrir o código para achar o nome."""
+    return {
+        "KV_MOVIMENTO": _MOV_ENABLE,
+        "KV_MOVIMENTO_INJETAR": _MOV_INJETAR,
+        "KV_MOV_LARGURA": _MOV_LARGURA,
+        "KV_MOV_LIMIAR_REL": _MOV_LIMIAR_REL,
+        "KV_MOV_ESCALA_MIN": _MOV_ESCALA_MIN,
+        "KV_MOV_FRACAO_PIXEL": _MOV_FRACAO_PIXEL,
+        "KV_MOV_BLOB_MAX": _MOV_BLOB_MAX,
+        "KV_MOV_OCUPACAO_MAX": _MOV_OCUPACAO_MAX,
+        "KV_MOV_DILATA_PESSOA": _MOV_DILATA_PESSOA,
+        "KV_MOV_MIN_VALIDOS": _MOV_MIN_VALIDOS,
+        "KV_MOV_CONTINUO": _MOV_CONTINUO,
+        "KV_MOV_INTERMITENTE": _MOV_INTERMITENTE,
+        "KV_MOV_GRADE": _MOV_GRADE,
+        "KV_MOV_MAPA_MIN_PARES": _MOV_MAPA_MIN_PARES,
+    }
 
 
 def carregar_camadas_duvida(sb: Client, empresa: str, processo: str) -> list:
@@ -4721,6 +5334,12 @@ def etapa_persistir(
             # análise do discriminador a ser feita lendo string de rótulo.
             "cena_maquina": _normalizar_maquina(e.get("maquina")),
             "cena_imovel": (bool(e["imovel"]) if e.get("imovel") is not None else None),
+            # Fase 89 — o que o SENSOR mediu, ao lado do que o VLM AFIRMOU.
+            # Guardar os dois é o que torna a discordância mensurável; era a
+            # falta exata disso que obrigou a análise do discriminador a ser
+            # feita lendo string de rótulo.
+            "movimento_maquina": e.get("movimento_maquina"),
+            "movimento_detalhe": e.get("movimento_detalhe"),
             "n_amostras": e["n_amostras"],
             "confianca": e["confianca"],
             "origem_validacao": origem,
@@ -10561,9 +11180,14 @@ def processar_video(
         + (f" · {conhecimento.count('- P:')} respostas no domínio" if conhecimento else ""),
     )
 
-    amostras, info_video, ids_unicos, descritores_track = etapa_detectar_e_amostrar(
+    # Fase 89: o mapa de movimento APRENDIDO do processo — as células da zona
+    # que se mexem sempre são as partes móveis. Só pesa depois de base; até lá
+    # o agregado sem peso é mais honesto que um mapa de três vídeos.
+    _mapa_mov = carregar_mapa_movimento(sb, empresa, processo, cam_id)
+    (amostras, info_video, ids_unicos, descritores_track,
+     movimento_por_minuto, grade_movimento) = etapa_detectar_e_amostrar(
         yolo, video_path, intervalo_amostragem_s, rois_contexto, progress_cb,
-        cam_id=cam_id,
+        cam_id=cam_id, mapa_movimento=_mapa_mov,
     )
 
     if not amostras:
@@ -10657,6 +11281,7 @@ def processar_video(
         # imagens — sem isso o modelo não tem como julgar "parado há quanto".
         intervalo_s=intervalo_amostragem_s,
         frente_maquina=frente_maquina,
+        movimento_por_minuto=movimento_por_minuto,
     )
 
     if not observacoes:
@@ -10697,6 +11322,7 @@ def processar_video(
             principais = etapa_consolidar_principais(
                 eventos_crus, catalogo, info_video["duracao_s"],
                 camadas=carregar_camadas_duvida(sb, empresa, processo),
+                movimento_por_minuto=movimento_por_minuto,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(f"[principal] consolidação falhou (não-fatal): {e}")
@@ -10726,6 +11352,11 @@ def processar_video(
         descritores_track=descritores_track,
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
+
+    # Fase 89: o mapa aprende DEPOIS de persistir o que importa — se ele
+    # falhar, o vídeo já está salvo.
+    if grade_movimento:
+        acumular_mapa_movimento(sb, empresa, processo, grade_movimento)
 
     # Fase 36: PRÉ-EXTRAI todos os JPEGs de visualização (frames dos eventos,
     # strips da cam2 e frames de referência) enquanto os vídeos ainda estão no

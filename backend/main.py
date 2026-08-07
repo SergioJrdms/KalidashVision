@@ -63,6 +63,8 @@ from .pipeline import (
     diagnosticar_contagio_por_descricao,
     relatorio_reprocesso_por_video,
     auditar_dia,
+    calibrar_movimento,
+    limiares_movimento,
     eventos_do_bin,
     BIN_JORNADA_MIN,
     VAZIO_ATIPICO_PCT,
@@ -1157,6 +1159,35 @@ def auditoria_do_dia(
     if "erro" in rel:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, rel["erro"])
     return {"ok": True, **rel}
+
+
+@app.get("/processos/{processo_id}/movimento/calibracao")
+def calibracao_do_movimento(
+    processo_id: str,
+    dia: str | None = Query(None, description="AAAA-MM-DD; vazio = tudo"),
+    limite: int = Query(200, ge=1, le=1000),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 89 — a tela de calibração do sensor de movimento. Só leitura.
+
+    Um MINUTO por linha: o que o sensor mediu, o que o VLM afirmou, o rótulo
+    que saiu, a descrição e o vídeo. Ordenado pela DISCORDÂNCIA entre os dois,
+    porque é onde se aprende — concordância não ensina nada, os dois podem
+    estar certos ou errados juntos.
+
+    Traz também os limiares em vigor com o nome da variável de ambiente ao
+    lado: calibrar não precisa de deploy nem de abrir o código."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    return {"ok": True, **calibrar_movimento(sb, user.empresa, nome, dia, limite)}
+
+
+@app.get("/movimento/limiares")
+def movimento_limiares(user: CurrentUser = Depends(get_current_user)):
+    """Os limiares do sensor em vigor NESTE processo do servidor, com o nome da
+    env ao lado. Serve para conferir que a variável que você mexeu no Render de
+    fato chegou — mexer e não conferir já nos custou um dia."""
+    return {"ok": True, "limiares": limiares_movimento()}
 
 
 @app.get("/processos/{processo_id}/jornada/bin")

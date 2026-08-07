@@ -1156,3 +1156,92 @@ alter table eventos add constraint eventos_cena_maquina_chk
 --     from eventos where principal and versao_instrumento >= 4;
 -- ════════════════════════════════════════════════════════════════════════
 alter table eventos add column if not exists camadas_avaliadas jsonb;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 89 — MOVIMENTO DA MÁQUINA, MEDIDO. EM SOMBRA.
+--
+-- O discriminador do VLM media ruído (item 11): um torno em ciclo e um parado
+-- são IDÊNTICOS num frame, e a diferença é MOVIMENTO. O laço de tracking já
+-- decodifica a 6 fps — ~360 pares de frames por minuto contra os 7 da
+-- sequência —, com as bboxes do YOLO do mesmo instante para descontar as
+-- pessoas. O custo de decodificação já estava pago.
+--
+-- `movimento_maquina` ∈ (continuo, intermitente, ausente, indisponivel).
+-- `indisponivel` NUNCA é `ausente`: zona ocupada por gente, contraste
+-- insuficiente ou par descartado por incoerência espacial produzem "não dá
+-- para ver", não "a máquina está parada". Ausência de medição não é medição
+-- de ausência — a mesma lição do `_mad` devolvendo 0.0 com n=1.
+--
+-- Guardar o SENSOR ao lado do que o VLM AFIRMOU (`cena_maquina`) é o que
+-- torna a discordância mensurável. A calibração se faz pela discordância:
+--
+--   select * from v_calibracao_movimento order by discordam desc limit 50;
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists movimento_maquina text;
+alter table eventos add column if not exists movimento_detalhe jsonb;
+alter table eventos drop constraint if exists eventos_movimento_chk;
+alter table eventos add constraint eventos_movimento_chk
+    check (movimento_maquina is null or movimento_maquina in
+           ('continuo','intermitente','ausente','indisponivel'));
+create index if not exists idx_eventos_movimento
+    on eventos(empresa, processo, movimento_maquina)
+    where movimento_maquina is not null;
+
+
+-- Onde a máquina se mexe, célula a célula, acumulado ao longo dos DIAS.
+-- Dispensa o dono de desenhar sub-região: as células que se mexem sempre SÃO
+-- as partes móveis. Só passa a PESAR depois de KV_MOV_MAPA_MIN_PARES pares —
+-- antes disso o agregado sem peso é mais honesto que um mapa de três vídeos.
+create table if not exists mapa_movimento (
+    empresa text not null,
+    processo text not null,
+    cam_id text not null default '',
+    zona text,
+    grade jsonb not null,
+    n_pares bigint not null default 0,
+    atualizado_em timestamptz not null default now(),
+    primary key (empresa, processo, cam_id)
+);
+alter table mapa_movimento enable row level security;
+drop policy if exists mapa_movimento_rw on mapa_movimento;
+create policy mapa_movimento_rw on mapa_movimento for all using (true) with check (true);
+grant select, insert, update, delete on mapa_movimento to anon, authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- A TELA DE CALIBRAÇÃO, EM SQL. Um minuto por linha: o que o sensor mediu, o
+-- que o VLM afirmou, o rótulo que saiu e onde está o vídeo.
+--
+-- ORDENADA PELA DISCORDÂNCIA, de propósito: é onde se aprende. Concordância
+-- não ensina nada — os dois podem estar certos ou errados juntos.
+-- ════════════════════════════════════════════════════════════════════════
+create or replace view v_calibracao_movimento as
+select
+    e.empresa, e.processo,
+    v.cam_id,
+    v.nome                                    as video,
+    e.tempo_inicio_s, e.tempo_fim_s,
+    e.movimento_maquina                       as sensor,
+    e.cena_maquina                            as vlm_afirmou,
+    coalesce(e.label_corrigido, e.comportamento_label) as rotulo,
+    e.descricao_bruta,
+    (e.movimento_detalhe->>'pct_intervalos_com_movimento')::numeric as pct_com_movimento,
+    (e.movimento_detalhe->>'pct_zona_ocupada')::numeric             as pct_zona_ocupada,
+    (e.movimento_detalhe->>'contraste')::numeric                    as contraste,
+    (e.movimento_detalhe->>'pares_validos')::int                    as pares_validos,
+    e.movimento_detalhe->'descartados'                              as descartados,
+    -- Discordância explícita: sensor sem movimento × VLM afirmando ciclo é o
+    -- caso mais informativo, e por isso vem primeiro.
+    case
+      when e.movimento_maquina = 'ausente'  and e.cena_maquina = 'ciclo'  then 2
+      when e.movimento_maquina = 'continuo' and e.cena_maquina = 'parada' then 2
+      when e.movimento_maquina = 'intermitente' and e.cena_maquina is not null then 1
+      when e.movimento_maquina = 'indisponivel' then 0
+      else 0
+    end                                       as discordam,
+    e.id                                      as evento_id,
+    e.video_id
+from eventos e
+join videos v on v.id = e.video_id
+where e.principal and e.movimento_maquina is not null;
