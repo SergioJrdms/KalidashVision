@@ -1652,9 +1652,48 @@ def _normalizar_maquina(v) -> str | None:
     return t if t in _MAQUINA_VALIDOS else None
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 88 — A PARTIÇÃO SAI DO RÓTULO E VIRA COLUNA SOB OBSERVAÇÃO
+#
+# A Fase 86 partiu o cluster pelo estado da máquina e colou o estado no NOME
+# do rótulo. Medimos o discriminador contra o próprio dado e ele não mede:
+# em minutos adjacentes com a MESMA ação, o estado troca tanto quanto uma
+# moeda com a mesma taxa-base (operar_torno 34,5% × 28,7% esperado;
+# monitorar_maquina 41,7% × 30,9%). Estado físico de máquina não se comporta
+# assim — o VLM está DEDUZINDO o estado da ação que ele mesmo descreveu
+# (76% "ciclo" quando opera, 19% quando monitora) e devolvendo como se
+# tivesse observado.
+#
+# Duas consequências, e a segunda é a cara:
+#   1. A partição separava por ruído: o vocabulário triplicava e cada
+#      variante nascia sem categoria Lean, ou seja, contando como desperdício.
+#   2. O RÓTULO AFIRMA. `monitorar_maquina_parada` diz que a máquina estava
+#      parada, e isso vai para relatório que o sócio lê. Afirmação errada
+#      custa mais caro que informação faltando.
+#
+# Então o estado sai do nome e vira COLUNA (`cena_maquina`/`cena_imovel`):
+# continua sendo coletado, continua podendo ser analisado, mas não afirma
+# nada no rótulo enquanto não houver com o que confrontá-lo. O caminho para
+# responder a pergunta de verdade é o movimento medido a 6 fps — não este.
+#
+# Fica atrás de flag DESLIGADA por padrão em vez de ser removido: a partição
+# volta a fazer sentido no dia em que o discriminador for medido, e código
+# apagado não volta testado.
+# ═════════════════════════════════════════════════════════════════════════
+_PARTICAO_CENA = os.environ.get("KV_PARTICAO_CENA", "off") not in (
+    "off", "0", "false", "False", "")
+
+
 def chave_cena(maquina: str | None, imovel: bool | None) -> str:
     """Chave de PARTIÇÃO do cluster. Descrições com chaves diferentes nunca
-    entram na mesma chamada, logo não podem ser agrupadas no mesmo label."""
+    entram na mesma chamada, logo não podem ser agrupadas no mesmo label.
+
+    Com `KV_PARTICAO_CENA` desligado devolve SEMPRE a mesma chave: uma
+    partição só. Colapsar as partições é o comportamento correto quando o
+    discriminador é ruído — era o que o cluster fazia antes da Fase 86.
+    """
+    if not _PARTICAO_CENA:
+        return ""
     return f"{_normalizar_maquina(maquina) or ''}|{'imovel' if imovel else ''}"
 
 
@@ -1669,7 +1708,12 @@ def sufixo_cena(maquina: str | None, imovel: bool | None) -> str:
     variantes coexistem no lote. Se dependesse do conteúdo do vídeo, a mesma
     situação ganharia labels diferentes em dias diferentes, que é exatamente o
     problema de inconsistência que estamos consertando em outro lugar.
+
+    Fase 88: vazio com a partição desligada. O estado passa a viver em
+    `cena_maquina`/`cena_imovel`, onde pode ser medido sem afirmar nada.
     """
+    if not _PARTICAO_CENA:
+        return ""
     m = _normalizar_maquina(maquina)
     partes = []
     if m:
@@ -1691,7 +1735,12 @@ def _partes_da_chave(ck: str) -> tuple[str | None, bool]:
 def _descricao_com_cena(desc: str, maquina: str | None, imovel: bool | None) -> str:
     """Descrição humana do catálogo, com o discriminador explícito. É o texto
     que o gestor lê na hora de classificar o Lean — sem ele, `x_ciclo` e
-    `x_parada` chegariam à tela como dois nomes crípticos."""
+    `x_parada` chegariam à tela como dois nomes crípticos.
+
+    Fase 88: sem partição não há dois nomes a distinguir, e anexar o estado
+    aqui seria a mesma afirmação não medida, só que em prosa."""
+    if not _PARTICAO_CENA:
+        return desc
     if maquina == "ciclo":
         return f"{desc} — com a MÁQUINA EM CICLO (trabalhando)"
     if maquina == "parada":
@@ -1708,11 +1757,25 @@ def familia_label(label: str | None) -> str:
     família é comparável entre semanas — julho tem 100% dela sem discriminador,
     agosto tem 40% ciclo / 50% parada / 10% sem —, o que mudou foi a RESOLUÇÃO
     com que sabemos decompor esse tempo, não o tempo.
+
+    Fase 88 — TIRA EM LAÇO, não uma vez só. O LLM do cluster batizava o rótulo
+    já com o estado dentro (`monitorar_maquina_parada`) e o sufixo mecânico era
+    colado por cima: nasceram `monitorar_maquina_parada_ciclo`,
+    `operar_torno_ciclo_ciclo`, `conversando_colega_parada_imovel`. Tirando um
+    sufixo só, a família de `monitorar_maquina_parada_ciclo` dava
+    `monitorar_maquina_parada` — um IRMÃO, não a raiz —, e a árvore da tela de
+    rótulos apontava para o lugar errado. Esses labels existem no histórico e
+    continuam existindo depois de a partição ser desligada.
     """
     base = (label or "").strip()
-    for suf in ("_ciclo", "_parada", "_imovel"):
-        if base.endswith(suf):
-            return base[: -len(suf)]
+    mudou = True
+    while mudou:
+        mudou = False
+        for suf in ("_ciclo", "_parada", "_imovel"):
+            # `_ciclo` sozinho não é rótulo: só descasca enquanto sobrar raiz.
+            if base.endswith(suf) and len(base) > len(suf):
+                base, mudou = base[: -len(suf)], True
+                break
     return base
 
 
@@ -1993,7 +2056,10 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #   2 = sequência por minuto; o VLM descreve e não classifica; heranças com teto
 #   3 = discriminador de cena (máquina/imobilidade) particiona o cluster;
 #       orientação vem da pose; cluster com cache exato e temperatura 0
-VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "3"))
+#   4 = partição de cena DESLIGADA (o discriminador media ruído); o estado da
+#       máquina sai do rótulo e vira coluna sob observação; rastro de que as
+#       camadas foram avaliadas
+VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "4"))
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -3818,7 +3884,11 @@ def etapa_consolidar_principais(
         if camadas:
             fato = montar_fato_evento(principais[-1], no_bucket, share,
                                       len(dur_por_label), rastreia_papel=_rastreia_papel)
-            em_duvida, disparos = avaliar_camadas(fato, escolhido, camadas)
+            em_duvida, disparos, avaliacao = avaliar_camadas(fato, escolhido, camadas)
+            # Fase 88: o rastro é gravado SEMPRE que o motor rodou — inclusive
+            # (e principalmente) quando nada disparou. É a única forma de
+            # distinguir "nenhuma contradição" de "camada nenhuma foi olhada".
+            principais[-1]["camadas_avaliadas"] = avaliacao
             if disparos:
                 principais[-1]["camadas_disparadas"] = disparos
                 principais[-1]["em_duvida"] = em_duvida
@@ -3908,29 +3978,60 @@ def _rotulo_casa(quando, label: str) -> bool:
 
 
 def avaliar_camadas(fato: dict, label: str, camadas: list) -> tuple:
-    '''(em_duvida, disparos) — FUNÇÃO PURA, testável sem banco.
+    '''(em_duvida, disparos, avaliacao) — FUNÇÃO PURA, testável sem banco.
 
     `em_duvida` só considera camadas ATIVAS. As em SOMBRA entram em `disparos`
     (para o placar contar) mas não marcam o evento: é assim que o dono do
-    processo mede o impacto de uma regra nova antes de ligá-la.'''
+    processo mede o impacto de uma regra nova antes de ligá-la.
+
+    Fase 88 — O RASTRO. `avaliacao` é o terceiro elemento e é o conserto mais
+    importante desta fase, embora não mude decisão nenhuma.
+
+    Até aqui `camadas_disparadas` NULL queria dizer duas coisas incompatíveis:
+    "as camadas rodaram e nenhuma disparou" e "as camadas nunca rodaram" — a
+    carga falha em silêncio (`carregar_camadas_duvida` devolve [] em qualquer
+    exceção) e a consolidação pula com um `if camadas:`. Sem separar os dois,
+    silêncio não é evidência de nada, e nenhuma camada é confiável — nem as
+    que acabamos de consertar.
+
+    `avaliacao` separa três estados que antes eram um só:
+      • ausente        → o motor NÃO rodou neste evento
+      • aplicaveis=[]  → rodou, mas nenhuma regra mira este rótulo. É a
+                         assinatura EXATA da regressão da Fase 86: os sufixos
+                         `_ciclo`/`_parada` fizeram `quando_rotulo` parar de
+                         casar, e toda camada de rótulo nomeado morreu calada.
+      • aplicaveis=[X] → X foi avaliada contra o fato e não disparou.
+    '''
     disparos, em_duvida = [], False
+    aplicaveis, com_erro = [], []
+    n_carregadas = 0
     for c in sorted(camadas or [], key=lambda x: x.get("ordem", 100)):
         modo = (c.get("modo") or "sombra").lower()
         if modo == "off":
             continue
+        n_carregadas += 1
         if not _rotulo_casa(c.get("quando_rotulo") or ["*"], label):
             continue
+        # "Aplicável" = o rótulo casou, logo a condição FOI olhada. É este o
+        # conjunto que responde "a regra chegou a ser perguntada?".
+        aplicaveis.append(c.get("nome"))
         try:
             if not _avaliar_condicao(c.get("se") or {}, fato):
                 continue
         except Exception as e:
             log.warning("[camadas] %s falhou ao avaliar (ignorada): %s", c.get("nome"), e)
+            # Regra que explode é diferente de regra que não disparou, e a
+            # diferença tem de sobreviver ao log — log some, dado fica.
+            com_erro.append(c.get("nome"))
             continue
         disparos.append({"nome": c.get("nome"), "modo": modo,
                          "motivo": c.get("motivo") or ""})
         if modo == "ativa":
             em_duvida = True
-    return em_duvida, disparos
+    avaliacao = {"carregadas": n_carregadas, "aplicaveis": aplicaveis}
+    if com_erro:
+        avaliacao["erro"] = com_erro
+    return em_duvida, disparos, avaliacao
 
 
 def montar_fato_evento(rep: dict, no_bucket: list, share: float,
@@ -4612,6 +4713,14 @@ def etapa_persistir(
             "papel_pessoa": e.get("papel_pessoa"),
             # Fase 85: com qual instrumento este número foi medido.
             "versao_instrumento": VERSAO_INSTRUMENTO,
+            # Fase 88 — O DISCRIMINADOR VIRA COLUNA, e ela NÃO é verdade: é a
+            # resposta crua do VLM, guardada para poder ser confrontada com o
+            # movimento medido depois. Nenhum leitor de métrica a consome hoje,
+            # e é de propósito — sem isso não há como medir a discordância que
+            # a Fase 89 vai precisar, e foi a falta desta coluna que obrigou a
+            # análise do discriminador a ser feita lendo string de rótulo.
+            "cena_maquina": _normalizar_maquina(e.get("maquina")),
+            "cena_imovel": (bool(e["imovel"]) if e.get("imovel") is not None else None),
             "n_amostras": e["n_amostras"],
             "confianca": e["confianca"],
             "origem_validacao": origem,
@@ -4652,6 +4761,12 @@ def etapa_persistir(
             row["camadas_disparadas"] = e["camadas_disparadas"]
             if e.get("duvida_motivo"):
                 row["duvida_motivo"] = e["duvida_motivo"]
+        # Fase 88: o RASTRO. Condicional só porque a chave não existe quando a
+        # consolidação roda sem camadas — e é exatamente essa ausência que
+        # passa a significar "o motor não rodou aqui", em vez de se confundir
+        # com "rodou e nada disparou".
+        if e.get("camadas_avaliadas") is not None:
+            row["camadas_avaliadas"] = e["camadas_avaliadas"]
         _cat_h = cat_ingestao.get(e["comportamento_label"])
         if _cat_h:
             row["categoria_lean"] = _cat_h

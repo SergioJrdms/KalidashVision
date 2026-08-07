@@ -190,7 +190,7 @@ check("cada amostra do grupo ainda emite a sua observação",
 
 print("\n[10] versao_instrumento: a quebra da série fica DENTRO do dado")
 check("a constante existe e foi bumpada (a medição mudou de novo)",
-      pl.VERSAO_INSTRUMENTO == 3, pl.VERSAO_INSTRUMENTO)
+      pl.VERSAO_INSTRUMENTO == 4, pl.VERSAO_INSTRUMENTO)
 check("é carimbada nas linhas de evento",
       src.count('"versao_instrumento": VERSAO_INSTRUMENTO') == 2)
 sql = open("sql/schema.sql").read()
@@ -446,6 +446,16 @@ check("processo sem eventos não quebra",
       vazio["itens"] == [] and vazio["pct_sem_categoria"] == 0.0, vazio)
 
 
+# ── Fase 88 ────────────────────────────────────────────────────────────
+# A partição foi DESLIGADA por padrão: medimos o discriminador contra o
+# próprio dado e ele não mede (em minutos adjacentes com a mesma ação o
+# estado troca como moeda). Os blocos [15] e [16] continuam existindo porque
+# a máquina da partição continua existindo — atrás de flag, para voltar
+# testada no dia em que houver um discriminador de verdade (o movimento a
+# 6 fps). Eles rodam com a flag LIGADA à força; o default está no bloco [15b].
+_PART_REAL = pl._PARTICAO_CENA
+pl._PARTICAO_CENA = True
+
 print("\n[15] Fase 86 · O DISCRIMINADOR PARTICIONA — colapso impossível, não desencorajado")
 check("chave de cena separa ciclo de parada",
       pl.chave_cena("ciclo", False) != pl.chave_cena("parada", False))
@@ -523,6 +533,22 @@ try:
           != "monitorar_maquina_ciclo")
 finally:
     pl.groq_text_call = _txt_real
+
+pl._PARTICAO_CENA = _PART_REAL
+
+print("\n[15b] Fase 88 · e o PADRÃO é desligado — o rótulo parou de afirmar")
+check("por padrão a partição está OFF", pl._PARTICAO_CENA is False)
+check("uma partição só", pl.chave_cena("ciclo", False) == pl.chave_cena("parada", True))
+check("nenhum sufixo é colado no rótulo",
+      pl.sufixo_cena("ciclo", False) == pl.sufixo_cena("parada", True)
+      == pl.sufixo_cena(None, True) == "")
+check("o estado passa a viver em coluna, não no nome",
+      '"cena_maquina": _normalizar_maquina' in src and '"cena_imovel"' in src)
+check("e o schema declara as colunas",
+      "add column if not exists cena_maquina" in sql
+      and "add column if not exists cena_imovel" in sql)
+check("família descasca sufixo DUPLO (o histórico da Fase 86 tem)",
+      pl.familia_label("monitorar_maquina_parada_ciclo") == "monitorar_maquina")
 
 print("\n[17] Fase 86 · ORIENTAÇÃO vem da pose, não do olho do modelo")
 W2, H2 = 640, 480

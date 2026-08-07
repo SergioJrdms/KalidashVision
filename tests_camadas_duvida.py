@@ -51,13 +51,13 @@ CAMADA_OPERAR = {
 
 print("\n[1] Critério 4 — cena com 1 pessoa + rótulo de interação → dúvida")
 fato = {"pessoas_na_cena": 1, "concordancia": 0.9}
-dv, disp = pl.avaliar_camadas(fato, "conversar_com_colega", [CAMADA_INTERACAO])
+dv, disp, _av = pl.avaliar_camadas(fato, "conversar_com_colega", [CAMADA_INTERACAO])
 ck("marca dúvida", dv is True, (dv, disp))
 ck("motivo registrado", disp and "interação" in disp[0]["motivo"], disp)
 ck("nome da camada registrado", disp[0]["nome"] == "interacao_sem_segunda_pessoa")
-dv2, _ = pl.avaliar_camadas({"pessoas_na_cena": 2}, "conversar_com_colega", [CAMADA_INTERACAO])
+dv2, _, _av = pl.avaliar_camadas({"pessoas_na_cena": 2}, "conversar_com_colega", [CAMADA_INTERACAO])
 ck("2 pessoas → não dispara", dv2 is False)
-dv3, _ = pl.avaliar_camadas(fato, "operar_torno", [CAMADA_INTERACAO])
+dv3, _, _av = pl.avaliar_camadas(fato, "operar_torno", [CAMADA_INTERACAO])
 ck("outro rótulo → não dispara", dv3 is False)
 
 print("\n[2] Lista de rótulos e curinga")
@@ -96,16 +96,16 @@ ck("operador desconhecido → não dispara (não quebra)",
 
 print("\n[5] MODO SOMBRA — mede sem contaminar")
 sombra = {**CAMADA_INTERACAO, "modo": "sombra"}
-dv, disp = pl.avaliar_camadas({"pessoas_na_cena": 1}, "conversar_com_colega", [sombra])
+dv, disp, _av = pl.avaliar_camadas({"pessoas_na_cena": 1}, "conversar_com_colega", [sombra])
 ck("sombra NÃO marca dúvida", dv is False, dv)
 ck("mas ENTRA no placar (disparo registrado)", len(disp) == 1 and disp[0]["modo"] == "sombra", disp)
 mix = [sombra, CAMADA_OPERAR]
-dv, disp = pl.avaliar_camadas({"pessoas_na_cena": 1, "maos_na_maquina": False,
+dv, disp, _av = pl.avaliar_camadas({"pessoas_na_cena": 1, "maos_na_maquina": False,
                                "concordancia": 0.5}, "conversar_com_colega", mix)
 ck("sombra sozinha não marca", dv is False, (dv, disp))
 off = {**CAMADA_INTERACAO, "modo": "off"}
 ck("modo off é ignorado por completo",
-   pl.avaliar_camadas({"pessoas_na_cena": 1}, "conversar_com_colega", [off]) == (False, []))
+   pl.avaliar_camadas({"pessoas_na_cena": 1}, "conversar_com_colega", [off])[:2] == (False, []))
 
 print("\n[6] Deslocamento em ALTURAS-DE-CORPO (invariante de escala)")
 def bucket(dx, alt, t0=0.0, t1=10.0):

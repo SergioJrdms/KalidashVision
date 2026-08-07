@@ -396,6 +396,119 @@ bate** — senão ele desfaria a partição recém-construída. Atrás de
 
 ---
 
+## 11. O discriminador de máquina media RUÍDO — e o rótulo afirmava mesmo assim
+
+**Estado:** corrigido (Fase 88). O caminho para responder a pergunta de verdade
+ainda está aberto.
+
+A Fase 86 particionou o cluster pelo estado da máquina (`ciclo`/`parada`) e
+colou o estado no **nome** do rótulo. Medindo o discriminador contra o próprio
+dado, ele não mede.
+
+**A prova é a persistência.** Estado de máquina é físico: um ciclo de torno dura
+minutos, então minutos consecutivos têm de se parecer. Em pares REALMENTE
+adjacentes (gap ≤ 90 s), com a **ação mantida** entre os dois minutos, contra o
+que uma moeda com a mesma taxa-base produziria:
+
+| ação mantida | pares | trocas | observado | moeda |
+|---|---:|---:|---:|---:|
+| `operar_torno` | 29 | 10 | 34,5% | 28,7% |
+| `monitorar_maquina` | 24 | 10 | **41,7%** | 30,9% |
+
+Não há persistência em lugar nenhum — o estado troca tanto quanto ou mais que um
+sorteio. E a taxa-base é explicada pela **ação**, não pela máquina: 76% "ciclo"
+quando o rótulo é `operar_torno`, 19% quando é `monitorar_maquina`, 0% quando é
+`conversando_colega`. O VLM **deduz o estado da ação que ele mesmo acabou de
+descrever** e devolve como se tivesse observado. `null` era só 3,7%: ele não
+admite que não viu.
+
+Confirmação independente: em 4 eventos o campo estruturado diz `ciclo` enquanto
+a prosa da **mesma resposta** diz "máquina parada".
+
+**Por que isso era pior que um sinal fraco:** rótulo é AFIRMAÇÃO.
+`monitorar_maquina_parada` diz que a máquina estava parada, e vai para relatório
+que o sócio lê. Afirmação errada custa mais que informação faltando. Além disso o
+vocabulário triplicava e **cada variante nascia sem categoria Lean**, ou seja,
+contando como desperdício — a queda por contabilidade do item 7, multiplicada.
+
+**A correção:** partição e sufixo desligados (`KV_PARTICAO_CENA`, off por
+padrão — a máquina fica atrás de flag para voltar testada). O estado sai do nome
+e vira coluna `cena_maquina`/`cena_imovel`, que **nenhum leitor de métrica
+consome**: existe para ser confrontada com o movimento medido depois.
+
+**O que fica aberto:** a pergunta "a máquina estava trabalhando?" continua sem
+resposta, e com a partição off `monitorar_maquina` volta a ser um rótulo só,
+produtivo, com 31% do tempo — o teto de 75% do item 6 volta a valer. O caminho é
+medir MOVIMENTO no laço de tracking, que já decodifica a 6 fps (~360 pares de
+frames por minuto contra os 7 da sequência), com máscara de pessoa para separar
+movimento DA máquina de movimento NA frente dela, e `indisponivel` — nunca
+`ausente` — quando a zona está ocluída.
+
+---
+
+## 12. Sufixo mecânico no mesmo namespace do vocabulário do LLM
+
+**Estado:** corrigido (Fase 88), com resíduo no histórico.
+
+O sufixo da Fase 86 era string colada no rótulo. O LLM do cluster batizava o
+rótulo já com o estado dentro (`monitorar_maquina_parada`) e o sufixo era colado
+por cima: nasceram `monitorar_maquina_parada_ciclo`, `operar_torno_ciclo_ciclo`,
+`conversando_colega_parada_imovel`. E `monitorar_maquina_parada` era **ambíguo
+por construção** — não dá para saber se é raiz + sufixo ou nome escolhido pelo
+modelo.
+
+`familia_label` tirava **um** sufixo, então a família de
+`monitorar_maquina_parada_ciclo` dava `monitorar_maquina_parada`: um IRMÃO, não a
+raiz. A árvore da tela de rótulos apontava para o lugar errado.
+
+Corrigido descascando em laço. Os labels do histórico continuam existindo — não
+são renomeados, pelo mesmo motivo de sempre: renomear reescreve o passado.
+
+---
+
+## 13. Camada de contradição: o silêncio era ambíguo — e um sufixo matou sete regras
+
+**Estado:** corrigido (Fase 88).
+
+Dois problemas independentes, achados investigando por que
+`contradicao_posto_vazio_com_operador` não pegou eventos com
+`papel_pessoa='operador'` rotulados `posto_vazio`.
+
+**(a) O sufixo da Fase 86 matou toda camada de rótulo nomeado.** `_rotulo_casa`
+faz match EXATO. Com os labels virando `operar_torno_ciclo`,
+`monitorar_maquina_parada` etc., `quando_rotulo: ["operar_torno", ...]` parou de
+casar. A regra `contradicao_ato_do_operador_sem_operador` (7 rótulos) e a
+`suspeita_conversa_sem_operador` ficaram mortas desde 06/08 12:16, sem um único
+sinal. Só sobreviveram as `['*']` e as de `posto_vazio` — este último porque é
+explicitamente isento do sufixo no cluster.
+
+**(b) `camadas_disparadas` NULL significava duas coisas incompatíveis:** "rodou
+e nada disparou" e "nunca rodou". `carregar_camadas_duvida` devolve lista vazia
+em qualquer exceção (só um `log.warning`) e a consolidação pula com um
+`if camadas:`. Sem separar os dois, silêncio não prova nada — e nenhuma camada é
+confiável, nem as recém-consertadas.
+
+A coluna `camadas_avaliadas` separa os estados:
+
+| valor | significa |
+|---|---|
+| `null` | o motor NÃO rodou neste evento |
+| `{"aplicaveis": []}` | rodou, mas nenhuma regra mira este rótulo — **é a assinatura de (a)** |
+| `{"aplicaveis":["X"]}` | X foi perguntada ao fato e não disparou |
+| `{"erro":["X"]}` | X explodiu ao avaliar (≠ não disparou) |
+
+**O que a investigação NÃO achou:** furo no motor. Reproduzindo o minuto exato
+(rótulo `posto_vazio` + `papel_pessoa='operador'`), a regra dispara em toda
+configuração testada — inclusive quando o operador aparece em só parte do minuto.
+`operador_presente` é derivado dos crus do minuto, que já carregam `papel_pessoa`
+desde `_abrir_evento`; as duas hipóteses de divergência (papel do evento × papel
+do minuto, e fato montado antes do papel) estão refutadas em
+`tests_rastro_camadas.py` blocos [1]–[4].
+
+---
+
+---
+
 ## 2. `gravado_em` carimba a tz do servidor no timestamp do nome
 
 **Estado:** não corrigido. Sem efeito visível hoje.

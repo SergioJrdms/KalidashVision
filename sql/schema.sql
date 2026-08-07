@@ -1098,3 +1098,61 @@ alter table zonas_camera add column if not exists frente_maquina text;
 alter table zonas_camera drop constraint if exists zonas_frente_maquina_chk;
 alter table zonas_camera add constraint zonas_frente_maquina_chk
     check (frente_maquina is null or frente_maquina in ('camera','oposta','perfil'));
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 88 — O ESTADO DA MÁQUINA SAI DO RÓTULO E VIRA COLUNA SOB OBSERVAÇÃO
+--
+-- A Fase 86 particionou o cluster pelo estado da máquina e colou o estado no
+-- NOME do rótulo (`monitorar_maquina_ciclo`). Medindo o discriminador contra
+-- o próprio dado, ele não mede: em minutos ADJACENTES com a MESMA ação, o
+-- estado troca tanto quanto uma moeda com a mesma taxa-base (operar_torno
+-- 34,5% observado × 28,7% esperado; monitorar_maquina 41,7% × 30,9%). Estado
+-- físico de máquina não se comporta assim. O VLM deduz o estado da ação que
+-- ele mesmo descreveu — 76% "ciclo" quando opera, 19% quando monitora — e
+-- devolve como se tivesse observado.
+--
+-- O rótulo AFIRMA, e vai para relatório que o sócio lê. Afirmação errada é
+-- mais cara que informação faltando. Então o estado sai do nome e vem para
+-- estas colunas: continua coletado, continua analisável, e não afirma nada.
+--
+-- ⚠️ NENHUM leitor de métrica consome estas colunas, e é de propósito. Elas
+-- existem para poder ser CONFRONTADAS com o movimento medido a 6 fps (a
+-- próxima fase). Foi a ausência delas que obrigou a análise do discriminador
+-- a ser feita lendo string de rótulo.
+--
+--   select cena_maquina, count(*) from eventos
+--    where versao_instrumento >= 4 and principal group by 1;
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists cena_maquina text;
+alter table eventos add column if not exists cena_imovel boolean;
+alter table eventos drop constraint if exists eventos_cena_maquina_chk;
+alter table eventos add constraint eventos_cena_maquina_chk
+    check (cena_maquina is null or cena_maquina in ('ciclo','parada'));
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 88 — O RASTRO DE QUE AS CAMADAS FORAM AVALIADAS
+--
+-- `camadas_disparadas` NULL queria dizer duas coisas incompatíveis: "rodou e
+-- nada disparou" e "nunca rodou". A carga das camadas falha em silêncio
+-- (devolve lista vazia em qualquer exceção) e a consolidação pula com um
+-- `if camadas:`. Sem separar os dois, silêncio não prova nada — e nenhuma
+-- camada é confiável, nem as recém-consertadas.
+--
+-- Estados que esta coluna separa:
+--   null                  → o motor NÃO rodou neste evento
+--   {"aplicaveis": []}    → rodou, mas nenhuma regra mira este rótulo. É a
+--                           assinatura da regressão da Fase 86: os sufixos
+--                           fizeram `quando_rotulo` parar de casar e as
+--                           camadas de rótulo nomeado morreram caladas.
+--   {"aplicaveis":["X"]}  → X foi perguntada ao fato e não disparou.
+--   {"erro": ["X"]}       → X explodiu ao avaliar (≠ não disparou).
+--
+-- A pergunta que ela responde, e que hoje não tem resposta:
+--   select count(*) filter (where camadas_avaliadas is null)          as motor_nao_rodou,
+--          count(*) filter (where camadas_avaliadas->'aplicaveis' = '[]') as sem_regra_para_o_rotulo,
+--          count(*) filter (where camadas_disparadas is not null)     as disparou
+--     from eventos where principal and versao_instrumento >= 4;
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists camadas_avaliadas jsonb;
