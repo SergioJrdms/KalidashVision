@@ -2059,7 +2059,10 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #   4 = partição de cena DESLIGADA (o discriminador media ruído); o estado da
 #       máquina sai do rótulo e vira coluna sob observação; rastro de que as
 #       camadas foram avaliadas
-VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "4"))
+#   5 = quadro OLHADO deixa de ser o mesmo que minuto COBERTO: herdada e
+#       interpolada mantêm o tempo e não votam na concordância; "não olhei"
+#       vira curva própria, separada da dúvida; cam2 só quando desambigua
+VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "5"))
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -2808,6 +2811,58 @@ def _subamostrar(itens: list, teto: int) -> list:
     return [itens[int(round(i * passo))] for i in range(teto)]
 
 
+def _interpolar_sequencia(descricoes: dict, idx_cam1: list) -> set:
+    """Preenche os índices sem descrição com a do quadro ANALISADO mais
+    próximo. Devolve o conjunto de índices interpolados (para marcá-los).
+
+    Não inventa: só estende para dentro do minuto uma descrição que o modelo
+    produziu olhando a sequência. Se nenhum quadro foi analisado, não há o que
+    estender e o buraco continua buraco.
+    """
+    com_desc = sorted(i for i in idx_cam1 if descricoes.get(i))
+    if not com_desc:
+        return set()
+    interpolados = set()
+    for i in idx_cam1:
+        if descricoes.get(i):
+            continue
+        j = min(com_desc, key=lambda k: (abs(k - i), k))
+        descricoes[i] = descricoes[j]
+        interpolados.add(i)
+    return interpolados
+
+
+def _cam2_ajuda(grupo: list) -> bool:
+    """Fase 90 — a lateral tem o que desambiguar neste minuto?
+
+    Ela existe para ver o que a máquina esconde. Num minuto em que a cam1 vê
+    o operador inteiro, ela não acrescenta nada e custa uma imagem inteira por
+    chamada. Na dúvida devolve True: perder desambiguação custa um rótulo
+    errado, e rótulo errado é mais caro que uma imagem.
+    """
+    for am in grupo or []:
+        # Operador presente no posto mas invisível na cam1 = oclusão total: é
+        # exatamente o caso que a lateral foi posta para resolver.
+        if getattr(am, "operador_presente", None) and not any(
+                p.get("papel") == "operador" for p in am.pessoas):
+            return True
+        if getattr(am, "maos_cam2", False):
+            return True
+        for p in am.pessoas:
+            k = p.get("kpts")
+            if k is None:
+                return True          # sem pose: não dá para saber se está inteiro
+            try:
+                # Pose parcial = corpo cortado pela máquina/quadro. `xyn` traz
+                # (0,0) no keypoint não detectado.
+                visiveis = sum(1 for x, y in k if x > 0 or y > 0)
+                if visiveis < len(k) * 0.6:
+                    return True
+            except Exception:  # noqa: BLE001
+                return True
+    return False
+
+
 def _contexto_zonas(amostra: Amostra, modo_op: bool,
                     frente_maquina: str | None = None,
                     movimento: dict | None = None) -> str:
@@ -2874,6 +2929,14 @@ def _analisar_sequencia_vlm(
     A cam2 entra com UM frame, o do meio — ela existe para desambiguar oclusão,
     e para isso um instante resolve. Mandá-la em todos os instantes dobraria as
     imagens e comeria o ganho de custo.
+
+    Fase 90 — E SÓ ENTRA QUANDO HÁ O QUE DESAMBIGUAR. Ela custa ~8% das
+    imagens da chamada e ia em TODO minuto, inclusive nos em que a cam1 vê o
+    operador inteiro e nada está oculto. A lateral existe para responder "o
+    que a máquina esconde"; sem oclusão ela não responde nada e é imagem paga
+    à toa. Critério: alguém sem pose completa (corpo cortado/ocluso), ou
+    operador ausente da cam1 no minuto, ou mãos na máquina pela cam2 — os três
+    casos em que a cam1 sozinha erra.
     """
     if not grupo:
         return {}
@@ -2883,7 +2946,7 @@ def _analisar_sequencia_vlm(
         return {}
 
     meio = usados[len(usados) // 2]
-    img_cam2 = meio.img_b64_secundario
+    img_cam2 = meio.img_b64_secundario if _cam2_ajuda(grupo) else None
     linha_cam2 = ""
     if img_cam2:
         imgs.append(img_cam2)
@@ -3045,10 +3108,16 @@ def _gate_vlm_binario(groq_client, amostra: Amostra, desc_ancora: str) -> bool:
         "Responda APENAS com uma palavra: SIM ou NAO."
     )
     try:
+        # Fase 90 — SEM a lateral. A pergunta é "ainda é a MESMA ação da
+        # âncora?", e a âncora é da cam1; a lateral não ajuda a respondê-la e
+        # DOBRAVA o custo da checagem. Com duas imagens o break-even do gate
+        # era ~7 checagens por minuto — acima disso ele gastava mais que a
+        # chamada de sequência que estava evitando, e é justamente com o teto
+        # alto que mais amostras chegam aqui. Com uma imagem o break-even vai
+        # para ~13 e o gate não tem como sair no prejuízo.
         r = groq_vision_call(
             groq_client, amostra.img_b64, prompt,
             json_mode=False, max_tokens=3, temperatura=0.0,
-            imagens_extra=([amostra.img_b64_secundario] if amostra.img_b64_secundario else None),
         )
         return (r or "").strip().lower().startswith("s")
     except Exception as e:
@@ -3127,7 +3196,7 @@ def etapa_analise_vlm(
     # Fase 85: com TETO — ver `_HERANCA_MAX_SEGUIDAS`.
     ultima_desc_op: str | None = None
     ultimo_tid_op: int | None = None
-    n_herdadas = n_teto_heranca = 0
+    n_herdadas = n_teto_heranca = n_interpoladas = 0
     heranca_seguidas = 0
 
     def _eh_indefinida(d: str | None) -> bool:
@@ -3196,6 +3265,7 @@ def etapa_analise_vlm(
 
         # ── 3) As chamadas do grupo: no máximo uma cam1 + uma cam2 ──
         descricoes_seq: dict[int, dict[int, str]] = {}
+        interp: set = set()
         if idx_cam1 and precisa_vlm:
             descricoes_seq = _analisar_sequencia_vlm(
                 groq_client, [plano[i][1] for i in idx_cam1], descricao_processo,
@@ -3206,6 +3276,21 @@ def etapa_analise_vlm(
             # Reindexa: a função devolve o índice DENTRO da lista que recebeu.
             descricoes_seq = {idx_cam1[k]: v for k, v in descricoes_seq.items()
                               if 0 <= k < len(idx_cam1)}
+            # Fase 90 — INTERPOLA OS BURACOS. `_subamostrar` manda no máximo
+            # KV_SEQUENCIA_MAX_IMG-1 quadros; os demais NÃO recebiam descrição
+            # e a observação morria no `if not desc: continue`. O efeito não
+            # era perder detalhe: era o minuto se PARTIR (o intervalo passa da
+            # janela de continuidade) e o `tempo_obs_s` — denominador de toda
+            # métrica — cair junto. Com 12 amostras e MAX_IMG=6 a cobertura
+            # medida caía de 55s para 25s no minuto.
+            #
+            # Interpolar aqui é honesto de um jeito que a ponte não é: o VLM
+            # analisou o minuto COMO SEQUÊNCIA e descreveu os quadros de t e
+            # t+10s; o de t+5s está ENTRE dois quadros vistos. Marcado como
+            # `interpolado_sequencia` e — o que importa — NÃO VOTA na
+            # concordância.
+            interp = _interpolar_sequencia(descricoes_seq, idx_cam1)
+            n_interpoladas += len(interp)
             n_completo += 1
 
         idx_resg = [i for i, (tipo, _) in enumerate(plano) if tipo == "resgate"]
@@ -3303,7 +3388,10 @@ def etapa_analise_vlm(
                     origem, desc_ancora = d_am.get(tid, ("analisar", ""))
                     if origem == "analisar":
                         desc = do_instante.get(tid)
-                        origem_gate = "analisado"
+                        # Fase 90: o quadro não foi enviado; a descrição veio
+                        # do quadro analisado vizinho. Cobre o tempo, não vota.
+                        origem_gate = ("interpolado_sequencia" if i in interp
+                                       else "analisado")
                         repeticoes_seguidas[tid] = 0
                     else:
                         desc = desc_ancora            # herda o padrão (sem token)
@@ -3693,7 +3781,16 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         "imovel": o.get("imovel"),
         "zona_contexto": o["zona"],
         "papel_pessoa": o.get("papel"),
-        "n_amostras": 1,
+        # Fase 90 — DOIS CONTADORES, porque são duas perguntas.
+        # `n_observacoes` = quanto do minuto está COBERTO (mantém o evento
+        # inteiro e o denominador honesto). `n_amostras` = quantos quadros
+        # foram de fato OLHADOS — é o que vira evidência e confiança. Herdada
+        # e interpolada cobrem tempo e NÃO votam: doze observações com a mesma
+        # descrição herdada dariam share 1,00, ou seja, certeza máxima num
+        # minuto em que ninguém olhou nada.
+        "n_observacoes": 1,
+        "n_amostras": 1 if o.get("origem_gate") == "analisado" else 0,
+        "origens": {(o.get("origem_gate") or "analisado"): 1},
     }
 
 
@@ -3729,7 +3826,11 @@ def etapa_segmentar_eventos(
             ):
                 atual["tempo_fim_s"] = o["tempo_s"]
                 atual["frame_fim"] = o["frame_idx"]
-                atual["n_amostras"] += 1
+                atual["n_observacoes"] += 1
+                if o.get("origem_gate") == "analisado":
+                    atual["n_amostras"] += 1
+                _og = o.get("origem_gate") or "analisado"
+                atual["origens"][_og] = atual["origens"].get(_og, 0) + 1
                 # Fase 82: a caixa de CADA amostra do evento, não só a primeira.
                 if _bbox_valido(o.get("bbox")):
                     atual["_caixas"].append(list(o["bbox"]))
@@ -3877,7 +3978,15 @@ def etapa_consolidar_principais(
         if share < dominancia and len(dur_por_label) > 1:
             escolhido = _principal_por_ia(no_bucket, catalogo) or top_label
         # Representante = evento do rótulo escolhido com MAIOR sobreposição no minuto.
-        _n_votos = sum(e["n_amostras"] for e, _ in no_bucket)
+        # Fase 90: VOTOS são quadros olhados. Herdada/interpolada mantêm o
+        # minuto coberto mas não afirmam nada — quem não olhou não vota.
+        _n_votos = sum(e.get("n_amostras", 0) for e, _ in no_bucket)
+        _n_obs = sum(e.get("n_observacoes", e.get("n_amostras", 0))
+                     for e, _ in no_bucket)
+        _origens: dict = {}
+        for _e, _ in no_bucket:
+            for k, v in (_e.get("origens") or {}).items():
+                _origens[k] = _origens.get(k, 0) + v
         reps = [(e, ov) for (e, ov) in no_bucket if e["comportamento_label"] == escolhido]
         rep = (max(reps, key=lambda x: x[1]) if reps else max(no_bucket, key=lambda x: x[1]))[0]
         principais.append({
@@ -3906,6 +4015,11 @@ def etapa_consolidar_principais(
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": rep.get("papel_pessoa"),
             "n_amostras": _n_votos,
+            # Cobertura e composição: é o par que permite dizer "este minuto
+            # ficou sem evidência POR supressão do gate" em vez de o teto
+            # agressivo ser descoberto por acaso, semanas depois.
+            "n_observacoes": _n_obs,
+            "observacoes_origem": _origens or None,
             # Fase 56 (B1) — CONFIANÇA = CONCORDÂNCIA entre as amostras do minuto.
             #
             # A fórmula antiga era `min(0.95, 0.6 + 0.05*n_amostras)`: contagem
@@ -4840,6 +4954,13 @@ def limiar_duvida(sb: Client, empresa: str, processo: str) -> float:
 # mecanismo que mantém o registro fora da fila. Nunca foram dúvida e não podem
 # entrar na curva histórica como dúvida resolvida.
 _ORIGENS_MECANICAS = frozenset({"posto_vazio", "auditoria"})
+# Fase 90 — observação que COBRE o tempo sem ter olhado quadro novo. Ela é
+# legítima (sem ela o minuto se parte e o denominador despenca) e não é
+# evidência. A distinção entre "não olhei" e "olhei e não sei" mora aqui.
+_ORIGENS_SEM_OLHAR = frozenset({
+    "repeticao_pose", "repeticao_gate", "interpolado_sequencia",
+    "indefinida_herdada", "ponte_temporal",
+})
 
 
 def evento_em_duvida(e: dict, limiar: float,
@@ -4868,6 +4989,23 @@ def evento_em_duvida(e: dict, limiar: float,
     # decisão (rótulo, prompt, camada).
     n_am = e.get("n_amostras")
     if n_am is not None and int(n_am) < MIN_AMOSTRAS_EVIDENCIA:
+        # Fase 90 — DUAS COISAS DIFERENTES, e misturá-las estraga a única
+        # métrica que responde se o produto funciona:
+        #   "olhei e não sei"  → dúvida real, resolve-se com melhor decisão
+        #   "NÃO OLHEI"        → cobertura, resolve-se com mais amostragem
+        # O segundo caso nasceu quando o gate passou a suprimir minutos
+        # inteiros: o tempo continua coberto (a descrição é herdada da âncora),
+        # mas nenhum quadro novo foi visto. Chamar isso de dúvida seria dizer
+        # que o sistema ficou inseguro, quando ele só ficou barato.
+        _org = e.get("observacoes_origem") or {}
+        _herdadas = sum(v for k, v in _org.items()
+                        if k in _ORIGENS_SEM_OLHAR)
+        if _herdadas:
+            return (True,
+                    f"nenhum quadro novo foi analisado neste minuto — "
+                    f"{_herdadas} observação(ões) herdada(s) do instante "
+                    "anterior mantêm o tempo coberto, mas não são evidência",
+                    "nao_observado")
         return (True,
                 f"apenas {int(n_am)} amostra neste trecho — não há evidência "
                 "suficiente para afirmar nem para duvidar",
@@ -5340,6 +5478,9 @@ def etapa_persistir(
             # feita lendo string de rótulo.
             "movimento_maquina": e.get("movimento_maquina"),
             "movimento_detalhe": e.get("movimento_detalhe"),
+            # Fase 90: cobertura e composição, ao lado da evidência.
+            "n_observacoes": e.get("n_observacoes"),
+            "observacoes_origem": e.get("observacoes_origem"),
             "n_amostras": e["n_amostras"],
             "confianca": e["confianca"],
             "origem_validacao": origem,
@@ -5413,6 +5554,8 @@ def etapa_persistir(
             "papel_pessoa": e.get("papel_pessoa"),
             "versao_instrumento": VERSAO_INSTRUMENTO,
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
+            "n_observacoes": e.get("n_observacoes"),
+            "observacoes_origem": e.get("origens") or None,
             "origem_validacao": "auditoria",
             # Mesmo lote dos principais: a coluna NOT NULL tem de vir explícita
             # aqui também, senão a unificação do PostgREST manda NULL.
@@ -10350,6 +10493,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         dia = inst.date().isoformat()
         d = por_dia.setdefault(dia, {
             "tot": 0.0, "va": 0.0, "desp": 0.0, "duvida": 0.0, "sem_evidencia": 0.0,
+            # Fase 90: "não olhei" é curva PRÓPRIA, nunca somada à dúvida.
+            "nao_observado": 0.0, "nao_observado_gate": 0.0,
             "duvida_resolvida": 0.0, "sem_evidencia_resolvida": 0.0,
             "vazio": 0.0, "visitas": 0, "acoes": defaultdict(float),
             "versoes": set(),
@@ -10386,7 +10531,19 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                        if _lim_duvida is not None else (False, "", ""))
         if _dv:
             _resolvida = bool(e.get("validado_humano"))
-            if _tp == "sem_evidencia":
+            if _tp == "nao_observado":
+                # NÃO entra em `duvida` nem em `sem_evidencia`: o sistema não
+                # ficou inseguro, ele não olhou. Misturar as duas estraga a
+                # curva que responde se o produto funciona — e faria um corte
+                # de orçamento parecer perda de confiança do modelo.
+                d["nao_observado"] += dur
+                _org = e.get("observacoes_origem") or {}
+                if any(k.startswith("repeticao") for k in _org):
+                    # A parcela que o TETO DO GATE causou. Se ela crescer, o
+                    # teto está agressivo demais — e isso tem de ser visível,
+                    # não descoberto por acaso.
+                    d["nao_observado_gate"] += dur
+            elif _tp == "sem_evidencia":
                 d["sem_evidencia"] += dur
                 if _resolvida:
                     d["sem_evidencia_resolvida"] += dur
@@ -10442,6 +10599,7 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 "dia": iso, "rot": rot, "dow": dow, "tempo_obs_s": 0.0,
                 "va_pct": 0.0, "desp_pct": 0.0, "vazio_pct": 0.0,
                 "duvida_pct": 0.0, "sem_evidencia_pct": 0.0,
+                "nao_observado_pct": 0.0, "nao_observado_gate_pct": 0.0,
                 "duvida_resolvida_pct": 0.0, "sem_evidencia_resolvida_pct": 0.0,
                 "posto_vazio_s": 0.0, "posto_vazio_pct": 0.0,
                 "atipico_vazio": False, "versoes_instrumento": [],
@@ -10517,6 +10675,12 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                 # Trecho curto demais para afirmar OU duvidar — resolve-se com
                 # mais amostragem, não com melhor decisão.
                 "sem_evidencia_pct": round(d["sem_evidencia"] / tot * 100, 1),
+                # Fase 90 — "NÃO OLHEI", separado de "olhei e não sei". Sobe
+                # quando o gate suprime; é o preço da economia, e ele fica na
+                # tela em vez de virar queda silenciosa de confiança.
+                "nao_observado_pct": round(d["nao_observado"] / tot * 100, 1),
+                "nao_observado_gate_pct": round(
+                    d["nao_observado_gate"] / tot * 100, 1),
                 "posto_vazio_s": round(d["vazio"], 1),
                 "posto_vazio_pct": round(vazio_pct, 1),
                 # Fase 79: dia quase todo posto vazio ou é falta real, ou é

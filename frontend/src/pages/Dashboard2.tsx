@@ -217,6 +217,8 @@ function construirAgregado(dias: DiaAnalise[]): DiaAnalise | null {
     va_pct: wavg((d) => d.va_pct), vazio_pct: wavg((d) => d.vazio_pct || 0),
     duvida_pct: wavg((d) => d.duvida_pct || 0),
     sem_evidencia_pct: wavg((d) => d.sem_evidencia_pct || 0),
+    nao_observado_pct: wavg((d) => d.nao_observado_pct || 0),
+    nao_observado_gate_pct: wavg((d) => d.nao_observado_gate_pct || 0),
     desp_pct: wavg((d) => d.desp_pct),
     posto_vazio_s: dias.reduce((s, d) => s + d.posto_vazio_s, 0),
     posto_vazio_pct: wavg((d) => d.posto_vazio_pct),
@@ -554,6 +556,8 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
   const ultimo = pts[pts.length - 1];
   const atual = ultimo.duvida_pct;
   const semEvid = ultimo.sem_evidencia_pct || 0;
+  const naoObs = ultimo.nao_observado_pct || 0;
+  const naoObsGate = ultimo.nao_observado_gate_pct || 0;
   // Fase 66: a curva é HISTÓRICA — validar um trecho não o apaga do dia em que
   // aconteceu. O que muda é quanto dela já foi julgado, e isso vira a área
   // preenchida sob a linha: o trabalho feito fica visível em vez de sumir.
@@ -570,7 +574,7 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
         titulo="Quanto o sistema não sabe"
-        ajuda="Parte do tempo observado em que a leitura ficou em dúvida naquele dia — as amostras do minuto discordaram, uma verificação da cena contradisse o rótulo, ou ninguém decidiu se o comportamento agrega valor. A curva é HISTÓRICA: validar um trecho não o apaga do dia em que aconteceu, só o marca como julgado (a área preenchida)."
+        ajuda="Parte do tempo observado em que a leitura ficou em dúvida naquele dia — as amostras do minuto discordaram, uma verificação da cena contradisse o rótulo, ou ninguém decidiu se o comportamento agrega valor. A curva é HISTÓRICA: validar um trecho não o apaga do dia em que aconteceu, só o marca como julgado (a área preenchida). Tempo que o sistema NÃO OLHOU (herdado por economia) NUNCA entra nesta curva — aparece separado, em âmbar."
         leitura="Esta curva é o veredito: caindo semana a semana, o sistema está aprendendo."
       />
       <div className="row gap2" style={{ alignItems: "baseline", marginBottom: 6 }}>
@@ -594,6 +598,30 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
           + <b className="tnum">{semEvid.toFixed(0)}%</b> sem evidência suficiente
           (trechos curtos demais para julgar) — isso se resolve gravando mais denso.
         </p>
+      )}
+      {naoObs > 0 && (
+        // Fase 90 — A TERCEIRA COISA, e ela NÃO é dúvida.
+        // "Olhei e não sei" é o sistema sendo honesto sobre uma cena difícil.
+        // "NÃO OLHEI" é o sistema tendo economizado. Se as duas entrassem na
+        // mesma curva, um corte de custo apareceria como perda de confiança do
+        // modelo — exatamente o gráfico errado para mostrar a um sócio.
+        // Caixa própria, cor própria (âmbar de alerta, não o vermelho da dúvida).
+        <div style={{ fontSize: 11.5, margin: "0 0 6px", padding: "7px 10px",
+                      background: "var(--apoio-bg)", border: "1px solid var(--apoio)",
+                      borderRadius: 8, color: "var(--ink)" }}>
+          <b className="tnum">{naoObs.toFixed(0)}%</b> do tempo <b>não foi olhado</b> —
+          o minuto está coberto por herança da observação anterior, mas nenhum
+          quadro novo foi analisado. Isso <b>não é dúvida do modelo</b>: é economia.
+          {naoObsGate > 0 && (
+            <>
+              {" "}Desses, <b className="tnum">{naoObsGate.toFixed(0)}%</b> vêm da
+              supressão do gate (<code className="font-mono">KV_GATE_MAX_REPETICOES</code>)
+              {naoObsGate >= 15
+                ? " — o teto está agressivo demais, baixe-o."
+                : " — dentro do esperado."}
+            </>
+          )}
+        </div>
       )}
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }} role="img"
            aria-label="Evolução do percentual de tempo em dúvida">

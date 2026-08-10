@@ -1245,3 +1245,66 @@ select
 from eventos e
 join videos v on v.id = e.video_id
 where e.principal and e.movimento_maquina is not null;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 90 — O LEDGER QUE NUNCA EXISTIU
+--
+-- `ai_uso` está declarada desde a Fase 14 e NUNCA foi criada no banco. A
+-- gravação é best-effort (log.warning e segue), então a ausência era
+-- silenciosa. Duas consequências que só apareceram quando o saldo acabou:
+--   • GET /ai/uso sempre devolveu vazio;
+--   • a TRAVA DE ORÇAMENTO (KV_AI_LIMITE_<PROV>_USD) semeia o acumulador
+--     lendo esta tabela — ou seja, a trava existia e nunca travou.
+--
+-- Custo estimado não serve para decidir parar a campanha ou recarregar. Este
+-- é o único jeito de trocar uma faixa de "$5,9 a $8,0/dia" por um número.
+--
+--   select date(ts) dia, tier, modelo, count(*) chamadas,
+--          sum(tokens_in) tin, sum(tokens_out) tout, round(sum(custo_usd)::numeric,3) usd
+--     from ai_uso group by 1,2,3 order by 1 desc, usd desc;
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists ai_uso (
+    id uuid primary key default gen_random_uuid(),
+    ts timestamptz default now(),
+    periodo text not null,
+    provedor text not null,
+    modelo text,
+    tier text,
+    tokens_in bigint default 0,
+    tokens_out bigint default 0,
+    custo_usd numeric(12,6) default 0
+);
+create index if not exists idx_ai_uso_periodo on ai_uso(periodo, provedor);
+create index if not exists idx_ai_uso_ts on ai_uso(ts);
+alter table ai_uso enable row level security;
+drop policy if exists ai_uso_rw on ai_uso;
+create policy ai_uso_rw on ai_uso for all using (true) with check (true);
+grant select, insert on ai_uso to anon, authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 90 — QUADRO OLHADO ≠ MINUTO COBERTO
+--
+-- Duas perguntas diferentes estavam num contador só:
+--   "quanto tempo o minuto cobre?"  → denominador de toda métrica
+--   "quantos quadros a gente OLHOU?" → evidência, que vira confiança
+--
+-- Observação HERDADA (gate disse repetição) ou INTERPOLADA (o quadro não foi
+-- enviado ao VLM, ficou entre dois enviados) mantém a continuidade do evento —
+-- sem ela o minuto se parte e o `tempo_obs_s` despenca. Mas ela NÃO pode
+-- votar na concordância: doze observações com a MESMA descrição herdada dão
+-- share 1,00, ou seja, confiança máxima num minuto em que ninguém olhou nada.
+-- Número que mente com selo de certeza é pior que número faltando.
+--
+-- `n_amostras` passa a ser QUADROS EFETIVAMENTE OLHADOS (o que o nome sempre
+-- prometeu). `n_observacoes` guarda o total, e `observacoes_origem` guarda a
+-- composição — é ela que responde "quantos minutos ficaram sem evidência POR
+-- supressão do gate", em vez de o teto agressivo ser descoberto por acaso.
+--
+--   select count(*) filter (where n_amostras = 0) as nao_olhados,
+--          count(*) filter (where (observacoes_origem->>'repeticao_pose')::int > 0) as com_heranca
+--     from eventos where principal and versao_instrumento >= 5;
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists n_observacoes int;
+alter table eventos add column if not exists observacoes_origem jsonb;

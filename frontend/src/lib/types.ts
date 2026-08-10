@@ -567,6 +567,15 @@ export interface DiaAnalise {
   // Trecho curto demais para afirmar OU duvidar — resolve-se com mais
   // amostragem, não com melhor decisão. Caso DIFERENTE de duvida_pct.
   sem_evidencia_pct: number;
+  // Fase 90 — "NÃO OLHEI", que é diferente de "olhei e não sei". Sobe quando o
+  // gate suprime minutos inteiros: o tempo continua coberto (a descrição é
+  // herdada da âncora) mas nenhum quadro novo foi visto. Nunca soma na dúvida —
+  // misturar os dois faria um corte de orçamento parecer perda de confiança do
+  // modelo, e a dúvida é a única métrica que responde se o produto funciona.
+  nao_observado_pct?: number;
+  // A fatia disso causada pelo TETO DO GATE. Se cresce, o teto está agressivo
+  // demais — e isso tem de aparecer, não ser descoberto por acaso.
+  nao_observado_gate_pct?: number;
   posto_vazio_s: number;
   posto_vazio_pct: number;
   n_videos: number;

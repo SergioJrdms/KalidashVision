@@ -598,6 +598,94 @@ tela de correção, não a camada.
 
 ---
 
+## 16. O ledger de custo nunca existiu — e a trava de orçamento nunca travou
+
+**Estado:** corrigido (Fase 90).
+
+`ai_uso` está declarada em `schema.sql` desde a Fase 14 e **nunca foi criada no
+banco**. A gravação é best-effort (`log.warning` e segue), então a ausência era
+silenciosa por três semanas. Duas consequências, e a segunda é a cara:
+
+- `GET /ai/uso` sempre devolveu vazio;
+- **a trava de orçamento (`KV_AI_LIMITE_<PROV>_USD`) semeia o acumulador lendo
+  esta tabela** — a trava existia, estava configurada, e nunca teve dado para
+  agir. O saldo foi de $119 a $23 sem nenhum mecanismo automático perceber.
+
+Quando o custo estourou, a análise teve que ser **reconstruída** do volume de
+vídeos + preços de tabela, com faixa de incerteza de $5,9 a $8,0/dia — ampla
+demais para decidir entre parar a campanha e recarregar.
+
+**Regra que fica:** mecanismo de segurança que depende de uma tabela precisa
+falhar ALTO quando a tabela não existe. Best-effort é certo para telemetria e
+errado para o insumo de uma trava.
+
+---
+
+## 17. Quadro OLHADO não é a mesma coisa que minuto COBERTO
+
+**Estado:** corrigido (Fase 90).
+
+Um contador (`n_amostras`) respondia duas perguntas incompatíveis: *quanto do
+minuto está coberto* (denominador de toda métrica) e *quantos quadros foram
+efetivamente olhados* (evidência, que vira confiança). Enquanto toda observação
+era analisada, os dois números coincidiam. Duas economias os separaram:
+
+**(a) O subamostreio da sequência.** `_subamostrar(grupo, MAX_IMG - 1)` manda só
+parte dos quadros ao VLM. Os demais não recebiam descrição e a observação morria
+num `if not desc: continue`. O efeito não era perder detalhe — era o minuto **se
+partir** (o intervalo passa da janela de continuidade de 8 s) e o `tempo_obs_s`
+cair junto: com `MAX_IMG=6`, **55 s de cobertura viravam 25 s**. Seria a Fase 86
+de novo, no denominador em vez do rótulo, com a curva de dúvida caindo por corte
+de orçamento e parecendo aprendizado.
+
+Corrigido interpolando: o quadro não enviado herda a descrição do quadro
+analisado vizinho, marcado `interpolado_sequencia`. É honesto de um jeito que a
+ponte não é — o VLM analisou o minuto **como sequência**, e o quadro está
+*entre* dois que ele viu.
+
+**(b) A supressão do gate.** Um minuto todo herdado da âncora cobre o tempo
+corretamente, mas **doze observações com a mesma descrição davam share 1,00** —
+confiança máxima num minuto em que ninguém olhou nada.
+
+**A regra:** herdada e interpolada **cobrem tempo e não votam**. `n_amostras`
+passa a ser quadros olhados (o que o nome sempre prometeu); `n_observacoes`
+guarda a cobertura; `observacoes_origem` guarda a composição.
+
+### E "não olhei" virou curva própria
+
+`nao_observado` **nunca** soma em `duvida` nem em `sem_evidencia`. São coisas
+diferentes: *"olhei e não sei"* se resolve com melhor decisão, *"não olhei"* com
+mais amostragem. Misturá-las faria um corte de custo aparecer como perda de
+confiança do modelo — e a dúvida é a única métrica que responde se o produto
+funciona. `nao_observado_gate_pct` isola a parcela causada pelo teto do gate: se
+ela cresce, o teto está agressivo demais, e isso aparece na tela em vez de ser
+descoberto por acaso.
+
+---
+
+## 18. A cam2 ia em todo minuto, e dobrava o custo da checagem do gate
+
+**Estado:** corrigido (Fase 90).
+
+A lateral existe para ver **o que a máquina esconde**. Ia em toda chamada de
+sequência (~8% das imagens), inclusive nos minutos em que a cam1 vê o operador
+inteiro e nada está oculto. Agora só entra quando há o que desambiguar: pose
+parcial, operador presente mas invisível na cam1, ou mãos na máquina pela cam2.
+Na dúvida, entra — perder desambiguação custa um rótulo errado, e rótulo errado
+é mais caro que uma imagem.
+
+**O caso pior estava na checagem binária do gate**, que mandava cam1 **e** cam2
+para perguntar "ainda é a mesma ação?" — pergunta sobre a âncora da cam1, que a
+lateral não ajuda a responder. Com duas imagens o break-even do gate era **~7
+checagens por minuto**: acima disso ele gastava mais que a chamada de sequência
+que estava evitando — e é justamente com o teto alto (`KV_GATE_MAX_REPETICOES`)
+que mais amostras chegam à checagem. Subir o teto podia **aumentar** o custo.
+Com uma imagem o break-even vai para ~13 e o gate não tem como sair no prejuízo.
+
+---
+
+---
+
 ## 2. `gravado_em` carimba a tz do servidor no timestamp do nome
 
 **Estado:** não corrigido. Sem efeito visível hoje.

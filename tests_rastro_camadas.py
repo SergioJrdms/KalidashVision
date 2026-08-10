@@ -139,7 +139,10 @@ for maq, imo in (("ciclo", False), ("parada", False), (None, True), (None, None)
     check(f"sufixo_cena({maq!r},{imo!r}) é vazio", pl.sufixo_cena(maq, imo) == "")
 check("a descrição do catálogo não ganha o estado em prosa",
       pl._descricao_com_cena("operando o torno", "ciclo", False) == "operando o torno")
-check("versão do instrumento subiu para 4", pl.VERSAO_INSTRUMENTO == 4)
+# >= e não ==: o contrato desta fase é "a versão foi bumpada AQUI". Cada fase
+# nova bumpa de novo, e uma suíte antiga não pode quebrar por isso.
+check("versão do instrumento foi bumpada nesta fase (>= 4)",
+      pl.VERSAO_INSTRUMENTO >= 4, pl.VERSAO_INSTRUMENTO)
 check("a partição fica atrás de flag, não apagada",
       hasattr(pl, "_PARTICAO_CENA") and pl._PARTICAO_CENA is False)
 

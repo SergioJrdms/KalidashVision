@@ -190,7 +190,7 @@ check("cada amostra do grupo ainda emite a sua observação",
 
 print("\n[10] versao_instrumento: a quebra da série fica DENTRO do dado")
 check("a constante existe e foi bumpada (a medição mudou de novo)",
-      pl.VERSAO_INSTRUMENTO == 4, pl.VERSAO_INSTRUMENTO)
+      pl.VERSAO_INSTRUMENTO >= 4, pl.VERSAO_INSTRUMENTO)
 check("é carimbada nas linhas de evento",
       src.count('"versao_instrumento": VERSAO_INSTRUMENTO') == 2)
 sql = open("sql/schema.sql").read()
