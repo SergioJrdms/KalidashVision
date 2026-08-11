@@ -121,12 +121,24 @@ check("o porquê está escrito (descrever custaria VLM)",
       "descrever custaria uma chamada de VLM" in fonte)
 
 # ══════════════════════════ PARTE 2 ══════════════════════════
-def desc(tid, cor_sup, cor_inf, tempo_posto, razoes=None, altura=0.5, cam="cam1"):
-    return {"id": f"d{tid}", "video_id": f"v{tid // 10}", "pessoa_track_id": tid,
+def desc(tid, cor_sup, cor_inf, tempo_posto, razoes=None, altura=0.5, cam="cam1",
+         n_amostras=20, t_ini=None, t_fim=None, x=0.5, video=None):
+    """Fase 92: o descritor ganhou as PONTAS (t_ini/t_fim + caixa inicial e
+    final). Sem elas a costura não tem o que costurar — e `n_amostras` passou a
+    decidir se o track entra no agrupamento ou fica `indefinido`.
+
+    Por padrão os tracks ficam LONGE no tempo (tid * 1000 s), para os testes de
+    aparência não serem costurados sem querer."""
+    t0 = tid * 1000.0 if t_ini is None else t_ini
+    return {"id": f"d{tid}", "video_id": video or f"v{tid // 10}",
+            "pessoa_track_id": tid,
             "cam_id": cam, "tempo_posto_s": tempo_posto,
             "tempo_visivel_s": tempo_posto,
+            "n_amostras": n_amostras, "n_amostras_posto": n_amostras,
             "altura_rel": altura, "razoes": razoes,
             "hist_sup": cor_sup, "hist_inf": cor_inf,
+            "t_ini_s": t0, "t_fim_s": (t0 + 30.0) if t_fim is None else t_fim,
+            "bbox_ini": [x, 0.5, 0.4], "bbox_fim": [x, 0.5, 0.4],
             "bbox_ref": [0.1, 0.1, 0.3, 0.9], "frame_ref": 10,
             "frame_w": 640, "frame_h": 480}
 
@@ -287,6 +299,70 @@ _s, m_r = pl._sim_descritores(desc(3, AZUL, AZUL, 100, R_STR),
 check("razões com valores em string também não levantam", m_r == "ok", m_r)
 check("histograma com strings dentro não levanta",
       pl._sim_hist(["10", "0", "0", "0", "0", "0"], AZUL) == 1.0)
+
+print("\n[12c] COSTURA GEOMÉTRICA — antes da cor, e sem depender dela")
+# Três tracks do MESMO vídeo, em sequência, no mesmo lugar: é uma pessoa só
+# que o BoT-SORT perdeu duas vezes atrás do torno.
+frag = [desc(1, AZUL, AZUL, 20, n_amostras=2, t_ini=0, t_fim=8, x=0.50, video="vA"),
+        desc(2, AZUL, AZUL, 20, n_amostras=2, t_ini=11, t_fim=19, x=0.52, video="vA"),
+        desc(3, AZUL, AZUL, 20, n_amostras=2, t_ini=22, t_fim=40, x=0.54, video="vA")]
+c = pl.costurar_tracks(frag)
+check("três fragmentos viram UM track", len(c) == 1, [x["pessoa_track_id"] for x in c])
+check("as amostras SOMAM (é daí que vem o ganho)", c[0]["n_amostras"] == 6, c[0]["n_amostras"])
+check("o tempo visível soma", c[0]["tempo_visivel_s"] == 60, c[0]["tempo_visivel_s"])
+check("o histograma soma (menos ruído)", c[0]["hist_sup"][0] == 30, c[0]["hist_sup"])
+check("guarda quais tracks foram costurados",
+      sorted(c[0]["tracks_costurados"]) == [1, 2, 3], c[0].get("tracks_costurados"))
+
+# Duas pessoas ao MESMO TEMPO nunca podem ser costuradas: sobreposição no
+# tempo é prova de que são duas.
+juntos = [desc(1, AZUL, AZUL, 20, t_ini=0, t_fim=30, x=0.3, video="vB"),
+          desc(2, AZUL, AZUL, 20, t_ini=5, t_fim=35, x=0.7, video="vB")]
+check("tracks SIMULTÂNEOS não costuram", len(pl.costurar_tracks(juntos)) == 2)
+
+# Longe no espaço: a pessoa não se teletransporta.
+longe = [desc(1, AZUL, AZUL, 20, t_ini=0, t_fim=10, x=0.10, video="vC"),
+         desc(2, AZUL, AZUL, 20, t_ini=12, t_fim=20, x=0.90, video="vC")]
+check("salto espacial grande não costura", len(pl.costurar_tracks(longe)) == 2)
+
+# Gap longo demais.
+tarde = [desc(1, AZUL, AZUL, 20, t_ini=0, t_fim=10, x=0.5, video="vD"),
+         desc(2, AZUL, AZUL, 20, t_ini=60, t_fim=70, x=0.5, video="vD")]
+check("gap acima do teto não costura", len(pl.costurar_tracks(tarde)) == 2)
+
+# Vídeos diferentes nunca costuram (o tracker é zerado entre vídeos).
+outro = [desc(1, AZUL, AZUL, 20, t_ini=0, t_fim=10, x=0.5, video="vE"),
+         desc(2, AZUL, AZUL, 20, t_ini=12, t_fim=20, x=0.5, video="vF")]
+check("vídeos diferentes não costuram", len(pl.costurar_tracks(outro)) == 2)
+# Câmeras diferentes idem.
+cams = [desc(1, AZUL, AZUL, 20, t_ini=0, t_fim=10, x=0.5, video="vG", cam="cam1"),
+        desc(2, AZUL, AZUL, 20, t_ini=12, t_fim=20, x=0.5, video="vG", cam="cam2")]
+check("câmeras diferentes não costuram", len(pl.costurar_tracks(cams)) == 2)
+check("a costura é pura geometria — não olha cor",
+      len(pl.costurar_tracks(
+          [desc(1, AZUL, AZUL, 20, t_ini=0, t_fim=10, x=0.5, video="vH"),
+           desc(2, VERM, VERM, 20, t_ini=12, t_fim=20, x=0.5, video="vH")])) == 1)
+
+print("\n[12d] PISO DE AMOSTRAS — track curto fica de fora, não polui")
+curtos = [desc(1, AZUL, AZUL, 300, n_amostras=30),
+          desc(2, VERM, VERM, 10, n_amostras=1, t_ini=9000)]
+gs = pl.agrupar_descritores(curtos)
+check("o curto vira grupo PRÓPRIO", len(gs) == 2, [g["n_tracks"] for g in gs])
+ind = [g for g in gs if g.get("indefinido")]
+check("marcado como indefinido", len(ind) == 1, [g.get("indefinido") for g in gs])
+check("e o longo NÃO é indefinido",
+      any(not g.get("indefinido") for g in gs))
+
+print("\n[12e] COMPLETE-LINK — a cadeia deixa de fundir o dia inteiro")
+# A~B e B~C, mas A e C são opostos. Single-link fundiria os três; complete-link
+# não. É o encadeamento que transformou 222 dos 224 tracks da cam1 num grupo.
+A = [10, 0, 0, 0, 0, 0]
+B = [5, 5, 0, 0, 0, 0]
+C = [0, 10, 0, 0, 0, 0]
+cadeia = [desc(1, A, A, 100), desc(2, B, B, 100), desc(3, C, C, 100)]
+gs2 = pl.agrupar_descritores(cadeia)
+check("A e C NÃO caem no mesmo grupo (sem encadeamento)",
+      not any(len(g["tracks"]) == 3 for g in gs2), [g["n_tracks"] for g in gs2])
 
 print("\n[13] Por CÂMERA e por DIA — cam1 e cam2 não são a mesma régua")
 r4, _ = rodar([desc(i, AZUL, AZUL, 200, cam="cam1") for i in range(1, 9)]

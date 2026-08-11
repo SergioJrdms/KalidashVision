@@ -939,7 +939,11 @@ def _anexar_segundo_angulo(
                             acumular_descritor(
                                 desc_acc, int(ids2[j]), frame=frame, pessoa=pessoa2,
                                 w=w2, h=h2, tempo_s=am.tempo_s,
-                                no_posto=no_posto2, papel=None,
+                                # Fase 92: a cam2 mandava papel=None e os 192
+                                # tracks do dia saíram sem rótulo — sem ele não
+                                # dá nem para medir separabilidade na lateral.
+                                no_posto=no_posto2,
+                                papel=("operador" if no_posto2 else "visitante"),
                             )
                     if bbox_no_posto is not None:
                         am.bbox_cam2 = bbox_no_posto[0]
@@ -2266,6 +2270,10 @@ def acumular_descritor(acc: dict, tid: int, *, frame, pessoa: dict,
         "alturas_rel": [], "aspectos": [], "n": 0, "n_posto": 0,
         "papeis": Counter(), "t_ini": tempo_s, "t_fim": tempo_s,
         "melhor_area": -1.0, "bbox_ref": None, "frame_ref": None,
+        # Fase 92: as pontas do track. A costura pergunta "onde este terminou e
+        # onde aquele começou?" — o recorte de MAIOR ÁREA (bbox_ref) não serve
+        # para isso, porque é o melhor quadro, não a borda.
+        "bbox_ini": None, "bbox_fim": None,
     })
     d["n"] += 1
     d["t_fim"] = max(d["t_fim"], tempo_s)
@@ -2279,6 +2287,12 @@ def acumular_descritor(acc: dict, tid: int, *, frame, pessoa: dict,
     if _bbox_valido(bbox):
         x1, y1, x2, y2 = (float(v) for v in bbox[:4])
         alt, larg = y2 - y1, x2 - x1
+        _cx = [round((x1 + x2) / 2 / max(1, w), 5), round((y1 + y2) / 2 / max(1, h), 5),
+               round(alt / max(1, h), 5)]
+        if d["bbox_ini"] is None or tempo_s <= d["t_ini"]:
+            d["bbox_ini"] = _cx
+        if d["bbox_fim"] is None or tempo_s >= d["t_fim"]:
+            d["bbox_fim"] = _cx
         d["alturas_rel"].append(alt / max(1.0, float(h)))
         d["aspectos"].append(larg / max(1.0, alt))
         area = alt * larg
@@ -2363,6 +2377,13 @@ def fechar_descritores(acc: dict, intervalo_s: float, cam_id: str | None,
                           "n_sup": len(d["hist_sup"]), "n_inf": len(d["hist_inf"])},
             "bbox_ref": d["bbox_ref"],
             "frame_ref": d["frame_ref"],
+            # Fase 92: as pontas do track, em coordenada NORMALIZADA
+            # [cx, cy, altura_rel] — é o insumo da costura geométrica, e
+            # normalizado para não depender da resolução do vídeo.
+            "t_ini_s": round(float(d["t_ini"]), 2),
+            "t_fim_s": round(float(d["t_fim"]), 2),
+            "bbox_ini": d["bbox_ini"],
+            "bbox_fim": d["bbox_fim"],
             "frame_w": int(w), "frame_h": int(h),
         })
     return saida
@@ -5011,44 +5032,224 @@ def _sim_descritores(d1: dict, d2: dict) -> tuple[float | None, str]:
     return cor, "ok"
 
 
+# ── Fase 92 — COSTURA GEOMÉTRICA, ANTES DA COR ───────────────────────────
+# O experimento da Fase 91 respondeu: aparência sozinha não separa. Medindo
+# operador × visitante (rótulo fraco mas independente da cor), a separação foi
+# de +0,025 quando um limiar precisaria de ~+0,15. E a distribuição de
+# similaridade é unimodal, sem vale — não existe limiar bom.
+#
+# A causa está à vista: o track MEDIANO da cam1 dura 8 s, o mínimo. Com 1-2
+# amostras o histograma é ruído, e só 8% dos tracks da cam1 têm alguma razão
+# corporal bem medida (o operador fica atrás do torno). Na cam2 o track mediano
+# dura 48 s e a cobertura de razão sobe para 41% — a diferença é DURAÇÃO, não
+# ângulo.
+#
+# Então ataca-se a duração primeiro, e por GEOMETRIA, que não depende de
+# aparência: um track que termina onde outro começa poucos segundos depois é a
+# mesma pessoa. Pessoa não se teletransporta — é o mesmo princípio da ponte
+# temporal da Fase 34, aplicado a tracks em vez de a presença.
+#
+# ⚠️ Custa ZERO: é aritmética sobre dados que o detector já produziu.
+_COSTURA_GAP_S = float(os.environ.get("KV_COSTURA_GAP_S", "6"))
+# Distância máxima entre o fim de um e o começo do outro, em ALTURAS DE CORPO.
+# Invariante de escala: 0,8 altura é aproximadamente um passo lateral.
+_COSTURA_DIST = float(os.environ.get("KV_COSTURA_DIST", "0.8"))
+# Altura aparente não pode saltar: quem estava perto não fica longe em 3 s.
+_COSTURA_ALTURA_TOL = float(os.environ.get("KV_COSTURA_ALTURA_TOL", "0.30"))
+# Piso DEPOIS da costura: track que não chegar aqui fica de fora do
+# agrupamento em vez de poluir a cadeia com histograma de 1 amostra.
+_COSTURA_MIN_AMOSTRAS = int(os.environ.get("KV_COSTURA_MIN_AMOSTRAS", "5"))
+
+
+def _ponta(d: dict, qual: str):
+    v = d.get("bbox_fim" if qual == "fim" else "bbox_ini")
+    if not v or len(v) < 3:
+        return None
+    try:
+        return (float(v[0]), float(v[1]), float(v[2]))
+    except (TypeError, ValueError):
+        return None
+
+
+def costurar_tracks(descritores: list) -> list:
+    """Junta tracks do MESMO vídeo e da MESMA câmera que são a mesma pessoa por
+    CONTINUIDADE — o track termina e outro começa logo depois, ali perto.
+
+    Geometria, não aparência: é confiável justamente onde a cor falha. Tracks
+    não cruzam vídeo (o tracker é zerado entre vídeos desde a Fase 64), então a
+    costura é sempre dentro de um vídeo — que é exatamente onde a fragmentação
+    acontece.
+
+    Devolve descritores FUNDIDOS: histogramas somados (mais amostras, menos
+    ruído), razões com o `n` somado, tempos somados.
+    """
+    por_video: dict = defaultdict(list)
+    for d in descritores:
+        por_video[(d.get("video_id"), d.get("cam_id"))].append(d)
+
+    saida = []
+    for _chave, ds in por_video.items():
+        ds = sorted(ds, key=lambda x: (_num(x.get("t_ini_s")) or 0.0))
+        pai = list(range(len(ds)))
+
+        def achar(i):
+            while pai[i] != i:
+                pai[i] = pai[pai[i]]
+                i = pai[i]
+            return i
+
+        for i, a in enumerate(ds):
+            fa = _num(a.get("t_fim_s"))
+            pa = _ponta(a, "fim")
+            if fa is None or pa is None:
+                continue
+            melhor, melhor_gap = None, None
+            for j, b in enumerate(ds):
+                if i == j:
+                    continue
+                ib = _num(b.get("t_ini_s"))
+                pb = _ponta(b, "ini")
+                if ib is None or pb is None:
+                    continue
+                gap = ib - fa
+                # Só costura para FRENTE: o outro track começa DEPOIS deste
+                # terminar. Sobreposição no tempo é prova de que são duas
+                # pessoas — as duas estavam em quadro ao mesmo tempo.
+                if gap < 0 or gap > _COSTURA_GAP_S:
+                    continue
+                alt = max(1e-6, (pa[2] + pb[2]) / 2)
+                dist = ((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2) ** 0.5 / alt
+                if dist > _COSTURA_DIST:
+                    continue
+                if abs(pa[2] - pb[2]) / max(pa[2], pb[2]) > _COSTURA_ALTURA_TOL:
+                    continue      # saltou de profundidade: não é a mesma pessoa
+                if melhor is None or gap < melhor_gap:
+                    melhor, melhor_gap = j, gap
+            if melhor is not None:
+                ra, rb = achar(i), achar(melhor)
+                if ra != rb:
+                    pai[max(ra, rb)] = min(ra, rb)
+
+        grupos: dict = defaultdict(list)
+        for i, d in enumerate(ds):
+            grupos[achar(i)].append(d)
+        for membros in grupos.values():
+            saida.append(_fundir_tracks(membros) if len(membros) > 1 else membros[0])
+    return saida
+
+
+def _fundir_tracks(membros: list) -> dict:
+    """Funde tracks costurados num descritor só. Histogramas SOMADOS — é daí
+    que vem o ganho: dois tracks de 1 amostra viram um de 2, e o ruído cai."""
+    membros = sorted(membros, key=lambda m: _num(m.get("t_ini_s")) or 0.0)
+    base = max(membros, key=lambda m: _num(m.get("tempo_visivel_s")) or 0.0)
+    def soma_hist(chave):
+        vetores = [m.get(chave) for m in membros if m.get(chave)]
+        if not vetores:
+            return None
+        n = min(len(v) for v in vetores)
+        return [sum((_num(v[i]) or 0.0) for v in vetores) for i in range(n)]
+    razoes: dict = {}
+    for m in membros:
+        for nome, r in (m.get("razoes") or {}).items():
+            if not isinstance(r, dict):
+                continue
+            cur = razoes.setdefault(nome, {"med": None, "mad": None, "n": 0, "_soma": 0.0})
+            n = int(_num(r.get("n")) or 0)
+            med = _num(r.get("med"))
+            if n and med is not None:
+                cur["_soma"] += med * n
+                cur["n"] += n
+    for nome, r in razoes.items():
+        r["med"] = round(r["_soma"] / r["n"], 4) if r["n"] else None
+        r.pop("_soma", None)
+    alturas = [(_num(m.get("altura_rel")), _num(m.get("tempo_visivel_s")) or 1.0)
+               for m in membros if _num(m.get("altura_rel")) is not None]
+    altura = (round(sum(a * p for a, p in alturas) / sum(p for _a, p in alturas), 5)
+              if alturas else None)
+    return {
+        **base,
+        "pessoa_track_id": base.get("pessoa_track_id"),
+        "tracks_costurados": [m.get("pessoa_track_id") for m in membros],
+        "n_costurados": len(membros),
+        "t_ini_s": _num(membros[0].get("t_ini_s")),
+        "t_fim_s": max((_num(m.get("t_fim_s")) or 0.0) for m in membros),
+        "tempo_posto_s": sum((_num(m.get("tempo_posto_s")) or 0.0) for m in membros),
+        "tempo_visivel_s": sum((_num(m.get("tempo_visivel_s")) or 0.0) for m in membros),
+        "n_amostras": sum(int(_num(m.get("n_amostras")) or 0) for m in membros),
+        "n_amostras_posto": sum(int(_num(m.get("n_amostras_posto")) or 0) for m in membros),
+        "hist_sup": soma_hist("hist_sup"),
+        "hist_inf": soma_hist("hist_inf"),
+        "razoes": razoes or None,
+        "altura_rel": altura,
+    }
+
+
 def agrupar_descritores(descritores: list) -> list[dict]:
     """Agrupa tracks da MESMA câmera que parecem a mesma pessoa.
 
-    União de vizinhos (single-link): se A parece B e B parece C, os três são um
-    grupo. É a escolha certa aqui porque o mesmo operador aparece em dezenas de
-    tracks curtos ao longo do dia, ligados em cadeia pelo tempo; exigir que
-    TODOS se pareçam entre si (complete-link) partiria o titular em vários
-    grupos justamente por causa da fragmentação que já medimos.
+    Fase 92 — TRÊS MUDANÇAS, na ordem em que o experimento pediu:
+
+    1. COSTURA GEOMÉTRICA ANTES. Tracks fragmentados são costurados por
+       continuidade (ver `costurar_tracks`) antes de qualquer comparação de
+       aparência. É o que dá amostras suficientes para o histograma e para as
+       razões corporais existirem.
+
+    2. PISO DE AMOSTRAS. Track que, mesmo depois da costura, não chega a
+       `KV_COSTURA_MIN_AMOSTRAS` fica FORA do agrupamento — vira grupo próprio,
+       marcado `indefinido`. Com 1-2 amostras o histograma é ruído, e ruído
+       encadeado por single-link foi o que transformou 222 dos 224 tracks da
+       cam1 num grupo só.
+
+    3. COMPLETE-LINK no lugar de single-link. Agora que os tracks são longos, a
+       cadeia deixa de ser necessária e passa a ser o problema: em single-link
+       basta A~B e B~C para juntar A e C mesmo que A e C não se pareçam em nada,
+       e com 24,5% dos pares passando isso funde o dia inteiro. Complete-link
+       exige que TODOS os membros se pareçam entre si.
     """
-    n = len(descritores)
-    pai = list(range(n))
+    grosso = costurar_tracks(descritores)
+    aptos, curtos = [], []
+    for d in grosso:
+        n_am = int(_num(d.get("n_amostras")) or 0)
+        (aptos if n_am >= _COSTURA_MIN_AMOSTRAS else curtos).append(d)
 
-    def achar(i):
-        while pai[i] != i:
-            pai[i] = pai[pai[i]]
-            i = pai[i]
-        return i
+    # Complete-link aglomerativo: só funde dois grupos se TODO par entre eles
+    # passar. O custo é O(n²) por rodada, e n aqui é dezenas — não centenas.
+    clusters = [[d] for d in aptos]
+    def _combina(ca, cb) -> bool:
+        for a in ca:
+            for b in cb:
+                sim, motivo = _sim_descritores(a, b)
+                # `None` é "não dá para dizer", não "são iguais": sem sinal
+                # comparável, não funde.
+                if sim is None or motivo != "ok":
+                    return False
+        return True
 
-    def unir(i, j):
-        ri, rj = achar(i), achar(j)
-        if ri != rj:
-            pai[max(ri, rj)] = min(ri, rj)
+    fundiu = True
+    while fundiu and len(clusters) > 1:
+        fundiu = False
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                if _combina(clusters[i], clusters[j]):
+                    clusters[i] = clusters[i] + clusters[j]
+                    clusters.pop(j)
+                    fundiu = True
+                    break
+            if fundiu:
+                break
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            sim, motivo = _sim_descritores(descritores[i], descritores[j])
-            # `None` é "não dá para dizer", não "são diferentes": track sem cor
-            # não vira grupo novo por falta de sinal — ele fica sozinho, e isso
-            # aparece como grupo de 1 na tela em vez de virar sopa.
-            if sim is not None and motivo == "ok":
-                unir(i, j)
-
-    por_raiz: dict = defaultdict(list)
-    for i, d in enumerate(descritores):
-        por_raiz[achar(i)].append(d)
+    por_raiz: dict = {}
+    for k, membros in enumerate(clusters):
+        por_raiz[k] = membros
+    # Cada track curto vira grupo próprio: aparece na tela como o que é — um
+    # pedaço solto que não deu para atribuir —, em vez de ser distribuído por
+    # adivinhação entre os grupos grandes.
+    for k, d in enumerate(curtos):
+        por_raiz[f"curto{k}"] = [d]
 
     grupos = []
-    for membros in por_raiz.values():
+    for _k, membros in por_raiz.items():
         tempo_posto = sum(_num(m.get("tempo_posto_s")) or 0.0 for m in membros)
         tempo_vis = sum(_num(m.get("tempo_visivel_s")) or 0.0 for m in membros)
         # Recorte de referência: o track com MAIS tempo no posto é o que tem a
@@ -5056,6 +5257,10 @@ def agrupar_descritores(descritores: list) -> list[dict]:
         ref = max(membros, key=lambda m: _num(m.get("tempo_posto_s")) or 0.0)
         grupos.append({
             "n_tracks": len(membros),
+            "n_tracks_originais": sum(int(m.get("n_costurados") or 1) for m in membros),
+            "n_amostras": sum(int(_num(m.get("n_amostras")) or 0) for m in membros),
+            # Grupo abaixo do piso não é "outra pessoa": é pedaço solto.
+            "indefinido": str(_k).startswith("curto"),
             # ASSINATURA = a cor do track de referência. É o que a verificação
             # de continuidade entre dias compara. Não é biometria: é a roupa,
             # e ela muda — por isso a divergência vira ALERTA, não correção.

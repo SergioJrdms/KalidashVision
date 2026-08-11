@@ -1372,3 +1372,31 @@ grant select, insert, update, delete on titular_dia to anon, authenticated;
 -- ════════════════════════════════════════════════════════════════════════
 alter table eventos add column if not exists pessoas_posto_cam2 int;
 alter table eventos add column if not exists pessoas_so_na_cam2 int;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 92 — AS PONTAS DO TRACK, PARA A COSTURA GEOMÉTRICA
+--
+-- O experimento da Fase 91 respondeu: aparência sozinha não separa. Medindo
+-- operador × visitante (rótulo fraco, mas INDEPENDENTE da cor), a separação de
+-- similaridade foi de +0,025 — um limiar precisaria de ~+0,15. E a
+-- distribuição é unimodal, sem vale: não existe limiar bom.
+--
+-- A causa é DURAÇÃO, não ângulo. Track mediano da cam1 = 8 s (o mínimo), com
+-- 1-2 amostras por histograma; só 8% dos tracks da cam1 têm alguma razão
+-- corporal bem medida. Na cam2 o track mediano dura 48 s e a cobertura sobe
+-- para 41% — a MESMA fórmula, com track mais longo.
+--
+-- Então costura-se por GEOMETRIA antes de olhar aparência: track que termina
+-- onde outro começa poucos segundos depois é a mesma pessoa. Pessoa não se
+-- teletransporta — é a ponte temporal da Fase 34 aplicada a tracks.
+--
+-- `t_ini_s`/`t_fim_s` já eram calculados no acumulador e jogados fora;
+-- `bbox_ini`/`bbox_fim` são [cx, cy, altura] normalizados (independentes da
+-- resolução). `bbox_ref` NÃO serve para isso: ela é o melhor quadro do track,
+-- não a borda.
+-- ════════════════════════════════════════════════════════════════════════
+alter table descritores_track add column if not exists t_ini_s numeric;
+alter table descritores_track add column if not exists t_fim_s numeric;
+alter table descritores_track add column if not exists bbox_ini jsonb;
+alter table descritores_track add column if not exists bbox_fim jsonb;
