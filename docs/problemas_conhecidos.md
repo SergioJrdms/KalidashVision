@@ -686,6 +686,49 @@ Com uma imagem o break-even vai para ~13 e o gate não tem como sair no prejuíz
 
 ---
 
+## 19. A tela de conferência mostrou a pessoa ERRADA — e com cara de certeza
+
+**Estado:** corrigido (Fase 93). Fica aqui pelo PADRÃO, não pelo caso.
+
+A tela "Quem dominou o posto" existe para uma coisa só: o dono bater o olho nos
+recortes e dizer se o agrupamento separou pessoas ou virou sopa. É o julgamento
+humano que decide se a identificação um dia pode mexer no número.
+
+O recorte era buscado por `(video_id, pessoa_track_id)`. Os ids de track da
+**cam2 vêm de outro tracker** e não têm relação nenhuma com os da cam1 — mas
+são inteiros pequenos, então **colidem por acaso**. Quando colidiam, o sistema
+baixava um frame da **cam1** e o cortava com a **caixa da cam2**: um recorte
+perfeitamente renderizado, sem nenhum aviso, **de outra pessoa**.
+
+O dono olhou aqueles cartões e disse "aparentemente acertou". Parte do que ele
+viu podia não ser quem o rótulo dizia.
+
+### Por que isto é da mesma família dos itens 8, 11 e 17
+
+Todos são o sistema **afirmando com confiança algo que não tinha como saber**:
+
+| item | a afirmação sem base |
+|---|---|
+| 8 | o cluster colapsava o discriminador e o rótulo afirmava a cena mesmo assim |
+| 11 | `monitorar_maquina_parada` afirmava máquina parada com sinal de moeda |
+| 17 | share 1,00 num minuto herdado — certeza máxima sem olhar quadro nenhum |
+| **19** | **um rosto na tela, sem aviso, no lugar de "não sei quem é"** |
+
+E o 19 é o mais perigoso dos quatro, porque os outros erram um número e este
+erra **a evidência que o humano usa para auditar os números**. Uma tela de
+conferência que mente corrompe a própria correção.
+
+**A regra que fica:** quando a chave de junção pode colidir por acaso (ids de
+espaços diferentes, nomes, timestamps arredondados), a ausência de resultado e
+o resultado errado são indistinguíveis — e o segundo é silencioso. Junção entre
+espaços de id distintos precisa ser **impossível por construção**, não
+improvável. Hoje a cam2 é explicitamente sem recorte, com o motivo vindo do
+servidor.
+
+---
+
+---
+
 ## 2. `gravado_em` carimba a tz do servidor no timestamp do nome
 
 **Estado:** não corrigido. Sem efeito visível hoje.

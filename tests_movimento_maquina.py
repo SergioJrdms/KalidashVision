@@ -142,13 +142,16 @@ check("sem veredito de movimento (não inventa 0%)",
 
 print("\n[6] Máscara de pessoa: tira do NUMERADOR e do DENOMINADOR")
 m = pl.MedidorMovimento(ROIS, W, H, cam_id="cam1")
-validos, ocup = m._mascara_pessoas([(400, 200, 460, 260)])
+# Fase 94: a máscara devolve TRÊS coisas — a terceira é a oclusão da PARTE
+# MÓVEL, que é None sem mapa com base ("não sei", nunca zero).
+validos, ocup, movel = m._mascara_pessoas([(400, 200, 460, 260)])
+check("sem mapa com base, a oclusão da parte móvel é None (não 0)", movel is None)
 check("a pessoa vira pixel inválido", validos.sum() < validos.size)
 check("a ocupação é medida", 0 < ocup < 1, ocup)
-v2, ocup2 = m._mascara_pessoas([])
+v2, ocup2, _ = m._mascara_pessoas([])
 check("sem pessoa, tudo é válido", int(v2.sum()) == v2.size and ocup2 == 0.0)
 # A dilatação existe porque a bbox do YOLO é justa e membros escapam.
-_, ocup_dil = m._mascara_pessoas([(400, 200, 460, 260)])
+_, ocup_dil, _ = m._mascara_pessoas([(400, 200, 460, 260)])
 check("a caixa é dilatada (cobre mais que a bbox crua)",
       ocup_dil > (60 * 60) / float((620 - 320) * (440 - 120)) * 0.9)
 
@@ -302,6 +305,110 @@ check("com constraint dos 4 valores válidos",
 check("a tabela do mapa existe", "create table if not exists mapa_movimento" in sql)
 check("e a view de calibração ordena pela discordância",
       "v_calibracao_movimento" in sql and "discordam" in sql)
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Fase 94 — O TERCEIRO ESTADO
+#
+# O dono abriu o vídeo e o SENSOR ESTAVA CERTO: pct=0 num minuto de operação
+# MANUAL. Não era imobilidade — era ponto cego, porque a máscara de pessoa
+# removeu exatamente os pixels da manipulação e a ocupação TOTAL ficou abaixo
+# do teto (o operador cobre ~20% da zona).
+# ══════════════════════════════════════════════════════════════════════════
+print("\n[19] Oclusão pesada por ONDE, não só por quanto")
+fonte = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "backend", "pipeline.py"), encoding="utf-8").read()
+check("existe o motivo 'parte_movel_ocluida'", "parte_movel_ocluida" in fonte)
+check("com limiar próprio, separado da ocupação total",
+      "KV_MOV_MOVEL_OCLUIDA_MAX" in fonte and "KV_MOV_CELULA_MOVEL" in fonte)
+check("sem mapa com base, a oclusão da parte móvel é None (não zero)",
+      "movel_ocl = None" in fonte)
+check("e o detalhe do minuto reporta o número",
+      '"pct_movel_ocluida"' in fonte)
+check("o porquê está escrito (ponto cego, não imobilidade)",
+      "PONTO CEGO" in fonte or "ponto cego" in fonte)
+
+print("\n[20] modo_operacao: três estados, cada um com evidência")
+def det(ocup=5.0, contraste=40.0, movel=0):
+    d = {"pct_zona_ocupada": ocup, "contraste": contraste}
+    if movel:
+        d["descartados"] = {"parte_movel_ocluida": movel}
+    return d
+
+check("máquina em movimento → automatico",
+      pl.modo_operacao("continuo", det(), False) == "automatico")
+check("intermitente também → automatico",
+      pl.modo_operacao("intermitente", det(), True) == "automatico")
+check("mãos DURANTE movimento não vira 'manual' (a máquina está rodando)",
+      pl.modo_operacao("continuo", det(), True) == "automatico")
+check("indisponível POR oclusão da parte móvel + mãos → MANUAL",
+      pl.modo_operacao("indisponivel", det(movel=30), True) == "manual")
+check("indisponível por OUTRO motivo + mãos → indeterminado (não afirma)",
+      pl.modo_operacao("indisponivel", det(), True) == "indeterminado")
+check("indisponível sem mãos → indeterminado",
+      pl.modo_operacao("indisponivel", det(movel=30), False) == "indeterminado")
+check("ausente + medição boa + SEM mãos → parado",
+      pl.modo_operacao("ausente", det(), False) == "parado")
+check("ausente + mãos com medição BOA → indeterminado, não manual",
+      pl.modo_operacao("ausente", det(), True) == "indeterminado")
+check("ausente com zona muito ocupada não vira 'parado'",
+      pl.modo_operacao("ausente", det(ocup=40.0), False) == "indeterminado")
+check("ausente com contraste apertado não vira 'parado'",
+      pl.modo_operacao("ausente", det(contraste=9.0), False) == "indeterminado")
+check("sem medição nenhuma → indeterminado",
+      pl.modo_operacao(None, None, None) == "indeterminado")
+
+print("\n[21] A frase do modo descreve, e não decide o Lean")
+for modo in ("automatico", "manual", "parado"):
+    f = pl.frase_modo(modo)
+    check(f"'{modo}' tem frase e cita o sensor", "SENSOR" in f, f)
+    for proibido in ("produtiv", "desperdic", "ocios"):
+        check(f"'{modo}' não conclui '{proibido}'", proibido not in f.lower(), f)
+check("a de manual diz que NÃO é máquina parada",
+      "não de máquina parada" in pl.frase_modo("manual"))
+check("indeterminado não vira frase (silêncio é o certo)",
+      pl.frase_modo("indeterminado") == "" and pl.frase_modo(None) == "")
+
+print("\n[22] O veto não morde mais o trabalho manual")
+_real = pl._MOV_INJETAR
+pl._MOV_INJETAR = True
+try:
+    check("modo 'parado' + VLM dizendo ciclo → veta",
+          pl.veto_movimento("ausente", det(), "ciclo", "parado") is not None)
+    check("modo MANUAL nunca veta (seria mandar minuto produtivo à fila)",
+          pl.veto_movimento("ausente", det(), "ciclo", "manual") is None)
+    check("modo indeterminado nunca veta",
+          pl.veto_movimento("ausente", det(), "ciclo", "indeterminado") is None)
+    check("sem modo, o comportamento antigo é preservado",
+          pl.veto_movimento("ausente", det(), "ciclo", None) is not None)
+finally:
+    pl._MOV_INJETAR = _real
+
+print("\n[23] Medição e composição em campos SEPARADOS")
+check("o evento grava o modo", '"modo_operacao": e.get("modo_operacao")' in fonte)
+check("e continua gravando a medição crua",
+      '"movimento_maquina": e.get("movimento_maquina")' in fonte)
+check("o modo é composto onde `maos_maquina` existe (no minuto)",
+      'principais[-1]["modo_operacao"] = modo_operacao(' in fonte)
+check("o prompt recebe o MODO, não a medição crua",
+      "f = frase_modo(movimento.get(\"modo\"))" in fonte)
+sql = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "sql", "schema.sql"), encoding="utf-8").read()
+check("schema declara modo_operacao", "add column if not exists modo_operacao" in sql)
+check("com os quatro valores válidos",
+      "'automatico','manual','parado','indeterminado'" in sql)
+check("e registra por que são DOIS campos",
+      "a COMPOSIÇÃO" in sql and "estava certa?" in sql, "schema não explica os dois campos")
+
+print("\n[24] O número por RÓTULO — é ele que decide ligar a injeção")
+check("a calibração devolve por_modo", '"por_modo"' in fonte)
+check("com o corte por rótulo dentro", '"rotulos": sorted(' in fonte)
+check("e o porquê do corte está escrito",
+      "chamando de \"monitorar\" o que é trabalho manual" in fonte
+      or "monitorar" in fonte and "trabalho manual" in fonte)
+check("o item da lista traz o modo", '"modo_operacao": modo,' in fonte)
 
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

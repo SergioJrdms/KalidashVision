@@ -215,7 +215,10 @@ print("\n[12] Persistência e versão")
 check("n_observacoes é gravado", '"n_observacoes": e.get("n_observacoes")' in fonte)
 check("observacoes_origem é gravado",
       '"observacoes_origem": e.get("observacoes_origem")' in fonte)
-check("versão do instrumento subiu para 5", pl.VERSAO_INSTRUMENTO == 5)
+# >= e não ==: o contrato desta fase é "a versão foi bumpada AQUI". Cada fase
+# nova bumpa de novo, e uma suíte antiga não pode quebrar por isso.
+check("versão do instrumento foi bumpada nesta fase (>= 5)",
+      pl.VERSAO_INSTRUMENTO >= 5, pl.VERSAO_INSTRUMENTO)
 sql = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "sql", "schema.sql"), encoding="utf-8").read()
 check("schema declara as colunas novas",

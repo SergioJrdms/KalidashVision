@@ -1400,3 +1400,38 @@ alter table descritores_track add column if not exists t_ini_s numeric;
 alter table descritores_track add column if not exists t_fim_s numeric;
 alter table descritores_track add column if not exists bbox_ini jsonb;
 alter table descritores_track add column if not exists bbox_fim jsonb;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 94 — O TERCEIRO ESTADO: OPERAÇÃO MANUAL
+--
+-- O dono abriu o vídeo que a análise apontou (pct_com_movimento=0, VLM dizendo
+-- "ciclo") e o SENSOR ESTAVA CERTO: o torno não rodava sozinho — o operador o
+-- manipulava manualmente. Trabalho produtivo acontecendo, sem ciclo automático.
+--
+-- O desenho só tinha dois estados e esse caía como `ausente`, junto com a
+-- parada de verdade. Pior: `pct=0` ali não era imobilidade, era PONTO CEGO — a
+-- máscara de pessoa removeu exatamente os pixels da manipulação, e a ocupação
+-- TOTAL ficou abaixo do teto porque o operador cobre só ~20% da zona.
+--
+-- Dois campos, de propósito:
+--   `movimento_maquina` = o que foi MEDIDO
+--   `modo_operacao`     = a COMPOSIÇÃO (medição + mãos na máquina)
+-- Colapsar num só impediria, daqui a duas semanas, responder "a composição
+-- estava certa?" — que é exatamente a pergunta que não pôde ser feita sobre o
+-- ciclo/parada do VLM, por falta de coluna.
+--
+-- `manual` só é afirmado quando a medição ficou indisponível POR CAUSA das
+-- mãos. Compor "ausente + mãos → manual" acertaria o caso do vídeo pela razão
+-- errada e quebraria em mão-na-máquina-durante-ciclo.
+--
+--   select modo_operacao, coalesce(label_corrigido, comportamento_label) rotulo,
+--          round(sum(tempo_fim_s-tempo_inicio_s)/60) min
+--     from eventos where principal and modo_operacao is not null
+--    group by 1,2 order by 1, min desc;
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists modo_operacao text;
+alter table eventos drop constraint if exists eventos_modo_operacao_chk;
+alter table eventos add constraint eventos_modo_operacao_chk
+    check (modo_operacao is null or modo_operacao in
+           ('automatico','manual','parado','indeterminado'));

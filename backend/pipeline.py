@@ -2075,10 +2075,13 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #   4 = partição de cena DESLIGADA (o discriminador media ruído); o estado da
 #       máquina sai do rótulo e vira coluna sob observação; rastro de que as
 #       camadas foram avaliadas
+#   6 = terceiro estado de trabalho (`modo_operacao`): operação MANUAL deixa
+#       de cair como parada; oclusão pesada por ONDE (parte móvel), não só por
+#       quanto
 #   5 = quadro OLHADO deixa de ser o mesmo que minuto COBERTO: herdada e
 #       interpolada mantêm o tempo e não votam na concordância; "não olhei"
 #       vira curva própria, separada da dúvida; cam2 só quando desambigua
-VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "5"))
+VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "6"))
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -2935,7 +2938,11 @@ def _contexto_zonas(amostra: Amostra, modo_op: bool,
     # influenciar o modelo quando o dono olhar os números e ligar a chave.
     # Medir e influenciar são decisões diferentes e não precisam do mesmo deploy.
     if _MOV_INJETAR and movimento:
-        f = frase_movimento(movimento.get("movimento"), movimento.get("detalhe"))
+        # Fase 94: entra o MODO (uma frase, três estados), não a medição crua —
+        # é o que o dono pediu: quanto menos o VLM tiver que inferir, melhor.
+        # A medição continua gravada em coluna própria, para poder ser auditada.
+        f = frase_modo(movimento.get("modo")) or frase_movimento(
+            movimento.get("movimento"), movimento.get("detalhe"))
         if f:
             txt += ". " + f
     return txt
@@ -4227,6 +4234,11 @@ def etapa_consolidar_principais(
         if _mov:
             principais[-1]["movimento_maquina"] = _mov.get("movimento")
             principais[-1]["movimento_detalhe"] = _mov.get("detalhe")
+            # Fase 94: o MODO é composto aqui porque é aqui que `maos_maquina`
+            # existe — ele vem dos crus do minuto, não do sensor.
+            _maos = any(e.get("maos_maquina") for e, _ in no_bucket)
+            principais[-1]["modo_operacao"] = modo_operacao(
+                _mov.get("movimento"), _mov.get("detalhe"), _maos)
         # Fase 57: CAMADAS DE DÚVIDA — determinísticas, em CPU, ZERO chamada
         # extra ao VLM. Camada nunca corrige o rótulo: só marca dúvida.
         if camadas:
@@ -4242,7 +4254,8 @@ def etapa_consolidar_principais(
             # o VLM não teve como considerar o movimento).
             _veto = veto_movimento(principais[-1].get("movimento_maquina"),
                                    principais[-1].get("movimento_detalhe"),
-                                   principais[-1].get("maquina"))
+                                   principais[-1].get("maquina"),
+                                   principais[-1].get("modo_operacao"))
             if _veto:
                 disparos = list(disparos) + [
                     {"nome": "sensor_movimento_contradiz_ciclo",
@@ -4565,7 +4578,17 @@ _MOV_GRADE = max(4, int(os.environ.get("KV_MOV_GRADE", "16")))
 _MOV_MAPA_MIN_PARES = int(os.environ.get("KV_MOV_MAPA_MIN_PARES", "20000"))
 _MOV_MAPA_PESO_MIN = float(os.environ.get("KV_MOV_MAPA_PESO_MIN", "0.25"))
 
+# Fase 94 — quanto da PARTE MÓVEL pode estar coberta antes de a medição
+# deixar de valer. Diferente de `_MOV_OCUPACAO_MAX`, que olha a zona inteira:
+# o operador em pé ao lado do torno cobre ~20% da zona, mas se esses 20% forem
+# a placa, o que sobra não responde nada.
+_MOV_MOVEL_OCLUIDA_MAX = float(os.environ.get("KV_MOV_MOVEL_OCLUIDA_MAX", "0.35"))
+# Célula "móvel" = que se mexe com frequência acima desta fração do topo do
+# mapa. Só faz sentido com o mapa já com base.
+_MOV_CELULA_MOVEL = float(os.environ.get("KV_MOV_CELULA_MOVEL", "0.50"))
+
 MOV_VALORES = ("continuo", "intermitente", "ausente", "indisponivel")
+MODO_VALORES = ("automatico", "manual", "parado", "indeterminado")
 
 
 def _retangulo_zonas_maquina(rois: dict, w: int, h: int) -> tuple | None:
@@ -4621,6 +4644,16 @@ class MedidorMovimento:
         self.n_pares_grade = 0
         self._mapa = self._normalizar_mapa(mapa)
         self._peso = None            # expansão do mapa, calculada uma vez só
+        self._peso_movel = None      # máscara das células que SE MEXEM
+        self._movel_exp = None       # a mesma, expandida ao tamanho do recorte
+        if self.ativo and self._mapa is not None:
+            try:
+                topo = max(max(l) for l in self._mapa) or 1.0
+                movel = [[1.0 if v >= _MOV_CELULA_MOVEL * topo else 0.0 for v in linha]
+                         for linha in self._mapa]
+                self._peso_movel = np.asarray(movel, dtype=np.float32)
+            except Exception:  # noqa: BLE001
+                self._peso_movel = None
         if self.ativo:
             x1, y1, x2, y2 = self.rect
             self.escala_px = _MOV_LARGURA / max(1, x2 - x1)
@@ -4683,7 +4716,20 @@ class MedidorMovimento:
             if cx2 > cx1 and cy2 > cy1:
                 ocupado[cy1:cy2, cx1:cx2] = 1
         n_ocup = int(ocupado.sum())
-        return (ocupado == 0), n_ocup / float(alt * larg)
+        # Fase 94: quanto da PARTE MÓVEL ficou coberta. Sem mapa com base não
+        # há como saber quais células são móveis, e aí devolve None — que é
+        # "não sei", nunca 0.
+        movel_ocl = None
+        if self._peso_movel is not None:
+            # A grade é 16x16; a máscara é do tamanho do recorte. Expande UMA
+            # vez (o mapa não muda dentro do vídeo).
+            if self._movel_exp is None:
+                self._movel_exp = cv2.resize(
+                    self._peso_movel, (larg, alt), interpolation=cv2.INTER_NEAREST)
+            tot = float(self._movel_exp.sum())
+            if tot > 0:
+                movel_ocl = float((self._movel_exp * ocupado).sum() / tot)
+        return (ocupado == 0), n_ocup / float(alt * larg), movel_ocl
 
     def passo(self, frame, tempo_s: float, bboxes_pessoas) -> None:
         """Um frame decodificado. Barato: recorte pequeno, dois Sobel, um diff."""
@@ -4700,11 +4746,23 @@ class MedidorMovimento:
         t_ant, self._t_ant = self._t_ant, tempo_s
         if ant is None:
             return
-        validos, ocupacao = self._mascara_pessoas(bboxes_pessoas)
+        validos, ocupacao, movel_ocl = self._mascara_pessoas(bboxes_pessoas)
         n_validos = int(validos.sum())
         par = {"t": round(tempo_s, 2), "ocupacao": round(ocupacao, 3),
+               "movel_ocluida": (round(movel_ocl, 3) if movel_ocl is not None else None),
                "valido": False, "movimento": False, "fracao": 0.0,
                "motivo": ""}
+        # ⚠️ Fase 94 — OCLUSÃO PESADA POR ONDE, NÃO SÓ POR QUANTO.
+        # O caso que o dono achou no vídeo: pct_com_movimento=0 num minuto de
+        # OPERAÇÃO MANUAL. Não era imobilidade — era ponto cego. A máscara de
+        # pessoa removeu exatamente os pixels onde a manipulação acontecia, e a
+        # ocupação TOTAL ficou abaixo do teto (o operador cobre ~20% da zona),
+        # então o par saiu como "ausente" em vez de "indisponivel".
+        # Aqui a pergunta muda: a parte que SE MEXE está coberta?
+        if movel_ocl is not None and movel_ocl > _MOV_MOVEL_OCLUIDA_MAX:
+            par["motivo"] = "parte_movel_ocluida"
+            self.pares.append(par)
+            return
         # Zona tomada por gente: não é "sem movimento", é "não dá para ver".
         if ocupacao > _MOV_OCUPACAO_MAX or n_validos < 64:
             par["motivo"] = "ocluida"
@@ -4777,8 +4835,12 @@ class MedidorMovimento:
             grupos[int(p["t"] // bucket_s)].append(p)
         saida = {}
         for m, ps in grupos.items():
-            saida[m] = classificar_movimento(ps, cam_id=self.cam_id,
-                                             zona=self.zona_nome)
+            r = classificar_movimento(ps, cam_id=self.cam_id, zona=self.zona_nome)
+            # O modo aqui é PRELIMINAR (sem `maos_maquina`, que só existe no
+            # minuto consolidado); serve ao prompt. A versão que vai ao banco é
+            # recomposta em `etapa_consolidar_principais`, com as mãos.
+            r["modo"] = modo_operacao(r["movimento"], r["detalhe"], None)
+            saida[m] = r
         return saida
 
 
@@ -4799,9 +4861,16 @@ def classificar_movimento(pares: list, cam_id: str | None = None,
         "pares": n,
         "pares_validos": nv,
         "pct_zona_ocupada": round(100.0 * sum(ocup) / len(ocup), 1) if ocup else None,
+        # Fase 94: é este número que separa "a máquina estava parada" de "a
+        # parte que se mexe estava coberta pelo operador".
+        "pct_movel_ocluida": (
+            round(100.0 * sum(m) / len(m), 1)
+            if (m := [p["movel_ocluida"] for p in pares
+                      if p.get("movel_ocluida") is not None]) else None),
         "descartados": {
             m: sum(1 for p in pares if p.get("motivo") == m)
-            for m in ("ocluida", "contraste_baixo", "blob_grande")
+            for m in ("ocluida", "contraste_baixo", "blob_grande",
+                      "parte_movel_ocluida")
             if any(p.get("motivo") == m for p in pares)
         } or None,
         "cam": cam_id,
@@ -4827,6 +4896,62 @@ def classificar_movimento(pares: list, cam_id: str | None = None,
     return {"movimento": v, "detalhe": detalhe}
 
 
+def modo_operacao(mov: str | None, detalhe: dict | None,
+                  maos_maquina: bool | None) -> str:
+    """Fase 94 — TRÊS estados de trabalho, não dois. FUNÇÃO PURA.
+
+    O desenho anterior só tinha "a máquina se mexe" ou "não se mexe", e isso
+    apagava um estado inteiro: OPERAÇÃO MANUAL — o operador manipulando a
+    máquina, trabalho produtivo acontecendo, sem ciclo automático em curso.
+    Ela caía como `ausente`, junto com a parada de verdade.
+
+    ⚠️ A REGRA CENTRAL: `manual` só é afirmado quando a medição ficou
+    INDISPONÍVEL **por causa das mãos** — ou seja, quando a parte móvel estava
+    coberta pelo operador. Compor "ausente + mãos → manual" acertaria o caso
+    do vídeo pela razão errada, e quebraria no seguinte: mão na máquina
+    DURANTE um ciclo automático (ajustando o avanço com a peça girando).
+
+    Mãos na máquina com medição BOA e sem movimento não é manual: é o operador
+    tocando uma máquina parada, que pode ser mil coisas. Isso é
+    `indeterminado`, e dizer `indeterminado` é a resposta honesta.
+    """
+    d = detalhe or {}
+    if mov in ("continuo", "intermitente"):
+        # A máquina se mexe. Se há mãos junto, é operação acompanhando ciclo —
+        # continua sendo a máquina trabalhando.
+        return "automatico"
+    if mov == "indisponivel":
+        cegou_pela_parte_movel = (d.get("descartados") or {}).get("parte_movel_ocluida", 0)
+        if maos_maquina and cegou_pela_parte_movel:
+            return "manual"
+        return "indeterminado"
+    if mov == "ausente":
+        if maos_maquina:
+            # Mediu bem, não viu movimento, e há mão na máquina: ambíguo entre
+            # manipulação fina demais para o sensor e mão apoiada. Não afirma.
+            return "indeterminado"
+        ocup = d.get("pct_zona_ocupada")
+        contraste = d.get("contraste")
+        if (ocup is not None and ocup <= 100 * _MOV_OCUPACAO_MAX * 0.5
+                and contraste is not None and contraste >= 2 * _MOV_ESCALA_MIN):
+            return "parado"
+        return "indeterminado"
+    return "indeterminado"
+
+
+def frase_modo(modo: str | None) -> str:
+    """Como o terceiro estado entra no prompt. Descreve o observado; quem
+    decide se aquilo é produtivo continua sendo o gestor, via categoria."""
+    return {
+        "automatico": ("SENSOR: a máquina esteve em MOVIMENTO neste minuto "
+                       "(medido por diferença entre quadros, descontando as pessoas)"),
+        "manual": ("SENSOR: a parte móvel da máquina esteve COBERTA PELAS MÃOS do "
+                   "operador — indício de OPERAÇÃO MANUAL, não de máquina parada"),
+        "parado": ("SENSOR: a máquina NÃO se moveu neste minuto, com a zona "
+                   "desimpedida e contraste bom — parada de verdade"),
+    }.get(modo or "", "")
+
+
 def frase_movimento(mov: str | None, detalhe: dict | None) -> str:
     """Como o fato entra no PROMPT. Descreve o observado e não conclui: quem
     traduz movimento em ciclo/parada continua sendo o VLM."""
@@ -4848,7 +4973,7 @@ def frase_movimento(mov: str | None, detalhe: dict | None) -> str:
 
 
 def veto_movimento(mov: str | None, detalhe: dict | None,
-                   maquina_vlm: str | None) -> str | None:
+                   maquina_vlm: str | None, modo: str | None = None) -> str | None:
     """Fase 89 — o ÚNICO poder do sinal determinístico, e ele não sobrescreve.
 
     Movimento claramente ausente, zona pouco ocupada e contraste bom, mas o
@@ -4859,6 +4984,12 @@ def veto_movimento(mov: str | None, detalhe: dict | None,
     considerar o movimento, e puni-lo por isso seria injusto e inútil.
     """
     if not _MOV_INJETAR or mov != "ausente":
+        return None
+    # Fase 94: `ausente` deixou de ser suficiente. Com mãos na máquina o
+    # minuto pode ser OPERAÇÃO MANUAL — trabalho produtivo —, e vetar ali
+    # mandaria um minuto produtivo para a fila como duvidoso. Só veta quando o
+    # modo diz `parado`, que é o único estado com evidência de imobilidade.
+    if modo and modo != "parado":
         return None
     if _normalizar_maquina(maquina_vlm) != "ciclo":
         return None
@@ -4941,8 +5072,8 @@ def calibrar_movimento(sb, empresa: str, processo: str, dia: str | None = None,
         sb, "eventos",
         "id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
         "tempo_inicio_s, tempo_fim_s, movimento_maquina, movimento_detalhe, "
-        "cena_maquina, cena_imovel, papel_pessoa, principal, validacao_correto, "
-        "versao_instrumento",
+        "modo_operacao, cena_maquina, cena_imovel, papel_pessoa, principal, "
+        "validacao_correto, versao_instrumento",
         empresa=empresa, processo=processo,
         ajustes=lambda q: q.not_.is_("movimento_maquina", "null"),
     )
@@ -4961,6 +5092,12 @@ def calibrar_movimento(sb, empresa: str, processo: str, dia: str | None = None,
         return 0
 
     itens, resumo = [], defaultdict(int)
+    # Fase 94 — O NÚMERO QUE DECIDE LIGAR A INJEÇÃO, e por RÓTULO.
+    # Se a operação manual estiver concentrada em `operar_torno`, o modo só
+    # refina o estado da máquina. Se estiver espalhada em `monitorar_maquina`,
+    # significa que o VLM está chamando de "monitorar" o que é trabalho manual
+    # — e aí o modo corrige a MEDIÇÃO DE PRODUTIVIDADE, não só o estado.
+    por_modo: dict = {}
     for e in eventos:
         if e.get("principal") is False or e.get("validacao_correto") is False:
             continue
@@ -4973,8 +5110,17 @@ def calibrar_movimento(sb, empresa: str, processo: str, dia: str | None = None,
             if inst.date().isoformat() != dia:
                 continue
         mov, vlm = e.get("movimento_maquina"), e.get("cena_maquina")
+        modo = e.get("modo_operacao")
+        rot = e.get("label_corrigido") or e.get("comportamento_label")
         d = e.get("movimento_detalhe") or {}
         resumo[f"{mov}×{vlm or 'null'}"] += 1
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0)
+                  - float(e.get("tempo_inicio_s") or 0))
+        _mod = por_modo.setdefault(modo or "sem_modo",
+                                   {"minutos": 0.0, "eventos": 0, "rotulos": {}})
+        _mod["minutos"] += dur / 60.0
+        _mod["eventos"] += 1
+        _mod["rotulos"][rot] = _mod["rotulos"].get(rot, 0.0) + dur / 60.0
         inst = (dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
                 if dt0 else None)
         itens.append({
@@ -4985,10 +5131,12 @@ def calibrar_movimento(sb, empresa: str, processo: str, dia: str | None = None,
             "ini": e.get("tempo_inicio_s"), "fim": e.get("tempo_fim_s"),
             "sensor": mov,
             "vlm_afirmou": vlm,
-            "rotulo": e.get("label_corrigido") or e.get("comportamento_label"),
+            "rotulo": rot,
+            "modo_operacao": modo,
             "descricao": e.get("descricao_bruta"),
             "pct_com_movimento": d.get("pct_intervalos_com_movimento"),
             "pct_zona_ocupada": d.get("pct_zona_ocupada"),
+            "pct_movel_ocluida": d.get("pct_movel_ocluida"),
             "contraste": d.get("contraste"),
             "pares": d.get("pares"), "pares_validos": d.get("pares_validos"),
             "descartados": d.get("descartados"),
@@ -5008,6 +5156,18 @@ def calibrar_movimento(sb, empresa: str, processo: str, dia: str | None = None,
         "minutos_indisponiveis": len(itens) - n_med,
         "discordancias": sum(1 for i in itens if i["discordam"] == 2),
         "cruzamento": dict(sorted(resumo.items(), key=lambda kv: -kv[1])),
+        "por_modo": {
+            k: {"minutos": round(v["minutos"], 1), "eventos": v["eventos"],
+                "pct": round(100.0 * v["minutos"]
+                             / max(1e-9, sum(x["minutos"] for x in por_modo.values())), 1),
+                # O corte por rótulo: é ele que diz se o modo corrige o estado
+                # da máquina ou a medição de produtividade.
+                "rotulos": sorted(
+                    ({"rotulo": r, "minutos": round(mi, 1)}
+                     for r, mi in v["rotulos"].items()),
+                    key=lambda x: -x["minutos"])[:12]}
+            for k, v in sorted(por_modo.items(), key=lambda kv: -kv[1]["minutos"])
+        },
         "limiares": limiares_movimento(),
         "injecao_ligada": _MOV_INJETAR,
         "itens": itens[:limite],
@@ -6240,6 +6400,11 @@ def etapa_persistir(
             # feita lendo string de rótulo.
             "movimento_maquina": e.get("movimento_maquina"),
             "movimento_detalhe": e.get("movimento_detalhe"),
+            # Fase 94: a MEDIÇÃO e a COMPOSIÇÃO em campos separados. Colapsar
+            # os dois num só impediria, daqui a duas semanas, responder "a
+            # composição estava certa?" — que é exatamente a pergunta que não
+            # pôde ser feita sobre o ciclo/parada do VLM.
+            "modo_operacao": e.get("modo_operacao"),
             # Fase 90: cobertura e composição, ao lado da evidência.
             "n_observacoes": e.get("n_observacoes"),
             "observacoes_origem": e.get("observacoes_origem"),
