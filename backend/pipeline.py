@@ -886,6 +886,8 @@ def _anexar_segundo_angulo(
                 )
                 achou = False
                 maos = False
+                n_posto2 = 0              # Fase 91: quantas pessoas no posto
+                n_cena2 = 0               # Fase 91: quantas pessoas no quadro
                 bbox_no_posto = None      # Fase 82: a caixa de quem está no posto
                 if res and res[0].boxes is not None and len(res[0].boxes) > 0:
                     boxes2 = res[0].boxes.xyxy.cpu().numpy()
@@ -913,8 +915,10 @@ def _anexar_segundo_angulo(
                             _ponto_em_roi(px, py, i["polygon"])
                             for i in rois2.values() for px, py in pontos2
                         )
+                        n_cena2 += 1
                         if no_posto2:
                             achou = True
+                            n_posto2 += 1
                             # Fase 82: guarda a MAIOR caixa dentro do posto. Com
                             # duas pessoas na zona, a maior é a mais próxima da
                             # câmera — mesmo critério de desempate que a eleição
@@ -942,6 +946,8 @@ def _anexar_segundo_angulo(
                         am.dim_cam2 = (w2, h2)
                 am.op_cam2 = achou
                 am.maos_cam2 = maos
+                am.n_posto_cam2 = n_posto2
+                am.n_cena_cam2 = n_cena2
             except Exception as e:
                 log.warning(f"[operador] confirmação cam2 falhou no slot {am.tempo_s:.0f}s ({e})")
                 am.op_cam2 = None
@@ -1972,6 +1978,12 @@ class Amostra:
     img_b64_secundario: str | None = None   # 2º ângulo (cam2) no mesmo instante (Fase 6)
     op_cam2: bool | None = None             # Fase 28: operador visto no posto pela cam2
     maos_cam2: bool = False                  # Fase 44: punho na zona 'maquina' pela cam2
+    # Fase 91 — a cam2 passa a CONTAR, não só a dizer sim/não. `op_cam2` é um
+    # booleano: com duas pessoas no posto ele diz a mesma coisa que com uma, e
+    # a segunda pessoa simplesmente não existia para o sistema. None = a cam2
+    # não mediu este slot (stride/fora do vídeo) — que é diferente de zero.
+    n_posto_cam2: int | None = None
+    n_cena_cam2: int | None = None
     operador_presente: bool | None = None   # Fase 28: veredito do slot (pós-confirmação)
     operador_ponte: bool = False            # Fase 34: presença por PONTE temporal
     # Fase 82: a caixa da pessoa que ESTABELECEU a presença na cam2. O detector
@@ -3444,6 +3456,12 @@ def etapa_analise_vlm(
                     # cluster, que particiona por ele.
                     "maquina": cena_maq,
                     "imovel": cena_imovel,
+                    # Fase 91: o que a LATERAL contou no mesmo instante. Viaja
+                    # junto para o fato das camadas — sem virar observação
+                    # própria, porque descrever a segunda pessoa exigiria uma
+                    # chamada de VLM que não podemos pagar.
+                    "n_posto_cam2": am.n_posto_cam2,
+                    "n_cena_cam2": am.n_cena_cam2,
                 })
 
         feitas += len(grupo)
@@ -3781,6 +3799,9 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         "imovel": o.get("imovel"),
         "zona_contexto": o["zona"],
         "papel_pessoa": o.get("papel"),
+        # Fase 91: o MÁXIMO que a lateral contou dentro deste evento.
+        "n_posto_cam2": o.get("n_posto_cam2"),
+        "n_cena_cam2": o.get("n_cena_cam2"),
         # Fase 90 — DOIS CONTADORES, porque são duas perguntas.
         # `n_observacoes` = quanto do minuto está COBERTO (mantém o evento
         # inteiro e o denominador honesto). `n_amostras` = quantos quadros
@@ -3831,6 +3852,10 @@ def etapa_segmentar_eventos(
                     atual["n_amostras"] += 1
                 _og = o.get("origem_gate") or "analisado"
                 atual["origens"][_og] = atual["origens"].get(_og, 0) + 1
+                for _k in ("n_posto_cam2", "n_cena_cam2"):
+                    _v = o.get(_k)
+                    if _v is not None:
+                        atual[_k] = max(atual.get(_k) or 0, int(_v))
                 # Fase 82: a caixa de CADA amostra do evento, não só a primeira.
                 if _bbox_valido(o.get("bbox")):
                     atual["_caixas"].append(list(o["bbox"]))
@@ -4252,9 +4277,32 @@ def montar_fato_evento(rep: dict, no_bucket: list, share: float,
     except Exception:
         desloc_rel = None
 
+    # ── Fase 91 — AS DUAS CÂMERAS CONTAM ────────────────────────────────
+    # A cam1 era a única fonte de contagem. Num caso medido, a cam2 mostrava
+    # DUAS pessoas no posto e a cam1 uma: a segunda não existia para o sistema,
+    # e o dia inteiro saiu com zero eventos de `visitante`.
+    #
+    # SEM CASAMENTO ENTRE CÂMERAS: usa o MÁXIMO. Se a cam1 vê 1 e a cam2 vê 2,
+    # são PELO MENOS 2. É um piso honesto e não exige identidade — casar tracks
+    # entre câmeras é o problema difícil, e resolvê-lo mal produziria contagem
+    # dupla, que é pior que contagem baixa. O offset de relógio entre as duas
+    # já é compensado na amostragem (`alvo_ms = tempo_s + offset_s`), então os
+    # dois números são do MESMO instante.
+    #
+    # A cam2 NÃO vira fonte de descrição: contar é grátis (o track já roda),
+    # descrever custaria uma chamada de VLM por pessoa.
+    _n_cam2_posto = max((int(e["n_posto_cam2"]) for e in eventos
+                         if e.get("n_posto_cam2") is not None), default=0)
+    _n_cam2_cena = max((int(e["n_cena_cam2"]) for e in eventos
+                        if e.get("n_cena_cam2") is not None), default=0)
     fato = {
-        "pessoas_na_cena": len(pessoas),
-        "pessoas_no_posto": len(no_posto),
+        "pessoas_na_cena": max(len(pessoas), _n_cam2_cena),
+        "pessoas_no_posto": max(len(no_posto), _n_cam2_posto),
+        # Quantas a cam1 NÃO viu. É este número que faz uma camada poder
+        # perguntar "havia alguém aqui que o sistema não descreveu?".
+        "pessoas_so_na_cam2": max(0, _n_cam2_posto - len(no_posto)),
+        "pessoas_cam1_posto": len(no_posto),
+        "pessoas_cam2_posto": _n_cam2_posto,
         "zonas_ocupadas": sorted(z for z in zonas),
         "concordancia": round(float(share), 2),
         "n_rotulos_no_minuto": int(n_rotulos),
@@ -4273,7 +4321,11 @@ def montar_fato_evento(rep: dict, no_bucket: list, share: float,
     # ausência de informação, e o contrato das camadas é que falta de dado
     # nunca vira suspeita. Por isso a chave é OMITIDA, não posta como False.
     if rastreia_papel:
-        fato["operador_presente"] = bool(no_posto)
+        # Fase 91: presença é das DUAS. `am.operador_presente` já considerava a
+        # lateral (política 'dupla', Fase 33); aqui o FATO passa a considerar
+        # também — antes ele olhava só o papel dos tracks da cam1 e podia dizer
+        # "sem operador" num minuto resgatado pela cam2.
+        fato["operador_presente"] = bool(no_posto) or _n_cam2_posto > 0
         fato["papeis_na_cena"] = sorted(
             {p for p in (e.get("papel_pessoa") for e in eventos) if p})
     if desloc_rel is not None:
@@ -4832,6 +4884,359 @@ def limiares_movimento() -> dict:
         "KV_MOV_GRADE": _MOV_GRADE,
         "KV_MOV_MAPA_MIN_PARES": _MOV_MAPA_MIN_PARES,
     }
+
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 91 — O TITULAR DO POSTO. EM SOMBRA.
+#
+# O PRINCÍPIO, e ele é a coisa toda: o titular NÃO é quem está na zona num
+# instante — é quem DOMINA a presença na zona ao longo do dia. Instante é
+# ruído (o líder passa, o colega encosta, o operador sai para o banheiro);
+# domínio é regime.
+#
+# IDENTIDADE ANÔNIMA POR PAPEL, NUNCA CADASTRO DE PESSOA. Os grupos recebem
+# rótulos posicionais (`g1`, `g2`) que valem para UM dia e UMA câmera. Não há
+# nome, não há re-identificação entre dias que persista pessoa, não há galeria
+# de rostos. É decisão de LGPD, não de conveniência: o produto mede o POSTO,
+# e para medir o posto basta saber que "o mesmo alguém dominou o dia".
+#
+# POR CÂMERA E POR DIA, porque cam1 e cam2 não são a mesma régua: ângulo,
+# distância, iluminação e balanço de branco diferentes fazem a MESMA pessoa ter
+# histograma diferente nas duas. Cruzar as duas exigiria calibração de cor que
+# não temos, e um agrupamento errado é pior que dois agrupamentos separados.
+#
+# ORDEM DOS SINAIS — cor primeiro, e o motivo é n=1:
+#   1. HISTOGRAMA DE COR (sup/inf) — o único robusto com uma amostra só. 57
+#      dos 90 tracks do primeiro dia tinham 8 s (o mínimo); qualquer sinal que
+#      precise de dispersão não existe nesses.
+#   2. RAZÕES CORPORAIS — só as medidas o bastante (`n` por razão). Uma razão
+#      medida 3 vezes num track de 200 amostras não é a mesma coisa que uma
+#      medida 180 vezes, e por isso `fechar_descritores` guarda o `n`.
+#   3. ALTURA RELATIVA — último, porque numa câmera fixa ela é boa entre
+#      pessoas em profundidade parecida e péssima entre profundidades
+#      diferentes.
+#
+# TUDO CPU. Zero chamada de API: histograma é correlação de vetor, agrupamento
+# é união de vizinhos. Roda DEPOIS do turno, fora do caminho de ingestão, e
+# falha sozinho — se a identificação quebrar, a coleta não pode parar.
+# ═════════════════════════════════════════════════════════════════════════
+_TIT_SIM_COR = float(os.environ.get("KV_TITULAR_SIM_COR", "0.62"))
+_TIT_RAZAO_MIN_N = int(os.environ.get("KV_TITULAR_RAZAO_MIN_N", "8"))
+_TIT_RAZAO_TOL = float(os.environ.get("KV_TITULAR_RAZAO_TOL", "0.18"))
+_TIT_ALTURA_TOL = float(os.environ.get("KV_TITULAR_ALTURA_TOL", "0.22"))
+# GUARDA DE PISO — o dominante precisa DOMINAR. Sem isso, num dia em que o
+# operador faltou e outra pessoa usou o torno por 10 minutos, o intruso seria
+# coroado titular com 100% de um total minúsculo.
+_TIT_PISO_PCT = float(os.environ.get("KV_TITULAR_PISO_PCT", "40"))
+_TIT_PISO_MIN = float(os.environ.get("KV_TITULAR_PISO_MINUTOS", "20"))
+
+
+def _sim_hist(a, b) -> float | None:
+    """Similaridade 0..1 entre dois histogramas (interseção normalizada).
+
+    Interseção e não cosseno: histograma é distribuição, e a interseção tem
+    interpretação direta — "que fração da cor de um está na do outro".
+    """
+    if not a or not b or len(a) != len(b):
+        return None
+    sa, sb = sum(a), sum(b)
+    if sa <= 0 or sb <= 0:
+        return None
+    na = [v / sa for v in a]
+    nb = [v / sb for v in b]
+    return float(sum(min(x, y) for x, y in zip(na, nb)))
+
+
+def _sim_descritores(d1: dict, d2: dict) -> tuple[float | None, str]:
+    """(similaridade, motivo) entre dois descritores da MESMA câmera.
+
+    Devolve None quando não há sinal comparável — e isso NÃO é "são pessoas
+    diferentes", é "não dá para dizer". A diferença importa: sem ela, track sem
+    cor viraria automaticamente um grupo novo e o dia viraria sopa.
+    """
+    s_sup = _sim_hist(d1.get("hist_sup"), d2.get("hist_sup"))
+    s_inf = _sim_hist(d1.get("hist_inf"), d2.get("hist_inf"))
+    partes = [s for s in (s_sup, s_inf) if s is not None]
+    if not partes:
+        return None, "sem cor comparável"
+    cor = sum(partes) / len(partes)
+    if cor < _TIT_SIM_COR:
+        return cor, f"cor {cor:.2f} < {_TIT_SIM_COR}"
+
+    # ── Razões corporais: só as MEDIDAS O BASTANTE nos dois lados ──
+    r1, r2 = (d1.get("razoes") or {}), (d2.get("razoes") or {})
+    conflito = 0
+    comparadas = 0
+    for nome in set(r1) & set(r2):
+        a, b = r1[nome], r2[nome]
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            continue
+        if (a.get("n") or 0) < _TIT_RAZAO_MIN_N or (b.get("n") or 0) < _TIT_RAZAO_MIN_N:
+            continue                      # medida de menos: não opina
+        ma, mb = a.get("med"), b.get("med")
+        if ma is None or mb is None or max(abs(ma), abs(mb)) <= 0:
+            continue
+        comparadas += 1
+        if abs(ma - mb) / max(abs(ma), abs(mb)) > _TIT_RAZAO_TOL:
+            conflito += 1
+    if comparadas and conflito > comparadas / 2:
+        return cor, f"razões corporais divergem ({conflito}/{comparadas})"
+
+    # ── Altura relativa: desempate, nunca porta de entrada ──
+    h1, h2 = d1.get("altura_rel"), d2.get("altura_rel")
+    if h1 and h2 and max(h1, h2) > 0:
+        if abs(h1 - h2) / max(h1, h2) > _TIT_ALTURA_TOL:
+            return cor, f"altura difere {abs(h1-h2)/max(h1,h2):.0%}"
+    return cor, "ok"
+
+
+def agrupar_descritores(descritores: list) -> list[dict]:
+    """Agrupa tracks da MESMA câmera que parecem a mesma pessoa.
+
+    União de vizinhos (single-link): se A parece B e B parece C, os três são um
+    grupo. É a escolha certa aqui porque o mesmo operador aparece em dezenas de
+    tracks curtos ao longo do dia, ligados em cadeia pelo tempo; exigir que
+    TODOS se pareçam entre si (complete-link) partiria o titular em vários
+    grupos justamente por causa da fragmentação que já medimos.
+    """
+    n = len(descritores)
+    pai = list(range(n))
+
+    def achar(i):
+        while pai[i] != i:
+            pai[i] = pai[pai[i]]
+            i = pai[i]
+        return i
+
+    def unir(i, j):
+        ri, rj = achar(i), achar(j)
+        if ri != rj:
+            pai[max(ri, rj)] = min(ri, rj)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim, motivo = _sim_descritores(descritores[i], descritores[j])
+            # `None` é "não dá para dizer", não "são diferentes": track sem cor
+            # não vira grupo novo por falta de sinal — ele fica sozinho, e isso
+            # aparece como grupo de 1 na tela em vez de virar sopa.
+            if sim is not None and motivo == "ok":
+                unir(i, j)
+
+    por_raiz: dict = defaultdict(list)
+    for i, d in enumerate(descritores):
+        por_raiz[achar(i)].append(d)
+
+    grupos = []
+    for membros in por_raiz.values():
+        tempo_posto = sum(float(m.get("tempo_posto_s") or 0) for m in membros)
+        tempo_vis = sum(float(m.get("tempo_visivel_s") or 0) for m in membros)
+        # Recorte de referência: o track com MAIS tempo no posto é o que tem a
+        # melhor chance de mostrar a pessoa inteira e nítida.
+        ref = max(membros, key=lambda m: float(m.get("tempo_posto_s") or 0))
+        grupos.append({
+            "n_tracks": len(membros),
+            # ASSINATURA = a cor do track de referência. É o que a verificação
+            # de continuidade entre dias compara. Não é biometria: é a roupa,
+            # e ela muda — por isso a divergência vira ALERTA, não correção.
+            "assinatura": {"hist_sup": ref.get("hist_sup"),
+                           "hist_inf": ref.get("hist_inf"),
+                           "altura_rel": ref.get("altura_rel")},
+            "tempo_posto_s": round(tempo_posto, 1),
+            "tempo_visivel_s": round(tempo_vis, 1),
+            "minutos_posto": round(tempo_posto / 60, 1),
+            "altura_rel": ref.get("altura_rel"),
+            "referencia": {
+                "descritor_id": ref.get("id"),
+                "video_id": ref.get("video_id"),
+                "pessoa_track_id": ref.get("pessoa_track_id"),
+                "frame_ref": ref.get("frame_ref"),
+                "bbox_ref": ref.get("bbox_ref"),
+                "frame_w": ref.get("frame_w"), "frame_h": ref.get("frame_h"),
+            },
+            "tracks": sorted(
+                ({"video_id": m.get("video_id"),
+                  "pessoa_track_id": m.get("pessoa_track_id"),
+                  "tempo_posto_s": float(m.get("tempo_posto_s") or 0),
+                  "descritor_id": m.get("id")}
+                 for m in membros),
+                key=lambda t: -t["tempo_posto_s"],
+            )[:60],
+        })
+    grupos.sort(key=lambda g: -g["tempo_posto_s"])
+    for i, g in enumerate(grupos):
+        # Rótulo POSICIONAL e do dia: `g1` de hoje não é `g1` de ontem. Não há
+        # pessoa aqui, há "o grupo que mais ocupou o posto hoje".
+        g["grupo"] = f"g{i + 1}"
+    return grupos
+
+
+def identificar_titular_do_dia(sb, empresa: str, processo: str, dia: str,
+                               persistir: bool = True) -> dict:
+    """Passe DIÁRIO: quem dominou o posto neste dia, por câmera. SOMBRA.
+
+    Não toca em evento, não muda papel_pessoa, não entra em métrica nenhuma.
+    Grava a atribuição para poder ser CONFERIDA a olho antes de valer.
+    """
+    try:
+        date.fromisoformat(dia)
+    except Exception:
+        return {"erro": f"data inválida: {dia!r} (esperado AAAA-MM-DD)"}
+
+    try:
+        linhas = varrer(
+            sb, "descritores_track",
+            "id, video_id, pessoa_track_id, cam_id, gravado_em, n_amostras, "
+            "n_amostras_posto, tempo_posto_s, tempo_visivel_s, papel_predominante, "
+            "altura_rel, aspecto, razoes, hist_sup, hist_inf, hist_bins, "
+            "bbox_ref, frame_ref, frame_w, frame_h",
+            empresa=empresa, processo=processo,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {"erro": f"leitura de descritores falhou: {e}"}
+
+    videos = varrer(sb, "videos", "id, nome, cam_id, processado_em",
+                    empresa=empresa, processo=processo)
+    dia_por_video = {}
+    for v in videos:
+        dt0 = _inicio_video_dt(v)
+        if v.get("id") and dt0:
+            dia_por_video[v["id"]] = dt0.date().isoformat()
+
+    do_dia = [d for d in linhas if dia_por_video.get(d.get("video_id")) == dia]
+    if not do_dia:
+        return {"dia": dia, "cameras": [], "n_descritores": 0,
+                "nota": "Nenhum descritor com gravação nesta data."}
+
+    por_cam: dict = defaultdict(list)
+    for d in do_dia:
+        por_cam[d.get("cam_id") or "?"].append(d)
+
+    saida_cams = []
+    for cam, ds in sorted(por_cam.items()):
+        grupos = agrupar_descritores(ds)
+        total_posto = sum(g["tempo_posto_s"] for g in grupos)
+        titular = None
+        motivo = ""
+        if grupos and total_posto > 0:
+            top = grupos[0]
+            pct = top["tempo_posto_s"] / total_posto * 100
+            top["pct_do_posto"] = round(pct, 1)
+            minutos = top["tempo_posto_s"] / 60
+            # ── GUARDA DE PISO ──
+            # Dominar é passar dos DOIS pisos. Num dia em que o titular faltou
+            # e um terceiro usou o torno por 10 min, ele teria 100% de um total
+            # minúsculo — e coroá-lo seria pior que não ter titular. Dia sem
+            # dominante é dia INDEFINIDO, e isso é uma resposta.
+            if pct < _TIT_PISO_PCT:
+                motivo = (f"o grupo mais presente tem {pct:.0f}% do tempo no "
+                          f"posto (piso {_TIT_PISO_PCT:.0f}%) — sem dominante")
+            elif minutos < _TIT_PISO_MIN:
+                motivo = (f"o grupo mais presente tem {minutos:.0f} min no posto "
+                          f"(piso {_TIT_PISO_MIN:.0f} min) — presença insuficiente")
+            else:
+                titular = top["grupo"]
+                motivo = f"{pct:.0f}% do tempo no posto, {minutos:.0f} min"
+        for g in grupos:
+            g["pct_do_posto"] = (round(g["tempo_posto_s"] / total_posto * 100, 1)
+                                 if total_posto > 0 else 0.0)
+            g["eh_titular"] = (g["grupo"] == titular)
+        saida_cams.append({
+            "cam_id": cam, "n_tracks": len(ds), "n_grupos": len(grupos),
+            "minutos_posto_total": round(total_posto / 60, 1),
+            "titular": titular, "motivo": motivo, "grupos": grupos,
+        })
+
+    rel = {
+        "dia": dia, "empresa": empresa, "processo": processo,
+        "n_descritores": len(do_dia),
+        "cameras": saida_cams,
+        "modo": "sombra",
+        "limiares": {
+            "KV_TITULAR_SIM_COR": _TIT_SIM_COR,
+            "KV_TITULAR_RAZAO_MIN_N": _TIT_RAZAO_MIN_N,
+            "KV_TITULAR_RAZAO_TOL": _TIT_RAZAO_TOL,
+            "KV_TITULAR_ALTURA_TOL": _TIT_ALTURA_TOL,
+            "KV_TITULAR_PISO_PCT": _TIT_PISO_PCT,
+            "KV_TITULAR_PISO_MINUTOS": _TIT_PISO_MIN,
+        },
+        "nota": ("SOMBRA: nada aqui muda papel_pessoa, evento ou métrica. Os "
+                 "rótulos de grupo são posicionais e valem para UM dia e UMA "
+                 "câmera — não são pessoas, não há cadastro."),
+    }
+    rel["continuidade"] = _continuidade_titular(sb, empresa, processo, dia, saida_cams)
+    if persistir:
+        _gravar_titular_dia(sb, empresa, processo, dia, rel)
+    return rel
+
+
+def _continuidade_titular(sb, empresa: str, processo: str, dia: str,
+                          cams: list) -> list:
+    """O titular de hoje deveria PARECER o de ontem. Se não parecer, ALERTA —
+    nunca correção automática.
+
+    Mudança de titular pode ser troca de turno, férias, camisa nova ou erro do
+    agrupamento, e nenhuma dessas o sistema consegue distinguir. Quem decide é
+    gente — a mesma lição do `conversando_colega`: correção automática sobre
+    sinal ambíguo espalha o erro em vez de corrigi-lo.
+    """
+    try:
+        ontem = (date.fromisoformat(dia) - timedelta(days=1)).isoformat()
+        ant = (sb.table("titular_dia").select("cam_id, assinatura, titular")
+               .eq("empresa", empresa).eq("processo", processo)
+               .eq("dia", ontem).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.debug("[titular] continuidade não avaliada (%s)", e)
+        return []
+    por_cam = {a.get("cam_id"): a for a in ant}
+    alertas = []
+    for c in cams:
+        a = por_cam.get(c["cam_id"])
+        if not a or not a.get("titular") or not c.get("titular"):
+            continue
+        hoje_ass = _assinatura_do_titular(c)
+        sim = _sim_hist((a.get("assinatura") or {}).get("hist_sup"),
+                        (hoje_ass or {}).get("hist_sup"))
+        if sim is None:
+            continue
+        if sim < _TIT_SIM_COR:
+            alertas.append({
+                "cam_id": c["cam_id"], "similaridade": round(sim, 2),
+                "ontem": ontem,
+                "alerta": ("o titular de hoje não parece o de ontem "
+                           f"(similaridade de cor {sim:.2f} < {_TIT_SIM_COR}). "
+                           "Pode ser troca de turno, roupa diferente ou erro do "
+                           "agrupamento — quem decide é você."),
+            })
+    return alertas
+
+
+def _assinatura_do_titular(cam: dict) -> dict | None:
+    for g in cam.get("grupos") or []:
+        if g.get("eh_titular"):
+            return g.get("assinatura")
+    return None
+
+
+def _gravar_titular_dia(sb, empresa: str, processo: str, dia: str, rel: dict) -> bool:
+    """Grava a atribuição do dia. NÃO-FATAL: identificação é sombra, e sombra
+    que derruba a coleta não é sombra."""
+    try:
+        for c in rel.get("cameras") or []:
+            sb.table("titular_dia").upsert({
+                "empresa": empresa, "processo": processo, "dia": dia,
+                "cam_id": c["cam_id"], "titular": c.get("titular"),
+                "motivo": c.get("motivo"),
+                "n_grupos": c.get("n_grupos"), "n_tracks": c.get("n_tracks"),
+                "minutos_posto_total": c.get("minutos_posto_total"),
+                "grupos": c.get("grupos"),
+                "assinatura": _assinatura_do_titular(c),
+                "atualizado_em": datetime.now(timezone.utc).isoformat(),
+            }, on_conflict="empresa,processo,dia,cam_id").execute()
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("[titular] não gravado (%s) — não-fatal.", e)
+        return False
 
 
 def carregar_camadas_duvida(sb: Client, empresa: str, processo: str) -> list:
@@ -5481,6 +5886,9 @@ def etapa_persistir(
             # Fase 90: cobertura e composição, ao lado da evidência.
             "n_observacoes": e.get("n_observacoes"),
             "observacoes_origem": e.get("observacoes_origem"),
+            # Fase 91: o que a LATERAL contou, e quantos ela viu que a cam1 não.
+            "pessoas_posto_cam2": (e.get("_fato") or {}).get("pessoas_cam2_posto"),
+            "pessoas_so_na_cam2": (e.get("_fato") or {}).get("pessoas_so_na_cam2"),
             "n_amostras": e["n_amostras"],
             "confianca": e["confianca"],
             "origem_validacao": origem,

@@ -34,6 +34,7 @@ import type {
   UsoDescricao,
   AuditoriaDia,
   BinJornada,
+  TitularDia,
   RotulosSemCategoria,
 } from "./types";
 
@@ -280,6 +281,11 @@ export const api = {
       req<AuditoriaDia>(
         `/processos/${processoId}/auditoria/dia?dia=${dia}&por_bloco=${porBloco}`,
       ),
+  },
+  titular: {
+    // Fase 91: SOMBRA. Ler não muda papel_pessoa, evento nem métrica.
+    dia: (processoId: string, dia: string) =>
+      req<TitularDia>(`/processos/${processoId}/titular/dia?dia=${dia}`),
   },
   jornada: {
     // Fase 87: o bloco de 15 min por trás de um pedaço da faixa. Só leitura —

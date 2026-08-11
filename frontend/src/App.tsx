@@ -20,6 +20,7 @@ import Validacao from "./pages/Validacao";
 import Duvidas from "./pages/Duvidas";
 import Auditoria from "./pages/Auditoria";
 import Rotulos from "./pages/Rotulos";
+import Titular from "./pages/Titular";
 import Eventos from "./pages/Eventos";
 import Padroes from "./pages/Padroes";
 import Fila from "./pages/Fila";
@@ -118,6 +119,7 @@ function AppShell() {
     else if (route.tab === "duvidas") content = <Duvidas proc={proc} go={goTyped} />;
     else if (route.tab === "auditoria") content = <Auditoria proc={proc} />;
     else if (route.tab === "rotulos") content = <Rotulos proc={proc} />;
+    else if (route.tab === "titular") content = <Titular proc={proc} />;
     else if (route.tab === "validacao") content = <Validacao proc={proc} go={goTyped} t={TWEAKS} />;
     else if (route.tab === "eventos") content = <Eventos proc={proc} />;
     else if (route.tab === "padroes") content = <Padroes proc={proc} go={goTyped} />;

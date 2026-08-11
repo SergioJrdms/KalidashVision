@@ -63,6 +63,7 @@ from .pipeline import (
     diagnosticar_contagio_por_descricao,
     relatorio_reprocesso_por_video,
     auditar_dia,
+    identificar_titular_do_dia,
     calibrar_movimento,
     limiares_movimento,
     eventos_do_bin,
@@ -901,6 +902,48 @@ def _varrer_storage_com_throttle(sb, empresa: str | None, motivo: str) -> None:
         log.warning("[varredura/%s] falhou (não-fatal): %s", motivo, e)
 
 
+_ULTIMO_TITULAR = {"ts": 0.0, "dia": ""}
+
+
+def _passe_titular_com_throttle(sb, empresa: str, motivo: str) -> None:
+    """Fase 91 — o passe do titular roda DEPOIS do turno, no pulso do Pi.
+
+    Mesmo relógio da varredura de Storage, pelo mesmo motivo (Render Hobby não
+    tem cron e thread morre com o processo): o heartbeat chega sempre, e
+    "existe um endpoint" não é mecanismo — é tarefa manual esperando ser
+    esquecida.
+
+    Roda sobre o dia de ONTEM, 1×/dia: identificar o titular de um dia ainda em
+    curso seria eleger com meia amostra. NUNCA levanta — identificação é
+    sombra, e sombra que derruba a coleta não é sombra.
+    """
+    import time as _t
+    if os.environ.get("KV_TITULAR_PASSE", "on") in ("off", "0", "false", "False"):
+        return
+    agora = _t.time()
+    ontem = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    if _ULTIMO_TITULAR["dia"] == ontem or agora - _ULTIMO_TITULAR["ts"] < 3600:
+        return
+    _ULTIMO_TITULAR["ts"] = agora
+    try:
+        procs = {r.get("processo") for r in (
+            sb.table("contexto_processo").select("processo")
+            .eq("empresa", empresa).execute().data or []) if r.get("processo")}
+        for proc in sorted(procs):
+            rel = identificar_titular_do_dia(sb, empresa, proc, ontem)
+            if rel.get("erro"):
+                continue
+            for c in rel.get("cameras") or []:
+                log.info("[titular/%s] %s %s/%s: %d grupo(s), titular=%s (%s)",
+                         motivo, ontem, proc, c["cam_id"], c["n_grupos"],
+                         c.get("titular") or "NENHUM", c.get("motivo"))
+            for a in rel.get("continuidade") or []:
+                log.warning("[titular] %s %s: %s", ontem, a["cam_id"], a["alerta"])
+        _ULTIMO_TITULAR["dia"] = ontem
+    except Exception as e:  # noqa: BLE001
+        log.warning("[titular/%s] passe falhou (não-fatal): %s", motivo, e)
+
+
 def _limpar_heartbeats_antigos(sb) -> None:
     """Retenção de 7 dias, com throttle de 1×/hora. Roda no POST porque
     heartbeat é frequente e garantido — não precisa de thread nem de cron."""
@@ -1215,6 +1258,75 @@ def jornada_do_bin(
     if "erro" in rel:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, rel["erro"])
     return {"ok": True, **rel}
+
+
+@app.get("/processos/{processo_id}/titular/dia")
+def titular_do_dia(
+    processo_id: str,
+    dia: str = Query(..., description="AAAA-MM-DD no relógio da fábrica"),
+    com_recortes: bool = Query(True),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 91 — quem DOMINOU o posto neste dia, por câmera. SOMBRA.
+
+    Devolve os grupos com o recorte de referência de cada um, o tempo
+    acumulado na zona e qual foi eleito titular — para o dono bater o olho e
+    dizer se separou pessoas ou virou sopa. É essa conferência que decide se a
+    identificação um dia pode mexer no número; até lá, não mexe em nada.
+
+    Identidade ANÔNIMA por papel: `g1`/`g2` valem para UM dia e UMA câmera. Não
+    há nome, não há cadastro, não há re-identificação persistente.
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    rel = identificar_titular_do_dia(sb, user.empresa, nome, dia)
+    if "erro" in rel:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, rel["erro"])
+    if com_recortes and rel.get("cameras"):
+        _anexar_recortes_dos_grupos(sb, user.empresa, nome, dia, rel)
+    return {"ok": True, **rel}
+
+
+def _anexar_recortes_dos_grupos(sb, empresa: str, processo: str, dia: str,
+                                rel: dict) -> None:
+    """Põe um JPEG (data URI) no grupo, cortado do frame JÁ no Storage.
+
+    Sem a imagem ao lado do número não dá para dizer se um grupo é uma pessoa
+    ou virou sopa — e essa é a pergunta que decide se isto um dia sai da
+    sombra. Não-fatal: relatório sem recorte ainda serve, erro derrubando a
+    tela não.
+    """
+    import base64 as _b64
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    try:
+        videos = varrer(sb, "videos", "id, nome, cam_id, caminho",
+                        empresa=empresa, processo=processo)
+        por_id = {v["id"]: v for v in videos}
+        alvo = {g["referencia"]["video_id"] for c in rel["cameras"]
+                for g in c["grupos"] if (g.get("referencia") or {}).get("video_id")}
+        eventos = varrer(
+            sb, "eventos", "id, video_id, pessoa_track_id, n_amostras",
+            empresa=empresa, processo=processo,
+            ajustes=lambda q: q.in_("video_id", sorted(alvo)[:100]),
+        ) if alvo else []
+        melhor: dict = {}
+        for e in eventos:
+            k = (e.get("video_id"), e.get("pessoa_track_id"))
+            a = melhor.get(k)
+            if a is None or (e.get("n_amostras") or 0) > (a.get("n_amostras") or 0):
+                melhor[k] = e
+        for c in rel["cameras"]:
+            for g in c["grupos"]:
+                r = g.get("referencia") or {}
+                jpg = _recorte_do_track(
+                    sb, bucket, por_id.get(r.get("video_id")) or {},
+                    melhor.get((r.get("video_id"), r.get("pessoa_track_id"))),
+                    r.get("bbox_ref"),
+                )
+                g["recorte"] = ("data:image/jpeg;base64,"
+                                + _b64.b64encode(jpg).decode()) if jpg else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("[titular] recortes não anexados (%s) — não-fatal.", e)
 
 
 @app.get("/processos/{processo_id}/descritores/dia")
@@ -1609,6 +1721,9 @@ def receber_heartbeat(body: HeartbeatBody, user: CurrentUser = Depends(get_curre
     _limpar_heartbeats_antigos(sb)
     # Fase 74: o pulso do Pi é o relógio da varredura. Throttled, não-fatal.
     _varrer_storage_com_throttle(sb, user.empresa, "heartbeat")
+    # Fase 91: o passe do titular pega carona no mesmo pulso — 1×/dia, sobre o
+    # dia de ontem, fora do caminho de ingestão. Não-fatal por dentro.
+    _passe_titular_com_throttle(sb, user.empresa, "heartbeat")
     return {"ok": True}
 
 

@@ -1308,3 +1308,67 @@ grant select, insert on ai_uso to anon, authenticated;
 -- ════════════════════════════════════════════════════════════════════════
 alter table eventos add column if not exists n_observacoes int;
 alter table eventos add column if not exists observacoes_origem jsonb;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 91 — O TITULAR DO POSTO, EM SOMBRA
+--
+-- O titular NÃO é quem está na zona num instante — é quem DOMINA a presença
+-- na zona ao longo do dia. Instante é ruído (o líder passa, o colega encosta);
+-- domínio é regime.
+--
+-- ⚠️ IDENTIDADE ANÔNIMA POR PAPEL, NUNCA CADASTRO DE PESSOA. `titular` guarda
+-- um rótulo POSICIONAL (`g1`, `g2`) que vale para UM dia e UMA câmera: o `g1`
+-- de hoje não é o `g1` de ontem. Não há nome, não há galeria, não há
+-- re-identificação persistente. `assinatura` é o histograma de cor do recorte
+-- de referência — ou seja, a ROUPA, que muda. É decisão de LGPD, não de
+-- conveniência: para medir o POSTO basta saber que o mesmo alguém dominou o
+-- dia.
+--
+-- SOMBRA: nada aqui altera papel_pessoa, evento ou métrica. Existe para ser
+-- conferido a olho antes de valer.
+--
+--   select dia, cam_id, titular, motivo, n_grupos, minutos_posto_total
+--     from titular_dia order by dia desc, cam_id;
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists titular_dia (
+    empresa text not null,
+    processo text not null,
+    dia date not null,
+    cam_id text not null default '',
+    -- null = DIA SEM TITULAR. Não é falha: é a guarda de piso dizendo que
+    -- ninguém dominou o posto (o dia em que o operador faltou e um terceiro
+    -- usou o torno por dez minutos). Coroar o intruso seria pior.
+    titular text,
+    motivo text,
+    n_grupos int,
+    n_tracks int,
+    minutos_posto_total numeric,
+    grupos jsonb,
+    assinatura jsonb,
+    atualizado_em timestamptz not null default now(),
+    primary key (empresa, processo, dia, cam_id)
+);
+alter table titular_dia enable row level security;
+drop policy if exists titular_dia_rw on titular_dia;
+create policy titular_dia_rw on titular_dia for all using (true) with check (true);
+grant select, insert, update, delete on titular_dia to anon, authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 91 — AS DUAS CÂMERAS CONTAM PRESENÇA
+--
+-- A cam1 era a única fonte de contagem. Num caso medido, a cam2 mostrava DUAS
+-- pessoas no posto e a cam1 uma: a segunda não existia para o sistema, e o dia
+-- saiu com ZERO eventos de `visitante`.
+--
+-- Sem casamento entre câmeras: usa o MÁXIMO. Se a cam1 vê 1 e a cam2 vê 2, são
+-- PELO MENOS 2 — piso honesto que não exige identidade. Casar tracks entre
+-- câmeras é o problema difícil, e resolvê-lo mal produz contagem DUPLA, que é
+-- pior que contagem baixa. O offset de relógio já é compensado na amostragem.
+--
+-- A cam2 NÃO vira fonte de descrição: contar é grátis (o track já roda desde a
+-- Fase 84), descrever custaria uma chamada de VLM por pessoa.
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists pessoas_posto_cam2 int;
+alter table eventos add column if not exists pessoas_so_na_cam2 int;

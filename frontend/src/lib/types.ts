@@ -710,6 +710,42 @@ export interface AuditoriaDia {
 }
 
 
+// Fase 91 — o TITULAR do posto, em SOMBRA.
+// Identidade ANÔNIMA por papel: `g1`/`g2` valem para UM dia e UMA câmera —
+// não são pessoas, não há cadastro, não há re-identificação persistente.
+export interface GrupoTitular {
+  grupo: string;
+  n_tracks: number;
+  tempo_posto_s: number;
+  minutos_posto: number;
+  pct_do_posto: number;
+  eh_titular: boolean;
+  altura_rel: number | null;
+  recorte?: string | null;
+  tracks: { video_id: string; pessoa_track_id: number; tempo_posto_s: number }[];
+}
+export interface CameraTitular {
+  cam_id: string;
+  n_tracks: number;
+  n_grupos: number;
+  minutos_posto_total: number;
+  // null = DIA SEM TITULAR. Não é falha: é a guarda de piso dizendo que
+  // ninguém dominou o posto. Coroar um intruso seria pior.
+  titular: string | null;
+  motivo: string;
+  grupos: GrupoTitular[];
+}
+export interface TitularDia {
+  dia: string;
+  n_descritores: number;
+  cameras: CameraTitular[];
+  modo: string;
+  limiares: Record<string, number>;
+  continuidade: { cam_id: string; similaridade: number; ontem: string; alerta: string }[];
+  nota: string;
+}
+
+
 // Fase 87 — o que compõe UM bloco de 15 min da faixa "A jornada de …".
 // A largura da cor dentro do bloco é PROPORÇÃO, não horário; a hora de
 // verdade de cada trecho está aqui.
