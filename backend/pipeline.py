@@ -3158,6 +3158,106 @@ def _gate_vlm_binario(groq_client, amostra: Amostra, desc_ancora: str) -> bool:
         return False
 
 
+# ── Fase 92 — A ÂNCORA DO GATE SOBREVIVE À TROCA DE ID ───────────────────
+# Cada troca de ID mata a âncora e força a análise do minuto inteiro. Com o
+# track mediano da cam1 em 8 s, isso é a maior parte dos minutos — e com o teto
+# do gate em 12 o desperdício cresceu, porque o teto passaria a permitir
+# suprimir minutos que a troca de ID reabre.
+#
+# ⚠️ NÃO REMAPEIA ID NENHUM. Papel, contagem, descritor, evento e eleição do
+# operador continuam exatamente como estão. Muda SÓ contra qual âncora o gate
+# compara — a superfície mínima que captura o ganho.
+#
+# O RISCO, e ele é real: duas pessoas coladas no tempo e no espaço fariam o
+# gate comparar contra a âncora errada, e o minuto inteiro herdaria a descrição
+# de outra pessoa. Quatro guardas, e a assimetria manda em todas:
+#   falso "diferente" custa UMA chamada · falso "igual" custa um RÓTULO ERRADO.
+# Na dúvida, NÃO herda.
+_COSTURA_ANCORA = os.environ.get("KV_COSTURA_ANCORA", "off") not in (
+    "off", "0", "false", "False", "")
+# Veto de aparência. NÃO é identificação — medimos que cor não identifica aqui
+# (+0,025 de separação onde um classificador precisaria de ~+0,15). Mas o
+# PISO da distribuição é real: os pares mais diferentes ficam em 0,15-0,30.
+# Rejeitar o absurdo é problema diferente de decidir quem é quem: o veto só
+# precisa pegar a cauda, e a cauda existe.
+_ANCORA_VETO_VISUAL = float(os.environ.get("KV_ANCORA_VETO_VISUAL", "0.75"))
+
+
+def _centro_rel(pessoa: dict, w: int, h: int):
+    b = pessoa.get("bbox")
+    if not _bbox_valido(b):
+        return None
+    x1, y1, x2, y2 = (float(v) for v in b[:4])
+    return (round((x1 + x2) / 2 / max(1, w), 5),
+            round((y1 + y2) / 2 / max(1, h), 5),
+            round((y2 - y1) / max(1, h), 5))
+
+
+def _n_no_posto(amostra) -> int:
+    """Quantas pessoas havia no posto neste instante — contando as DUAS
+    câmeras (Fase 91). Com mais de uma, quem continuou é ambíguo e a herança
+    se recusa a adivinhar."""
+    n1 = sum(1 for p in amostra.pessoas if p.get("papel") == "operador")
+    n2 = getattr(amostra, "n_posto_cam2", None)
+    return max(n1, int(n2) if n2 is not None else 0)
+
+
+def ancora_por_continuidade(ancoras: dict, tid_novo: int, pessoa: dict,
+                            amostra, w: int, h: int, vivos: set) -> tuple:
+    """(tid da âncora herdada, motivo) — ou (None, motivo da recusa).
+
+    Track NOVO sem âncora própria: existe um track que acabou de sumir, ali
+    perto, que é plausivelmente a mesma pessoa? Se sim, o gate compara contra
+    a âncora dele em vez de forçar uma análise cheia.
+    """
+    if not _COSTURA_ANCORA:
+        return None, "desligado"
+    centro = _centro_rel(pessoa, w, h)
+    if centro is None:
+        return None, "sem caixa"
+    # GUARDA 1 — ambiguidade: com mais de uma pessoa no posto, quem continuou
+    # não é dedutível. Recusa em vez de sortear.
+    if _n_no_posto(amostra) > 1:
+        return None, "mais de uma pessoa no posto"
+    melhor, melhor_gap, motivo = None, None, "nenhum candidato"
+    for tid, anc in ancoras.items():
+        if tid == tid_novo or tid in vivos:
+            continue                      # âncora de track AINDA ativo não vale
+        t_anc, c_anc = anc.get("t"), anc.get("centro")
+        if t_anc is None or c_anc is None:
+            continue
+        gap = amostra.tempo_s - float(t_anc)
+        # GUARDA 2 — geometria: pouco tempo, pouca distância, sem salto de
+        # profundidade. Mesma regra da costura dos descritores.
+        if gap <= 0 or gap > _COSTURA_GAP_S:
+            continue
+        alt = max(1e-6, (c_anc[2] + centro[2]) / 2)
+        dist = ((c_anc[0] - centro[0]) ** 2 + (c_anc[1] - centro[1]) ** 2) ** 0.5 / alt
+        if dist > _COSTURA_DIST:
+            motivo = "candidato longe demais"
+            continue
+        if abs(c_anc[2] - centro[2]) / max(c_anc[2], centro[2]) > _COSTURA_ALTURA_TOL:
+            motivo = "salto de profundidade"
+            continue
+        # GUARDA 3 — papel: visitante não herda âncora de operador. É o caso
+        # perigoso, porque converteria terceiro em titular sem ninguém ver.
+        if anc.get("papel") != pessoa.get("papel"):
+            motivo = "papel diferente"
+            continue
+        # GUARDA 4 — VETO de aparência. Não identifica: rejeita o absurdo.
+        dv = _dist_movimento(anc.get("crop"), pessoa.get("crop"))
+        if dv is not None and dv > _ANCORA_VETO_VISUAL:
+            motivo = f"veto visual ({dv:.2f})"
+            continue
+        if anc.get("n_no_posto", 1) > 1:
+            motivo = "âncora nasceu ambígua"
+            continue
+        if melhor is None or gap < melhor_gap:
+            melhor, melhor_gap = tid, gap
+    return (melhor, f"herdou de {melhor} (gap {melhor_gap:.1f}s)") if melhor is not None \
+        else (None, motivo)
+
+
 def _agrupar_amostras(amostras: list, bucket_s: float) -> list[list]:
     """Fase 85 — agrupa amostras consecutivas em blocos do mesmo MINUTO.
 
@@ -3220,6 +3320,9 @@ def etapa_analise_vlm(
                 + (" · gate ON" if _GATE_ENABLE else ""))
     observacoes: list[dict] = []
     ancoras: dict[int, dict] = {}   # track_id → {kpts, crop, zona, descricao}
+    # Fase 92: dimensões do quadro, para normalizar centro/altura da âncora.
+    _dim0 = next((a.dim for a in amostras if getattr(a, "dim", None)), None)
+    _W_VID, _H_VID = (_dim0 if _dim0 else (1280, 720))
     # Fase 85: quantas amostras SEGUIDAS cada track já herdou do gate. É o
     # contador que faz o teto existir.
     repeticoes_seguidas: dict[int, int] = {}
@@ -3230,6 +3333,7 @@ def etapa_analise_vlm(
     ultima_desc_op: str | None = None
     ultimo_tid_op: int | None = None
     n_herdadas = n_teto_heranca = n_interpoladas = 0
+    n_ancora_herdada = n_ancora_nova = 0
     heranca_seguidas = 0
 
     def _eh_indefinida(d: str | None) -> bool:
@@ -3270,9 +3374,21 @@ def etapa_analise_vlm(
                 tid = p["track_id"]
                 anc = ancoras.get(tid)
                 if anc is None:
-                    d_am[tid] = ("analisar", "")      # 1ª vez do track → analisa
-                    precisa_vlm = True
-                    continue
+                    # Fase 92: antes de pagar uma análise cheia, pergunta se
+                    # este track novo é a CONTINUAÇÃO de um que acabou de
+                    # sumir. Não remapeia ID: só empresta a âncora.
+                    _vivos = {q["track_id"] for q in am.pessoas}
+                    _tid_anc, _motivo = ancora_por_continuidade(
+                        ancoras, tid, p, am, _W_VID, _H_VID, _vivos)
+                    if _tid_anc is not None:
+                        anc = ancoras[_tid_anc]
+                        ancoras[tid] = dict(anc)      # o novo id passa a tê-la
+                        n_ancora_herdada += 1
+                    else:
+                        d_am[tid] = ("analisar", "")  # 1ª vez do track → analisa
+                        precisa_vlm = True
+                        n_ancora_nova += 1
+                        continue
                 if repeticoes_seguidas.get(tid, 0) >= _GATE_MAX_REPETICOES:
                     # TETO: já herdou demais seguidas. Parar de herdar aqui é o
                     # que transforma "parado há 2 minutos" numa observação em
@@ -3456,6 +3572,12 @@ def etapa_analise_vlm(
                     ancoras[tid] = {
                         "kpts": p.get("kpts"), "crop": p.get("crop"),
                         "zona": p.get("zona"), "descricao": desc,
+                        # Fase 92: quando/onde/quem — o que a herança por
+                        # continuidade precisa para decidir se este track e o
+                        # próximo são a mesma pessoa.
+                        "t": am.tempo_s, "centro": _centro_rel(p, _W_VID, _H_VID),
+                        "papel": p.get("papel"),
+                        "n_no_posto": _n_no_posto(am),
                     }
                 observacoes.append({
                     "tempo_s": am.tempo_s,
@@ -3490,6 +3612,13 @@ def etapa_analise_vlm(
         progress_cb("vlm", pct,
                     f"{feitas}/{len(amostras)} amostras · {len(observacoes)} observações")
 
+    if n_ancora_herdada or n_ancora_nova:
+        # A CONTAGEM QUE O DONO PEDIU PARA VER ANTES DE CONFIAR: quantas
+        # âncoras sobreviveram à troca de ID, contra quantas custaram análise.
+        log.info("[ancora] %d herdada(s) por continuidade · %d nova(s) "
+                 "(pagaram análise) · KV_COSTURA_ANCORA=%s",
+                 n_ancora_herdada, n_ancora_nova,
+                 "on" if _COSTURA_ANCORA else "off")
     if n_herdadas or n_teto_heranca:
         log.info("[operador] %d observação(ões) herdaram a última ação conhecida; "
                  "%d recusadas pelo teto de herança (KV_HERANCA_MAX_SEGUIDAS=%d).",
@@ -3508,6 +3637,9 @@ def etapa_analise_vlm(
             "amostras": base, "grupos": len(grupos), "vlm_completo": n_completo,
             "vlm_binario": n_binario, "repeticoes": n_repeticao,
             "teto_gate": n_teto_gate, "teto_heranca": n_teto_heranca,
+            # Fase 92: o ganho da costura de âncora, mensurável por vídeo.
+            "ancora_herdada": n_ancora_herdada,
+            "ancora_nova": n_ancora_nova,
             "economia_pct": economia,
         }
     return observacoes

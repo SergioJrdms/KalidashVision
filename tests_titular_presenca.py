@@ -364,6 +364,101 @@ gs2 = pl.agrupar_descritores(cadeia)
 check("A e C NÃO caem no mesmo grupo (sem encadeamento)",
       not any(len(g["tracks"]) == 3 for g in gs2), [g["n_tracks"] for g in gs2])
 
+print("\n[12f] ÂNCORA que sobrevive à troca de ID — e as quatro guardas")
+class Am2:
+    def __init__(self, pessoas, tempo_s, n2=None):
+        self.pessoas, self.tempo_s, self.n_posto_cam2 = pessoas, tempo_s, n2
+        self.dim = (1280, 720)
+
+def pess(tid, x, papel="operador", crop=None):
+    return {"track_id": tid, "bbox": (int(x*1280-40), 300, int(x*1280+40), 600),
+            "papel": papel, "crop": crop}
+
+def anc(t, x, papel="operador", crop=None, n_posto=1):
+    return {"kpts": None, "crop": crop, "zona": "posto", "descricao": "operando",
+            "t": t, "centro": (x, 0.62, 0.42), "papel": papel, "n_no_posto": n_posto}
+
+_real = pl._COSTURA_ANCORA
+pl._COSTURA_ANCORA = True
+try:
+    A = {7: anc(10.0, 0.50)}
+    t, m = pl.ancora_por_continuidade(A, 9, pess(9, 0.52), Am2([pess(9,0.52)], 13.0),
+                                      1280, 720, {9})
+    check("track novo logo ali herda a âncora", t == 7, (t, m))
+    check("e o motivo diz de quem herdou", "herdou de 7" in m, m)
+
+    # GUARDA 1 — ambiguidade
+    t, m = pl.ancora_por_continuidade(A, 9, pess(9, 0.52),
+                                      Am2([pess(9,0.52), pess(11,0.6)], 13.0),
+                                      1280, 720, {9, 11})
+    check("com DUAS pessoas no posto, recusa", t is None and "mais de uma" in m, m)
+    t, m = pl.ancora_por_continuidade(A, 9, pess(9, 0.52),
+                                      Am2([pess(9,0.52)], 13.0, n2=2), 1280, 720, {9})
+    check("e conta a cam2 também (Fase 91)", t is None and "mais de uma" in m, m)
+
+    # GUARDA 2 — geometria
+    t, m = pl.ancora_por_continuidade(A, 9, pess(9, 0.95), Am2([pess(9,0.95)], 13.0),
+                                      1280, 720, {9})
+    check("longe demais no espaço, recusa", t is None, (t, m))
+    t, m = pl.ancora_por_continuidade(A, 9, pess(9, 0.52), Am2([pess(9,0.52)], 90.0),
+                                      1280, 720, {9})
+    check("gap grande demais, recusa", t is None, (t, m))
+    t, m = pl.ancora_por_continuidade(A, 9, pess(9, 0.52), Am2([pess(9,0.52)], 5.0),
+                                      1280, 720, {9})
+    check("âncora do FUTURO nunca vale", t is None, (t, m))
+
+    # GUARDA 3 — papel
+    t, m = pl.ancora_por_continuidade(A, 9, pess(9, 0.52, papel="visitante"),
+                                      Am2([pess(9,0.52,"visitante")], 13.0),
+                                      1280, 720, {9})
+    check("visitante NÃO herda âncora de operador",
+          t is None and "papel diferente" in m, m)
+
+    # GUARDA 4 — veto visual (rejeita o absurdo, não identifica)
+    # O numpy é stub nesta suíte, então o veto é testado com `_dist_movimento`
+    # trocado por um dublê — o que interessa aqui é a DECISÃO do veto, não a
+    # aritmética do absdiff (essa já é testada em tests_camadas_duvida).
+    _dm_real = pl._dist_movimento
+    pl._dist_movimento = lambda a, b: (None if a is None or b is None
+                                       else (0.95 if a != b else 0.05))
+    c1, c2 = "crop_a", "crop_b"
+    Av = {7: anc(10.0, 0.50, crop=c1)}
+    t, m = pl.ancora_por_continuidade(Av, 9, pess(9, 0.52, crop=c2),
+                                      Am2([pess(9,0.52)], 13.0), 1280, 720, {9})
+    check("aparência absurdamente diferente é VETADA",
+          t is None and "veto visual" in m, m)
+    t, m = pl.ancora_por_continuidade(Av, 9, pess(9, 0.52, crop=c1),
+                                      Am2([pess(9,0.52)], 13.0), 1280, 720, {9})
+    check("mesma aparência passa", t == 7, (t, m))
+    pl._dist_movimento = _dm_real
+
+    # Âncora de track AINDA VIVO não é emprestada (senão duas pessoas
+    # simultâneas compartilhariam a mesma descrição).
+    t, m = pl.ancora_por_continuidade(A, 9, pess(9, 0.52),
+                                      Am2([pess(9,0.52)], 13.0), 1280, 720, {7, 9})
+    check("âncora de track vivo não é emprestada", t is None, (t, m))
+
+    # Âncora que nasceu num instante ambíguo não empresta.
+    Aa = {7: anc(10.0, 0.50, n_posto=2)}
+    t, m = pl.ancora_por_continuidade(Aa, 9, pess(9, 0.52),
+                                      Am2([pess(9,0.52)], 13.0), 1280, 720, {9})
+    check("âncora nascida ambígua não empresta",
+          t is None and "ambígua" in m, m)
+finally:
+    pl._COSTURA_ANCORA = _real
+
+check("a flag nasce DESLIGADA", pl._COSTURA_ANCORA is False)
+t, m = pl.ancora_por_continuidade({7: anc(10.0, 0.50)}, 9, pess(9, 0.52),
+                                  Am2([pess(9,0.52)], 13.0), 1280, 720, {9})
+check("com a flag off nunca herda", t is None and m == "desligado", m)
+check("a contagem de âncoras herdadas é exposta",
+      '"ancora_herdada": n_ancora_herdada' in fonte
+      and '"ancora_nova": n_ancora_nova' in fonte)
+check("e logada com o total que pagou análise",
+      "herdada(s) por continuidade" in fonte)
+check("a assimetria está escrita no código",
+      "falso \"igual\" custa um RÓTULO ERRADO" in fonte)
+
 print("\n[13] Por CÂMERA e por DIA — cam1 e cam2 não são a mesma régua")
 r4, _ = rodar([desc(i, AZUL, AZUL, 200, cam="cam1") for i in range(1, 9)]
               + [desc(i, VERM, VERM, 200, cam="cam2") for i in range(30, 38)])
