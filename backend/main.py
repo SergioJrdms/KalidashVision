@@ -55,6 +55,8 @@ from .pipeline import (
     _seg_token_nome,
     FRAMES_VER,
     chave_frame_evento,
+    _nomes_no_prefixo,
+    _prefixo_frames,
     chave_frame_segmento,
     varrer_videos_expirados,
     propagar_categoria_para_eventos,
@@ -1293,11 +1295,25 @@ def _anexar_recortes_dos_grupos(sb, empresa: str, processo: str, dia: str,
 
     Sem a imagem ao lado do número não dá para dizer se um grupo é uma pessoa
     ou virou sopa — e essa é a pergunta que decide se isto um dia sai da
-    sombra. Não-fatal: relatório sem recorte ainda serve, erro derrubando a
-    tela não.
+    sombra. Não-fatal.
+
+    ⚠️ Fase 93 — DOIS CONSERTOS, e os dois eram egress perdido:
+
+    1. SÓ EVENTO PRINCIPAL tem frame aquecido. O "melhor evento por track" caía
+       quase sempre num de AUDITORIA, cuja chave nunca existiu no Storage —
+       cada grupo virava um GET que só podia falhar.
+
+    2. TRACK DA CAM2 NÃO TEM EVENTO. Os ids da lateral vêm de outro tracker e
+       não casam com os da cam1. Quando não casavam, o cartão saía sem recorte
+       ("frame não aquecido", que era diagnóstico errado); quando casavam POR
+       COINCIDÊNCIA, baixava-se um frame da cam1 e cortava-se com coordenada
+       da cam2 — imagem de outra pessoa, que é pior que imagem nenhuma. Agora
+       a cam2 é explicitamente sem recorte, com o motivo certo: os frames dela
+       são indexados por JANELA DE TEMPO do segmento, não por evento.
     """
     import base64 as _b64
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    cache_frames: dict = {}
     try:
         videos = varrer(sb, "videos", "id, nome, cam_id, caminho",
                         empresa=empresa, processo=processo)
@@ -1305,26 +1321,41 @@ def _anexar_recortes_dos_grupos(sb, empresa: str, processo: str, dia: str,
         alvo = {g["referencia"]["video_id"] for c in rel["cameras"]
                 for g in c["grupos"] if (g.get("referencia") or {}).get("video_id")}
         eventos = varrer(
-            sb, "eventos", "id, video_id, pessoa_track_id, n_amostras",
+            sb, "eventos", "id, video_id, pessoa_track_id, n_amostras, principal",
             empresa=empresa, processo=processo,
-            ajustes=lambda q: q.in_("video_id", sorted(alvo)[:100]),
+            ajustes=lambda q: q.in_("video_id", sorted(alvo)[:100]).is_("principal", "true"),
         ) if alvo else []
         melhor: dict = {}
         for e in eventos:
+            if e.get("principal") is not True:
+                continue
             k = (e.get("video_id"), e.get("pessoa_track_id"))
             a = melhor.get(k)
             if a is None or (e.get("n_amostras") or 0) > (a.get("n_amostras") or 0):
                 melhor[k] = e
         for c in rel["cameras"]:
+            # O frame do evento é da câmera PRIMÁRIA. Cortá-lo com a caixa de um
+            # track da lateral daria a pessoa errada.
+            eh_primaria = (c.get("cam_id") or "") in ("", "cam1")
             for g in c["grupos"]:
+                if not eh_primaria:
+                    g["recorte"] = None
+                    g["recorte_motivo"] = (
+                        "a lateral não tem frame por evento — os frames dela são "
+                        "indexados por janela de tempo do segmento")
+                    continue
                 r = g.get("referencia") or {}
+                v = por_id.get(r.get("video_id")) or {}
+                ev = melhor.get((r.get("video_id"), r.get("pessoa_track_id")))
                 jpg = _recorte_do_track(
-                    sb, bucket, por_id.get(r.get("video_id")) or {},
-                    melhor.get((r.get("video_id"), r.get("pessoa_track_id"))),
-                    r.get("bbox_ref"),
+                    sb, bucket, v, ev, r.get("bbox_ref"),
+                    existentes=_frames_do_video(sb, bucket, v, cache_frames),
                 )
                 g["recorte"] = ("data:image/jpeg;base64,"
                                 + _b64.b64encode(jpg).decode()) if jpg else None
+                if not jpg:
+                    g["recorte_motivo"] = ("nenhum evento principal deste track teve "
+                                           "frame aquecido")
     except Exception as e:  # noqa: BLE001
         log.warning("[titular] recortes não anexados (%s) — não-fatal.", e)
 
@@ -1383,18 +1414,27 @@ def exportar_descritores_do_dia(
     # ── 2) Um evento por track, para achar o frame já aquecido no Storage ──
     ev_por_track: dict[tuple, dict] = {}
     if com_recortes:
+        # ⚠️ Fase 93 — SÓ EVENTO PRINCIPAL. `pre_extrair_frames` aquece frames
+        # apenas para os principais; evento de AUDITORIA (principal=false) nunca
+        # teve frame no Storage. Sem este filtro, o "melhor evento por track"
+        # caía quase sempre num de auditoria (eles são a maioria esmagadora), e
+        # cada track virava um GET que só podia falhar. Era a maior fonte dos
+        # erros — e de egress desperdiçado no free tier.
         eventos = varrer(
             sb, "eventos", "id, video_id, pessoa_track_id, n_amostras, principal",
             empresa=user.empresa, processo=nome,
-            ajustes=lambda q: q.in_("video_id", list(do_dia)[:100]),
+            ajustes=lambda q: q.in_("video_id", list(do_dia)[:100]).is_("principal", "true"),
         )
         for e in eventos:
+            if e.get("principal") is not True:
+                continue
             k = (e.get("video_id"), e.get("pessoa_track_id"))
             atual = ev_por_track.get(k)
             if atual is None or (e.get("n_amostras") or 0) > (atual.get("n_amostras") or 0):
                 ev_por_track[k] = e
 
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    _cache_frames: dict = {}
     buf = io.BytesIO()
     n_recortes = 0
     sem_recorte: list[str] = []
@@ -1426,6 +1466,7 @@ def exportar_descritores_do_dia(
                 jpg = _recorte_do_track(
                     sb, bucket, v, ev_por_track.get((d["video_id"], d["pessoa_track_id"])),
                     d.get("bbox_ref"),
+                    existentes=_frames_do_video(sb, bucket, v, _cache_frames),
                 )
                 if jpg:
                     arq_recorte = f"recortes/{chave}.jpg"
@@ -1467,24 +1508,49 @@ def exportar_descritores_do_dia(
     )
 
 
+def _frames_do_video(sb, bucket: str, video: dict, cache: dict) -> set:
+    """Nomes de frame já existentes no prefixo deste vídeo — UMA listagem de
+    metadados por vídeo, memorizada.
+
+    É a peça que substitui centenas de GETs perdidos por uma chamada que não
+    baixa byte nenhum. No free tier de 5 GB/mês essa diferença é a campanha.
+    """
+    caminho = (video or {}).get("caminho")
+    if not caminho or str(caminho).startswith(("/", "\\")):
+        return set()
+    if caminho in cache:
+        return cache[caminho]
+    cache[caminho] = _nomes_no_prefixo(sb, bucket, _prefixo_frames(caminho))
+    return cache[caminho]
+
+
 def _recorte_do_track(sb, bucket: str, video: dict, evento: dict | None,
-                      bbox_ref) -> bytes | None:
+                      bbox_ref, existentes: set | None = None) -> bytes | None:
     """JPEG do track, cortado do frame que JÁ está no Storage.
 
     `bbox_ref` é NORMALIZADA (0-1) de propósito: o frame guardado foi
     redimensionado (FRAME_MAX_W), então coordenada em pixel do vídeo original
     cortaria o lugar errado. Normalizada, funciona em qualquer tamanho.
+
+    ⚠️ Fase 93 — NUNCA PEDIR O QUE NÃO EXISTE. Antes, cada track sem frame
+    aquecido virava um GET ao Storage que voltava erro. Centenas por
+    exportação, no free tier de 5 GB/mês, para descobrir pelo 404 uma coisa
+    que uma listagem de metadados responde de uma vez. `existentes` é o
+    conjunto de nomes já no prefixo (uma chamada de LISTAGEM, que não baixa
+    byte nenhum) — sem ele na mão, esta função se recusa a tentar.
     """
     if not evento or not bbox_ref or not video.get("caminho"):
         return None
     caminho = video["caminho"]
     if str(caminho).startswith(("/", "\\")):
         return None                      # upload legado com path local
+    chave = chave_frame_evento(caminho, evento["id"], 1)
+    if existentes is not None and posixpath.basename(chave) not in existentes:
+        # O frame não foi aquecido para este evento. Saber ANTES é a diferença
+        # entre zero requisição e uma requisição perdida por track.
+        return None
     try:
-        # k=1 é o frame do MEIO do evento — o menos provável de pegar a pessoa
-        # entrando ou saindo de quadro.
-        dados = sb.storage.from_(bucket).download(
-            chave_frame_evento(caminho, evento["id"], 1))
+        dados = sb.storage.from_(bucket).download(chave)
         if not dados:
             return None
         import numpy as _np

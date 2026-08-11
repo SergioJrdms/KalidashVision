@@ -722,6 +722,9 @@ export interface GrupoTitular {
   eh_titular: boolean;
   altura_rel: number | null;
   recorte?: string | null;
+  // Fase 93: POR QUE não há recorte. "frame não aquecido" era diagnóstico
+  // errado na cam2 — a lateral simplesmente não tem frame por evento.
+  recorte_motivo?: string | null;
   tracks: { video_id: string; pessoa_track_id: number; tempo_posto_s: number }[];
 }
 export interface CameraTitular {

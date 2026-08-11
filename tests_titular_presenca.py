@@ -521,5 +521,49 @@ check("e o schema registra a decisão de LGPD",
 check("titular nulo é estado legítimo, documentado",
       "DIA SEM TITULAR" in sql)
 
+
+
+
+# ── Fase 93 — EGRESS: nunca pedir ao Storage o que não existe ────────────
+# O log do Render mostrava dezenas de GETs por segundo ao Storage, quase todos
+# falhando. No free tier de 5 GB/mês isso é a campanha. Três causas, e nenhuma
+# era o pipeline (ele não baixa frame nenhum):
+#   1. o "melhor evento por track" não filtrava `principal`, e só o principal
+#      tem frame aquecido — o de AUDITORIA, que é a maioria esmagadora, nunca
+#      teve chave no Storage;
+#   2. não havia checagem de existência: o código descobria pelo erro;
+#   3. track da cam2 não tem evento (ids de outro tracker), então ou não achava
+#      nada ou — pior — casava por coincidência e cortava um frame da cam1 com
+#      coordenada da cam2, devolvendo outra pessoa.
+print("\n[19] Egress: o Storage não é consultado às cegas")
+_main = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "backend", "main.py"), encoding="utf-8").read()
+check("o PIPELINE não baixa frame nenhum (o log era da API)",
+      ".download(" not in fonte, "pipeline.py baixa algo do Storage")
+check("existe listagem de metadados memorizada por vídeo",
+      "def _frames_do_video" in _main and "_nomes_no_prefixo" in _main)
+check("e a listagem é declarada como não-egress",
+      "não baixa byte nenhum" in _main or "não gera egress" in fonte,
+      "nem main nem pipeline documentam que a listagem não gera egress")
+check("o recorte se RECUSA a tentar sem saber que existe",
+      "if existentes is not None and posixpath.basename(chave) not in existentes"
+      in _main)
+check("os dois chamadores passam o conjunto de existentes",
+      _main.count("existentes=_frames_do_video(") == 2,
+      _main.count("existentes=_frames_do_video("))
+check("só evento PRINCIPAL é candidato (só ele tem frame aquecido)",
+      _main.count('.is_("principal", "true")') == 2,
+      _main.count('.is_("principal", "true")'))
+check("com guarda em memória também (o filtro do servidor pode falhar)",
+      _main.count('if e.get("principal") is not True:') == 2)
+check("a cam2 não tenta cortar frame de evento",
+      "eh_primaria" in _main and "a lateral não tem frame por evento" in _main)
+check("e o motivo do 'sem recorte' vem do SERVIDOR, não é chute da tela",
+      "recorte_motivo" in _main
+      and "recorte_motivo" in open(
+          os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "frontend", "src", "pages", "Titular.tsx"),
+          encoding="utf-8").read())
+
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

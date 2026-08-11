@@ -148,8 +148,12 @@ function CartaoGrupo({ g }: { g: GrupoTitular }) {
         {g.recorte
           ? <img src={g.recorte} alt={`recorte do grupo ${g.grupo}`}
                  style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-          : <span style={{ fontSize: 10.5, color: "var(--faint)", textAlign: "center", padding: 6 }}>
-              sem recorte<br />(frame não aquecido)
+          : <span style={{ fontSize: 10, color: "var(--faint)", textAlign: "center",
+                           padding: 6, lineHeight: 1.4 }}>
+              sem recorte<br />
+              {/* O motivo VEM DO SERVIDOR: "frame não aquecido" era chute, e na
+                  cam2 era chute errado — a lateral não tem frame por evento. */}
+              {g.recorte_motivo || "motivo não informado"}
             </span>}
       </div>
       <div className="row gap1" style={{ alignItems: "baseline" }}>
