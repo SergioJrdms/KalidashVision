@@ -124,7 +124,7 @@ check("o porquê está escrito (descrever custaria VLM)",
 def desc(tid, cor_sup, cor_inf, tempo_posto, razoes=None, altura=0.5, cam="cam1"):
     return {"id": f"d{tid}", "video_id": f"v{tid // 10}", "pessoa_track_id": tid,
             "cam_id": cam, "tempo_posto_s": tempo_posto,
-            "tempo_visivel_s": tempo_posto + 10,
+            "tempo_visivel_s": tempo_posto,
             "altura_rel": altura, "razoes": razoes,
             "hist_sup": cor_sup, "hist_inf": cor_inf,
             "bbox_ref": [0.1, 0.1, 0.3, 0.9], "frame_ref": 10,
@@ -262,6 +262,31 @@ check("e barrou pelo PERCENTUAL, não por falta de minutos",
       "min no posto" not in c3["motivo"], c3["motivo"])
 check("e isso é RESPOSTA, não erro (o relatório sai completo)",
       c3["n_grupos"] == 3 and c3["minutos_posto_total"] > 0, c3)
+
+print("\n[12b] `numeric` do Postgres volta como STRING — e quase matou tudo")
+# O PostgREST devolve coluna `numeric` como texto: altura_rel chega '0.4831',
+# não 0.4831. `max(str, int)` levanta TypeError e o agrupamento inteiro morre
+# no primeiro par. Os testes sintéticos não pegavam porque construíam floats —
+# o dublê era mais generoso que o serviço real, a MESMA armadilha da Fase 81.
+# Achado rodando contra o banco de verdade, não contra fixture.
+check("_num coage string numérica", pl._num("0.4831") == 0.4831)
+check("e devolve None no que não é número", pl._num("abc") is None
+      and pl._num(None) is None and pl._num(True) is None)
+d_str = desc(1, AZUL, AZUL, "200.5", altura="0.38158")
+d_str2 = desc(2, AZULC, AZULC, "180.0", altura="0.38487")
+_s, m_str = pl._sim_descritores(d_str, d_str2)
+check("comparar dois descritores com strings NÃO levanta", m_str == "ok", m_str)
+g_str = pl.agrupar_descritores([d_str, d_str2])
+check("agrupa normalmente", len(g_str) == 1 and g_str[0]["n_tracks"] == 2, g_str)
+check("e o tempo somado sai numérico",
+      abs(g_str[0]["tempo_posto_s"] - 380.5) < 0.01, g_str[0]["tempo_posto_s"])
+# razoes vem de jsonb (tipos preservados), mas defensivo mesmo assim
+R_STR = {"ombro_tronco": {"med": "0.50", "n": "40"}}
+_s, m_r = pl._sim_descritores(desc(3, AZUL, AZUL, 100, R_STR),
+                              desc(4, AZULC, AZULC, 100, R_STR))
+check("razões com valores em string também não levantam", m_r == "ok", m_r)
+check("histograma com strings dentro não levanta",
+      pl._sim_hist(["10", "0", "0", "0", "0", "0"], AZUL) == 1.0)
 
 print("\n[13] Por CÂMERA e por DIA — cam1 e cam2 não são a mesma régua")
 r4, _ = rodar([desc(i, AZUL, AZUL, 200, cam="cam1") for i in range(1, 9)]

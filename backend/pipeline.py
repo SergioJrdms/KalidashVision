@@ -4940,12 +4940,31 @@ def _sim_hist(a, b) -> float | None:
     """
     if not a or not b or len(a) != len(b):
         return None
-    sa, sb = sum(a), sum(b)
+    va = [_num(x) or 0.0 for x in a]
+    vb = [_num(x) or 0.0 for x in b]
+    sa, sb = sum(va), sum(vb)
     if sa <= 0 or sb <= 0:
         return None
-    na = [v / sa for v in a]
-    nb = [v / sb for v in b]
+    na = [v / sa for v in va]
+    nb = [v / sb for v in vb]
     return float(sum(min(x, y) for x, y in zip(na, nb)))
+
+
+def _num(v) -> float | None:
+    """Coage para float ou None.
+
+    ⚠️ COLUNA `numeric` DO POSTGRES VOLTA COMO STRING no PostgREST — `altura_rel`
+    e `tempo_posto_s` chegam '0.4831', não 0.4831. Comparar string com número
+    levanta TypeError, e o agrupamento inteiro morreria no primeiro par. Os
+    testes sintéticos não pegavam porque construíam floats: o dublê era mais
+    generoso que o serviço real, que é exatamente a armadilha da Fase 81.
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _sim_descritores(d1: dict, d2: dict) -> tuple[float | None, str]:
@@ -4972,9 +4991,10 @@ def _sim_descritores(d1: dict, d2: dict) -> tuple[float | None, str]:
         a, b = r1[nome], r2[nome]
         if not isinstance(a, dict) or not isinstance(b, dict):
             continue
-        if (a.get("n") or 0) < _TIT_RAZAO_MIN_N or (b.get("n") or 0) < _TIT_RAZAO_MIN_N:
+        if ((_num(a.get("n")) or 0) < _TIT_RAZAO_MIN_N
+                or (_num(b.get("n")) or 0) < _TIT_RAZAO_MIN_N):
             continue                      # medida de menos: não opina
-        ma, mb = a.get("med"), b.get("med")
+        ma, mb = _num(a.get("med")), _num(b.get("med"))
         if ma is None or mb is None or max(abs(ma), abs(mb)) <= 0:
             continue
         comparadas += 1
@@ -4984,7 +5004,7 @@ def _sim_descritores(d1: dict, d2: dict) -> tuple[float | None, str]:
         return cor, f"razões corporais divergem ({conflito}/{comparadas})"
 
     # ── Altura relativa: desempate, nunca porta de entrada ──
-    h1, h2 = d1.get("altura_rel"), d2.get("altura_rel")
+    h1, h2 = _num(d1.get("altura_rel")), _num(d2.get("altura_rel"))
     if h1 and h2 and max(h1, h2) > 0:
         if abs(h1 - h2) / max(h1, h2) > _TIT_ALTURA_TOL:
             return cor, f"altura difere {abs(h1-h2)/max(h1,h2):.0%}"
@@ -5029,11 +5049,11 @@ def agrupar_descritores(descritores: list) -> list[dict]:
 
     grupos = []
     for membros in por_raiz.values():
-        tempo_posto = sum(float(m.get("tempo_posto_s") or 0) for m in membros)
-        tempo_vis = sum(float(m.get("tempo_visivel_s") or 0) for m in membros)
+        tempo_posto = sum(_num(m.get("tempo_posto_s")) or 0.0 for m in membros)
+        tempo_vis = sum(_num(m.get("tempo_visivel_s")) or 0.0 for m in membros)
         # Recorte de referência: o track com MAIS tempo no posto é o que tem a
         # melhor chance de mostrar a pessoa inteira e nítida.
-        ref = max(membros, key=lambda m: float(m.get("tempo_posto_s") or 0))
+        ref = max(membros, key=lambda m: _num(m.get("tempo_posto_s")) or 0.0)
         grupos.append({
             "n_tracks": len(membros),
             # ASSINATURA = a cor do track de referência. É o que a verificação
@@ -5045,7 +5065,7 @@ def agrupar_descritores(descritores: list) -> list[dict]:
             "tempo_posto_s": round(tempo_posto, 1),
             "tempo_visivel_s": round(tempo_vis, 1),
             "minutos_posto": round(tempo_posto / 60, 1),
-            "altura_rel": ref.get("altura_rel"),
+            "altura_rel": _num(ref.get("altura_rel")),
             "referencia": {
                 "descritor_id": ref.get("id"),
                 "video_id": ref.get("video_id"),
@@ -5057,7 +5077,7 @@ def agrupar_descritores(descritores: list) -> list[dict]:
             "tracks": sorted(
                 ({"video_id": m.get("video_id"),
                   "pessoa_track_id": m.get("pessoa_track_id"),
-                  "tempo_posto_s": float(m.get("tempo_posto_s") or 0),
+                  "tempo_posto_s": _num(m.get("tempo_posto_s")) or 0.0,
                   "descritor_id": m.get("id")}
                  for m in membros),
                 key=lambda t: -t["tempo_posto_s"],
