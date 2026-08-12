@@ -67,6 +67,7 @@ from .pipeline import (
     auditar_dia,
     identificar_titular_do_dia,
     calibrar_movimento,
+    comparar_arvore,
     limiares_movimento,
     eventos_do_bin,
     BIN_JORNADA_MIN,
@@ -1225,6 +1226,25 @@ def calibracao_do_movimento(
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
     return {"ok": True, **calibrar_movimento(sb, user.empresa, nome, dia, limite)}
+
+
+@app.get("/processos/{processo_id}/arvore/comparar")
+def comparar_arvore_decisao(
+    processo_id: str,
+    dia: str | None = Query(None, description="AAAA-MM-DD; vazio = todo o período"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fase 95 — o ANTES e o DEPOIS da árvore, no MESMO dado. Só leitura.
+
+    A árvore é determinística e lê só campos já persistidos, então os dois
+    números saem dos mesmos eventos: não precisa reprocessar, não precisa
+    ligar a flag, não custa chamada nenhuma.
+
+    Devolve de ONDE saiu cada ponto (`por_nivel`, `mudancas`) — uma queda de
+    produtividade sem decomposição não se apresenta a sócio nenhum."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    return {"ok": True, **comparar_arvore(sb, user.empresa, nome, dia)}
 
 
 @app.get("/movimento/limiares")

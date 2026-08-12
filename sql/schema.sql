@@ -1435,3 +1435,36 @@ alter table eventos drop constraint if exists eventos_modo_operacao_chk;
 alter table eventos add constraint eventos_modo_operacao_chk
     check (modo_operacao is null or modo_operacao in
            ('automatico','manual','parado','indeterminado'));
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 95 — A ÁRVORE DECIDE, E QUEM DECIDIU FICA GRAVADO
+--
+-- O teto de 75-80% não era resultado: era o único resultado possível. A
+-- produtividade vinha do NOME que o VLM dá à ação, e quase todo nome que ele
+-- dá é produtivo. Um instrumento que só pode dizer "sim" não mede nada.
+--
+-- A inversão: o sinal DETERMINÍSTICO decide, e o rótulo vira último recurso.
+--   1 presenca    zonas + tracking   ninguém no posto → IMPRODUTIVO
+--   2 movimento   sensor a 6 fps     máquina se mexe  → PRODUTIVO
+--   3 manual      pose + oclusão     operação manual  → PRODUTIVO
+--   4 rotulo      o VLM              nada acima decidiu
+--
+-- Precedência ABSOLUTA: humano > determinístico > rótulo. Se o sensor vê a
+-- máquina trabalhando, o minuto é produtivo mesmo com rótulo
+-- `conversando_colega` — o sensor mede o mundo, o rótulo opina sobre ele.
+--
+-- `decidido_por` é gravado SEMPRE, inclusive com KV_ARVORE_DECIDE desligado:
+-- é assim que se compara o antes e o depois no MESMO dado, sem reprocessar.
+-- Sem ele, "por que este minuto é produtivo?" volta a não ter resposta — o
+-- problema original com outra roupa.
+--
+--   select decidido_por, count(*), round(sum(tempo_fim_s-tempo_inicio_s)/60) min
+--     from eventos where principal group by 1 order by min desc;
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists decidido_por text;
+alter table eventos add column if not exists maos_maquina boolean;
+alter table eventos drop constraint if exists eventos_decidido_por_chk;
+alter table eventos add constraint eventos_decidido_por_chk
+    check (decidido_por is null or decidido_por in
+           ('humano','presenca','movimento','manual','rotulo'));

@@ -4239,6 +4239,17 @@ def etapa_consolidar_principais(
             _maos = any(e.get("maos_maquina") for e, _ in no_bucket)
             principais[-1]["modo_operacao"] = modo_operacao(
                 _mov.get("movimento"), _mov.get("detalhe"), _maos)
+        # Fase 95: o NÍVEL que a árvore usaria é calculado e gravado mesmo com
+        # a flag desligada — é o que permite comparar antes/depois sem
+        # reprocessar. Ele não muda a categoria enquanto a flag não liga.
+        #
+        # ⚠️ Só o NÍVEL, não o "candidato a improdutivo": este depende da
+        # categoria Lean do rótulo, que na ingestão AINDA NÃO EXISTE (ela é
+        # atribuída depois, por `classificar_comportamentos_lean`). Gravá-lo
+        # aqui seria gravar uma conta feita com um insumo faltando — o
+        # candidato é derivado na LEITURA, onde o mapa de categorias existe.
+        _c, _niv, _mot, _cand = arvore_decidir(principais[-1], None)
+        principais[-1]["decidido_por"] = _niv
         # Fase 57: CAMADAS DE DÚVIDA — determinísticas, em CPU, ZERO chamada
         # extra ao VLM. Camada nunca corrige o rótulo: só marca dúvida.
         if camadas:
@@ -6405,6 +6416,12 @@ def etapa_persistir(
             # composição estava certa?" — que é exatamente a pergunta que não
             # pôde ser feita sobre o ciclo/parada do VLM.
             "modo_operacao": e.get("modo_operacao"),
+            # Fase 95 — QUEM DECIDIU. Sem isto, "por que este minuto é
+            # produtivo?" volta a não ter resposta, que é o problema original
+            # com outra roupa. Gravado SEMPRE, mesmo com a flag desligada: é
+            # assim que dá para comparar antes/depois no mesmo dado.
+            "maos_maquina": e.get("maos_maquina"),
+            "decidido_por": e.get("decidido_por"),
             # Fase 90: cobertura e composição, ao lado da evidência.
             "n_observacoes": e.get("n_observacoes"),
             "observacoes_origem": e.get("observacoes_origem"),
@@ -10620,11 +10637,215 @@ def compor_tempo_observado(va_s: float, desp_s: float, vazio_s: float,
 
 
 def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
-    """(label efetivo, categoria lean, duração) de um evento principal."""
-    label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
-    cat = categoria_efetiva(cat_por_label.get(label))
-    dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+    """(label efetivo, categoria lean, duração) de um evento principal.
+
+    Fase 95: com `KV_ARVORE_DECIDE` ligado, quem decide a categoria é a ÁRVORE
+    (sinal determinístico primeiro, rótulo por último). Desligado, devolve
+    exatamente o de antes — este é o ponto único por onde toda métrica passa, e
+    é por isso que a inversão cabe numa flag só."""
+    label, cat, dur, _nivel, _cand = _cat_com_arvore(e, cat_por_label)
     return label, cat, dur
+
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 95 — A ÁRVORE DECIDE. ATRÁS DE FLAG.
+#
+# O PROBLEMA, e ele é o teto de 75-80%: a produtividade vinha do NOME que o
+# VLM dá à ação, e quase todo nome que ele dá é produtivo. Não era medição —
+# era o único resultado possível. Um instrumento que só pode dizer "sim" não
+# está medindo nada.
+#
+# A INVERSÃO: quem decide passa a ser o sinal determinístico, e o rótulo vira
+# o ÚLTIMO recurso em vez do primeiro.
+#
+#   1. operador presente?   zonas + tracking   não → IMPRODUTIVO (posto vazio)
+#   2. máquina em movimento? sensor 6 fps      sim → PRODUTIVO
+#   3. operação manual?      pose + oclusão    sim → PRODUTIVO
+#   4. nada disso                              → o rótulo decide (como hoje)
+#
+# ⚠️ PRECEDÊNCIA, de cima para baixo, e ela é absoluta:
+#      correção HUMANA  >  sinal determinístico  >  rótulo do VLM
+#   Se o sensor vê a máquina trabalhando, o minuto é produtivo mesmo que o
+#   rótulo seja `conversando_colega`. O sensor mede o mundo; o rótulo é uma
+#   opinião sobre o mundo.
+#
+# ⚠️ O NÍVEL 3 NÃO É "MÃOS NA MÁQUINA". É `modo_operacao == 'manual'`, que
+# exige que a medição tenha ficado cega POR CAUSA das mãos. Mão apoiada numa
+# máquina visivelmente parada não é trabalho — é a mesma armadilha do
+# "ausente + mãos" que já recusamos na Fase 94, e aceitá-la aqui reintroduziria
+# o viés que esta árvore existe para eliminar.
+#
+# ⚠️ E O NÍVEL QUE DECIDIU FICA GRAVADO. Sem isso, "por que este minuto é
+# produtivo?" volta a não ter resposta — que é o problema original com outra
+# roupa.
+# ═════════════════════════════════════════════════════════════════════════
+_ARVORE_DECIDE = os.environ.get("KV_ARVORE_DECIDE", "off") not in (
+    "off", "0", "false", "False", "")
+
+NIVEL_HUMANO = "humano"
+NIVEL_PRESENCA = "presenca"
+NIVEL_MOVIMENTO = "movimento"
+NIVEL_MANUAL = "manual"
+NIVEL_ROTULO = "rotulo"
+NIVEIS_ARVORE = (NIVEL_HUMANO, NIVEL_PRESENCA, NIVEL_MOVIMENTO,
+                 NIVEL_MANUAL, NIVEL_ROTULO)
+
+# O nível 4 que merece OLHADA: operador presente, máquina medida e parada, sem
+# mãos. Hoje conta como produtivo pelo rótulo; pode ser ler desenho, esperar
+# material ou preparar setup — trabalho de verdade. A árvore NÃO afirma
+# improdutivo sozinha aqui: marca CANDIDATO e a camada manda para a fila.
+NIVEL_CANDIDATO_IMPRODUTIVO = "parado_sem_maos"
+
+
+def arvore_decidir(e: dict, cat_do_rotulo: str | None) -> tuple:
+    """(categoria, nivel, motivo, candidato) — FUNÇÃO PURA, sem banco.
+
+    `cat_do_rotulo` é o que o caminho atual decidiria. A árvore só o usa no
+    nível 4 — e devolvê-lo intacto ali é de propósito: o nível 4 é 'não sei
+    melhor que hoje', não 'é improdutivo'.
+    """
+    # ── PRECEDÊNCIA 0 — correção humana vence tudo, sempre ──
+    if e.get("validado_humano") and (e.get("label_corrigido")
+                                     or e.get("validacao_correto") is True):
+        return (categoria_efetiva(cat_do_rotulo), NIVEL_HUMANO,
+                "categoria do rótulo confirmado ou corrigido por você", None)
+
+    # ── NÍVEL 1 — presença. Determinístico: zonas + tracking (as DUAS câmeras) ──
+    papel = e.get("papel_pessoa")
+    if papel == "posto_vazio" or (e.get("comportamento_label") == POSTO_VAZIO_LABEL
+                                  and not e.get("label_corrigido")):
+        return ("desperdicio", NIVEL_PRESENCA,
+                "ninguém no posto — medido por zona e rastreamento", None)
+
+    # ── NÍVEL 2 — a máquina se mexe. O sensor mede o mundo ──
+    mov = e.get("movimento_maquina")
+    if mov in ("continuo", "intermitente"):
+        return ("valor_agregado", NIVEL_MOVIMENTO,
+                f"o sensor viu a máquina em movimento ({mov}) neste minuto", None)
+
+    # ── NÍVEL 3 — operação manual. NÃO é "mãos na máquina": é a medição ter
+    #    ficado cega POR CAUSA das mãos (ver Fase 94) ──
+    if e.get("modo_operacao") == "manual":
+        return ("valor_agregado", NIVEL_MANUAL,
+                "a parte móvel estava coberta pelas mãos do operador — "
+                "operação manual", None)
+
+    # ── NÍVEL 4 — o rótulo decide, como hoje. Mas fica MARCADO que foi ele ──
+    candidato = None
+    if e.get("modo_operacao") == "parado" and categoria_efetiva(cat_do_rotulo) == "valor_agregado":
+        # Presente, máquina medida e parada, sem mãos, e o rótulo diz produtivo.
+        # Pode ser ler desenho, esperar material, preparar setup — ou pode ser
+        # ociosidade. A árvore NÃO decide: aponta.
+        candidato = NIVEL_CANDIDATO_IMPRODUTIVO
+    return (categoria_efetiva(cat_do_rotulo), NIVEL_ROTULO,
+            "nenhum sinal determinístico decidiu — vale o rótulo do VLM",
+            candidato)
+
+
+def _cat_com_arvore(e: dict, cat_por_label: dict) -> tuple:
+    """(label, categoria, duracao, nivel, candidato) — o `_cat_do_evento` com a
+    árvore por cima. Com a flag desligada devolve exatamente o de hoje."""
+    label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
+    dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+    cat_rotulo = cat_por_label.get(label)
+    if not _ARVORE_DECIDE:
+        return label, categoria_efetiva(cat_rotulo), dur, None, None
+    cat, nivel, _motivo, candidato = arvore_decidir(e, cat_rotulo)
+    return label, cat, dur, nivel, candidato
+
+
+def comparar_arvore(sb, empresa: str, processo: str, dia: str | None = None) -> dict:
+    """Fase 95 — O ANTES E O DEPOIS, no MESMO dado, sem reprocessar nada.
+
+    A árvore é determinística e lê só campos JÁ persistidos, então dá para
+    calcular os dois números sobre os mesmos eventos: o de hoje (rótulo manda)
+    e o da árvore. Não precisa ligar a flag, não precisa esperar um dia, não
+    custa chamada nenhuma.
+
+    Devolve de ONDE saiu cada ponto — sem isso a queda é inexplicável, e uma
+    queda inexplicável não se apresenta a sócio nenhum.
+    """
+    eventos = varrer(
+        sb, "eventos",
+        "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
+        "tempo_fim_s, principal, validacao_correto, validado_humano, "
+        "papel_pessoa, movimento_maquina, modo_operacao, versao_instrumento",
+        empresa=empresa, processo=processo,
+    )
+    comps = varrer(sb, "comportamentos", "label, categoria_lean",
+                   empresa=empresa, processo=processo)
+    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+
+    if dia:
+        videos = varrer(sb, "videos", "id, nome, processado_em",
+                        empresa=empresa, processo=processo)
+        do_dia = set()
+        for v in videos:
+            dt0 = _inicio_video_dt(v)
+            if dt0 and dt0.date().isoformat() == dia:
+                do_dia.add(v["id"])
+        eventos = [e for e in eventos if e.get("video_id") in do_dia]
+
+    tot = va_hoje = va_arvore = 0.0
+    por_nivel: dict = defaultdict(lambda: {"minutos": 0.0, "va": 0.0, "eventos": 0})
+    mudou: dict = defaultdict(float)
+    candidatos = {"minutos": 0.0, "eventos": 0, "rotulos": defaultdict(float)}
+    for e in eventos:
+        if e.get("principal") is not True or e.get("validacao_correto") is False:
+            continue
+        label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        if dur <= 0:
+            continue
+        cat_hoje = categoria_efetiva(cat_por_label.get(label))
+        cat_arv, nivel, _m, cand = arvore_decidir(e, cat_por_label.get(label))
+        tot += dur
+        va_hoje += dur if cat_hoje == "valor_agregado" else 0.0
+        va_arvore += dur if cat_arv == "valor_agregado" else 0.0
+        n = por_nivel[nivel]
+        n["minutos"] += dur / 60.0
+        n["eventos"] += 1
+        n["va"] += (dur / 60.0) if cat_arv == "valor_agregado" else 0.0
+        if cat_hoje != cat_arv:
+            mudou[f"{nivel}: {cat_hoje} → {cat_arv}"] += dur / 60.0
+        if cand:
+            candidatos["minutos"] += dur / 60.0
+            candidatos["eventos"] += 1
+            candidatos["rotulos"][label] += dur / 60.0
+
+    pct = lambda x: round(x / tot * 100, 1) if tot else 0.0
+    return {
+        "dia": dia, "minutos_observados": round(tot / 60, 1),
+        "produtivo_hoje_pct": pct(va_hoje),
+        "produtivo_arvore_pct": pct(va_arvore),
+        "delta_pp": round(pct(va_arvore) - pct(va_hoje), 1),
+        # De onde saiu cada ponto — a decomposição que torna a queda explicável.
+        "por_nivel": {
+            k: {"minutos": round(v["minutos"], 1), "eventos": v["eventos"],
+                "pct_do_tempo": round(100.0 * v["minutos"] * 60 / tot, 1) if tot else 0.0,
+                "minutos_produtivos": round(v["va"], 1)}
+            for k, v in sorted(por_nivel.items(), key=lambda kv: -kv[1]["minutos"])
+        },
+        "mudancas": dict(sorted(mudou.items(), key=lambda kv: -kv[1])),
+        # O caso que a árvore NÃO decide sozinha: presente, máquina parada, sem
+        # mãos, rótulo dizendo produtivo. Pode ser ler desenho ou esperar
+        # material. Vira fila, não vira número.
+        "candidatos_improdutivo": {
+            "minutos": round(candidatos["minutos"], 1),
+            "eventos": candidatos["eventos"],
+            "pct_do_tempo": pct(candidatos["minutos"] * 60),
+            "rotulos": sorted(({"rotulo": r, "minutos": round(m, 1)}
+                               for r, m in candidatos["rotulos"].items()),
+                              key=lambda x: -x["minutos"])[:12],
+        },
+        "flag_ligada": _ARVORE_DECIDE,
+        "nota": ("Simulação sobre os eventos JÁ gravados — a árvore é "
+                 "determinística e lê só campos persistidos, então não precisa "
+                 "reprocessar nem ligar a flag. `rotulo` é o nível em que "
+                 "nenhum sinal determinístico decidiu: quanto maior essa fatia, "
+                 "menos a árvore mudou o instrumento."),
+    }
 
 
 def _montar_placar(
