@@ -68,6 +68,9 @@ from .pipeline import (
     identificar_titular_do_dia,
     calibrar_movimento,
     comparar_arvore,
+    reavaliar_correcao,
+    custo_reavaliacao_usd,
+    chave_frame_evento,
     limiares_movimento,
     eventos_do_bin,
     BIN_JORNADA_MIN,
@@ -3951,7 +3954,63 @@ def validar_evento(
 
     update = _montar_update_validacao(body.acao, ev["comportamento_label"], body.label_corrigido)
     sb.table("eventos").update(update).eq("id", evento_id).execute()
-    return {"ok": True}
+
+    # Fase 98 — REAVALIAÇÃO: uma chamada de visão para DIAGNOSTICAR o erro.
+    # Só em correção HUMANA individual, só com KV_REAVALIAR_CORRECAO ligada,
+    # e o resultado vale SÓ para este evento. Não-fatal: se falhar, a
+    # correção já está gravada e é ela que importa.
+    reav = None
+    if body.acao == "corrigir" and body.label_corrigido:
+        try:
+            reav = _reavaliar_evento(sb, user.empresa, evento_id, body.label_corrigido)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[reavaliacao] não-fatal: %s", e)
+    return {"ok": True, "reavaliacao": reav}
+
+
+def _reavaliar_evento(sb, empresa: str, evento_id: str, rotulo_novo: str):
+    """Busca os frames JÁ no Storage e pede o diagnóstico. Zero frame novo."""
+    import posixpath
+    r = (sb.table("eventos")
+         .select("id, video_id, comportamento_label, descricao_bruta, empresa")
+         .eq("id", evento_id).limit(1).execute().data or [])
+    if not r or r[0].get("empresa") != empresa:
+        return None
+    ev = r[0]
+    v = (sb.table("videos").select("caminho")
+         .eq("id", ev.get("video_id")).limit(1).execute().data or [])
+    caminho = (v[0].get("caminho") if v else None)
+    bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
+    imgs = []
+    if caminho and not str(caminho).startswith(("/", "\\")):
+        # Fase 93: nunca pedir ao Storage o que não existe — lista primeiro.
+        existentes = _nomes_no_prefixo(sb, bucket, _prefixo_frames(caminho))
+        import base64 as _b64
+        for k in (0, 1, 2):
+            chave = chave_frame_evento(caminho, evento_id, k)
+            if posixpath.basename(chave) not in existentes:
+                continue
+            try:
+                dados = sb.storage.from_(bucket).download(chave)
+                if dados:
+                    imgs.append(_b64.b64encode(dados).decode())
+            except Exception:  # noqa: BLE001
+                pass
+    reav = reavaliar_correcao(None, ev, imgs, rotulo_novo)
+    if reav and "erro" not in reav:
+        sb.table("eventos").update({"reavaliacao": reav}).eq("id", evento_id).execute()
+    return reav
+
+
+@app.get("/reavaliacao/custo")
+def reavaliacao_custo(user: CurrentUser = Depends(get_current_user)):
+    """Quanto custa UMA reavaliação, para decidir se liga a chave."""
+    from .pipeline import _REAVALIAR
+    return {"ok": True, "ligada": _REAVALIAR,
+            "usd_por_correcao_3_imagens": custo_reavaliacao_usd(3),
+            "usd_por_correcao_1_imagem": custo_reavaliacao_usd(1),
+            "usd_por_100_correcoes": round(custo_reavaliacao_usd(3) * 100, 3),
+            "chave": "KV_REAVALIAR_CORRECAO"}
 
 
 @app.post("/eventos/{evento_id}/reabrir")

@@ -262,5 +262,86 @@ check("e o porquê está escrito (a métrica inteira depende dela)",
 check("nasce desligada",
       _os.environ.get(_amb, "off") in ("off", "0", "false", "False"))
 
+
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Fase 98 — REAVALIAÇÃO (diagnóstico) e `acao_indefinida` como ESTADO
+# ══════════════════════════════════════════════════════════════════════════
+print("\n[14] `acao_indefinida` deixa de ser rótulo e vira ESTADO")
+check("evento com o rótulo é marcado como sem descrição utilizável",
+      pl.sem_descricao_utilizavel({"comportamento_label": "acao_indefinida"}) is True)
+check("qualquer outro rótulo não",
+      pl.sem_descricao_utilizavel({"comportamento_label": "operar_torno"}) is False)
+check("⚠️ correção humana TIRA o evento do estado (alguém disse o que era)",
+      pl.sem_descricao_utilizavel({"comportamento_label": "acao_indefinida",
+                                   "label_corrigido": "medir_peca"}) is False)
+check("não entra na árvore nem no Pareto",
+      pl.evento_conta_no_vocabulario(
+          {"comportamento_label": "acao_indefinida"}) is False)
+check("e é filtrado na distribuição de comportamentos",
+      "if l == LABEL_INDEFINIDA:" in fonte and "FORA da árvore e do Pareto" in fonte)
+check("nem no top de ações do dia",
+      "evento_conta_no_vocabulario(e)" in fonte)
+
+print("\n[15] Vai para a fila — com tipo PRÓPRIO, não misturado")
+dv, motivo, tp = pl.evento_em_duvida(
+    {"comportamento_label": "acao_indefinida", "n_amostras": 12,
+     "confianca": 1.0, "n_rotulos_no_minuto": 1}, 0.7)
+check("entra na fila", dv is True)
+check("tipo 'sem_descricao' (não 'sem_evidencia')", tp == "sem_descricao", tp)
+check("o motivo diz que precisa de olho humano", "olho humano" in motivo, motivo)
+# ⚠️ A abstenção CONTINUA existindo — proibi-la faria o modelo chutar.
+check("a capacidade de admitir que não soube NÃO foi removida",
+      "LABEL_INDEFINIDA" in fonte and "chute confiante é pior" in fonte)
+
+print("\n[16] Reavaliação: DIAGNÓSTICO, e só para o evento corrigido")
+check("nasce desligada", pl._REAVALIAR is False)
+check("com a flag off não gasta chamada nenhuma",
+      pl.reavaliar_correcao(None, {"descricao_bruta": "x"}, ["img"], "y") is None)
+_r = pl._REAVALIAR
+pl._REAVALIAR = True
+try:
+    check("sem frame aquecido devolve o motivo, não inventa diagnóstico",
+          (pl.reavaliar_correcao(None, {"descricao_bruta": "x"}, [], "y") or {})
+          .get("erro", "").startswith("sem frames"))
+finally:
+    pl._REAVALIAR = _r
+trecho_r = fonte[fonte.index("def reavaliar_correcao"):
+                 fonte.index("def custo_reavaliacao_usd")]
+check("o escopo fica escrito no PRÓPRIO dado",
+      "não propaga, não vira vocabulário" in trecho_r)
+check("e o porquê está registrado (a Fase 67)",
+      "Fase 67" in fonte and "espalhou" in fonte)
+check("o prompt pede DIAGNÓSTICO, não reclassificação",
+      "DIAGNOSTICAR o próprio erro" in fonte and "não se defender" in fonte)
+check("distingue as duas causas que têm consertos opostos",
+      "descricao_errada" in fonte and "rotulo_traiu_descricao" in fonte)
+check("revisa também `trabalho` (é ele que move o número na Fase 97)",
+      '"trabalho": (bool(r["trabalho"])' in trecho_r)
+check("e `null` continua `null` na revisão", "else None" in trecho_r)
+check("a chave existe", "KV_REAVALIAR_CORRECAO" in fonte)
+
+print("\n[17] Custo por correção — controlado e consultável")
+c3 = pl.custo_reavaliacao_usd(3)
+c1 = pl.custo_reavaliacao_usd(1)
+check(f"3 imagens: US$ {c3:.5f}", 0.002 < c3 < 0.006, c3)
+check(f"1 imagem:  US$ {c1:.5f}", c1 < c3, (c1, c3))
+check("100 correções ficam abaixo de US$ 0,50", c3 * 100 < 0.5, c3 * 100)
+main = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "backend", "main.py"), encoding="utf-8").read()
+check("há endpoint para consultar o custo antes de ligar",
+      "/reavaliacao/custo" in main)
+check("só dispara em correção INDIVIDUAL, nunca em lote",
+      'if body.acao == "corrigir" and body.label_corrigido:' in main
+      and "_reavaliar_evento" not in main.split("def validar_lote")[1])
+check("não pede ao Storage o que não existe (Fase 93)",
+      "_nomes_no_prefixo(sb, bucket, _prefixo_frames(caminho))" in main)
+check("e é NÃO-FATAL: a correção já está gravada",
+      "não-fatal: %s" in main)
+sql = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "sql", "schema.sql"), encoding="utf-8").read()
+check("a coluna existe", "add column if not exists reavaliacao" in sql)
+
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

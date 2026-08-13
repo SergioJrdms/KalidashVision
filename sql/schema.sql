@@ -1496,3 +1496,25 @@ alter table eventos add column if not exists trabalho boolean;
 alter table eventos drop constraint if exists eventos_orientacao_chk;
 alter table eventos add constraint eventos_orientacao_chk
     check (orientacao is null or orientacao in ('frente','costas','perfil'));
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 98 — A REAVALIAÇÃO É DIAGNÓSTICO, NÃO APRENDIZADO
+--
+-- Quando o gestor corrige um rótulo, o sistema não sabia POR QUE errou. Duas
+-- causas com consertos opostos: a DESCRIÇÃO estava errada e o rótulo apenas a
+-- seguiu (o VLM é cego naquele enquadramento), ou a descrição estava CERTA e o
+-- rótulo a traiu (o problema é a clusterização).
+--
+-- ⚠️ VALE SÓ PARA O EVENTO CORRIGIDO. Não propaga por descrição parecida, não
+-- vira regra, não entra no vocabulário como canônico. Foi a propagação por
+-- descrição que espalhou `conversando_colega` errado na Fase 67 — o `escopo`
+-- fica escrito dentro do próprio JSON para quem ler daqui a seis meses.
+--
+-- Atrás de KV_REAVALIAR_CORRECAO (off). Custo: US$ 0,0033 por correção com 3
+-- imagens; US$ 0,33 a cada 100 correções.
+--
+--   select reavaliacao->>'causa' as causa, count(*)
+--     from eventos where reavaliacao is not null group by 1;
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists reavaliacao jsonb;

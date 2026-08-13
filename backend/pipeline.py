@@ -5962,6 +5962,14 @@ def evento_em_duvida(e: dict, limiar: float,
     # discordantes" aqui seria mentira. São problemas diferentes: este se
     # resolve com mais evidência (amostrar mais denso), o outro com melhor
     # decisão (rótulo, prompt, camada).
+    # Fase 98: sem descrição utilizável é ESTADO, e ele vai direto para a fila.
+    # Vem antes da checagem de evidência porque a causa é outra: aqui houve
+    # observação, o que faltou foi o modelo conseguir nomeá-la.
+    if sem_descricao_utilizavel(e):
+        return (True,
+                "o modelo não conseguiu descrever o que estava acontecendo "
+                "neste trecho — precisa de olho humano",
+                "sem_descricao")
     n_am = e.get("n_amostras")
     if n_am is not None and int(n_am) < MIN_AMOSTRAS_EVIDENCIA:
         # Fase 90 — DUAS COISAS DIFERENTES, e misturá-las estraga a única
@@ -7311,6 +7319,36 @@ def categoria_tem_evidencia(cat: str | None, origem: str | None = None) -> bool:
 # receber categoria como todo o resto (não-produtivo, por falta de prova de
 # valor) — e vai para a fila de dúvidas, que é onde a incerteza deve morar.
 LABEL_INDEFINIDA = "acao_indefinida"
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 98 — `acao_indefinida` DEIXA DE SER RÓTULO. Vira ESTADO.
+#
+# "Ação indefinida" não é o que o operador estava fazendo. Como rótulo, ela
+# aparecia na árvore e no Pareto como se fosse uma atividade — e no dia 10/08
+# até saía PRODUTIVA, porque alguém teve de lhe dar uma categoria.
+#
+# ⚠️ MAS A ABSTENÇÃO CONTINUA EXISTINDO, e isso é o ponto: proibir o VLM de
+# admitir que não soube o faria CHUTAR, e chute confiante é pior que dúvida
+# declarada. Foi assim que `monitorar_maquina` virou depósito de tudo que ele
+# não entendia.
+#
+# Então: o evento é marcado `sem_descricao_utilizavel`, vai direto para a
+# fila, NÃO aparece na árvore nem no Pareto, e não decide produtividade
+# (com a Fase 97 nenhum rótulo decide, então isto é reforço, não novidade).
+#
+# TAMANHO DO PROBLEMA, medido no dia 10/08: 1,0 min de 248,2 = 0,4% (1
+# evento). Pequeno — o VLM está conseguindo ver. Se fosse grande, o conserto
+# seria outro: o problema seria a visão, não o rótulo.
+# ═════════════════════════════════════════════════════════════════════════
+def sem_descricao_utilizavel(e: dict) -> bool:
+    """True quando o VLM não conseguiu nomear a ação. É ESTADO, não rótulo."""
+    lbl = e.get("label_corrigido") or e.get("comportamento_label")
+    # Correção humana tira o evento deste estado: se alguém disse o que era,
+    # passou a haver descrição utilizável.
+    if e.get("label_corrigido"):
+        return False
+    return lbl == LABEL_INDEFINIDA
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -9674,6 +9712,11 @@ def montar_snapshot_chat(
     total_atividade = sum(a["dur"] for a in agg.values())
     distrib = []
     for l, a in sorted(agg.items(), key=lambda kv: kv[1]["dur"], reverse=True):
+        # Fase 98: `acao_indefinida` fica FORA da árvore e do Pareto. Ela não é
+        # uma atividade — é a ausência de uma. O tempo dela continua no
+        # denominador (foi observado), mas não vira folha nem barra.
+        if l == LABEL_INDEFINIDA:
+            continue
         distrib.append(
             {
                 "comportamento": l,
@@ -10737,6 +10780,12 @@ def carimbar_frente(eventos: list, frente: str | None) -> list:
 # `carimbar_frente(eventos, frente_maquina_do_processo(...))` ANTES de passar
 # por aqui. Sem o carimbo, `_frente_maquina` vem None e o nível 2 não afirma —
 # degradação segura (nada vira produtivo por engano), mas o número fica baixo.
+def evento_conta_no_vocabulario(e: dict) -> bool:
+    """Fase 98: o que entra na ÁRVORE e no PARETO. `acao_indefinida` fica de
+    fora — ela não é uma atividade, é a ausência de uma."""
+    return not sem_descricao_utilizavel(e)
+
+
 def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
     """(label efetivo, categoria lean, duração) de um evento principal.
 
@@ -11128,6 +11177,115 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     return (CATEGORIA_SEM_EVIDENCIA, "duvida",
             "no posto, de outro lado, e não deu para dizer se é serviço — "
             "entra na fila", estado)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 98 — REAVALIAÇÃO QUANDO O HUMANO CORRIGE. É DIAGNÓSTICO, NÃO APRENDIZADO.
+#
+# Quando o gestor corrige um rótulo, o sistema não sabe POR QUE errou. Duas
+# causas completamente diferentes, com consertos opostos:
+#   (a) a DESCRIÇÃO estava errada e o rótulo apenas a seguiu  → o VLM é cego
+#       naquele enquadramento, e o conserto é de captura/prompt;
+#   (b) a descrição estava CERTA e o rótulo a traiu           → o conserto é
+#       de clusterização.
+# Sem separá-las, toda correção vira anedota.
+#
+# ⚠️ REGRA INVIOLÁVEL: a reavaliação vale SÓ PARA O EVENTO CORRIGIDO. Não
+# propaga por descrição parecida, não vira regra, não entra no vocabulário
+# como canônico, não religa aprendizado nenhum. Foi exatamente a propagação
+# por descrição que espalhou `conversando_colega` errado na Fase 67 — e a
+# chave de aprendizado automático continua desligada.
+#
+# CUSTO: uma chamada por correção HUMANA, e só quando `KV_REAVALIAR_CORRECAO`
+# estiver ligada. Não roda em lote, não roda em ingestão, não roda sozinha.
+# ═════════════════════════════════════════════════════════════════════════
+_REAVALIAR = os.environ.get("KV_REAVALIAR_CORRECAO", "off") not in (
+    "off", "0", "false", "False", "")
+
+PROMPT_REAVALIACAO = """Você descreveu um trecho de vídeo de um posto de trabalho industrial e um SUPERVISOR HUMANO corrigiu a classificação. Sua tarefa é DIAGNOSTICAR o próprio erro — não se defender, não reclassificar.
+
+O que você havia descrito: "{descricao}"
+Rótulo que saiu disso: "{rotulo_antigo}"
+Rótulo que o supervisor escolheu: "{rotulo_novo}"
+
+Olhando as imagens de novo, com a correção do supervisor em mãos, responda:
+
+1. A sua DESCRIÇÃO estava correta? Se não, o que faltou ver?
+2. A atividade corrigida ("{rotulo_novo}") é TRABALHO DO POSTO?
+   - trabalho = ler desenho, medir peça, buscar ferramenta ou material, organizar bancada, limpar cavaco, conversar sobre o serviço, operar a máquina
+   - não é trabalho = celular, conversa paralela, parado sem atividade aparente
+   - null se não der para dizer
+
+Responda em JSON:
+{{"descricao_estava_correta": true|false,
+  "causa": "descricao_errada" | "rotulo_traiu_descricao" | "indeterminado",
+  "o_que_faltou": "uma frase curta, ou null se a descrição estava boa",
+  "descricao_revisada": "a descrição correta em uma frase, ou null se a original já estava certa",
+  "trabalho": true|false|null}}
+
+Seja honesto sobre a própria cegueira: "não dava para ver o paquímetro nesse ângulo" é uma resposta útil; "estava tudo certo" quando não estava, não é."""
+
+
+def reavaliar_correcao(groq_client, evento: dict, imgs_b64: list,
+                       rotulo_novo: str) -> dict | None:
+    """UMA chamada de visão para diagnosticar por que o rótulo saiu errado.
+
+    Devolve None quando a flag está desligada ou não há imagem — e None é
+    resposta legítima: sem diagnóstico é melhor que com diagnóstico inventado.
+    """
+    if not _REAVALIAR:
+        return None
+    if not imgs_b64:
+        return {"erro": "sem frames aquecidos para reavaliar"}
+    prompt = PROMPT_REAVALIACAO.format(
+        descricao=(evento.get("descricao_bruta") or "(sem descrição)"),
+        rotulo_antigo=(evento.get("comportamento_label") or "?"),
+        rotulo_novo=rotulo_novo,
+    )
+    try:
+        bruto = groq_vision_call(
+            groq_client, imgs_b64[0], prompt, json_mode=True,
+            max_tokens=320, temperatura=0.0,
+            imagens_extra=imgs_b64[1:3],
+        )
+        r = json.loads(bruto) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("[reavaliacao] falhou (%s) — não-fatal.", e)
+        return {"erro": str(e)[:200]}
+    causa = str(r.get("causa") or "indeterminado")
+    if causa not in ("descricao_errada", "rotulo_traiu_descricao", "indeterminado"):
+        causa = "indeterminado"
+    return {
+        "causa": causa,
+        "descricao_estava_correta": (bool(r["descricao_estava_correta"])
+                                     if isinstance(r.get("descricao_estava_correta"), bool)
+                                     else None),
+        "o_que_faltou": (str(r["o_que_faltou"])[:400]
+                         if r.get("o_que_faltou") else None),
+        "descricao_revisada": (str(r["descricao_revisada"])[:400]
+                               if r.get("descricao_revisada") else None),
+        # ⚠️ Revisado porque é ele que move o número na Fase 97 — mas vale SÓ
+        # para este evento. `null` continua sendo `null`.
+        "trabalho": (bool(r["trabalho"]) if isinstance(r.get("trabalho"), bool)
+                     else None),
+        "rotulo_antigo": evento.get("comportamento_label"),
+        "rotulo_novo": rotulo_novo,
+        "em": datetime.now(timezone.utc).isoformat(),
+        # O escopo, escrito no próprio dado: quem ler isto daqui a seis meses
+        # precisa saber que não virou regra.
+        "escopo": "somente este evento — não propaga, não vira vocabulário",
+    }
+
+
+def custo_reavaliacao_usd(n_imagens: int = 3) -> float:
+    """Custo de UMA reavaliação, para o dono decidir se liga a chave.
+
+    Prompt ~330 tokens + n imagens de 1024x576 (~786 tokens cada) + ~120 de
+    saída, a $1/$5 por MTok (Haiku 4.5).
+    """
+    tin = 330 + n_imagens * 786
+    tout = 120
+    return round(tin / 1e6 * 1.0 + tout / 1e6 * 5.0, 5)
 
 def _montar_placar(
     eventos: list[dict],
@@ -11990,7 +12148,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
                     d["duvida_resolvida"] += dur
         if e.get("papel_pessoa") == "visitante":
             d["visitas"] += 1
-        if not eh_vazio:
+        # Fase 98: `acao_indefinida` não é atividade — não entra no top de ações.
+        if not eh_vazio and evento_conta_no_vocabulario(e):
             d["acoes"][label] += dur
         h = d["horas"][inst.hour]
         h["seg"] += dur
