@@ -29,6 +29,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Btn, Card, Icon, Empty, PanelHead, Segmented, toast } from "../design/ui";
+import { nomeHumano } from "../design/rotulos";
 import { FrameStripReal, FrameStripSegmento, janelaCam2, RotuloSegundoAngulo,
          useAspecto, colunasPorAspecto } from "../lib/frames";
 import { leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
@@ -107,7 +108,7 @@ export default function Duvidas({ proc }: { proc: ProcHeaderMock; go: Go }) {
       api.comportamentos.setCategoriaPorLabel(proc.id, label, leanLong(cat)),
     onSuccess: (_r, v) => {
       invalidar();
-      toast(`“${v.label}” agora é ${leanLabel(v.cat)} — vale para todos os trechos com esse nome.`, { icon: "check" });
+      toast(`“${nomeHumano(v.label)}” agora é ${leanLabel(v.cat)} — vale para todos os trechos com esse nome.`, { icon: "check" });
     },
     onError: (e: Error) => toast(`Não deu: ${e.message}`, { color: "var(--desp)" }),
   });
@@ -256,7 +257,7 @@ function ItemDaFila({ it, procId, ocupado, onValidar, onClassificar }: {
     <Card style={{ padding: 0, overflow: "hidden" }}>
       <div className="row gap2 wrap" style={{ alignItems: "center", padding: "12px 16px", borderBottom: "1px solid var(--line-2)" }}>
         <code className="font-mono" style={{ background: "var(--line-2)", padding: "2px 9px", borderRadius: 6, fontSize: 12 }}>
-          {it.rotulo}
+          {nomeHumano(it.rotulo)}
         </code>
         <span style={{ fontSize: 11.5, fontWeight: 700, color: tom.cor }} title={tom.dica}>
           <Icon name="help-circle" size={12} /> {tom.nome}
@@ -320,7 +321,7 @@ function ItemDaFila({ it, procId, ocupado, onValidar, onClassificar }: {
           // A pergunta aqui NÃO é sobre o rótulo — é sobre valor.
           <div className="row gap2 wrap" style={{ alignItems: "center" }}>
             <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>
-              “{it.rotulo}” agrega valor ao produto?
+              “{nomeHumano(it.rotulo)}” agrega valor ao produto?
             </span>
             {(["va", "desp"] as LeanShort[]).map((c) => (
               <Btn

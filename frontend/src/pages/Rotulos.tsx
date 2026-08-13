@@ -20,6 +20,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, Icon, Empty, PanelHead, toast } from "../design/ui";
+import { nomeHumano } from "../design/rotulos";
 import { leanCor, leanLabel } from "../design/helpers";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { CategoriaLean, RotuloSemCategoria } from "../lib/types";
@@ -129,7 +130,7 @@ function LinhaRotulo({ r, salvando, onClassificar }: {
         <div className="grow col" style={{ gap: 6, minWidth: 240 }}>
           <div className="row gap2 wrap" style={{ alignItems: "baseline" }}>
             <code className="font-mono" style={{ fontSize: 13, fontWeight: 700, background: "var(--line-2)", padding: "2px 9px", borderRadius: 6 }}>
-              {r.label}
+              {nomeHumano(r.label)}
             </code>
             <span className="tnum" style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>
               {r.minutos.toFixed(0)} min
@@ -159,12 +160,12 @@ function LinhaRotulo({ r, salvando, onClassificar }: {
             // série comparável; a decomposição é o detalhe que ganhamos agora.
             <div className="col" style={{ gap: 3, borderLeft: "2px solid var(--line)", paddingLeft: 9, marginTop: 2 }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>
-                família <code className="font-mono">{r.familia}</code> ·{" "}
+                família <b>{nomeHumano(r.familia)}</b> ·{" "}
                 {r.familia_minutos.toFixed(0)} min no total
               </span>
               {r.familia_variantes.map((v) => (
                 <span key={v.label} style={{ fontSize: 11, color: "var(--faint)" }}>
-                  <code className="font-mono">{v.label}</code> · {v.minutos.toFixed(0)} min ·{" "}
+                  <b>{nomeHumano(v.label)}</b> · {v.minutos.toFixed(0)} min ·{" "}
                   {v.categoria
                     ? leanLabel(v.categoria === "valor_agregado" ? "va" : "desp")
                     : "sem categoria"}

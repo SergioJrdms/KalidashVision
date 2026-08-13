@@ -9,6 +9,7 @@ import { api } from "../lib/api";
 import { mapDashboard, type DetMock, type CompMock, type ProcHeaderMock, type SugMock } from "../lib/adapt";
 import { leanCor, leanLabel, leanLong, leanShort, fmtDur, type LeanShort } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, Ring, toast } from "../design/ui";
+import { leituraDoPosto, nomeHumano } from "../design/rotulos";
 import type { Go } from "../design/Shell";
 import type { AcaoSugestao, InsightsQuantitativos, PerguntaGestor, PlacarProcesso } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -33,6 +34,11 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
   return (
     <div className="col" style={{ gap: 18 }}>
       <DashHeader proc={proc} det={det} go={go} />
+
+      {/* Fase 96 — A CONCLUSÃO EM PORTUGUÊS, acima dos cards. Gerada por
+          REGRA (previsível e sem custo de token) e honesta: com pouca
+          cobertura ou muita dúvida, ela diz isso em vez de fingir precisão. */}
+      <LeituraEmPortugues det={det} />
 
       {/* Fase 19 — HERÓI: o processo comparado com o melhor dia dele mesmo. */}
       <PlacarHero placar={det.insights?.placar || null} />
@@ -492,6 +498,29 @@ function KpiTendencia({ trend, texto }: { trend: number | null; texto: string | 
   );
 }
 
+// Fase 96: a frase que o dono de fábrica lê sem precisar de alguém ao lado.
+function LeituraEmPortugues({ det }: { det: DetMock }) {
+  const s = det.snapshot;
+  const l = leituraDoPosto({
+    vaPct: s.va, vazioPct: s.vazio,
+    tempoObservadoMin: s.tempoObservadoMin,
+    semEvidenciaPct: s.semEvidencia,
+  });
+  const cor = l.tom === "ok" ? leanCor("va") : l.tom === "atencao" ? "var(--apoio)" : "var(--muted)";
+  return (
+    <Card style={{ padding: "16px 20px", borderLeft: `4px solid ${cor}` }}>
+      <p style={{ margin: 0, fontSize: 17, lineHeight: 1.5, color: "var(--ink)", fontWeight: 600 }}>
+        {l.frase}
+      </p>
+      {l.ressalva && (
+        <p style={{ margin: "7px 0 0", fontSize: 13, lineHeight: 1.5, color: "var(--muted)" }}>
+          {l.ressalva}
+        </p>
+      )}
+    </Card>
+  );
+}
+
 function DashHeader({ proc, det, go }: { proc: ProcHeaderMock; det: DetMock; go: Go }) {
   return (
     <div className="row" style={{ justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
@@ -640,7 +669,7 @@ function SugestaoCard({ s, pendente, onMarcar }: { s: SugMock; pendente: boolean
           {s.causa && <p style={{ margin: 0 }}><b style={{ color: "var(--ink)" }}>Causa provável. </b>{s.causa}</p>}
           {s.comportamentos.length > 0 && (
             <div className="row wrap" style={{ gap: 4, marginTop: 2 }}>
-              {s.comportamentos.map((c) => <code key={c} style={{ fontSize: 10, background: "var(--line-2)", color: "var(--text)", padding: "1px 6px", borderRadius: 5 }} className="font-mono">{c}</code>)}
+              {s.comportamentos.map((c) => <span key={c} style={{ fontSize: 10.5, background: "var(--line-2)", color: "var(--text)", padding: "1px 6px", borderRadius: 5 }}>{nomeHumano(c)}</span>)}
             </div>
           )}
         </div>
@@ -739,7 +768,7 @@ function ParetoPanel({ det }: { det: DetMock }) {
           })}
           <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="2.2" />
           {data.map((d, i) => <circle key={i} cx={x(i) + bw / 2} cy={yT(d.acc)} r="3" fill="var(--accent)" />)}
-          {data.map((d, i) => <text key={i} x={x(i) + bw / 2} y={H - padB + 14} fontSize="8.5" textAnchor="end" transform={`rotate(-32 ${x(i) + bw / 2} ${H - padB + 14})`} fill="var(--muted)" fontFamily="var(--mono)">{d.nome}</text>)}
+          {data.map((d, i) => <text key={i} x={x(i) + bw / 2} y={H - padB + 14} fontSize="8.5" textAnchor="end" transform={`rotate(-32 ${x(i) + bw / 2} ${H - padB + 14})`} fill="var(--muted)">{nomeHumano(d.nome)}</text>)}
         </svg>
       )}
     </Card>
@@ -804,7 +833,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
           return (
             <li key={d.id}>
               <div className="row gap2" style={{ marginBottom: 4 }}>
-                <span className="truncate" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", maxWidth: 180 }}>{d.nome}</span>
+                <span className="truncate" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", maxWidth: 180 }} title={d.nome}>{nomeHumano(d.nome)}</span>
                 {editing ? (
                   <span className="row gap1" style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 8, padding: "2px 4px", boxShadow: "var(--glow)" }}>
                     {(["va", "desp"] as LeanShort[]).map((c) => <button key={c} disabled={setCat.isPending} onClick={() => setCat.mutate({ label: d.nome, cat: c })} title={leanLabel(c)} style={{ width: 18, height: 18, borderRadius: 5, border: d.cat === c ? "2px solid var(--ink)" : "none", background: leanCor(c), opacity: setCat.isPending ? 0.5 : 1 }} />)}
@@ -845,9 +874,9 @@ function FluxoPanel({ det }: { det: DetMock }) {
         <div className="col" style={{ gap: 9 }}>
           {det.transicoes.map((tr, i) => (
             <div key={i} className="row gap2" style={{ fontSize: 11.5 }}>
-              <code className="truncate font-mono" style={{ flex: 1, textAlign: "right", background: "var(--line-2)", color: "var(--text)", padding: "3px 8px", borderRadius: 6 }}>{tr.de}</code>
+              <span className="truncate" style={{ flex: 1, textAlign: "right", background: "var(--line-2)", color: "var(--text)", padding: "3px 8px", borderRadius: 6 }} title={tr.de}>{nomeHumano(tr.de)}</span>
               <Icon name="arrow-right" size={13} color="var(--faint)" />
-              <code className="truncate font-mono" style={{ flex: 1, background: "var(--accent-soft)", color: "var(--accent-deep)", padding: "3px 8px", borderRadius: 6 }}>{tr.para}</code>
+              <span className="truncate" style={{ flex: 1, background: "var(--accent-soft)", color: "var(--accent-deep)", padding: "3px 8px", borderRadius: 6 }} title={tr.para}>{nomeHumano(tr.para)}</span>
               <div className="track" style={{ width: 56, height: 6, flex: "none" }}><i style={{ width: `${(tr.vezes / max) * 100}%`, background: "var(--accent)" }} /></div>
               <span className="tnum" style={{ width: 26, textAlign: "right", color: "var(--muted)", fontWeight: 600 }}>{tr.vezes}×</span>
             </div>

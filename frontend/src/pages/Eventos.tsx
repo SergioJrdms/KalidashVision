@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapEventosTabela, type EvTabMock, type ProcHeaderMock } from "../lib/adapt";
 import { fmtSeg, leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
+import { nomeHumano } from "../design/rotulos";
 import { Btn, Card, Icon, Badge, Empty, Modal, toast } from "../design/ui";
 import { FrameReal, janelaCam2 } from "../lib/frames";
 import type { AcaoEvento } from "../lib/types";
@@ -114,7 +115,9 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
           </div>
           <select className="field" style={{ flex: "0 1 180px" }} value={comp} onChange={(e) => setComp(e.target.value)}>
             <option value="">Todos os comportamentos</option>
-            {comps.map((c) => <option key={c} value={c}>{c}</option>)}
+            {/* O VALOR continua sendo a chave (o filtro conversa com a API); só o
+                texto muda. */}
+            {comps.map((c) => <option key={c} value={c}>{nomeHumano(c)}</option>)}
           </select>
           <span className="grow" />
           <span style={{ fontSize: 12.5, color: "var(--muted)", alignSelf: "center" }}>{filtrados.length} de {rows.length} eventos</span>
@@ -201,7 +204,7 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
           {e.status === "corrigido" && e.corrigido ? (
             <span style={{ fontSize: 12 }}><span style={{ textDecoration: "line-through", color: "var(--faint)" }}>{e.labelOrig}</span> <span style={{ color: "var(--faint)" }}>→</span> <code className="font-mono" style={{ background: "var(--accent-soft)", color: "var(--accent-deep)", padding: "2px 6px", borderRadius: 5 }}>{e.corrigido}</code></span>
           ) : (
-            <code className="font-mono" style={{ background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 5, fontSize: 11.5 }}>{e.label}</code>
+            <span style={{ background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 5, fontSize: 12, fontWeight: 600 }} title={e.label}>{nomeHumano(e.label)}</span>
           )}
         </td>
         <td style={{ padding: "10px 12px", textAlign: "center" }}>

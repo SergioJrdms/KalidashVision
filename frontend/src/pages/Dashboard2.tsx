@@ -8,6 +8,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, PanelHead, Ring, Icon, Empty, LeanBar } from "../design/ui";
+import { nomeHumano } from "../design/rotulos";
 import { leanCor, leanLabel, type LeanShort } from "../design/helpers";
 import { pedirAuditoriaDoDia } from "./Auditoria";
 import type { ProcHeaderMock } from "../lib/adapt";
@@ -444,7 +445,7 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado, onAuditar }: { d: Dia
         {d.posto_vazio_s > 0 && <ChipStat icon="user-x" texto={`posto vazio ${d.posto_vazio_pct.toFixed(0)}%`} alerta={d.posto_vazio_pct >= 20} />}
         {d.visitas > 0 && <ChipStat icon="users" texto={`${d.visitas} visita(s) ao posto`} />}
         {d.primeira_h && d.ultima_h && <ChipStat icon="sunrise" texto={`atividade de ${d.primeira_h} às ${d.ultima_h}`} />}
-        {d.top_acao && <ChipStat icon="star" texto={`mais tempo em "${d.top_acao.label}"`} />}
+        {d.top_acao && <ChipStat icon="star" texto={`mais tempo em "${nomeHumano(d.top_acao.label)}"`} />}
         {pico && vale && pico.hora !== vale.hora && (
           <ChipStat icon="trending-up" texto={`pico ${String(pico.hora).padStart(2, "0")}h (${pico.va_pct.toFixed(0)}%) · vale ${String(vale.hora).padStart(2, "0")}h (${vale.va_pct.toFixed(0)}%)`} />
         )}
@@ -907,7 +908,7 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
               {b.acoes.map((a) => (
                 <li key={a.rotulo} className="row gap2" style={{ alignItems: "baseline" }}>
                   <i style={{ width: 8, height: 8, borderRadius: 2, background: CAT_CORES[a.cat], flex: "none" }} />
-                  <code className="font-mono" style={{ fontSize: 11.5, background: "var(--line-2)", padding: "1px 7px", borderRadius: 5 }}>{a.rotulo}</code>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>{nomeHumano(a.rotulo)}</span>
                   <span className="tnum" style={{ fontSize: 11.5, color: "var(--ink)", fontWeight: 700 }}>{a.pct.toFixed(0)}%</span>
                   <span style={{ fontSize: 11, color: "var(--muted)" }}>do bloco · {a.n} trecho(s)</span>
                 </li>
@@ -921,9 +922,9 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
                 <li key={it.id} className="col" style={{ gap: 3, borderLeft: `3px solid ${CAT_CORES[it.cat]}`, paddingLeft: 9 }}>
                   <div className="row gap2 wrap" style={{ alignItems: "baseline" }}>
                     <span className="font-mono tnum" style={{ fontSize: 11.5, color: "var(--muted)" }}>{it.hora}</span>
-                    <code className="font-mono" style={{ fontSize: 11.5, fontWeight: 700, background: "var(--line-2)", padding: "1px 7px", borderRadius: 5 }}>
-                      {it.rotulo}
-                    </code>
+                    <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }} title={it.rotulo}>
+                      {nomeHumano(it.rotulo)}
+                    </span>
                     {/* A duração saiu da tela: com a sequência, todo trecho é o
                         minuto, e "60s" em cada linha era ruído. O evento que
                         atravessa a borda do bloco ainda precisa se anunciar —
@@ -1002,7 +1003,7 @@ function TopAcoesDia({ d, agregado }: { d: DiaAnalise; agregado?: boolean }) {
           {acoes.map((a, i) => (
             <li key={a.label} className="col" style={{ gap: 3 }}>
               <div className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
-                <code className="font-mono" style={{ background: "var(--line-2)", padding: "1px 7px", borderRadius: 5, fontSize: 11 }}>{i + 1}. {a.label}</code>
+                <span style={{ background: "var(--line-2)", padding: "1px 7px", borderRadius: 5, fontSize: 11.5, fontWeight: 600 }} title={a.label}>{i + 1}. {nomeHumano(a.label)}</span>
                 <span className="tnum" style={{ color: "var(--muted)" }}>{pctDoTempo(a.seg)}</span>
               </div>
               <div className="track" style={{ height: 7 }}>

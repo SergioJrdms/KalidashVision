@@ -20,6 +20,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, Icon, Empty, PanelHead } from "../design/ui";
+import { nomeHumano } from "../design/rotulos";
 import { leanCor } from "../design/helpers";
 import { FrameStripReal } from "../lib/frames";
 import type { ProcHeaderMock } from "../lib/adapt";
@@ -205,7 +206,7 @@ function CardAmostra({ a }: { a: AmostraAuditoria }) {
           {a.hora}
         </span>
         <code className="font-mono" style={{ fontSize: 11.5, background: "var(--line-2)", padding: "1px 8px", borderRadius: 5 }}>
-          {a.rotulo}
+          {nomeHumano(a.rotulo)}
         </code>
         <span style={{ fontSize: 11, color: "var(--faint)" }}>
           {POS[a.posicao]} · {a.bloco_eventos} trechos / {a.bloco_minutos.toFixed(0)}min
