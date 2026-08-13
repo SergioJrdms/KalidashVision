@@ -38,6 +38,11 @@ os.environ.setdefault("SUPABASE_KEY", "k")
 
 from backend import pipeline as pl  # noqa: E402
 
+# Fase 97: a produtividade passou a vir da PERMANÊNCIA. O sujeito desta suíte
+# é outro (o bloco da jornada / a árvore da Fase 95), e os dois mecanismos
+# coexistem atrás de flag — então ela roda no caminho que está testando.
+pl._PERMANENCIA = False
+
 ok = fail = 0
 
 

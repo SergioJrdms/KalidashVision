@@ -1807,7 +1807,13 @@ Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índ
 Além da descrição, devolva DOIS CAMPOS SEPARADOS por imagem — eles não são enfeite da frase, são o que distingue espera de ociosidade:
 - "maquina": "ciclo" se a máquina está trabalhando (eixo girando, luz de ciclo, peça sendo usinada), "parada" se está claramente parada, null se você não consegue ver.
 - "imovel": true se a pessoa está na MESMA posição da imagem anterior, false se mudou.
-{{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}, "maquina": "ciclo", "imovel": true}}, {{"i": 1, "acoes": {{"P1": "..."}}, "maquina": null, "imovel": false}}]}}"""
+Responda também "trabalho" por imagem: a atividade descrita é TRABALHO DO POSTO?
+- true  = ler desenho técnico, medir peça, buscar ferramenta ou material, organizar bancada, limpar cavaco, conversar SOBRE O SERVIÇO
+- false = celular, conversa paralela, parado sem atividade aparente, ausente do enquadramento
+- null  = não dá para dizer
+Julgue a ATIVIDADE, não a pessoa: a pergunta é se aquilo é serviço do posto, não se ele é produtivo em geral. Na dúvida, null — nunca chute true.
+
+{{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}, "maquina": "ciclo", "imovel": true, "trabalho": true}}, {{"i": 1, "acoes": {{"P1": "..."}}, "maquina": null, "imovel": false, "trabalho": null}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA_CAM2 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
@@ -2081,7 +2087,9 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #   5 = quadro OLHADO deixa de ser o mesmo que minuto COBERTO: herdada e
 #       interpolada mantêm o tempo e não votam na concordância; "não olhei"
 #       vira curva própria, separada da dúvida; cam2 só quando desambigua
-VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "6"))
+#   7 = a produtividade vem da PERMANÊNCIA (posição + orientação + julgamento
+#       do VLM). O rótulo deixa de decidir; a cadeia Lean sai do caminho
+VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "7"))
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -3062,6 +3070,10 @@ def _analisar_sequencia_vlm(
                 "acoes": por_track,
                 "maquina": _normalizar_maquina(t.get("maquina")),
                 "imovel": bool(t.get("imovel")),
+                # Fase 97: o julgamento vem no MESMO JSON — zero chamada nova.
+                # `null` explícito é resposta legítima e NUNCA vira produtivo.
+                "trabalho": (bool(t["trabalho"])
+                             if isinstance(t.get("trabalho"), bool) else None),
             }
     return saida
 
@@ -3534,6 +3546,7 @@ def etapa_analise_vlm(
             _bloco = descricoes_seq.get(i) or {}
             do_instante = _bloco.get("acoes") or {}
             cena_maq, cena_imovel = _bloco.get("maquina"), _bloco.get("imovel")
+            cena_trabalho = _bloco.get("trabalho")
             d_am = decisoes.get(i, {})
             for p in am.pessoas:
                 tid = p["track_id"]
@@ -3600,12 +3613,20 @@ def etapa_analise_vlm(
                     # chave morria aqui — o sinal do punho na zona da máquina
                     # nunca entrou em fato nenhum.
                     "maos_maquina": p.get("maos_maquina"),
+                    # Fase 97: a ORIENTAÇÃO passa a ser persistida. Ela era
+                    # calculada desde a Fase 86, injetada no prompt e JOGADA
+                    # FORA — e agora ela decide produtividade, então tinha de
+                    # existir no dado. É a terceira vez que este padrão morde
+                    # (maquina/imovel na 88, t_ini/t_fim na 92): sinal que só
+                    # existe em memória não pode ser verificado nem auditado.
+                    "orientacao": p.get("orientacao"),
                     "origem_gate": origem_gate,
                     "mudanca_contexto": origem_gate == "analisado",
                     # Fase 86: o discriminador viaja com a observação até o
                     # cluster, que particiona por ele.
                     "maquina": cena_maq,
                     "imovel": cena_imovel,
+                    "trabalho": cena_trabalho,
                     # Fase 91: o que a LATERAL contou no mesmo instante. Viaja
                     # junto para o fato das camadas — sem virar observação
                     # própria, porque descrever a segunda pessoa exigiria uma
@@ -3957,6 +3978,7 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         # até o fato das camadas.
         "maquina": o.get("maquina"),
         "imovel": o.get("imovel"),
+        "trabalho": o.get("trabalho"),
         "zona_contexto": o["zona"],
         "papel_pessoa": o.get("papel"),
         # Fase 91: o MÁXIMO que a lateral contou dentro deste evento.
@@ -4054,6 +4076,20 @@ def etapa_segmentar_eventos(
 # ═════════════════════════════════════════════════════════════════════════
 # ETAPA 4b · Consolidação em 1 evento PRINCIPAL por minuto (Fase 16)
 # ═════════════════════════════════════════════════════════════════════════
+def _orientacao_do_minuto(no_bucket: list) -> str | None:
+    """Orientação DOMINANTE do minuto (moda ponderada pela sobreposição).
+
+    O minuto é um regime, não um instante: o operador vira a cabeça o tempo
+    todo, e um quadro isolado não decide nada. None quando nenhuma amostra teve
+    pose — e None NUNCA vira "de frente" por omissão."""
+    peso: dict = defaultdict(float)
+    for e, ov in no_bucket:
+        o = e.get("orientacao")
+        if o:
+            peso[o] += float(ov or 1.0)
+    return max(peso, key=peso.get) if peso else None
+
+
 def _merge_bbox_stats(eventos: list[dict]) -> dict | None:
     """Junta os resumos de caixa de vários eventos crus num só (o do minuto).
 
@@ -4195,8 +4231,14 @@ def etapa_consolidar_principais(
                  if e.get("pessoa_track_id") == rep.get("pessoa_track_id")]),
             "maos_maquina": (True if any(e.get("maos_maquina")
                                          for e, _ in no_bucket) else None),
+            # Fase 97: a orientação DOMINANTE do minuto — é ela que decide o
+            # nível 2. Moda simples: o minuto é um regime, não um instante.
+            "orientacao": _orientacao_do_minuto(no_bucket),
             "maquina": rep.get("maquina"),
             "imovel": rep.get("imovel"),
+            # Fase 97: o julgamento do minuto — maioria simples entre os crus,
+            # e `None` vence empate (na dúvida, dúvida).
+            "trabalho": _trabalho_do_minuto(no_bucket),
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": rep.get("papel_pessoa"),
             "n_amostras": _n_votos,
@@ -6421,6 +6463,7 @@ def etapa_persistir(
             # com outra roupa. Gravado SEMPRE, mesmo com a flag desligada: é
             # assim que dá para comparar antes/depois no mesmo dado.
             "maos_maquina": e.get("maos_maquina"),
+            "orientacao": e.get("orientacao"),
             "decidido_por": e.get("decidido_por"),
             # Fase 90: cobertura e composição, ao lado da evidência.
             "n_observacoes": e.get("n_observacoes"),
@@ -8228,6 +8271,13 @@ COMPORTAMENTOS A CLASSIFICAR:
 """
 
 
+# Fase 97: com a permanência decidindo, classificar vocabulário deixou de ter
+# efeito no número. O mecanismo NÃO é apagado — fica atrás de flag, desligado,
+# porque ele ainda serve a quem quiser o Pareto por categoria.
+_LEAN_AUTO = os.environ.get("KV_LEAN_AUTO", "off") not in (
+    "off", "0", "false", "False", "")
+
+
 def classificar_comportamentos_lean(
     sb: Client,
     groq_client: Groq,
@@ -8250,6 +8300,17 @@ def classificar_comportamentos_lean(
     Nunca toca em quem tem origem='humano'. Não-fatal.
     Retorna total de comportamentos atualizados.
     """
+    # ⚠️ Fase 97 — DESLIGADA POR PADRÃO. Com a permanência decidindo, a
+    # categoria do rótulo não move número nenhum: classificar vocabulário
+    # deixou de ser trabalho obrigatório do usuário, e a "queda por
+    # contabilidade" quando nasce rótulo novo deixou de existir. O mecanismo
+    # fica, para quem quiser o Pareto por categoria — mas não roda sozinho,
+    # nem gasta chamada de IA, enquanto ninguém pedir.
+    if not _LEAN_AUTO:
+        log.info("[lean] classificação automática DESLIGADA (KV_LEAN_AUTO=off) "
+                 "— a produtividade vem da permanência, não do rótulo.")
+        return 0
+
     try:
         r = (
             sb.table("comportamentos")
@@ -10636,6 +10697,46 @@ def compor_tempo_observado(va_s: float, desp_s: float, vazio_s: float,
     }
 
 
+_FRENTE_CACHE: dict = {}
+
+
+def frente_maquina_do_processo(sb, empresa: str, processo: str) -> str | None:
+    """Como esta câmera traduz 'de frente para a CÂMERA' em 'de frente para o
+    TORNO'. Lido UMA vez por processo e memorizado — é configuração fixa.
+
+    None sem configuração, e aí o nível 2 não afirma nada: a orientação em
+    relação à máquina é indedutível sem saber onde a máquina está.
+    """
+    ch = (empresa, processo)
+    if ch in _FRENTE_CACHE:
+        return _FRENTE_CACHE[ch]
+    v = None
+    try:
+        for z in (sb.table("zonas_camera")
+                  .select("papel, frente_maquina, cam_id")
+                  .eq("empresa", empresa).eq("processo", processo)
+                  .execute().data or []):
+            if z.get("papel") == "maquina" and z.get("frente_maquina"):
+                v = z["frente_maquina"]
+                break
+    except Exception as e:  # noqa: BLE001
+        log.debug("[permanencia] frente_maquina não lida (%s)", e)
+    _FRENTE_CACHE[ch] = v
+    return v
+
+
+def carimbar_frente(eventos: list, frente: str | None) -> list:
+    """Cola a configuração da câmera em cada evento, para `_cat_do_evento`
+    poder decidir sem ter que consultar o banco por evento."""
+    for e in eventos:
+        e["_frente_maquina"] = frente
+    return eventos
+
+
+# ⚠️ CONTRATO: com KV_PERMANENCIA ligado, quem varre `eventos` precisa chamar
+# `carimbar_frente(eventos, frente_maquina_do_processo(...))` ANTES de passar
+# por aqui. Sem o carimbo, `_frente_maquina` vem None e o nível 2 não afirma —
+# degradação segura (nada vira produtivo por engano), mas o número fica baixo.
 def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
     """(label efetivo, categoria lean, duração) de um evento principal.
 
@@ -10643,7 +10744,20 @@ def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
     (sinal determinístico primeiro, rótulo por último). Desligado, devolve
     exatamente o de antes — este é o ponto único por onde toda métrica passa, e
     é por isso que a inversão cabe numa flag só."""
-    label, cat, dur, _nivel, _cand = _cat_com_arvore(e, cat_por_label)
+    label = e.get("label_corrigido") or e.get("comportamento_label") or "?"
+    dur = max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+    if _PERMANENCIA:
+        # ⚠️ Fase 97 — NENHUM RÓTULO ENTRA NA DECISÃO. `cat_por_label` só é
+        # consultado no caminho de correção humana (onde a decisão é dela, não
+        # do rótulo). É isto que faz rótulo novo não mexer em número nenhum, e
+        # é o que acaba com a "queda por contabilidade".
+        e2 = dict(e)
+        # A categoria do rótulo entra APENAS no caminho humano — é a decisão
+        # dela sobre aquele rótulo, não o rótulo decidindo sozinho.
+        e2["_cat_humana"] = cat_por_label.get(label)
+        cat, _niv, _mot, _est = decidir_permanencia(e2, e.get("_frente_maquina"))
+        return label, cat, dur
+    _label, cat, dur, _nivel, _cand = _cat_com_arvore(e, cat_por_label)
     return label, cat, dur
 
 
@@ -10770,9 +10884,12 @@ def comparar_arvore(sb, empresa: str, processo: str, dia: str | None = None) -> 
         sb, "eventos",
         "video_id, comportamento_label, label_corrigido, tempo_inicio_s, "
         "tempo_fim_s, principal, validacao_correto, validado_humano, "
-        "papel_pessoa, movimento_maquina, modo_operacao, versao_instrumento",
+        "papel_pessoa, movimento_maquina, modo_operacao, versao_instrumento, "
+        # Fase 97: os sinais da permanência.
+        "orientacao, trabalho",
         empresa=empresa, processo=processo,
     )
+    frente = frente_maquina_do_processo(sb, empresa, processo)
     comps = varrer(sb, "comportamentos", "label, categoria_lean",
                    empresa=empresa, processo=processo)
     cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
@@ -10791,6 +10908,8 @@ def comparar_arvore(sb, empresa: str, processo: str, dia: str | None = None) -> 
     por_nivel: dict = defaultdict(lambda: {"minutos": 0.0, "va": 0.0, "eventos": 0})
     mudou: dict = defaultdict(float)
     candidatos = {"minutos": 0.0, "eventos": 0, "rotulos": defaultdict(float)}
+    # Fase 97: os TRÊS estados que somam 100% do tempo observado.
+    por_estado: dict = defaultdict(float)
     for e in eventos:
         if e.get("principal") is not True or e.get("validacao_correto") is False:
             continue
@@ -10799,7 +10918,12 @@ def comparar_arvore(sb, empresa: str, processo: str, dia: str | None = None) -> 
         if dur <= 0:
             continue
         cat_hoje = categoria_efetiva(cat_por_label.get(label))
-        cat_arv, nivel, _m, cand = arvore_decidir(e, cat_por_label.get(label))
+        e["_frente_maquina"] = frente
+        if _PERMANENCIA:
+            cat_arv, nivel, _m, _est = decidir_permanencia(e, frente)
+            cand = None
+        else:
+            cat_arv, nivel, _m, cand = arvore_decidir(e, cat_por_label.get(label))
         tot += dur
         va_hoje += dur if cat_hoje == "valor_agregado" else 0.0
         va_arvore += dur if cat_arv == "valor_agregado" else 0.0
@@ -10809,6 +10933,8 @@ def comparar_arvore(sb, empresa: str, processo: str, dia: str | None = None) -> 
         n["va"] += (dur / 60.0) if cat_arv == "valor_agregado" else 0.0
         if cat_hoje != cat_arv:
             mudou[f"{nivel}: {cat_hoje} → {cat_arv}"] += dur / 60.0
+        est, _v = estado_permanencia(e, frente)
+        por_estado[est] += dur / 60.0
         if cand:
             candidatos["minutos"] += dur / 60.0
             candidatos["eventos"] += 1
@@ -10840,6 +10966,14 @@ def comparar_arvore(sb, empresa: str, processo: str, dia: str | None = None) -> 
                               key=lambda x: -x["minutos"])[:12],
         },
         "flag_ligada": _ARVORE_DECIDE,
+        "permanencia_ligada": _PERMANENCIA,
+        # Os três estados. Somam 100% por construção: todo evento cai em
+        # exatamente um deles.
+        "por_estado": {
+            k: {"minutos": round(v, 1),
+                "pct": round(100.0 * v * 60 / tot, 1) if tot else 0.0}
+            for k, v in sorted(por_estado.items(), key=lambda kv: -kv[1])
+        },
         "nota": ("Simulação sobre os eventos JÁ gravados — a árvore é "
                  "determinística e lê só campos persistidos, então não precisa "
                  "reprocessar nem ligar a flag. `rotulo` é o nível em que "
@@ -10847,6 +10981,153 @@ def comparar_arvore(sb, empresa: str, processo: str, dia: str | None = None) -> 
                  "menos a árvore mudou o instrumento."),
     }
 
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 97 — A PRODUTIVIDADE VEM DO QUE FOI OBSERVADO, NÃO DO NOME DO RÓTULO
+#
+# Decisão dos sócios (12/08). O produto é TEMPO DE PERMANÊNCIA NO POSTO.
+# Fernando: "se o cara está de frente para o torno, ele está trabalhando".
+#
+# O DIAGNÓSTICO: as descrições do VLM estão boas. O que estava quebrado é o
+# que vinha depois — descrição → rótulo (cluster) → categoria Lean →
+# produtividade. Duas traduções, cada uma perdendo informação e somando erro.
+# O caso que fechou a decisão: "parado junto ao torno, máquina parada" virava
+# `acao_indefinida` e saía PRODUTIVO. A descrição está certa; o rótulo é lixo;
+# a categoria contradiz a descrição.
+#
+#   ANTES  descrição → rótulo → categoria Lean → produtivo/improdutivo
+#   AGORA  posição + orientação + julgamento do VLM → produtivo/improdutivo
+#          (o rótulo continua existindo, mas só para AGRUPAR na tela)
+#
+# O rótulo deixa de carregar peso. Se ele errar, o número não estraga — e é
+# isso que faz a "queda por contabilidade" deixar de existir.
+#
+# PRECEDÊNCIA:
+#   0. correção humana  — inviolável
+#   1. fora do posto    → IMPRODUTIVO (determinístico: zona + tracking)
+#   2. no posto, voltado para o torno → PRODUTIVO (determinístico: pose)
+#   3. no posto, voltado para outro lado → o VLM julga (`trabalho`)
+#
+# ⚠️ `trabalho=null` NUNCA vira produtivo por omissão: vira dúvida e vai para
+# a fila. Omissão que rende ponto é exatamente o viés que derrubamos aqui.
+# ═════════════════════════════════════════════════════════════════════════
+_PERMANENCIA = os.environ.get("KV_PERMANENCIA", "on") not in (
+    "off", "0", "false", "False", "")
+# ⚠️ O NÍVEL 2 NÃO AFIRMA ENQUANTO A ORIENTAÇÃO NÃO FOR VERIFICADA COM DADO.
+#
+# `zonas_camera.frente_maquina` da cam1 está em 'camera' — "de frente para a
+# câmera = de frente para o torno". Mas nos vídeos o operador aparece DE
+# COSTAS quando trabalha no torno. Se a configuração estiver invertida,
+# produtivo e improdutivo trocam de lugar — a métrica inteira.
+#
+# A verificação exige cruzar `orientacao` com `maos_maquina`, e `orientacao`
+# NUNCA FOI PERSISTIDA (era calculada desde a Fase 86, injetada no prompt e
+# jogada fora). Ela passa a ser gravada nesta fase; a verificação é possível
+# a partir do primeiro vídeo processado depois do deploy.
+#
+# Até lá o nível 2 ABSTÉM-SE: o minuto cai no nível 3 e o VLM julga. Isso
+# degrada com segurança (nada vira produtivo por engano) e liga com uma
+# variável de ambiente, sem deploy, no dia em que o dado confirmar.
+_ORIENTACAO_VERIFICADA = os.environ.get("KV_ORIENTACAO_VERIFICADA", "off") not in (
+    "off", "0", "false", "False", "")
+
+EST_FORA = "fora_do_posto"
+EST_NO_TORNO = "no_posto_torno"
+EST_OUTRO_LADO = "no_posto_outro_lado"
+ESTADOS_PERMANENCIA = (EST_NO_TORNO, EST_OUTRO_LADO, EST_FORA)
+
+
+def _trabalho_do_minuto(no_bucket: list):
+    """Maioria simples do julgamento do VLM no minuto. `None` vence empate —
+    na dúvida, dúvida."""
+    sim = nao = 0
+    for e, _ov in no_bucket:
+        t = e.get("trabalho")
+        if t is True:
+            sim += 1
+        elif t is False:
+            nao += 1
+    if sim == nao:
+        return None
+    return sim > nao
+
+
+def estado_permanencia(e: dict, frente_maquina: str | None) -> tuple:
+    """(estado, voltado_para_o_torno) — onde a pessoa esteve e para onde olhava.
+
+    `voltado` é None quando não houve pose ou quando a câmera não sabe traduzir
+    orientação-para-a-câmera em orientação-para-a-máquina (`frente_maquina` não
+    configurado). None não é "não estava voltado": é "não dá para dizer".
+    """
+    papel = e.get("papel_pessoa")
+    lbl = e.get("label_corrigido") or e.get("comportamento_label")
+    if papel == "posto_vazio" or (lbl == POSTO_VAZIO_LABEL and not e.get("label_corrigido")):
+        return EST_FORA, None
+    if papel == "visitante":
+        # Visitante não é o titular do posto: o tempo dele não é permanência
+        # do operador. Conta como fora.
+        return EST_FORA, None
+    # Sem verificação, a orientação não decide — ver `_ORIENTACAO_VERIFICADA`.
+    voltado = (orientacao_vs_maquina(e.get("orientacao"), frente_maquina)
+               if _ORIENTACAO_VERIFICADA else None)
+    if voltado is None:
+        return EST_OUTRO_LADO, None
+    de_frente = "de frente" in voltado.lower() and "costas" not in voltado.lower()
+    return (EST_NO_TORNO if de_frente else EST_OUTRO_LADO), de_frente
+
+
+def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
+    """(categoria, nivel, motivo, estado) — a decisão nova. FUNÇÃO PURA.
+
+    Nenhum rótulo de atividade entra aqui. É a garantia de que rótulo novo não
+    move número nenhum.
+    """
+    # ── 0 — correção humana, inviolável ──
+    # ⚠️ `validado_humano=True` NÃO É DECISÃO HUMANA quando veio de MECANISMO.
+    # `posto_vazio` e `auditoria` usam a flag só para ficar fora da fila (Fase
+    # 62), e no dia 10/08 isso é 255 de 255 eventos — tratá-los como decisão
+    # humana faria a arquitetura nova nunca rodar. A Fase 88 já tinha
+    # documentado esta armadilha; aqui ela voltaria pela porta da precedência.
+    _mecanico = (e.get("origem_validacao") or "") in _ORIGENS_MECANICAS
+    if (not _mecanico) and e.get("validado_humano") and (
+            e.get("label_corrigido") or e.get("validacao_correto") is True):
+        # ⚠️ CONFIRMAR NÃO É APROVAR. "o rótulo está certo" diz que o RÓTULO
+        # está certo — não que o trecho é produtivo. Confirmar
+        # `conversando_colega` mantém improdutivo. A primeira versão desta
+        # função devolvia `valor_agregado` na confirmação, e o comparativo com
+        # o dia real acusou na hora: 41% viraram 81%, quase tudo vindo dos
+        # eventos auto-validados por mecanismo (posto_vazio e auditoria).
+        est, _v = estado_permanencia(e, frente_maquina)
+        return (categoria_efetiva(e.get("_cat_humana")),
+                NIVEL_HUMANO, "você decidiu este trecho", est)
+
+    estado, voltado = estado_permanencia(e, frente_maquina)
+
+    # ── 1 — fora do posto ──
+    if estado == EST_FORA:
+        return ("desperdicio", NIVEL_PRESENCA,
+                "fora do posto — medido por zona e rastreamento", estado)
+
+    # ── 2 — no posto, voltado para o torno ──
+    if estado == EST_NO_TORNO:
+        return ("valor_agregado", "orientacao",
+                "no posto e voltado para o torno — medido pela pose", estado)
+
+    # ── 3 — no posto, voltado para outro lado: o VLM julga ──
+    t = e.get("trabalho")
+    if t is True:
+        return ("valor_agregado", "julgamento",
+                "no posto, de outro lado, e a atividade é serviço do posto", estado)
+    if t is False:
+        return ("desperdicio", "julgamento",
+                "no posto, de outro lado, e a atividade não é serviço do posto",
+                estado)
+    # `None` — e aqui está a regra que impede o viés voltar pela porta dos
+    # fundos: omissão NÃO rende ponto. Vira desperdício E vira dúvida.
+    return (CATEGORIA_SEM_EVIDENCIA, "duvida",
+            "no posto, de outro lado, e não deu para dizer se é serviço — "
+            "entra na fila", estado)
 
 def _montar_placar(
     eventos: list[dict],
@@ -11444,6 +11725,7 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
     comps = varrer(sb, "comportamentos", "label, categoria_lean",
                    empresa=empresa, processo=processo)
     cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+    _frente = frente_maquina_do_processo(sb, empresa, processo)
 
     ids = sorted(inicio_por_video)
     eventos: list[dict] = []
@@ -11470,6 +11752,7 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
         dt0 = inicio_por_video.get(e.get("video_id"))
         if dt0 is None:
             continue
+        e["_frente_maquina"] = _frente
         label, cat, dur = _cat_do_evento(e, cat_por_label)
         if dur <= 0:
             continue
@@ -11616,6 +11899,9 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         e for e in eventos
         if e.get("validacao_correto") is not False and e.get("principal") is not False
     ]
+    # Fase 97: a decisão por permanência precisa saber como esta câmera
+    # traduz orientação-para-a-câmera em orientação-para-a-máquina.
+    carimbar_frente(eventos, frente_maquina_do_processo(sb, empresa, processo))
 
     # B5: limiar do processo, lido UMA vez (a checagem por evento é pura).
     try:

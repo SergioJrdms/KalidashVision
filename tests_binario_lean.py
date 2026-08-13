@@ -35,6 +35,12 @@ os.environ.setdefault("SUPABASE_KEY", "k")
 
 from backend import pipeline as pl  # noqa: E402
 
+# Fase 97: a classificação Lean automática saiu do caminho da produtividade e
+# ficou DESLIGADA por padrão. Esta suíte testa o MECANISMO, que continua
+# existindo — então ela o liga explicitamente. Sem isto ela passaria a testar
+# "a flag está off", que é outra coisa.
+pl._LEAN_AUTO = True
+
 ok = fail = 0
 
 

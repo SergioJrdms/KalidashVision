@@ -123,10 +123,16 @@ git = subprocess.run(["git", "diff", "--name-only", "HEAD~1", "HEAD"],
 # Esta suíte roda ANTES do commit; usa o working tree.
 alterados = subprocess.run(["git", "status", "--porcelain"], cwd=RAIZ,
                            capture_output=True, text=True).stdout.splitlines()
-back = [l for l in alterados if "backend/" in l or "sql/" in l]
-check("nenhum arquivo de backend alterado nesta fase", not back, back)
-check("nenhum arquivo de SQL alterado nesta fase",
-      not [l for l in alterados if "sql/" in l])
+# O guard original era da Fase 96 ("esta fase não toca backend"). Fases
+# seguintes tocam, e travar o repositório inteiro seria falso. O que esta
+# suíte protege de VERDADE é que a CAMADA DE EXIBIÇÃO não depende do backend:
+# se `rotulos.ts` importar algo de rede ou de API, a tradução deixou de ser
+# tradução.
+check("a camada de tradução não importa nada de rede/API",
+      "import" not in ROTULOS.split("export")[0].replace("// ", "")
+      and "fetch(" not in ROTULOS and "api." not in ROTULOS, "rotulos.ts tem dependência externa")
+check("e não depende de nenhum tipo do backend",
+      "from \"../lib/types\"" not in ROTULOS)
 
 print("\n[6] A tradução é SÓ exibição — a chave nunca muda")
 # A chave é o que vai para a API. Se alguém passar o nome humano numa chamada,

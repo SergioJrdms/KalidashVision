@@ -1468,3 +1468,31 @@ alter table eventos drop constraint if exists eventos_decidido_por_chk;
 alter table eventos add constraint eventos_decidido_por_chk
     check (decidido_por is null or decidido_por in
            ('humano','presenca','movimento','manual','rotulo'));
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 97 — A PRODUTIVIDADE VEM DO QUE FOI OBSERVADO
+--
+-- Decisão dos sócios (12/08): o produto é TEMPO DE PERMANÊNCIA NO POSTO.
+-- A cadeia descrição → rótulo → categoria Lean → produtividade tinha duas
+-- traduções, cada uma perdendo informação. O caso que fechou a decisão:
+-- "parado junto ao torno, máquina parada" virava `acao_indefinida` e saía
+-- PRODUTIVO — a descrição certa, o rótulo lixo, a categoria contradizendo a
+-- descrição.
+--
+-- `orientacao` era calculada desde a Fase 86, injetada no prompt e JOGADA
+-- FORA. É a TERCEIRA vez que este padrão morde (maquina/imovel na 88,
+-- t_ini/t_fim na 92): sinal que só existe em memória não pode ser verificado
+-- nem auditado — e agora ela DECIDE produtividade.
+--
+-- `trabalho` é o julgamento do VLM, no mesmo JSON da descrição (zero chamada
+-- nova). NULL é resposta legítima e NUNCA vira produtivo por omissão.
+--
+--   select orientacao, count(*), round(sum(tempo_fim_s-tempo_inicio_s)/60) min
+--     from eventos where principal and maos_maquina group by 1 order by min desc;
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists orientacao text;
+alter table eventos add column if not exists trabalho boolean;
+alter table eventos drop constraint if exists eventos_orientacao_chk;
+alter table eventos add constraint eventos_orientacao_chk
+    check (orientacao is null or orientacao in ('frente','costas','perfil'));
