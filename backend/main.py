@@ -69,6 +69,7 @@ from .pipeline import (
     calibrar_movimento,
     comparar_arvore,
     reavaliar_correcao,
+    limpar_sufixo_estado,
     custo_reavaliacao_usd,
     chave_frame_evento,
     limiares_movimento,
@@ -3888,7 +3889,12 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
             "validado_em": now,
         }
     if acao == "corrigir":
-        novo = (label_corrigido or "").strip()
+        # ⚠️ Fase 99 — A GUARDA VALE AQUI TAMBÉM. A tela oferece os rótulos do
+        # HISTÓRICO, que ainda tem os 896 com sufixo de estado; sem esta linha
+        # o gestor reintroduziria `monitorar_maquina_parada` de boa-fé, e o
+        # rótulo voltaria a afirmar algo que nada mede. A correção continua
+        # valendo — só o sufixo cai.
+        novo = limpar_sufixo_estado((label_corrigido or "").strip())
         if not novo:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "label_corrigido obrigatório")
         # Se o "corrigido" é igual ao original, não é correção: limpa LC.
@@ -3960,9 +3966,13 @@ def validar_evento(
     # e o resultado vale SÓ para este evento. Não-fatal: se falhar, a
     # correção já está gravada e é ela que importa.
     reav = None
-    if body.acao == "corrigir" and body.label_corrigido:
+    # Fase 99: o MESMO rótulo que foi gravado. `_montar_update_validacao` limpa
+    # o sufixo de estado; mandar o texto cru aqui faria o diagnóstico raciocinar
+    # sobre `monitorar_maquina_parada` — um rótulo que não existe no banco.
+    _lc = limpar_sufixo_estado(body.label_corrigido or "")
+    if body.acao == "corrigir" and _lc:
         try:
-            reav = _reavaliar_evento(sb, user.empresa, evento_id, body.label_corrigido)
+            reav = _reavaliar_evento(sb, user.empresa, evento_id, _lc)
         except Exception as e:  # noqa: BLE001
             log.warning("[reavaliacao] não-fatal: %s", e)
     return {"ok": True, "reavaliacao": reav}

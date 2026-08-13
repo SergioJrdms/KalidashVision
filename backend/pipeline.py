@@ -1557,18 +1557,20 @@ Responda APENAS um JSON no formato:
 # categoria Lean; com a descrição no lugar, o vocabulário aberto volta a
 # funcionar sozinho e a improdutividade nasce sem lista fechada.
 #
-# A calibração está nos EXEMPLOS, e ela é deliberadamente simétrica: duas das
-# frases têm a MESMA postura e diferem só no estado da máquina. É esse o
-# discriminador entre esperar ciclo (produtivo, regra do dono do processo) e
-# ociosidade — e o prompt nunca diz qual é qual.
+# ⚠️ Fase 99 — OS EXEMPLOS DE ESTADO DA MÁQUINA SAÍRAM. Eles ensinavam o
+# modelo a afirmar "máquina em ciclo"/"máquina parada", e a Fase 89 provou que
+# ele não consegue julgar isso a partir de imagem parada: o estado afirmado
+# não tinha persistência entre minutos seguidos. Exemplo é a instrução mais
+# forte de um prompt — enquanto a frase estivesse aqui, a proibição lá embaixo
+# competia com ela e perdia.
 #
 # A sequência é o que torna imobilidade OBSERVÁVEL: três frames idênticos ao
 # longo de 24s são evidência; um frame só nunca foi.
 # ═════════════════════════════════════════════════════════════════════════
 _BLOCO_EXEMPLOS_DESCRICAO = """EXEMPLOS DE DESCRIÇÃO (o que se vê, não o julgamento):
 - "operando o torno, mãos na peça"
-- "parado junto ao torno, máquina em ciclo"
-- "parado ao lado do torno, máquina parada"   (orientação só quando o CONTEXTO informa)
+- "parado junto ao torno, sem tocar em nada"
+- "parado ao lado do torno, braços abaixados"   (orientação só quando o CONTEXTO informa)
 - "medindo a peça com paquímetro"
 - "de costas para o posto, mexendo no celular"
 - "conversando com colega, sem tocar na máquina"
@@ -1583,9 +1585,12 @@ _REGRAS_DESCRICAO = """- Descreva o OBSERVÁVEL, em UMA FRASE CURTA (até 10 pal
 - AUSÊNCIA DE MUDANÇA É UMA OBSERVAÇÃO, não uma falha da imagem. Se a pessoa
   está na mesma posição em todas as imagens, diga isso. NÃO preencha com a
   ação mais provável nem com a ação anterior.
-- Diga também o que a MÁQUINA está fazendo quando der para ver (luz de ciclo,
-  eixo girando, porta aberta, peça na castanha) — é o que separa espera de
-  ociosidade, e sem isso a descrição fica ambígua.
+- ⚠️ NÃO AFIRME O ESTADO DA MÁQUINA. Nada de "máquina parada", "em ciclo",
+  "torno rodando", "eixo girando". Fase 89: isso foi MEDIDO e o estado que
+  você afirmava não tinha persistência entre minutos seguidos — trocava como
+  cara ou coroa. Um torno em ciclo e um parado são idênticos num quadro; a
+  diferença é MOVIMENTO, e imagem parada não tem movimento. Quem mede a
+  máquina é sensor. Descreva a PESSOA.
 - Só diga que ele OPERA, manipula, prepara, ajusta ou mede se você VÊ as MÃOS
   dele na máquina, na ferramenta ou na peça, em ação, em alguma das imagens.
 - EXCEÇÃO (o CONTEXTO manda): se o CONTEXTO disser que ele está com as MÃOS na
@@ -1649,10 +1654,37 @@ def cache_desc_label(sb, empresa: str, processo: str) -> dict[str, str]:
     vistos: dict[str, set] = defaultdict(set)
     for l in linhas:
         d = (l.get("descricao_bruta") or "").strip().lower()
-        lbl = (l.get("comportamento_label") or "").strip()
+        # ⚠️ Fase 99 — O CACHE LÊ O HISTÓRICO, e o histórico tem 896 eventos
+        # com sufixo de estado. Sem esta limpeza acontecia o pior dos dois
+        # mundos: o rótulo guardado (`monitorar_maquina_parada`) não casava
+        # com a checagem de sufixo logo abaixo, então a descrição ia ao LLM de
+        # novo — que a mandava de volta para o vocabulário canônico, com
+        # sufixo. O cache não só deixava passar o resíduo: ele PAGAVA uma
+        # chamada para reintroduzi-lo.
+        lbl = limpar_sufixo_estado((l.get("comportamento_label") or "").strip())
         if d and lbl:
             vistos[d].add(lbl)
     return {d: next(iter(ls)) for d, ls in vistos.items() if len(ls) == 1}
+
+
+def _maquina_do_vlm(t: dict) -> None:
+    """SEMPRE None. Fase 99 — o prompt parou de PEDIR estado de máquina; este é
+    o lado de parar de ACEITAR.
+
+    O campo continua sendo lido só para registrar a violação: se o modelo
+    volunteer `"maquina": "ciclo"` mesmo com a proibição explícita, queremos ver
+    isso no log — não gravado numa coluna, onde viraria a mesma afirmação não
+    medida de sempre, só que fora do nome. Nada mede estado de máquina hoje: o
+    sensor de movimento mede MOVIMENTO na zona, e isso já vive em
+    `movimento_maquina`, medido, separado e com detalhe de qualidade.
+
+    `imovel` NÃO cai junto: imobilidade é da PESSOA, atravessa vários quadros e
+    é exatamente o tipo de coisa que o modelo consegue ver."""
+    bruto = _normalizar_maquina(t.get("maquina"))
+    if bruto:
+        log.info("[vlm] o modelo afirmou estado da máquina (%r) mesmo com a "
+                 "proibição no prompt — descartado, não vira coluna.", bruto)
+    return None
 
 
 def _normalizar_maquina(v) -> str | None:
@@ -1743,20 +1775,17 @@ def _partes_da_chave(ck: str) -> tuple[str | None, bool]:
 
 
 def _descricao_com_cena(desc: str, maquina: str | None, imovel: bool | None) -> str:
-    """Descrição humana do catálogo, com o discriminador explícito. É o texto
-    que o gestor lê na hora de classificar o Lean — sem ele, `x_ciclo` e
-    `x_parada` chegariam à tela como dois nomes crípticos.
+    """LÁPIDE (Fase 99). Anexava o estado da máquina à descrição do catálogo,
+    para o gestor distinguir na tela `x_ciclo` de `x_parada`.
 
-    Fase 88: sem partição não há dois nomes a distinguir, e anexar o estado
-    aqui seria a mesma afirmação não medida, só que em prosa."""
-    if not _PARTICAO_CENA:
-        return desc
-    if maquina == "ciclo":
-        return f"{desc} — com a MÁQUINA EM CICLO (trabalhando)"
-    if maquina == "parada":
-        return f"{desc} — com a MÁQUINA PARADA"
-    if imovel:
-        return f"{desc} — pessoa IMÓVEL, estado da máquina não observado"
+    Com a guarda estrutural, nenhum rótulo carrega estado — nem com
+    `KV_PARTICAO_CENA` ligada. Sobrava, então, o pior dos mundos: as duas cenas
+    colapsam no MESMO label, e a última partição a rodar sobrescrevia o catálogo
+    com "— com a MÁQUINA PARADA". Um rótulo que cobre ciclo E parada passava a
+    ser descrito ao gestor como parada. Afirmação não medida, agora em prosa e
+    ainda por cima decidida por ordem de iteração.
+
+    Fica como no-op para não reabrir o caminho por engano."""
     return desc
 
 
@@ -1803,9 +1832,10 @@ Sua tarefa é dizer o que aconteceu AO LONGO da sequência, não o que se vê nu
 {exemplos}
 CONTEXTO: {contexto_zonas}
 
+NÃO AFIRME O ESTADO DA MÁQUINA. Não diga "máquina parada", "em ciclo", "torno rodando" nem equivalente — nem na descrição, nem em campo nenhum. Você NÃO consegue julgar isso a partir de imagens paradas, e isso foi MEDIDO: o estado que você afirmava não se mantinha entre minutos seguidos, trocava como cara ou coroa. Descreva o que a PESSOA está fazendo; a máquina, quem mede é sensor.
+
 Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira).
-Além da descrição, devolva DOIS CAMPOS SEPARADOS por imagem — eles não são enfeite da frase, são o que distingue espera de ociosidade:
-- "maquina": "ciclo" se a máquina está trabalhando (eixo girando, luz de ciclo, peça sendo usinada), "parada" se está claramente parada, null se você não consegue ver.
+Devolva também, por imagem:
 - "imovel": true se a pessoa está na MESMA posição da imagem anterior, false se mudou.
 Responda também "trabalho" por imagem: a atividade descrita é TRABALHO DO POSTO?
 - true  = ler desenho técnico, medir peça, buscar ferramenta ou material, organizar bancada, limpar cavaco, conversar SOBRE O SERVIÇO
@@ -1813,7 +1843,7 @@ Responda também "trabalho" por imagem: a atividade descrita é TRABALHO DO POST
 - null  = não dá para dizer
 Julgue a ATIVIDADE, não a pessoa: a pergunta é se aquilo é serviço do posto, não se ele é produtivo em geral. Na dúvida, null — nunca chute true.
 
-{{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}, "maquina": "ciclo", "imovel": true, "trabalho": true}}, {{"i": 1, "acoes": {{"P1": "..."}}, "maquina": null, "imovel": false, "trabalho": null}}]}}"""
+{{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}, "imovel": true, "trabalho": true}}, {{"i": 1, "acoes": {{"P1": "..."}}, "imovel": false, "trabalho": null}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA_CAM2 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
@@ -1829,9 +1859,11 @@ Diga o que o operador fez AO LONGO da sequência, não o que se vê num frame is
 {exemplos}
 CONTEXTO: {contexto_zonas}
 
+NÃO AFIRME O ESTADO DA MÁQUINA — nem "parada", nem "em ciclo", nem equivalente. Você não consegue julgar isso a partir de imagens paradas, e isso foi medido. Descreva o que a PESSOA faz.
+
 Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira).
-Devolva também "maquina" ("ciclo" | "parada" | null) e "imovel" (true/false) por imagem — são eles que distinguem espera de ociosidade:
-{{"trechos": [{{"i": 0, "acao": "...", "maquina": "ciclo", "imovel": true}}, {{"i": 1, "acao": "...", "maquina": null, "imovel": false}}]}}"""
+Devolva também "imovel" (true/false) por imagem — true se a pessoa está na MESMA posição da imagem anterior:
+{{"trechos": [{{"i": 0, "acao": "...", "imovel": true}}, {{"i": 1, "acao": "...", "imovel": false}}]}}"""
 
 
 def _analisar_operador_cam2(
@@ -1904,7 +1936,9 @@ def construir_bloco_vocabulario(memoria: dict, max_itens: int = 20) -> str:
     linhas = [
         "VOCABULÁRIO OPERACIONAL CONHECIDO deste cliente (use estes termos quando a ação corresponder, mantendo consistência com observações anteriores):"
     ]
-    for v in memoria["vocabulario"][:max_itens]:
+    # Fase 99: mesma limpeza no prompt do VLM — sugerir "monitorar_maquina_parada"
+    # como vocabulário conhecido é pedir para ele descrever estado de máquina.
+    for v in vocabulario_sem_estado(memoria["vocabulario"])[:max_itens]:
         if (v.get("descricao") or "").strip().lower() in _queimadas:
             continue
         linhas.append(f'- {v["descricao"]}')
@@ -1915,6 +1949,93 @@ def construir_bloco_vocabulario(memoria: dict, max_itens: int = 20) -> str:
     return "\n".join(linhas) + "\n\n"
 
 
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 99 — O SUFIXO DE ESTADO NÃO PODE NASCER. POR CONSTRUÇÃO.
+#
+# A Fase 88 desligou a partição e o sufixo DUPLO morreu em 07/08. Mas cinco
+# rótulos continuaram nascendo — 896 eventos desde 12/08:
+#   monitorar_maquina_parada 370 · operar_torno_parada 257 ·
+#   operar_torno_ciclo 119 · conversando_colega_parada 92 ·
+#   monitorar_maquina_ciclo 58
+#
+# A porta que ficou aberta: esses nomes entraram no VOCABULÁRIO CANÔNICO
+# enquanto a partição existia, e o prompt do cluster diz "REGRA DURA: se uma
+# descrição corresponde a um destes labels, REUSE". O modelo obedecia — e
+# passou a colar "parada" em rótulo novo sem nada ter medido estado nenhum.
+#
+# O rótulo AFIRMA "máquina parada", e a Fase 89 provou que ninguém mediu
+# isso: o estado que o VLM afirmava não tinha persistência entre minutos
+# consecutivos, trocava como moeda (+0,025 de separação onde um classificador
+# precisaria de ~+0,15).
+#
+# ⚠️ POR ISSO A GUARDA É ESTRUTURAL, NÃO UMA SUGESTÃO AO MODELO. Depender de
+# o modelo "não escolher" foi exatamente o que falhou. O sufixo é removido
+# DEPOIS que o cluster responde e ANTES de virar rótulo — impossível, não
+# improvável.
+#
+# Histórico NÃO é renomeado: os 896 eventos ficam como estão. Renomear
+# reescreve o passado, e a série comparável entre semanas é a da família (que
+# `familia_label` já entrega).
+# ═════════════════════════════════════════════════════════════════════════
+_SUFIXOS_ESTADO = ("_parada", "_parado", "_ciclo", "_imovel", "_imóvel")
+
+# Os cinco que já entraram no vocabulário canônico enquanto a partição
+# existia. Ficam BANIDOS de voltar como sugestão ao modelo — mas continuam
+# existindo no histórico e nas telas (traduzidos pela família).
+ROTULOS_BANIDOS_DO_VOCABULARIO = frozenset({
+    "monitorar_maquina_parada", "operar_torno_parada", "operar_torno_ciclo",
+    "conversando_colega_parada", "monitorar_maquina_ciclo",
+    # os de sufixo duplo, que morreram em 07/08 mas podem estar no catálogo
+    "monitorar_maquina_parada_parada", "operar_torno_ciclo_ciclo",
+    "conversando_colega_parada_imovel", "monitorar_maquina_parada_imovel",
+    "monitorar_maquina_ciclo_ciclo", "operar_torno_parada_parada",
+    "monitorar_maquina_parada_ciclo",
+})
+
+
+def limpar_sufixo_estado(label: str | None) -> str:
+    """Tira QUALQUER sufixo de estado de máquina de um rótulo, em laço.
+
+    É a guarda estrutural: roda sobre o que o cluster devolve, antes de o nome
+    virar rótulo. `monitorar_maquina_parada` → `monitorar_maquina`.
+
+    Nunca esvazia o rótulo: se sobrar só o sufixo, devolve o original (um
+    rótulo chamado literalmente `_parada` seria pior que o sufixo).
+    """
+    base = (label or "").strip()
+    if not base:
+        return base
+    mudou = True
+    while mudou:
+        mudou = False
+        for suf in _SUFIXOS_ESTADO:
+            if base.lower().endswith(suf) and len(base) > len(suf):
+                base, mudou = base[: -len(suf)], True
+                break
+    return base or (label or "").strip()
+
+
+def rotulo_afirma_estado(label: str | None) -> bool:
+    """True se o rótulo carrega afirmação de estado da máquina — o que nenhum
+    sinal do sistema mede hoje."""
+    return limpar_sufixo_estado(label) != (label or "").strip()
+
+
+def vocabulario_sem_estado(vocab: list) -> list:
+    """Filtra o vocabulário que vai ao PROMPT do cluster.
+
+    Tira os banidos e qualquer rótulo com sufixo de estado. Não apaga nada do
+    banco: só deixa de SUGERIR ao modelo o que ele não deveria reusar.
+    """
+    saida = []
+    for v in vocab or []:
+        lbl = (v.get("label") or "").strip()
+        if lbl in ROTULOS_BANIDOS_DO_VOCABULARIO or rotulo_afirma_estado(lbl):
+            continue
+        saida.append(v)
+    return saida
+
 def construir_bloco_memoria_cluster(
     memoria: dict,
     max_vocab: int = 25,
@@ -1923,9 +2044,13 @@ def construir_bloco_memoria_cluster(
 ) -> str:
     blocos: list[str] = []
 
-    if memoria.get("vocabulario"):
+    # Fase 99: o vocabulário sugerido ao modelo NÃO pode conter rótulo que
+    # afirme estado da máquina. Eles entraram aqui quando a partição existia,
+    # e a "REGRA DURA" abaixo os fazia ser reusados para sempre.
+    _vocab = vocabulario_sem_estado(memoria.get("vocabulario"))
+    if _vocab:
         linhas = ["LABELS CANÔNICOS JÁ VALIDADOS por humanos neste cliente:"]
-        for v in memoria["vocabulario"][:max_vocab]:
+        for v in _vocab[:max_vocab]:
             linhas.append(f'  - {v["label"]}: {v["descricao"]}')
         linhas.append("")
         linhas.append(
@@ -3068,7 +3193,7 @@ def _analisar_sequencia_vlm(
             # custa alguns tokens de saída e elimina o parsing por adivinhação.
             saida[idx_no_grupo[id(am)]] = {
                 "acoes": por_track,
-                "maquina": _normalizar_maquina(t.get("maquina")),
+                "maquina": _maquina_do_vlm(t),
                 "imovel": bool(t.get("imovel")),
                 # Fase 97: o julgamento vem no MESMO JSON — zero chamada nova.
                 # `null` explícito é resposta legítima e NUNCA vira produtivo.
@@ -3141,7 +3266,7 @@ def _analisar_sequencia_cam2(
         if acao:
             saida[idx_no_grupo[id(usados[i])]] = {
                 "acao": acao,
-                "maquina": _normalizar_maquina(t.get("maquina")),
+                "maquina": _maquina_do_vlm(t),
                 "imovel": bool(t.get("imovel")),
             }
     return saida
@@ -3755,12 +3880,18 @@ def etapa_clusterizar(
             continue
         # Fase 86 — CONSISTÊNCIA. Frase idêntica já clusterizada neste processo
         # reusa o label, em vez de ser re-perguntada a um modelo estocástico.
-        # Só vale quando a cena BATE com o sufixo do label guardado: um label
-        # sem sufixo não pode servir a uma cena discriminada, senão o cache
-        # desfaria a partição que acabamos de construir.
-        em_cache = _cache.get(d_lower)
-        if em_cache and em_cache == familia_label(em_cache) + sufixo_cena(
-                *_partes_da_chave(ck)):
+        #
+        # Fase 99 — o cache deixou de olhar a cena. Ele exigia que a cena
+        # BATESSE com o sufixo do label guardado, para não desfazer a partição.
+        # Só que o histórico vem cheio de `x_ciclo`/`x_parada` e a leitura agora
+        # limpa o sufixo: o label guardado NUNCA mais bate com uma cena
+        # discriminada. O efeito, com a partição ligada, era o cache nunca
+        # acertar e o sistema PAGAR uma chamada por descrição já conhecida —
+        # para receber de volta um nome que a guarda ia limpar de novo.
+        # Não há mais partição a preservar: nenhum rótulo pode nomear estado,
+        # então a mesma frase é o mesmo rótulo, em qualquer cena.
+        em_cache = limpar_sufixo_estado(_cache.get(d_lower))
+        if em_cache:
             descricoes_conhecidas[(d_lower, ck)] = em_cache
             n_cache += 1
             continue
@@ -3845,6 +3976,15 @@ def etapa_clusterizar(
             label = (c.get("label") or "acao_indefinida").strip() or "acao_indefinida"
             if label not in ("acao_indefinida", POSTO_VAZIO_LABEL):
                 label = label + sufixo_cena(maq, imo)
+            # ⚠️ Fase 99 — A GUARDA ESTRUTURAL. Roda DEPOIS do cluster e ANTES
+            # de o nome virar rótulo: mesmo que o modelo devolva
+            # `monitorar_maquina_parada`, o sufixo cai aqui. Depender de o
+            # modelo não escolher foi exatamente o que falhou por 896 eventos.
+            _antes = label
+            label = limpar_sufixo_estado(label)
+            if label != _antes:
+                log.info("[cluster] sufixo de estado removido: %s → %s "
+                         "(nenhum sinal mede estado de máquina)", _antes, label)
             for d in c.get("descricoes_originais", []):
                 mapa_descricao_label[(d.strip().lower(), ck)] = label
             catalogo[label] = _descricao_com_cena(c.get("descricao") or label, maq, imo)
@@ -5035,6 +5175,12 @@ def veto_movimento(mov: str | None, detalhe: dict | None,
 
     Só vale com a injeção ligada: sem o fato no prompt o VLM não teve como
     considerar o movimento, e puni-lo por isso seria injusto e inútil.
+
+    ⚠️ Fase 99 — ESTA CAMADA NÃO DISPARA MAIS, e é consequência correta. Ela
+    existe para pegar o VLM afirmando `ciclo` sem movimento; o VLM parou de
+    afirmar `ciclo` (`_maquina_do_vlm` devolve None sempre). Sem afirmação, não
+    há contradição a marcar. Fica de pé porque o dia em que houver um
+    discriminador de verdade, é aqui que ele se contradiz com o sensor.
     """
     if not _MOV_INJETAR or mov != "ausente":
         return None

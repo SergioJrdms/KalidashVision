@@ -13,6 +13,7 @@ import { mapPendentes, mapPerguntas, type PendMock, type PendIrmaoMock, type Per
 import { nivelDe, leanCor, leanLabel, fmtSeg } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Ring, toast } from "../design/ui";
 import { FrameStripReal, FrameStripSegmento, FrameReal } from "../lib/frames";
+import { rotulosAtribuiveis } from "../design/rotulos";
 import { ConfirmaQueima } from "./Duvidas";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
@@ -34,8 +35,12 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
   const pergQ = useQuery({ queryKey: ["perguntas", proc.id], queryFn: () => api.perguntas.listar(proc.id, "pendente") });
   const dashQ = useQuery({ queryKey: ["dashboard", proc.id], queryFn: () => api.processos.dashboard(proc.id), staleTime: 30_000 });
 
+  // Fase 99 — o que o gestor PODE atribuir. A distribuição traz os rótulos com
+  // sufixo de estado (896 eventos no histórico); o backend limpa o sufixo de
+  // qualquer correção que chegue, então oferecê-los aqui faria o gestor
+  // escolher uma coisa e o banco gravar outra, sem aviso. Não são oferecidos.
   const labels = useMemo(
-    () => (dashQ.data?.snapshot.distribuicao_comportamentos || []).map((d) => d.comportamento).sort(),
+    () => rotulosAtribuiveis((dashQ.data?.snapshot.distribuicao_comportamentos || []).map((d) => d.comportamento)),
     [dashQ.data]
   );
 

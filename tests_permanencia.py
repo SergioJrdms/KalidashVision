@@ -333,7 +333,7 @@ main = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 check("há endpoint para consultar o custo antes de ligar",
       "/reavaliacao/custo" in main)
 check("só dispara em correção INDIVIDUAL, nunca em lote",
-      'if body.acao == "corrigir" and body.label_corrigido:' in main
+      'if body.acao == "corrigir" and _lc:' in main
       and "_reavaliar_evento" not in main.split("def validar_lote")[1])
 check("não pede ao Storage o que não existe (Fase 93)",
       "_nomes_no_prefixo(sb, bucket, _prefixo_frames(caminho))" in main)
@@ -342,6 +342,181 @@ check("e é NÃO-FATAL: a correção já está gravada",
 sql = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "sql", "schema.sql"), encoding="utf-8").read()
 check("a coluna existe", "add column if not exists reavaliacao" in sql)
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Fase 99 — O SUFIXO DE ESTADO NÃO PODE NASCER. POR CONSTRUÇÃO.
+#
+# A Fase 88 desligou a partição e o sufixo DUPLO morreu em 07/08. Mas cinco
+# rótulos continuaram nascendo — 896 eventos desde 12/08 — porque tinham
+# entrado no VOCABULÁRIO CANÔNICO enquanto a partição existia, e o prompt do
+# cluster manda REUSAR label canônico. O rótulo afirmava "máquina parada" e
+# nada mediu isso: a Fase 89 provou que o estado que o VLM afirmava trocava
+# como moeda entre minutos consecutivos.
+# ══════════════════════════════════════════════════════════════════════════
+print("\n[18] A guarda estrutural: sufixo de estado não vira rótulo")
+for antes, depois in [
+    ("monitorar_maquina_parada", "monitorar_maquina"),
+    ("operar_torno_parada", "operar_torno"),
+    ("operar_torno_ciclo", "operar_torno"),
+    ("conversando_colega_parada", "conversando_colega"),
+    ("monitorar_maquina_ciclo", "monitorar_maquina"),
+    # os de sufixo duplo do histórico
+    ("monitorar_maquina_parada_parada", "monitorar_maquina"),
+    ("operar_torno_ciclo_ciclo", "operar_torno"),
+    ("conversando_colega_parada_imovel", "conversando_colega"),
+    # variações de grafia que o modelo pode inventar
+    ("medir_peca_parado", "medir_peca"),
+    ("ajustar_maquina_imovel", "ajustar_maquina"),
+]:
+    check(f"{antes} → {depois}", pl.limpar_sufixo_estado(antes) == depois,
+          pl.limpar_sufixo_estado(antes))
+check("rótulo sem sufixo passa intacto",
+      pl.limpar_sufixo_estado("operar_torno") == "operar_torno")
+check("⚠️ nunca esvazia o rótulo", pl.limpar_sufixo_estado("_parada") == "_parada")
+check("vazio e None não quebram",
+      pl.limpar_sufixo_estado("") == "" and pl.limpar_sufixo_estado(None) == "")
+check("e há um detector explícito",
+      pl.rotulo_afirma_estado("operar_torno_parada") is True
+      and pl.rotulo_afirma_estado("operar_torno") is False)
+
+print("\n[19] Os cinco saem do VOCABULÁRIO sugerido ao modelo")
+vocab = [{"label": "operar_torno", "descricao": "a"},
+         {"label": "monitorar_maquina_parada", "descricao": "b"},
+         {"label": "operar_torno_ciclo", "descricao": "c"},
+         {"label": "medir_peca", "descricao": "d"},
+         {"label": "conversando_colega_parada", "descricao": "e"}]
+limpo = [v["label"] for v in pl.vocabulario_sem_estado(vocab)]
+check("só sobram os sem estado", limpo == ["operar_torno", "medir_peca"], limpo)
+check("os cinco estão na lista de banidos",
+      {"monitorar_maquina_parada", "operar_torno_parada", "operar_torno_ciclo",
+       "conversando_colega_parada", "monitorar_maquina_ciclo"}
+      <= pl.ROTULOS_BANIDOS_DO_VOCABULARIO)
+bloco = pl.construir_bloco_memoria_cluster({"vocabulario": vocab})
+check("o PROMPT do cluster não sugere nenhum deles",
+      "monitorar_maquina_parada" not in bloco and "operar_torno_ciclo" not in bloco,
+      bloco[:200])
+check("mas continua sugerindo os bons", "operar_torno" in bloco)
+bloco_vlm = pl.construir_bloco_vocabulario({"vocabulario": vocab})
+check("e o prompt do VLM também não",
+      "monitorar_maquina_parada" not in bloco_vlm)
+
+print("\n[20] O CACHE do cluster limpa o histórico ao ler")
+# Sem isto acontecia o pior dos dois mundos: o rótulo com sufixo não casava na
+# checagem, a descrição ia ao LLM de novo, e o LLM a devolvia com sufixo —
+# o cache PAGAVA uma chamada para reintroduzir o resíduo.
+check("a leitura do cache limpa o sufixo",
+      "limpar_sufixo_estado((l.get(\"comportamento_label\")" in fonte)
+check("e o uso do cache também",
+      'em_cache = limpar_sufixo_estado(_cache.get(d_lower))' in fonte)
+# O comentário quebra em duas linhas no fonte — casa pelo pedaço que sobrevive.
+check("com o porquê escrito (pagava chamada para reintroduzir)",
+      "ele PAGAVA uma" in fonte and "chamada para reintroduzi-lo" in fonte,
+      "o comentário do cache sumiu")
+
+print("\n[21] O prompt para de PEDIR e de ACEITAR estado da máquina")
+check('o campo "maquina" saiu do JSON pedido',
+      '"maquina": "ciclo" se a máquina' not in fonte)
+check("e do exemplo de resposta", '"maquina": "ciclo", "imovel"' not in fonte)
+check("da sequência E do prompt da cam2",
+      fonte.count("NÃO AFIRME O ESTADO DA MÁQUINA") >= 2)
+check("os EXEMPLOS não ensinam mais a afirmar estado",
+      '"parado junto ao torno, máquina em ciclo"' not in fonte
+      and '"parado ao lado do torno, máquina parada"' not in fonte)
+check("a REGRA que mandava descrever a máquina virou proibição",
+      "Diga também o que a MÁQUINA está fazendo" not in fonte
+      and "NÃO AFIRME O ESTADO DA MÁQUINA" in fonte)
+check("e o porquê está no prompt (foi medido, trocava como moeda)",
+      "trocava como cara ou coroa" in fonte)
+check("`imovel` continua sendo pedido (esse a pose mede)",
+      '"imovel": true se a pessoa está na MESMA posição' in fonte)
+
+print("\n[22] A correção humana também não reintroduz o sufixo")
+main2 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "backend", "main.py"), encoding="utf-8").read()
+check("o endpoint de correção limpa o rótulo escolhido",
+      'novo = limpar_sufixo_estado((label_corrigido or "").strip())' in main2)
+check("com o porquê (a tela oferece o histórico)",
+      "reintroduziria `monitorar_maquina_parada` de boa-fé" in main2)
+
+print("\n[22b] Fase 99 · O RESTO DO RESÍDUO — o que sobrou da partição")
+# (a) O catálogo. Descrevia o estado em prosa; como as duas cenas colapsam no
+# mesmo label, a última partição a rodar sobrescrevia o texto e um rótulo que
+# cobre ciclo E parada era descrito ao gestor como parada.
+check("a descrição do catálogo não anexa mais estado — nem com a flag ligada",
+      pl._descricao_com_cena("operador junto ao torno", "parada", True)
+      == pl._descricao_com_cena("operador junto ao torno", "ciclo", False)
+      == "operador junto ao torno")
+_part = pl._PARTICAO_CENA
+pl._PARTICAO_CENA = True
+try:
+    check("e nem quando KV_PARTICAO_CENA volta a valer",
+          pl._descricao_com_cena("x", "parada", True) == "x")
+finally:
+    pl._PARTICAO_CENA = _part
+
+# (b) Parar de PEDIR era metade; a outra metade é parar de ACEITAR. Sem isto o
+# modelo podia voluntariar `"maquina": "ciclo"` contra a proibição e o valor ia
+# direto para a coluna `cena_maquina` — a mesma afirmação não medida, fora do
+# nome.
+check("o parser NUNCA aceita estado de máquina do VLM",
+      pl._maquina_do_vlm({"maquina": "ciclo"}) is None
+      and pl._maquina_do_vlm({"maquina": "parada"}) is None
+      and pl._maquina_do_vlm({}) is None)
+check("mas a imobilidade da PESSOA continua sendo lida — ela é observável",
+      '"imovel": bool(t.get("imovel"))' in fonte)
+check("e o descarte é LOGADO, para a violação da proibição aparecer",
+      "o modelo afirmou estado da máquina" in fonte)
+check("os dois pontos de parse usam a guarda, não o normalizador cru",
+      fonte.count('"maquina": _maquina_do_vlm(t)') == 2
+      and '"maquina": _normalizar_maquina(t.get("maquina"))' not in fonte)
+
+# (c) O cache do cluster exigia que a cena batesse com o sufixo do label
+# guardado. Com a leitura limpando o sufixo, ele nunca mais batia: com a
+# partição ligada, o sistema PAGAVA uma chamada por frase já conhecida.
+check("o cache não condiciona mais o reuso à cena",
+      "em_cache = limpar_sufixo_estado" in fonte
+      and "if em_cache:" in fonte
+      and "em_cache == familia_label(em_cache) + sufixo_cena" not in fonte)
+
+# (d) A camada de contradição do sensor exige o VLM afirmando `ciclo`. Ele
+# parou de afirmar, então ela não dispara mais — e isso está escrito.
+check("a camada sensor×ciclo está documentada como não-disparável",
+      "ESTA CAMADA NÃO DISPARA MAIS" in fonte)
+check("e o veto de fato não dispara sem afirmação de ciclo",
+      pl.veto_movimento("ausente", {"pct_zona_ocupada": 1, "contraste": 99},
+                        pl._maquina_do_vlm({"maquina": "ciclo"}), "parado") is None)
+
+# (e) A reavaliação diagnosticava sobre o texto CRU da correção — um rótulo que
+# não existe no banco, porque o update grava a versão limpa.
+check("a reavaliação recebe o MESMO rótulo que foi gravado",
+      "_lc = limpar_sufixo_estado(body.label_corrigido" in main2
+      and "_reavaliar_evento(sb, user.empresa, evento_id, _lc)" in main2)
+
+# (f) A tela oferecia o histórico como opção de correção. O backend limpava em
+# silêncio: o gestor escolhia uma coisa, o banco gravava outra.
+rot = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "frontend", "src", "design", "rotulos.ts"),
+           encoding="utf-8").read()
+check("o front expõe o teste de afirmação de estado", "export function afirmaEstado" in rot)
+check("e a lista de ESCOLHA filtra por ele", "export function rotulosAtribuiveis" in rot)
+for _tela in ("Validacao", "Eventos"):
+    _t = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "frontend", "src", "pages", f"{_tela}.tsx"),
+              encoding="utf-8").read()
+    check(f"{_tela} não oferece rótulo com estado como correção",
+          "rotulosAtribuiveis(" in _t)
+check("mas a LEITURA do histórico continua intacta (nomeHumano/familiaLabel)",
+      "export function familiaLabel" in rot and "export function nomeHumano" in rot)
+
+print("\n[23] Histórico NÃO é renomeado")
+check("nenhum UPDATE em massa de comportamento_label",
+      "comportamento_label" not in main2.split("def _montar_update_validacao")[0]
+      or "update({\"comportamento_label\"" not in main2)
+check("e a família continua unindo o histórico na leitura",
+      pl.familia_label("monitorar_maquina_parada") == "monitorar_maquina")
 
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

@@ -41,6 +41,32 @@ export function familiaLabel(label: string): string {
   return base;
 }
 
+/** True se o rótulo afirma estado da máquina — coisa que nenhum sinal mede.
+ *
+ *  Fase 99 — usar SÓ para filtrar ESCOLHA (o que o gestor pode atribuir a um
+ *  evento), nunca LEITURA. O histórico tem 896 eventos assim e continua sendo
+ *  mostrado; o que não pode é nascer o 897º.
+ *
+ *  O backend limpa o sufixo em qualquer correção que chegue. Sem este filtro,
+ *  a lista de opções ofereceria `monitorar_maquina_parada`, o gestor escolheria
+ *  de boa-fé e o banco gravaria outra coisa — reescrita silenciosa, que é pior
+ *  que recusar. Aqui a opção simplesmente não existe. */
+export function afirmaEstado(label: string | null | undefined): boolean {
+  const cru = String(label ?? "").trim();
+  return !!cru && familiaLabel(cru) !== cru;
+}
+
+/** Opções de correção: sem duplicata de família e sem afirmação de estado. */
+export function rotulosAtribuiveis(labels: (string | null | undefined)[]): string[] {
+  const vistos = new Set<string>();
+  for (const l of labels) {
+    const cru = String(l ?? "").trim();
+    if (!cru || afirmaEstado(cru)) continue;
+    vistos.add(cru);
+  }
+  return [...vistos].sort();
+}
+
 // SEMENTE, não contrato: só os rótulos em que a conversão automática ficaria
 // pobre ou ambígua. Tudo o que não estiver aqui é convertido sozinho.
 const SEMENTE: Record<string, string> = {

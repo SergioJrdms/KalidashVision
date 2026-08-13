@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapEventosTabela, type EvTabMock, type ProcHeaderMock } from "../lib/adapt";
 import { fmtSeg, leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
-import { nomeHumano } from "../design/rotulos";
+import { nomeHumano, rotulosAtribuiveis } from "../design/rotulos";
 import { Btn, Card, Icon, Badge, Empty, Modal, toast } from "../design/ui";
 import { FrameReal, janelaCam2 } from "../lib/frames";
 import type { AcaoEvento } from "../lib/types";
@@ -40,7 +40,9 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
   const q = useQuery({ queryKey: ["eventos-tabela", proc.id], queryFn: () => api.eventos.tabela(proc.id, { page: 1, page_size: 200, sort: "criado_em", order: "desc" }) });
   const rows: EvTabMock[] = useMemo(() => mapEventosTabela(q.data?.itens || []), [q.data]);
 
-  const comps = useMemo(() => Array.from(new Set(rows.map((e) => e.label))), [rows]);
+  // Fase 99: só o que PODE ser atribuído. Rótulo com estado de máquina
+  // segue visível na tabela (histórico), mas não é oferecido como escolha.
+  const comps = useMemo(() => rotulosAtribuiveis(rows.map((e) => e.label)), [rows]);
   const filtrados = useMemo(
     () => rows.filter((e) => (status === "todos" || e.status === status) && (!comp || e.label === comp) && (!busca || (e.label + e.descricao).toLowerCase().includes(busca.toLowerCase()))),
     [rows, status, comp, busca]

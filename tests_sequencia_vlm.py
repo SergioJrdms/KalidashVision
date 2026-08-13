@@ -107,18 +107,26 @@ check("ausência de mudança é observação legítima",
       "AUSÊNCIA DE MUDANÇA É UMA OBSERVAÇÃO" in regras)
 check("e é proibido preencher com a ação mais provável",
       "NÃO preencha com a ação mais provável" in regras)
-check("o estado da MÁQUINA é pedido — é ele que separa espera de ociosidade",
-      "o que a MÁQUINA está fazendo" in regras and "separa espera de ociosidade" in regras)
+# ⚠️ Fase 99 — REVOGADO. Pedir o estado da máquina era a Fase 85; a Fase 89
+# MEDIU e provou que o VLM não consegue julgá-lo a partir de imagem parada (o
+# estado afirmado trocava como moeda entre minutos consecutivos). Agora a
+# regra é a PROIBIÇÃO.
+check("o estado da MÁQUINA é PROIBIDO — foi medido e ele não consegue ver",
+      "NÃO AFIRME O ESTADO DA MÁQUINA" in regras
+      and "o que a MÁQUINA está fazendo" not in regras, regras[:200])
 check("a exceção do sensor de mãos continua (esperar ciclo com mãos = operar)",
       "MÃOS na máquina" in regras and "sensor" in regras)
 
-print("\n[4] A calibração é SIMÉTRICA — dois exemplos, mesma postura")
-check("parado COM a máquina em ciclo é um exemplo",
-      "parado junto ao torno, máquina em ciclo" in exemplos)
+print("\n[4] Os EXEMPLOS não ensinam mais a afirmar estado de máquina")
+# Exemplo é a instrução mais forte de um prompt: enquanto "máquina em ciclo"
+# estivesse aqui, a proibição competia com ele e perdia.
+check("nenhum exemplo afirma estado da máquina",
+      "máquina em ciclo" not in exemplos and "máquina parada" not in exemplos,
+      exemplos)
+check("mas a postura parada continua exemplificada (é observável)",
+      "parado junto ao torno" in exemplos)
 check("Fase 86: o exemplo não carrega mais a muleta 'de frente ao torno'",
       "de frente ao torno" not in exemplos, exemplos)
-check("parado SEM a máquina trabalhando é outro",
-      "parado ao lado do torno, máquina parada" in exemplos)
 check("há exemplos claramente produtivos", "operando o torno, mãos na peça" in exemplos)
 check("e claramente improdutivos", "mexendo no celular" in exemplos)
 check("o prompt NUNCA diz qual dos dois é produtivo — quem decide é o gestor, "
@@ -504,33 +512,46 @@ try:
     check("uma chamada POR PARTIÇÃO, não uma para tudo", len(chamou) == 2, len(chamou))
     l_ciclo = label_de("parado junto ao torno, observando", "ciclo", True)
     l_parada = label_de("parado junto ao torno, observando", "parada", True)
-    check("a MESMA frase com máquinas diferentes gera labels DIFERENTES",
-          l_ciclo != l_parada, (l_ciclo, l_parada))
-    check("e os labels carregam o discriminador",
-          l_ciclo == "monitorar_maquina_ciclo" and l_parada == "monitorar_maquina_parada",
-          (l_ciclo, l_parada))
-    check("as duas pertencem à mesma família",
-          pl.familia_label(l_ciclo) == pl.familia_label(l_parada) == "monitorar_maquina")
-    check("o catálogo explica o discriminador em português (é o que o gestor lê "
-          "na hora de classificar o Lean)",
-          "MÁQUINA EM CICLO" in catalogo[l_ciclo] and "MÁQUINA PARADA" in catalogo[l_parada],
-          catalogo)
+    # ⚠️ Fase 99 — A PARTIÇÃO FICOU SEM DENTE, e isto é deliberado.
+    # A guarda que remove sufixo de estado roda DEPOIS do cluster e ANTES de o
+    # nome virar rótulo — INCLUSIVE com KV_PARTICAO_CENA ligado. Ou seja: mesmo
+    # reativando a partição, ela separa as chamadas sem conseguir NOMEAR a
+    # separação, o que a torna inútil na prática.
+    #
+    # É a escolha certa: "impossível" tem de ser impossível, não "improvável se
+    # ninguém religar a flag". Um rótulo só pode afirmar o que algum sinal mede,
+    # e nada mede estado de máquina hoje.
+    check("mesmo com a partição LIGADA, o rótulo não carrega estado",
+          not pl.rotulo_afirma_estado(l_ciclo)
+          and not pl.rotulo_afirma_estado(l_parada), (l_ciclo, l_parada))
+    check("as duas cenas colapsam no mesmo nome (a partição perdeu o dente)",
+          l_ciclo == l_parada == "monitorar_maquina", (l_ciclo, l_parada))
+    # O catálogo é o texto que o gestor lê na tela. Um rótulo que agora cobre
+    # ciclo E parada não pode ser descrito como um dos dois — era o que
+    # acontecia, decidido por ordem de iteração das partições.
+    check("e o catálogo não descreve estado nenhum",
+          not any("ciclo" in (d or "").lower() or "parada" in (d or "").lower()
+                  for d in catalogo.values()), catalogo)
     check("temperatura ZERO no cluster", "temperatura=0.0" in src)
 
-    # Cache: mesma frase, mesma cena → reusa sem chamar a LLM.
+    # Cache — Fase 99. O histórico está cheio de `x_ciclo`; a leitura limpa o
+    # sufixo. Antes, o label limpo nunca batia com uma cena discriminada e o
+    # cache NUNCA acertava: o sistema pagava uma chamada por frase já conhecida
+    # para receber um nome que a guarda ia limpar de novo.
     chamou.clear()
     _, _, label_de2, _ = pl.etapa_clusterizar(
         None, obs, "torno", {}, 3, lambda *a, **k: None, aprendizado_auto=False,
         cache_labels={"parado junto ao torno, observando": "monitorar_maquina_ciclo"})
-    check("o cache atende a cena que BATE com o sufixo e poupa a chamada",
-          len(chamou) == 1, len(chamou))
-    check("e devolve o label do histórico",
+    check("o cache atende — e não paga chamada nenhuma por frase conhecida",
+          len(chamou) == 0, len(chamou))
+    check("e devolve o label do histórico JÁ SEM o estado",
           label_de2("parado junto ao torno, observando", "ciclo", True)
-          == "monitorar_maquina_ciclo")
-    check("mas NÃO atende a cena que não bate — senão o cache desfaria a "
-          "partição que acabamos de construir",
+          == "monitorar_maquina")
+    check("as duas cenas recebem o MESMO label — não há mais partição a "
+          "preservar, então não há mais o que o cache desfaça",
           label_de2("parado junto ao torno, observando", "parada", True)
-          != "monitorar_maquina_ciclo")
+          == label_de2("parado junto ao torno, observando", "ciclo", True)
+          == "monitorar_maquina")
 finally:
     pl.groq_text_call = _txt_real
 
