@@ -279,8 +279,11 @@ check("⚠️ correção humana TIRA o evento do estado (alguém disse o que era
 check("não entra na árvore nem no Pareto",
       pl.evento_conta_no_vocabulario(
           {"comportamento_label": "acao_indefinida"}) is False)
+# Fase 100: o filtro deixou de ser por UM nome fixo e passou a ser pelo
+# PREDICADO de ausência — `acao_indefinida` (histórico) e `nao_nomeado` (novo).
+# Filtrar por nome fixo é como banir sufixo por lista: o balde só troca de nome.
 check("e é filtrado na distribuição de comportamentos",
-      "if l == LABEL_INDEFINIDA:" in fonte and "FORA da árvore e do Pareto" in fonte)
+      "if rotulo_e_ausencia(l):" in fonte and "FORA da árvore e do Pareto" in fonte)
 check("nem no top de ações do dia",
       "evento_conta_no_vocabulario(e)" in fonte)
 

@@ -56,12 +56,25 @@ export function afirmaEstado(label: string | null | undefined): boolean {
   return !!cru && familiaLabel(cru) !== cru;
 }
 
-/** Opções de correção: sem duplicata de família e sem afirmação de estado. */
+// ⚠️ Fase 100 — OS DOIS CARIMBOS DE AUSÊNCIA DE RÓTULO.
+// `acao_indefinida` é o histórico (o modelo escolhia um balde com cara de
+// atividade); `nao_nomeado` é o regime novo (o cluster não nomeou e o evento
+// foi para a fila). Nenhum dos dois é atividade — e por isso nenhum dos dois
+// pode ser oferecido como escolha nem exibido como se fosse uma.
+const SEM_ROTULO = new Set(["acao_indefinida", "nao_nomeado"]);
+
+/** True quando o "rótulo" é, na verdade, a ausência de um. */
+export function semRotulo(label: string | null | undefined): boolean {
+  return SEM_ROTULO.has(String(label ?? "").trim());
+}
+
+/** Opções de correção: sem duplicata de família, sem afirmação de estado e
+ *  sem os carimbos de ausência — ninguém "corrige" um evento PARA sem-nome. */
 export function rotulosAtribuiveis(labels: (string | null | undefined)[]): string[] {
   const vistos = new Set<string>();
   for (const l of labels) {
     const cru = String(l ?? "").trim();
-    if (!cru || afirmaEstado(cru)) continue;
+    if (!cru || afirmaEstado(cru) || semRotulo(cru)) continue;
     vistos.add(cru);
   }
   return [...vistos].sort();
@@ -74,7 +87,11 @@ const SEMENTE: Record<string, string> = {
   posto_vazio: "Posto vazio",
   monitorar_maquina: "Acompanhando a máquina",
   conversando_colega: "Conversando com colega",
-  acao_indefinida: "Ação não identificada",
+  // Fase 100: os dois carimbos de ausência não recebem nome de atividade. O
+  // texto diz o que É — um item de trabalho para o gestor —, não finge que o
+  // sistema observou uma ação chamada "indefinida".
+  acao_indefinida: "Sem nome — aguardando você",
+  nao_nomeado: "Sem nome — aguardando você",
   ajustar_maquina: "Ajustando a máquina",
   preparar_maquina: "Preparando a máquina",
   medir_peca: "Medindo a peça",

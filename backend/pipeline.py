@@ -617,6 +617,19 @@ def carregar_memoria_do_negocio(
     )
     catalogo_completo = {c["label"]: c.get("descricao", "") for c in (r2.data or [])}
 
+    # ⚠️ Fase 100 — CONFIRMAR A ABSTENÇÃO NÃO A PROMOVE. Foi por aqui que o
+    # vazamento entrou: 65 eventos `acao_indefinida` confirmados na fila ("sim,
+    # é indefinida mesmo") a fizeram virar LABEL CANÔNICO VALIDADO no prompt do
+    # cluster, ao lado de `operar_torno`. Confirmar "não sei o que é" é
+    # informação sobre a FILA, não sobre o vocabulário.
+    _abstencoes = sum(n for l, n in confirmados.items() if rotulo_e_ausencia(l))
+    if _abstencoes:
+        log.info("Memória: %d confirmação(ões) de ausência de rótulo NÃO entram "
+                 "no vocabulário (abstenção não é atividade).", _abstencoes)
+    for _l in list(confirmados):
+        if rotulo_e_ausencia(_l):
+            del confirmados[_l]
+
     vocabulario = []
     for label, n in confirmados.most_common(top_vocabulario):
         vocabulario.append(
@@ -1662,7 +1675,29 @@ def cache_desc_label(sb, empresa: str, processo: str) -> dict[str, str]:
         # sufixo. O cache não só deixava passar o resíduo: ele PAGAVA uma
         # chamada para reintroduzi-lo.
         lbl = limpar_sufixo_estado((l.get("comportamento_label") or "").strip())
-        if d and lbl:
+        # ⚠️ Fase 100 — A CATRACA. Aqui estava o motivo de o vazamento ser
+        # RAMPA e não degrau: 0,5% → 5,4% → 4,6% → 11,4% → 38,7%.
+        #
+        # O cache guarda a descrição que teve UM ÚNICO label no histórico. Com
+        # o balde contando como label, a primeira vez que uma frase saía
+        # `acao_indefinida` — e só isso — ela ficava TRAVADA: dali em diante o
+        # cache servia `acao_indefinida` para aquela frase de graça, sem
+        # chamar modelo nenhum, para sempre. Não havia nem a chance de o
+        # cluster revisar.
+        #
+        # MEDIDO em 14/08, e é a maior parte do dia: de 330 eventos no balde,
+        # 285 (51 das 56 descrições) foram servidos pelo CACHE, determinística
+        # e gratuitamente. Só 45 chegaram a passar pelo modelo.
+        #
+        # (Os outros 45 são o segundo efeito, menor: frases que tinham label
+        # de verdade E o balde no histórico — "operador parado junto ao torno,
+        # sem manipulação visível" era monitorar_maquina:28 / acao_indefinida:21
+        # — viravam AMBÍGUAS e perdiam a proteção do cache. Sem o balde na
+        # conta, essa volta a ser monitorar_maquina sem ambiguidade nenhuma.)
+        #
+        # Abstenção não é evidência do passado: é a ausência dela. Não se
+        # guarda, não se serve e não desempata.
+        if d and lbl and not _e_desistencia(lbl):
             vistos[d].add(lbl)
     return {d: next(iter(ls)) for d, ls in vistos.items() if len(ls) == 1}
 
@@ -1912,7 +1947,8 @@ REGRAS:
 - Comportamentos genuinamente diferentes devem ter labels diferentes.
 - Use labels descritivos da AÇÃO (verbo+objeto), não da localização.
 - Inclua TODAS as descrições da entrada — cada uma cai em algum grupo.
-- "ação não identificada" vira o label "acao_indefinida".
+- ⚠️ NÃO EXISTE label de desistência. Não use "acao_indefinida", "indefinido", "outro", "diverso" nem equivalente. Uma pessoa parada ao lado da máquina, sem tocar nela, ESTÁ fazendo algo — está acompanhando a máquina, e isso tem nome. "Sem manipulação visível" descreve as MÃOS, não a ausência de atividade.
+- Se uma descrição realmente não permitir nomear ação nenhuma, OMITA-A da resposta. Ela vai para revisão humana. Nunca a jogue num grupo genérico só para não deixá-la de fora.
 - PRIORIDADE MÁXIMA: se um label canônico já validado se aplica, REUSE-O em vez de criar um novo.
 
 Responda APENAS um JSON no formato:
@@ -2022,16 +2058,84 @@ def rotulo_afirma_estado(label: str | None) -> bool:
     return limpar_sufixo_estado(label) != (label or "").strip()
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 100 — `acao_indefinida` NUNCA É VOCABULÁRIO. Esta é a causa raiz do
+# vazamento de 14/08 (38,7% do dia), e ela não tem nada a ver com sufixo.
+#
+# O que aconteceu, medido: 65 eventos `acao_indefinida` foram CONFIRMADOS por
+# um humano na fila ("sim, é indefinida mesmo"). `carregar_memoria_do_negocio`
+# monta o vocabulário canônico a partir de exatamente isso — label confirmado
+# sem correção. Então `acao_indefinida` entrou na lista de LABELS CANÔNICOS
+# JÁ VALIDADOS, com a descrição que o catálogo tinha:
+#
+#     acao_indefinida: "Operador parado próximo ao torno, sem manipulação,
+#                       monitoramento ativo ou conversa identificável,
+#                       com a máquina parada."
+#
+# E logo abaixo dela, no mesmo prompt: "REGRA DURA: se uma descrição
+# corresponde semanticamente a um destes labels, REUSE o label existente."
+#
+# O modelo não falhou. Ele OBEDECEU. Demos a ele um balde com nome de
+# atividade, uma descrição que casa com "parado junto ao torno, sem
+# manipulação visível", e uma ordem para reusar.
+#
+# O balde não é atividade nenhuma — é a ABSTENÇÃO. Abstenção não se aprende,
+# não se confirma e não se sugere. Confirmar "é indefinida mesmo" tem de
+# significar "mandei para a fila", nunca "promova a canônica".
+# ═════════════════════════════════════════════════════════════════════════
+# O carimbo do NÃO-NOMEADO. `comportamento_label` é NOT NULL, então a
+# abstenção precisa de algum valor — mas ele não é um rótulo, é o registro de
+# que rótulo não houve. Nome novo de propósito: separa o regime novo ("o
+# cluster não nomeou, está na fila") do `acao_indefinida` histórico ("o modelo
+# escolheu um balde"), sem reescrever o passado.
+LABEL_NAO_NOMEADO = "nao_nomeado"
+
+# Os dois valores que significam AUSÊNCIA de rótulo. Nenhum deles é atividade:
+# ficam fora da árvore, do Pareto, do vocabulário, da tela e da conta de
+# produtividade — e sempre na fila.
+ROTULOS_AUSENCIA = frozenset({"acao_indefinida", LABEL_NAO_NOMEADO})
+NAO_SAO_VOCABULARIO = ROTULOS_AUSENCIA
+
+
+def rotulo_e_ausencia(label: str | None) -> bool:
+    """True quando o 'rótulo' é, na verdade, a ausência de um."""
+    return (label or "").strip() in ROTULOS_AUSENCIA
+
+
+# Variantes de desistência que o modelo inventa quando o balde canônico some.
+# Tirar `acao_indefinida` do prompt sem isto só troca o nome do balde.
+_RAIZES_DESISTENCIA = (
+    "indefinid", "indeterminad", "nao_identificad", "não_identificad",
+    "nao_definid", "desconhecid", "outros", "outro_", "diverso", "generic",
+    "sem_acao", "sem_atividade", "nao_classificad", "inconclusiv",
+)
+
+
+def _e_desistencia(label: str | None) -> bool:
+    """True se o nome é uma forma de 'não sei' disfarçada de atividade.
+
+    Comparação por RAIZ, não por lista fechada: `acao_indefinida`,
+    `atividade_indefinida`, `acao_nao_identificada` e `comportamento_generico`
+    são a mesma desistência com roupa diferente."""
+    n = (label or "").strip().lower()
+    return bool(n) and any(r in n for r in _RAIZES_DESISTENCIA)
+
+
 def vocabulario_sem_estado(vocab: list) -> list:
     """Filtra o vocabulário que vai ao PROMPT do cluster.
 
-    Tira os banidos e qualquer rótulo com sufixo de estado. Não apaga nada do
-    banco: só deixa de SUGERIR ao modelo o que ele não deveria reusar.
+    Tira os banidos, qualquer rótulo com sufixo de estado, e a ABSTENÇÃO. Não
+    apaga nada do banco: só deixa de SUGERIR ao modelo o que ele não deveria
+    reusar.
     """
     saida = []
     for v in vocab or []:
         lbl = (v.get("label") or "").strip()
         if lbl in ROTULOS_BANIDOS_DO_VOCABULARIO or rotulo_afirma_estado(lbl):
+            continue
+        if lbl in NAO_SAO_VOCABULARIO:
+            log.info("[vocabulario] %r não entra no prompt: é abstenção, não "
+                     "atividade — sugeri-la é ensinar o modelo a desistir.", lbl)
             continue
         saida.append(v)
     return saida
@@ -3973,8 +4077,19 @@ def etapa_clusterizar(
             # O SUFIXO É APLICADO AQUI, por código. A LLM pode ter devolvido
             # `monitorar_maquina` nas duas partições; é este passo que impede
             # as duas de virarem o mesmo rótulo.
-            label = (c.get("label") or "acao_indefinida").strip() or "acao_indefinida"
-            if label not in ("acao_indefinida", POSTO_VAZIO_LABEL):
+            label = (c.get("label") or "").strip()
+            # ⚠️ Fase 100 — GUARDA DA ABSTENÇÃO. O prompt já proíbe, mas
+            # depender de o modelo obedecer foi exatamente o que falhou na
+            # Fase 99. Se ele devolver o balde mesmo assim, isto NÃO vira
+            # rótulo: as descrições do grupo ficam sem mapeamento e caem no
+            # caminho da fila logo abaixo, com a descrição preservada.
+            if not label or label in NAO_SAO_VOCABULARIO or _e_desistencia(label):
+                log.warning("[cluster] o modelo devolveu desistência (%r) para "
+                            "%d descrição(ões) — vão para a fila com a descrição "
+                            "visível, sem rótulo que finja atividade.",
+                            label or "(vazio)", len(c.get("descricoes_originais") or []))
+                continue
+            if label != POSTO_VAZIO_LABEL:
                 label = label + sufixo_cena(maq, imo)
             # ⚠️ Fase 99 — A GUARDA ESTRUTURAL. Roda DEPOIS do cluster e ANTES
             # de o nome virar rótulo: mesmo que o modelo devolva
@@ -3989,17 +4104,31 @@ def etapa_clusterizar(
                 mapa_descricao_label[(d.strip().lower(), ck)] = label
             catalogo[label] = _descricao_com_cena(c.get("descricao") or label, maq, imo)
 
+    # ⚠️ Fase 100 — DESCRIÇÃO UTILIZÁVEL QUE NÃO FOI NOMEADA NÃO VIRA BALDE.
+    # Antes, tudo que o cluster não devolvesse caía em `acao_indefinida` — um
+    # rótulo com cara de atividade, que entrava na árvore, no Pareto, no
+    # vocabulário e (por ter categoria) na conta de produtividade.
+    #
+    # Agora o não-nomeado fica FORA do mapa. `label_de` devolve None, e quem
+    # monta o evento manda para a fila com a descrição visível. O gestor nomeia
+    # — que é exatamente o pedido: nunca um rótulo que finge ser atividade.
+    _nao_nomeadas = 0
     for d, ck in pares:
         if (d.lower().strip(), ck) not in mapa_descricao_label:
-            log.warning(f"Descrição não clusterizada: {d!r} (cena {ck!r})")
-            mapa_descricao_label[(d.lower().strip(), ck)] = "acao_indefinida"
+            _nao_nomeadas += 1
+            log.warning("[cluster] NÃO NOMEADA (vai para a fila com a descrição "
+                        "visível): %r (cena %r)", d, ck)
+    if _nao_nomeadas:
+        log.warning("[cluster] %d de %d descrição(ões) sem nome — o gestor "
+                    "nomeia na fila. Nenhuma virou rótulo genérico.",
+                    _nao_nomeadas, len(pares))
 
-    if "acao_indefinida" not in catalogo:
-        catalogo["acao_indefinida"] = "Ação não foi identificada com clareza pelo modelo"
-
-    def label_de(desc: str, maquina: str | None = None, imovel: bool | None = None) -> str:
+    def label_de(desc: str, maquina: str | None = None,
+                 imovel: bool | None = None) -> str | None:
+        """None = o cluster NÃO conseguiu nomear. Não é um rótulo; é a ausência
+        de um. Quem chama manda o evento para a fila."""
         return mapa_descricao_label.get(
-            (desc.lower().strip(), chave_cena(maquina, imovel)), "acao_indefinida")
+            (desc.lower().strip(), chave_cena(maquina, imovel)))
 
     # Fase 62: com a generalização desligada, nada é "aprendido" — tudo vai
     # para a fila como pendente. Nota sobre o que NÃO é desligado aqui: o
@@ -4139,11 +4268,19 @@ def _abrir_evento(tid: int, o: dict) -> dict:
 
 def etapa_segmentar_eventos(
     observacoes_brutas: list[dict],
-    label_de: Callable[..., str],
+    label_de: Callable[..., str | None],
     intervalo_s: float,
 ) -> list[dict]:
     for o in observacoes_brutas:
-        o["label"] = label_de(o["descricao"], o.get("maquina"), o.get("imovel"))
+        lbl = label_de(o["descricao"], o.get("maquina"), o.get("imovel"))
+        # Fase 100: None = o cluster não nomeou. O evento continua existindo (a
+        # pessoa estava lá, o minuto é real), mas nasce SEM NOME e marcado para
+        # a fila. `nao_nomeado` é o carimbo do estado — a coluna é NOT NULL e a
+        # abstenção precisa de um valor —, e ele é tratado como ausência de
+        # rótulo em todo lugar: fora da árvore, fora do Pareto, fora do
+        # vocabulário, sem categoria e sempre na fila.
+        o["label"] = lbl or LABEL_NAO_NOMEADO
+        o["nao_nomeado"] = lbl is None
 
     por_pessoa: dict[int, list[dict]] = defaultdict(list)
     for o in observacoes_brutas:
@@ -4464,6 +4601,20 @@ def etapa_consolidar_principais(
                 if motivos:
                     principais[-1]["duvida_motivo"] = " · ".join(motivos)
             principais[-1]["_fato"] = fato
+
+        # ⚠️ Fase 100 — SEM NOME ⇒ FILA, sempre. Independe de camadas: se o
+        # cluster não nomeou, não há rótulo para uma camada contradizer. Este é
+        # o requisito "o evento vai direto pra fila de validação com a
+        # descrição visível, e eu nomeio" — e é o que garante que nenhum
+        # não-nomeado passe silencioso para o dashboard.
+        if rotulo_e_ausencia(principais[-1].get("comportamento_label")):
+            principais[-1]["em_duvida"] = True
+            if not principais[-1].get("duvida_motivo"):
+                _d = (principais[-1].get("descricao_bruta") or "").strip()
+                principais[-1]["duvida_motivo"] = (
+                    "o sistema NÃO nomeou esta ação — a descrição observada foi: "
+                    f"“{_d}”. Nomeie você." if _d else
+                    "o sistema não nomeou esta ação e não há descrição utilizável.")
     return principais
 
 
@@ -7488,13 +7639,19 @@ LABEL_INDEFINIDA = "acao_indefinida"
 # seria outro: o problema seria a visão, não o rótulo.
 # ═════════════════════════════════════════════════════════════════════════
 def sem_descricao_utilizavel(e: dict) -> bool:
-    """True quando o VLM não conseguiu nomear a ação. É ESTADO, não rótulo."""
+    """True quando o evento está SEM RÓTULO. É ESTADO, não rótulo.
+
+    Fase 100 — cobre os DOIS carimbos: `acao_indefinida` (histórico, quando o
+    modelo escolhia um balde) e `nao_nomeado` (regime novo, quando o cluster
+    não nomeia e o evento vai direto para a fila). Os dois significam a mesma
+    coisa para quem lê: ninguém sabe ainda o que era.
+    """
     lbl = e.get("label_corrigido") or e.get("comportamento_label")
     # Correção humana tira o evento deste estado: se alguém disse o que era,
     # passou a haver descrição utilizável.
     if e.get("label_corrigido"):
         return False
-    return lbl == LABEL_INDEFINIDA
+    return rotulo_e_ausencia(lbl)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -8535,7 +8692,16 @@ def classificar_comportamentos_lean(
         # dono e sem prazo para alguém olhar.
         # Sem LLM: não há descrição para o modelo classificar, é justamente o
         # caso em que a visão não conseguiu nomear nada.
-        if c.get("label") == LABEL_INDEFINIDA:
+        # ⚠️ Fase 100 — COBRE OS DOIS CARIMBOS, e é CORRETIVO. Em 14/08 a linha
+        # `acao_indefinida` estava em `valor_agregado` com origem `humano`
+        # (alguém a classificou uma vez, na fila), e por herança 320 eventos do
+        # dia contaram como PRODUTIVOS. Ausência de rótulo não pode agregar
+        # valor: não há o que agregue. O `!=` abaixo é o que reverte isso
+        # sozinho no próximo passe — inclusive por cima da origem humana, que é
+        # a única exceção à inviolabilidade da marcação manual e existe porque
+        # aqui não se está classificando uma atividade, e sim desfazendo a
+        # classificação de uma não-atividade.
+        if rotulo_e_ausencia(c.get("label")):
             if (c.get("categoria_lean") != CATEGORIA_SEM_EVIDENCIA
                     or c.get("categoria_lean_origem") != ORIGEM_SEM_EVIDENCIA):
                 try:
@@ -8544,7 +8710,7 @@ def classificar_comportamentos_lean(
                          "categoria_lean_origem": ORIGEM_SEM_EVIDENCIA}
                     ).eq("id", c["id"]).execute()
                     propagar_categoria_para_eventos(
-                        sb, empresa, processo, LABEL_INDEFINIDA, CATEGORIA_SEM_EVIDENCIA)
+                        sb, empresa, processo, c["label"], CATEGORIA_SEM_EVIDENCIA)
                 except Exception as e:
                     log.warning(f"Lean: acao_indefinida não marcada: {e}")
             continue
@@ -9858,10 +10024,11 @@ def montar_snapshot_chat(
     total_atividade = sum(a["dur"] for a in agg.values())
     distrib = []
     for l, a in sorted(agg.items(), key=lambda kv: kv[1]["dur"], reverse=True):
-        # Fase 98: `acao_indefinida` fica FORA da árvore e do Pareto. Ela não é
-        # uma atividade — é a ausência de uma. O tempo dela continua no
-        # denominador (foi observado), mas não vira folha nem barra.
-        if l == LABEL_INDEFINIDA:
+        # Fase 98/100: rótulo de AUSÊNCIA fica FORA da árvore e do Pareto —
+        # `acao_indefinida` (histórico) e `nao_nomeado` (novo). Não são
+        # atividades; são a ausência de uma. O tempo continua no denominador
+        # (foi observado), mas não vira folha nem barra.
+        if rotulo_e_ausencia(l):
             continue
         distrib.append(
             {

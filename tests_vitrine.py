@@ -75,8 +75,13 @@ check("as funções rodam (o TS porta para JS sem tipos)", r.returncode == 0,
       r.stderr[-300:] if r.returncode else "")
 if r.returncode == 0:
     v = json.loads(r.stdout)
+    # Fase 100: "Ação não identificada" saiu. Ela nomeava uma ausência como se
+    # fosse uma ação observada — e foi exatamente essa aparência de atividade
+    # que fez o rótulo ser confirmado na fila, virar vocabulário canônico e
+    # engolir 38,7% do dia 14/08. O texto agora diz o que a linha É: trabalho
+    # pendente do gestor.
     esperado = ["Operando o torno", "Posto vazio", "Acompanhando a máquina",
-                "Conversando com colega", "Ação não identificada"]
+                "Conversando com colega", "Sem nome — aguardando você"]
     for got, exp in zip(v, esperado):
         check(f"{exp!r}", got == exp, got)
 
