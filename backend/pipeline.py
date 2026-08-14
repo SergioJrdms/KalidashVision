@@ -11,6 +11,8 @@ import base64
 import json
 import logging
 import os
+import random
+import re
 import time
 from pathlib import Path as _Path
 
@@ -1963,6 +1965,272 @@ DESCRIÇÕES OBSERVADAS:
 """
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 102 — DESCRIÇÃO SEM OBSERVAÇÃO. AUSÊNCIA DE MEDIDA VIRANDO MEDIDA,
+# pela QUINTA vez: bbox (0,0,0,0) na Fase 82, MAD=0 com uma amostra na 84,
+# share=1,00 em minuto herdado na 97, `acao_indefinida` como vocabulário na
+# 100, e agora descrição com `n_amostras = 0`.
+#
+# É PADRÃO, não caso. A forma é sempre a mesma: um valor calculado sobre nada
+# tem a MESMA APARÊNCIA de um valor calculado sobre evidência, e nada no tipo
+# de dado distingue os dois. A defesa também é sempre a mesma — o dado tem de
+# CARREGAR a própria origem, e quem lê tem de ser obrigado a olhar.
+#
+# AS ORIGENS (`origem_gate`, por observação; o evento guarda o histograma em
+# `observacoes_origem`):
+#   analisado              → o quadro FOI ao VLM.                    ✅ observou
+#   resgate_cam2           → a cam2 FOI ao VLM naquele instante.     ✅ observou
+#   interpolado_sequencia  → o quadro não foi; um vizinho ANALISADO
+#                            da MESMA chamada cobriu o instante.     ⚠️ deriva
+#   repeticao*             → o gate suprimiu; herdou a ÂNCORA.       ⚠️ deriva
+#   indefinida_herdada     → herdou a última ação conhecida.         ❌ afirma
+#   ponte_temporal         → herdou SEM ver imagem nenhuma.          ❌ afirma
+#   posto_vazio            → ninguém na zona; o detector mediu.      ✅ não afirma
+#                            atividade — afirma AUSÊNCIA, e isso é medido.
+#
+# ⚠️ `resgate_cam2` ESTAVA SENDO CONTADO COMO ZERO, e é um erro do CONTADOR,
+# não da descrição: `_analisar_sequencia_cam2` faz uma chamada de visão de
+# verdade e olha aquele instante pela lateral. Chamar isso de "sem observação"
+# é o espelho do problema que esta fase conserta — negar medida que existe.
+#
+# A REGRA (a do dono, literal): herança é legítima quando o EVENTO tem pelo
+# menos uma amostra analisada — uma olhada seguida de quadros idênticos
+# suprimidos é herança honesta. ZERO amostras no evento inteiro, não.
+# ═════════════════════════════════════════════════════════════════════════
+ORIGENS_OBSERVADAS = frozenset({"analisado", "resgate_cam2"})
+ORIGENS_DERIVADAS = frozenset({"interpolado_sequencia", "indefinida_herdada",
+                               "ponte_temporal"})
+
+
+def origem_foi_observada(origem: str | None) -> bool:
+    """True quando ALGUÉM olhou aquele instante — cam1 ou cam2."""
+    return (origem or "analisado") in ORIGENS_OBSERVADAS
+
+
+def descricao_foi_observada(e: dict) -> bool:
+    """True quando o EVENTO tem ao menos uma amostra analisada.
+
+    É o único teste que autoriza a descrição a afirmar o que aconteceu. Note
+    que `posto_vazio` não precisa dele: ele não afirma atividade nenhuma.
+    """
+    if (e.get("papel_pessoa") == "posto_vazio"
+            or (e.get("label_corrigido") or e.get("comportamento_label")) == POSTO_VAZIO_LABEL):
+        return True
+    # Correção humana é observação de gente, que vale mais que a do modelo.
+    if e.get("label_corrigido"):
+        return True
+    return int(e.get("n_amostras") or 0) > 0
+
+
+def origem_da_descricao(e: dict) -> str:
+    """De onde veio a descrição deste evento, para exibir e para medir."""
+    if not descricao_foi_observada(e):
+        og = e.get("observacoes_origem") or {}
+        if og:
+            dominante = max(og, key=lambda k: og.get(k) or 0)
+            return dominante
+        return "desconhecida"
+    return "observada"
+
+
+def descricao_para_exibir(e: dict) -> tuple[str | None, bool]:
+    """(texto, observada). Quando NÃO houve observação, a descrição não é
+    apresentada como o que aconteceu — ela é substituída por uma frase que diz
+    a verdade sobre a própria origem.
+
+    ⚠️ A descrição bruta NÃO é apagada do banco: ela continua auditável, e é
+    dela que sai o diagnóstico de por que o sistema errou. O que muda é que
+    ela deixa de ser exibida como observação.
+    """
+    if descricao_foi_observada(e):
+        return (e.get("descricao_bruta") or None), True
+    return _FRASE_SEM_OBSERVACAO.get(
+        origem_da_descricao(e),
+        "Nenhum quadro deste minuto foi analisado — o tempo é real, "
+        "a atividade não foi observada."), False
+
+
+_FRASE_SEM_OBSERVACAO = {
+    "ponte_temporal": ("Nenhum quadro deste minuto foi analisado. A presença "
+                       "veio da continuidade do rastreamento; a atividade não "
+                       "foi observada."),
+    "indefinida_herdada": ("Nenhum quadro deste minuto foi analisado. O texto "
+                          "anterior seria repetido aqui — não é observação."),
+    "interpolado_sequencia": ("Nenhum quadro deste minuto foi analisado; a "
+                              "descrição viria de um quadro vizinho."),
+    "desconhecida": ("Nenhum quadro deste minuto foi analisado — o tempo é "
+                     "real, a atividade não foi observada."),
+}
+
+
+def origens_sem_observacao(eventos: list) -> dict:
+    """A MEDIDA da Parte 1: quantos eventos afirmam sem ter olhado, por origem.
+
+    Função pura, zero chamada de API. É o que vira endpoint e o que permite
+    responder "consertou?" com número em vez de impressão.
+    """
+    por_origem: dict[str, int] = {}
+    total = observados = 0
+    for e in eventos or []:
+        if e.get("principal") is False:
+            continue
+        total += 1
+        if descricao_foi_observada(e):
+            observados += 1
+            continue
+        por_origem[origem_da_descricao(e)] = por_origem.get(
+            origem_da_descricao(e), 0) + 1
+    sem = total - observados
+    return {
+        "total_principais": total,
+        "com_observacao": observados,
+        "sem_observacao": sem,
+        "pct_sem_observacao": round(100.0 * sem / total, 1) if total else 0.0,
+        "por_origem": dict(sorted(por_origem.items(), key=lambda kv: -kv[1])),
+    }
+
+
+def sortear_amostra_cega(eventos: list, n: int, semente: int) -> list:
+    """Sorteia N eventos para a medição cega. SORTEIO DE VERDADE.
+
+    ⚠️ NÃO FILTRA POR SUSPEITA — nem por dúvida, nem por confiança baixa, nem
+    por rótulo feio. Filtrar mediria a desconfiança do gestor, não o sistema, e
+    devolveria uma taxa pessimista que pareceria medida.
+
+    Entram apenas eventos que AFIRMAM atividade: `posto_vazio` não tem
+    descrição a julgar, e incluí-lo inflaria o acerto com acertos triviais.
+
+    `semente` torna o sorteio reproduzível: dois gestores sorteando o mesmo dia
+    julgam o MESMO conjunto, e a taxa passa a ser comparável entre pessoas.
+    """
+    candidatos = [
+        e for e in (eventos or [])
+        if e.get("principal") is not False
+        and (e.get("descricao_bruta") or "").strip()
+        and e.get("papel_pessoa") != "posto_vazio"
+        and (e.get("label_corrigido") or e.get("comportamento_label")) != POSTO_VAZIO_LABEL
+    ]
+    candidatos.sort(key=lambda e: str(e.get("id") or ""))
+    rnd = random.Random(semente)
+    rnd.shuffle(candidatos)
+    return candidatos[:max(0, int(n))]
+
+
+def taxa_de_acerto(linhas: list) -> dict:
+    """A taxa MEDIDA, a partir dos vereditos já dados.
+
+    Os três resultados ficam SEPARADOS. Nenhuma média ponderada que
+    transformasse "bate em parte" em meio-acerto: isso inventaria um número
+    intermediário que ninguém julgou e apagaria a distinção que diz o que
+    consertar.
+    """
+    julgadas = [l for l in (linhas or []) if l.get("veredito")]
+    n = len(julgadas)
+    cont = {"bate": 0, "bate_em_parte": 0, "nao_bate": 0}
+    for l in julgadas:
+        v = l.get("veredito")
+        if v in cont:
+            cont[v] += 1
+
+    def pct(x):
+        return round(100.0 * x / n, 1) if n else 0.0
+
+    # Cruzamento que a Parte 1 torna obrigatório: descrição sem observação
+    # deveria acertar MENOS. Se acertar igual, a herança está boa — e isso
+    # também é um achado.
+    sem_obs = [l for l in julgadas if not int(l.get("n_amostras_no_sorteio") or 0)]
+    return {
+        "n_julgadas": n,
+        "n_pendentes": len([l for l in (linhas or []) if not l.get("veredito")]),
+        "bate": cont["bate"], "bate_pct": pct(cont["bate"]),
+        "bate_em_parte": cont["bate_em_parte"],
+        "bate_em_parte_pct": pct(cont["bate_em_parte"]),
+        "nao_bate": cont["nao_bate"], "nao_bate_pct": pct(cont["nao_bate"]),
+        "sem_observacao": {
+            "n": len(sem_obs),
+            "bate_pct": (round(100.0 * len([l for l in sem_obs
+                                            if l.get("veredito") == "bate"])
+                               / len(sem_obs), 1) if sem_obs else None),
+        },
+        # ⚠️ Com poucas julgadas a taxa oscila demais para valer como leitura.
+        # Dizer isso é parte da medida, não uma ressalva cosmética.
+        "confiavel": n >= 20,
+    }
+
+
+def descricoes_que_afirmam_estado(eventos: list) -> dict:
+    """A MEDIDA da Parte 2: quantas descrições ainda afirmam estado da máquina.
+
+    Separa por versão do instrumento, porque texto anterior à proibição é
+    histórico e não prova que a proibição falhou — só que existe passado.
+    """
+    n = antigas = novas = 0
+    exemplos: list[str] = []
+    for e in eventos or []:
+        if e.get("principal") is False:
+            continue
+        d = e.get("descricao_bruta") or ""
+        if not texto_afirma_estado_maquina(d):
+            continue
+        n += 1
+        if int(e.get("versao_instrumento") or 0) >= 8:
+            novas += 1
+            if len(exemplos) < 10:
+                exemplos.append(d)
+        else:
+            antigas += 1
+    return {"total": n, "anteriores_a_proibicao": antigas,
+            "posteriores_a_proibicao": novas, "exemplos_novos": exemplos}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 102 — PROSA DE ESTADO DA MÁQUINA. A Fase 99 baniu o SUFIXO do rótulo;
+# faltou o texto. Estado de máquina não é observável em imagem parada — a Fase
+# 89 mediu: o estado afirmado não persistia entre minutos consecutivos e era
+# função da ação que o próprio modelo tinha acabado de descrever.
+#
+# Recorta só a AFIRMAÇÃO, nunca a frase inteira: "operador parado junto ao
+# torno, com a máquina parada" tem de virar "operador parado junto ao torno",
+# não sumir. A observação da PESSOA é boa e é o produto.
+# ═════════════════════════════════════════════════════════════════════════
+_TRECHOS_ESTADO = (
+    r",?\s*(?:e\s+)?(?:com|com\s+a|a)\s+m[áa]quina\s+(?:parada|em\s+ciclo|"
+    r"rodando|ligada|desligada|em\s+opera[çc][ãa]o|em\s+funcionamento)",
+    r",?\s*(?:com\s+o\s+)?torno\s+(?:parado|girando|rodando|em\s+ciclo|ligado|desligado)",
+    r"\s*(?:—|-|,)?\s*m[áa]quina\s+(?:parada|em\s+ciclo)\s*\.?",
+    r"\s*durante\s+o\s+ciclo(?:\s+de\s+usinagem)?",
+    r"\s*(?:com\s+)?(?:o\s+)?ciclo\s+(?:autom[áa]tico\s+)?em\s+(?:curso|andamento)",
+    r",?\s*(?:sem|com)\s+ciclo\s+autom[áa]tico(?:\s+em\s+curso)?",
+    r",?\s*aguardando\s+o?\s*ciclo(?:\s+da\s+m[áa]quina)?",
+)
+
+
+def texto_sem_estado_maquina(texto: str | None) -> str:
+    """Tira a AFIRMAÇÃO de estado da máquina de uma frase, preservando o resto.
+
+    Devolve "" só quando não sobra observação nenhuma — nesse caso a frase era
+    apenas a afirmação não medida, e não há o que preservar.
+    """
+    t = (texto or "").strip()
+    if not t:
+        return ""
+    for padrao in _TRECHOS_ESTADO:
+        t = re.sub(padrao, "", t, flags=re.IGNORECASE)
+    # Sobras de pontuação depois do recorte.
+    t = re.sub(r"\s{2,}", " ", t)
+    t = re.sub(r"\s*,\s*(,\s*)+", ", ", t)
+    t = t.strip(" ,;—-").strip()
+    if t and not t.endswith("."):
+        pass
+    # Uma frase que virou fragmento inútil não volta ao prompt.
+    return t if len(t) >= 12 else ""
+
+
+def texto_afirma_estado_maquina(texto: str | None) -> bool:
+    """True se a frase afirma estado da máquina. É o medidor da Parte 2."""
+    return texto_sem_estado_maquina(texto) != (texto or "").strip()
+
+
 def construir_bloco_vocabulario(memoria: dict, max_itens: int = 20) -> str:
     if not memoria.get("vocabulario"):
         return ""
@@ -1972,12 +2240,32 @@ def construir_bloco_vocabulario(memoria: dict, max_itens: int = 20) -> str:
     linhas = [
         "VOCABULÁRIO OPERACIONAL CONHECIDO deste cliente (use estes termos quando a ação corresponder, mantendo consistência com observações anteriores):"
     ]
-    # Fase 99: mesma limpeza no prompt do VLM — sugerir "monitorar_maquina_parada"
-    # como vocabulário conhecido é pedir para ele descrever estado de máquina.
+    # ⚠️ Fase 102 — AQUI ESTAVA O FURO DA PROIBIÇÃO DA FASE 99, e ele explica
+    # por que 101 das 495 descrições continuavam afirmando estado da máquina.
+    #
+    # A Fase 99 filtrou o LABEL (`vocabulario_sem_estado`) e deixou passar a
+    # DESCRIÇÃO. Mas o que entra no prompt do VLM é a descrição — e o catálogo
+    # está cheio de prosa de estado:
+    #   monitorar_maquina: "...durante o CICLO DE USINAGEM, sem manipulação"
+    #   deslocamento_interno_posto: "...junto ao torno, COM A MÁQUINA PARADA"
+    #
+    # E a linha logo acima manda "manter consistência com observações
+    # anteriores". Ou seja: o prompt PROIBIA afirmar estado da máquina e, duas
+    # linhas depois, entregava exemplos que afirmam estado da máquina com ordem
+    # de imitá-los. Exemplo vence regra — é a mesma lição do
+    # `_BLOCO_EXEMPLOS_DESCRICAO` na Fase 99, num bloco que ninguém olhou.
+    #
+    # É também o "cache servindo descrição velha indefinidamente" que o dono
+    # suspeitou: não é o cache de rótulo, é este bloco, que lê
+    # `comportamentos.descricao` — texto histórico, anterior à proibição, que
+    # volta ao prompt em todo vídeo, para sempre, até alguém limpá-lo.
     for v in vocabulario_sem_estado(memoria["vocabulario"])[:max_itens]:
         if (v.get("descricao") or "").strip().lower() in _queimadas:
             continue
-        linhas.append(f'- {v["descricao"]}')
+        _d = texto_sem_estado_maquina(v.get("descricao"))
+        if not _d:
+            continue
+        linhas.append(f'- {_d}')
     linhas.append("")
     linhas.append(
         "Se reconhecer uma das ações conhecidas, descreva usando vocabulário CONSISTENTE com o catálogo acima. Se for ação genuinamente nova, descreva livremente."
@@ -4283,7 +4571,7 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         # descrição herdada dariam share 1,00, ou seja, certeza máxima num
         # minuto em que ninguém olhou nada.
         "n_observacoes": 1,
-        "n_amostras": 1 if o.get("origem_gate") == "analisado" else 0,
+        "n_amostras": 1 if origem_foi_observada(o.get("origem_gate")) else 0,
         "origens": {(o.get("origem_gate") or "analisado"): 1},
     }
 
@@ -4329,7 +4617,7 @@ def etapa_segmentar_eventos(
                 atual["tempo_fim_s"] = o["tempo_s"]
                 atual["frame_fim"] = o["frame_idx"]
                 atual["n_observacoes"] += 1
-                if o.get("origem_gate") == "analisado":
+                if origem_foi_observada(o.get("origem_gate")):
                     atual["n_amostras"] += 1
                 _og = o.get("origem_gate") or "analisado"
                 atual["origens"][_og] = atual["origens"].get(_og, 0) + 1

@@ -7,7 +7,7 @@ import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
 export type Screen = "login" | "processos" | "processo" | "ajuda" | "fila-global";
-export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "rotulos" | "titular" | "arvore" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
+export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "rotulos" | "titular" | "arvore" | "precisao" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
 
@@ -88,6 +88,8 @@ export function Sidebar({
   const procNavAvancado = [
     // Fase 80: auditar é olhar um dia por amostragem, sem julgar nada.
     { tab: "auditoria", label: "Auditoria do dia", icon: "search" },
+    // Fase 102: a taxa de acerto MEDIDA, por julgamento cego.
+    { tab: "precisao", label: "A IA acerta?", icon: "target" },
     // Fase 59: a fila da dúvida é o trabalho de maior alavancagem.
     { tab: "duvidas", label: "Dúvidas", icon: "help-circle" },
     // Fase 85: rótulo sem categoria conta como NÃO-PRODUTIVO.

@@ -72,6 +72,14 @@ from .pipeline import (
     limpar_sufixo_estado,
     # Fase 101 — o número principal.
     permanencia_do_dia,
+    # Fase 102 — a precisão da descrição, medida.
+    origens_sem_observacao,
+    descricoes_que_afirmam_estado,
+    sortear_amostra_cega,
+    taxa_de_acerto,
+    origem_da_descricao,
+    descricao_foi_observada,
+    descricao_para_exibir,
     frase_permanencia,
     frente_maquina_do_processo,
     custo_reavaliacao_usd,
@@ -1253,6 +1261,178 @@ def comparar_arvore_decisao(
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
     return {"ok": True, **comparar_arvore(sb, user.empresa, nome, dia)}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 102 — A PRECISÃO DA DESCRIÇÃO: medida, não suposta.
+# ═════════════════════════════════════════════════════════════════════════
+def _evs_do_dia(sb, empresa: str, processo: str, dia: str | None) -> list:
+    """Eventos principais com o que a medição precisa. Uma leitura só."""
+    linhas = varrer(
+        sb, "eventos",
+        "id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
+        "tempo_inicio_s, tempo_fim_s, n_amostras, observacoes_origem, principal, "
+        "papel_pessoa, versao_instrumento, criado_em, validado_humano, "
+        "pessoa_track_id, frame_inicio, cam_id",
+        empresa=empresa, processo=processo,
+        ajustes=(lambda q: q.gte("criado_em", f"{dia}T00:00:00")
+                 .lt("criado_em", f"{dia}T23:59:59.999")) if dia else None,
+    )
+    return [e for e in linhas if e.get("principal") is not False]
+
+
+@app.get("/processos/{processo_id}/descricao/diagnostico")
+def descricao_diagnostico(
+    processo_id: str,
+    dia: str | None = Query(None, description="AAAA-MM-DD; vazio = todo o período"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """As DUAS medidas das Partes 1 e 2, num payload só. Zero chamada de API.
+
+    Substitui a query avulsa: a pergunta "consertou?" passa a ter resposta
+    consultável a qualquer momento, em vez de depender de alguém lembrar o SQL.
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    evs = _evs_do_dia(sb, user.empresa, nome, dia)
+    return {
+        "ok": True,
+        "dia": dia,
+        "sem_observacao": origens_sem_observacao(evs),
+        "afirmam_estado_maquina": descricoes_que_afirmam_estado(evs),
+    }
+
+
+class SortearBody(BaseModel):
+    dia: str
+    n: int = 20
+    semente: int | None = None
+
+
+@app.post("/processos/{processo_id}/amostragem/sortear")
+def amostragem_sortear(
+    processo_id: str, body: SortearBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Sorteia N eventos do dia para julgamento CEGO.
+
+    ⚠️ A descrição NÃO volta neste payload. Ela é congelada no banco e só é
+    revelada pelo endpoint de revelação, depois da resposta do gestor — a ordem
+    é o experimento.
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    evs = _evs_do_dia(sb, user.empresa, nome, body.dia)
+    # Semente derivada do dia quando não vier: o mesmo dia sorteia o mesmo
+    # conjunto, e duas pessoas medem o mesmo — a taxa fica comparável.
+    semente = body.semente if body.semente is not None else abs(hash(body.dia)) % (2**31)
+    escolhidos = sortear_amostra_cega(evs, body.n, semente)
+    linhas = [{
+        "empresa": user.empresa, "processo": nome, "dia": body.dia,
+        "evento_id": e["id"],
+        "descricao_no_sorteio": e.get("descricao_bruta"),
+        "n_amostras_no_sorteio": int(e.get("n_amostras") or 0),
+        "origem_descricao": origem_da_descricao(e),
+    } for e in escolhidos]
+    if linhas:
+        try:
+            sb.table("amostragem_cega").upsert(
+                linhas, on_conflict="empresa,processo,evento_id").execute()
+        except Exception as e:   # noqa: BLE001
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                f"amostragem_cega indisponível ({e}). Rode o schema.sql.")
+    return {"ok": True, "sorteados": len(linhas), "semente": semente,
+            "candidatos_no_dia": len([x for x in evs if (x.get("descricao_bruta") or "").strip()])}
+
+
+@app.get("/processos/{processo_id}/amostragem")
+def amostragem_listar(
+    processo_id: str,
+    dia: str = Query(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """A fila de julgamento + a taxa até agora.
+
+    Item ainda não respondido vem SEM `descricao_no_sorteio` — a tela não pode
+    nem receber o texto, senão basta abrir o inspetor para contaminar.
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    linhas = varrer(sb, "amostragem_cega", "*", empresa=user.empresa, processo=nome,
+                    ajustes=lambda q: q.eq("dia", dia))
+    itens = []
+    for l in linhas:
+        cego = not l.get("respondido_em")
+        itens.append({
+            "id": l["id"], "evento_id": l["evento_id"],
+            "respondido": bool(l.get("respondido_em")),
+            "revelado": bool(l.get("revelado_em")),
+            "veredito": l.get("veredito"),
+            "resposta_humana": l.get("resposta_humana"),
+            "n_amostras_no_sorteio": l.get("n_amostras_no_sorteio"),
+            "origem_descricao": l.get("origem_descricao"),
+            # ⛔ o texto só sai depois de respondido.
+            "descricao": None if cego else l.get("descricao_no_sorteio"),
+        })
+    return {"ok": True, "dia": dia, "itens": itens, "taxa": taxa_de_acerto(linhas)}
+
+
+class ResponderBody(BaseModel):
+    resposta: str
+
+
+@app.post("/amostragem/{item_id}/responder")
+def amostragem_responder(
+    item_id: str, body: ResponderBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Grava o que o gestor viu e SÓ ENTÃO revela a descrição."""
+    sb = make_supabase_client()
+    r = (sb.table("amostragem_cega").select("*").eq("id", item_id)
+         .limit(1).execute().data or [])
+    if not r or r[0].get("empresa") != user.empresa:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item não encontrado")
+    if r[0].get("respondido_em"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Este item já foi respondido — reabrir contaminaria a medida.")
+    agora = datetime.now(timezone.utc).isoformat()
+    sb.table("amostragem_cega").update({
+        "resposta_humana": (body.resposta or "").strip(),
+        "respondido_em": agora, "revelado_em": agora,
+    }).eq("id", item_id).execute()
+    return {"ok": True, "descricao": r[0].get("descricao_no_sorteio"),
+            "n_amostras": r[0].get("n_amostras_no_sorteio"),
+            "origem_descricao": r[0].get("origem_descricao")}
+
+
+class VereditoBody(BaseModel):
+    veredito: str
+    observacao: str | None = None
+
+
+@app.post("/amostragem/{item_id}/veredito")
+def amostragem_veredito(
+    item_id: str, body: VereditoBody,
+    user: CurrentUser = Depends(get_current_user),
+):
+    if body.veredito not in ("bate", "bate_em_parte", "nao_bate"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "veredito deve ser bate | bate_em_parte | nao_bate")
+    sb = make_supabase_client()
+    r = (sb.table("amostragem_cega").select("empresa, respondido_em")
+         .eq("id", item_id).limit(1).execute().data or [])
+    if not r or r[0].get("empresa") != user.empresa:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item não encontrado")
+    # ⚠️ A ordem É o experimento: veredito antes da resposta mede ancoragem.
+    if not r[0].get("respondido_em"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Responda o que você vê ANTES de ver a descrição.")
+    sb.table("amostragem_cega").update({
+        "veredito": body.veredito,
+        "observacao": (body.observacao or "").strip() or None,
+        "veredito_em": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", item_id).execute()
+    return {"ok": True}
 
 
 @app.get("/movimento/limiares")
@@ -3114,6 +3294,15 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     composicao_valor["posto_vazio_pct"] = round(_vazio_s / total_tempo * 100, 1)
     composicao_valor["posto_vazio_s"] = round(_vazio_s, 1)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Fase 102 — QUANTO DO PARETO É OBSERVAÇÃO. O Pareto é "no que o tempo foi
+    # gasto", e virou o diferencial do produto: só visão computacional responde
+    # isso. Por isso ele precisa dizer quanto de si mesmo é afirmação sem
+    # observação — um Pareto bonito construído sobre herança é pior que um
+    # Pareto com buraco declarado.
+    # ═══════════════════════════════════════════════════════════════════
+    _diag_desc = origens_sem_observacao(evs)
+
     # Pareto: top comportamentos com acumulado
     pareto = [
         {
@@ -3140,6 +3329,9 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     return {
         "snapshot": snapshot,
         "permanencia": permanencia,
+        # Fase 102: a descrição é o diferencial — e vem com o próprio
+        # certificado de origem ao lado.
+        "descricao_diagnostico": _diag_desc,
         "sugestoes": sugs,
         "eventos_pendentes": pendentes.count or 0,
         "perguntas_pendentes": perguntas_pend.count or 0,

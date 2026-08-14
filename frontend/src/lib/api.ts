@@ -211,6 +211,33 @@ export const api = {
       return req<EventosTabelaResposta>(`/processos/${processoId}/eventos/tabela${sufixo}`);
     },
   },
+  // Fase 102 — a precisão MEDIDA, por amostragem cega.
+  amostragem: {
+    listar: (processoId: string, dia: string) =>
+      req<{
+        ok: boolean; dia: string;
+        itens: Array<{
+          id: string; evento_id: string; respondido: boolean; revelado: boolean;
+          veredito: string | null; resposta_humana: string | null;
+          n_amostras_no_sorteio: number | null; origem_descricao: string | null;
+          descricao: string | null;
+        }>;
+        taxa: Record<string, any>;
+      }>(`/processos/${processoId}/amostragem?dia=${dia}`),
+    sortear: (processoId: string, dia: string, n: number) =>
+      req<{ ok: boolean; sorteados: number; semente: number; candidatos_no_dia: number }>(
+        `/processos/${processoId}/amostragem/sortear`,
+        { method: "POST", body: JSON.stringify({ dia, n }) }),
+    // ⚠️ A descrição só volta AQUI — depois da resposta. É o que torna o
+    // julgamento cego de verdade, e não cego só na aparência.
+    responder: (itemId: string, resposta: string) =>
+      req<{ ok: boolean; descricao: string | null; n_amostras: number | null; origem_descricao: string | null }>(
+        `/amostragem/${itemId}/responder`,
+        { method: "POST", body: JSON.stringify({ resposta }) }),
+    veredito: (itemId: string, veredito: string, observacao?: string) =>
+      req<{ ok: boolean }>(`/amostragem/${itemId}/veredito`,
+        { method: "POST", body: JSON.stringify({ veredito, observacao }) }),
+  },
   perguntas: {
     listar: (processoId: string, status: "pendente" | "respondida" | "dispensada" | "todas" = "pendente") =>
       req<PerguntaProcesso[]>(`/processos/${processoId}/perguntas?status=${status}`),

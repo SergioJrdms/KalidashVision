@@ -1518,3 +1518,63 @@ alter table eventos add constraint eventos_orientacao_chk
 --     from eventos where reavaliacao is not null group by 1;
 -- ════════════════════════════════════════════════════════════════════════
 alter table eventos add column if not exists reavaliacao jsonb;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 102 — AMOSTRAGEM CEGA: a taxa de acerto MEDIDA
+--
+-- "Hoje a estimativa de acerto é impressão, não medida." Esta tabela é o
+-- registro do único protocolo que produz um número honesto:
+--
+--   1. sorteia N eventos de um dia — SORTEIO DE VERDADE, sem filtrar por
+--      suspeita. Filtrar por suspeita mede a desconfiança do gestor, não o
+--      sistema, e o número sai pessimista por construção.
+--   2. mostra os frames SEM a descrição
+--   3. o gestor escreve o que vê        → `resposta_humana`
+--   4. SÓ ENTÃO revela a descrição      → `revelado_em`
+--   5. o gestor marca o veredito        → `veredito`
+--
+-- ⚠️ A ORDEM É O EXPERIMENTO. Ver a descrição antes de responder contamina a
+-- resposta (ancoragem), e o número vira concordância com o que já estava
+-- escrito. Por isso `resposta_humana` e `revelado_em` são colunas separadas e
+-- gravadas em MOMENTOS separados: o banco guarda a prova de que a ordem foi
+-- respeitada, e uma resposta que chegue depois da revelação é descartável.
+--
+-- ⚠️ TRÊS VEREDITOS, NÃO DOIS. "bate em parte" é informação, não meio-acerto:
+-- descrição que acerta a ação e erra o detalhe tem conserto de PROMPT;
+-- descrição que inventa a cena tem conserto de CAPTURA. Colapsar os dois numa
+-- taxa só apagaria justamente a distinção que diz o que consertar.
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists amostragem_cega (
+    id uuid primary key default gen_random_uuid(),
+    empresa text not null,
+    processo text not null,
+    dia date not null,
+    evento_id uuid not null,
+    -- Cópia CONGELADA da descrição no instante do sorteio. Sem ela, um
+    -- reprocessamento mudaria o texto e a medição passaria a se referir a algo
+    -- que o gestor nunca julgou.
+    descricao_no_sorteio text,
+    -- Rastro da própria evidência: de quantas amostras analisadas veio a
+    -- descrição julgada. É o que permite cruzar acerto × observação.
+    n_amostras_no_sorteio int,
+    origem_descricao text,
+    sorteado_em timestamptz not null default now(),
+    resposta_humana text,
+    respondido_em timestamptz,
+    revelado_em timestamptz,
+    -- 'bate' | 'bate_em_parte' | 'nao_bate'
+    veredito text,
+    veredito_em timestamptz,
+    observacao text,
+    constraint amostragem_cega_veredito_chk
+        check (veredito is null or veredito in ('bate','bate_em_parte','nao_bate'))
+);
+create index if not exists idx_amostragem_cega_dia
+    on amostragem_cega(empresa, processo, dia);
+create unique index if not exists idx_amostragem_cega_evento
+    on amostragem_cega(empresa, processo, evento_id);
+alter table amostragem_cega enable row level security;
+drop policy if exists amostragem_cega_rw on amostragem_cega;
+create policy amostragem_cega_rw on amostragem_cega for all using (true) with check (true);
+grant select, insert, update, delete on amostragem_cega to anon, authenticated;
