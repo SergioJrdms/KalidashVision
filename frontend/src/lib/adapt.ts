@@ -10,6 +10,7 @@ import type {
   InsightGlobal,
   InsightsQuantitativos,
   PadraoGlobal,
+  Permanencia,
   PadraoProcesso,
   PerguntaProcesso,
   Processo,
@@ -46,7 +47,7 @@ export interface ProcHeaderMock {
 export interface CompMock { id: string; nome: string; pct: number; seg: number; cat: LeanShort; origem: string | null }
 export interface SugMock { id: string; prioridade: string; area: string; sugestao: string; impacto: string; situacao: string; causa: string; comportamentos: string[]; voltou: boolean }
 export interface DetMock {
-  snapshot: { va: number; desp: number; vazio: number; semEvidencia: number; tempoObservadoMin: number; videos: number; validadoPct: number; topComportamento: { nome: string; pct: number } };
+  snapshot: { va: number; desp: number; vazio: number; semEvidencia: number; /** ⛔ limiar de cobertura, nunca exibido (Fase 101) */ coberturaMin: number; videos: number; validadoPct: number; topComportamento: { nome: string; pct: number } };
   comportamentos: CompMock[];
   pareto: { nome: string; pct: number; acc: number; cat: LeanShort }[];
   transicoes: { de: string; para: string; vezes: number }[];
@@ -55,6 +56,8 @@ export interface DetMock {
   videos: { id: string; nome: string; quando: string; eventos: number; dur: number }[];
   perguntasPendentes: number;
   insights: InsightsQuantitativos | null;
+  /** Fase 101 — o número principal, passado adiante sem transformação. */
+  permanencia: Permanencia | null;
 }
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
@@ -114,6 +117,7 @@ export function mapHeader(p: ProcessoDetalhe): ProcHeaderMock {
 
 export function mapDashboard(d: DashboardData): DetMock {
   const s = d.snapshot;
+  const permanencia = d.permanencia ?? null;
   const cv = d.composicao_valor;
   const top = s.distribuicao_comportamentos[0];
   const comportamentos: CompMock[] = s.distribuicao_comportamentos.map((c) => ({
@@ -151,7 +155,7 @@ export function mapDashboard(d: DashboardData): DetMock {
       // Não é uma fatia — é quanto do tempo já classificado foi ASSUMIDO em
       // vez de decidido. Vira o "próximo passo" e vira fila de dúvidas.
       semEvidencia: Math.round(cv.sem_evidencia_pct || 0),
-      tempoObservadoMin: s.tempo_total_observado_min,
+      coberturaMin: s.tempo_total_observado_min,
       videos: s.videos_analisados,
       validadoPct: Math.round(s.pct_validado_por_humano),
       topComportamento: { nome: top?.comportamento || "—", pct: Math.round(top?.pct_tempo || 0) },
@@ -164,6 +168,7 @@ export function mapDashboard(d: DashboardData): DetMock {
     videos: (d.videos || []).map((v) => ({ id: v.id, nome: v.nome, quando: rel(v.processado_em), eventos: v.total_eventos, dur: v.duracao_s })),
     perguntasPendentes: d.perguntas_pendentes || 0,
     insights: d.insights_quantitativos || null,
+    permanencia,
   };
 }
 

@@ -124,7 +124,13 @@ export function nomeEhAutomatico(label: string | null | undefined): boolean {
 }
 
 /** Duração em unidade de chão de fábrica: 2h10, 45min, 30s.
- *  Ninguém na fábrica pensa em "130 minutos" nem em "0,25 do turno". */
+ *
+ *  ⛔ Fase 101 — PROIBIDA EM SUPERFÍCIE DO CLIENTE. Continua existindo para
+ *  ferramenta interna (a validação usa o instante do trecho como localizador
+ *  no vídeo). Em dashboard, árvore, Pareto, evolução por dia, ritmo por hora,
+ *  relatório ou exportação, use percentual: a captura amostra ~50% de cada
+ *  hora, então a duração absoluta é metade da verdade.
+ *  `tests_permanencia_numero.py` bloco [6] varre os arquivos e reprova. */
 export function duracaoHumana(segundos: number): string {
   const s = Math.max(0, Math.round(segundos));
   if (s < 60) return `${s}s`;
@@ -146,8 +152,9 @@ export function duracaoHumana(segundos: number): string {
 // a frase diz isso em vez de fingir precisão.
 //
 // Vocabulário de chão de fábrica: nada de "valor agregado", "categoria Lean",
-// "não classificado" ou "concordância". E unidade que a pessoa usa: 2h10, não
-// 130 minutos e muito menos 0,25.
+// "não classificado" ou "concordância".
+//
+// ⛔ Fase 101 — E NENHUMA DURAÇÃO. Só percentual. Ver `leituraDoPosto`.
 // ============================================================
 export interface LeituraDoPosto {
   frase: string;
@@ -158,19 +165,30 @@ export interface LeituraDoPosto {
 export function leituraDoPosto(d: {
   vaPct: number;
   vazioPct: number;
-  tempoObservadoMin: number;
+  /** ⛔ LIMIAR, nunca exibido. Nome explícito de propósito: o nome antigo
+   *  parecia um número para mostrar, e a varredura da Fase 101 (que bane
+   *  duração em superfície do cliente) o pegava com razão. Ele decide se há
+   *  material suficiente para concluir — não vai para a tela. */
+  limiarCoberturaMin: number;
   semEvidenciaPct?: number;
   naoObservadoPct?: number;
 }): LeituraDoPosto {
-  const obsSeg = Math.max(0, d.tempoObservadoMin) * 60;
-  const vazioSeg = obsSeg * (Math.max(0, d.vazioPct) / 100);
   const duvida = Math.max(d.semEvidenciaPct || 0, d.naoObservadoPct || 0);
 
+  // ⛔ Fase 101 — A DURAÇÃO SAIU DAQUI. Esta frase dizia "o operador esteve
+  // ausente 2h10". A captura é uma amostra sistemática de ~50% de cada hora:
+  // esse "2h10" era METADE do tempo real de ausência, apresentado como se
+  // fosse o total. Não era feio — era errado. O percentual, sobre o mesmo
+  // denominador amostrado, é estimativa correta do turno.
+  //
+  // A cobertura continua entrando como LIMIAR (`limiarCoberturaMin`), que é
+  // decisão interna, não número exibido.
+
   // COBERTURA INSUFICIENTE — não arredonda para uma frase confiante.
-  if (d.tempoObservadoMin < 30) {
+  if (d.limiarCoberturaMin < 30) {
     return {
-      frase: `Ainda há pouco material para concluir: ${duracaoHumana(obsSeg)} de gravação analisada.`,
-      ressalva: "Com menos de meia hora observada, qualquer percentual oscila demais para valer como leitura.",
+      frase: "Ainda há pouco material para concluir.",
+      ressalva: "Com pouco tempo observado, qualquer percentual oscila demais para valer como leitura.",
       tom: "fraco",
     };
   }
@@ -178,10 +196,9 @@ export function leituraDoPosto(d: {
   const partes: string[] = [
     `O posto rendeu ${Math.round(d.vaPct)}% do tempo observado.`,
   ];
-  if (vazioSeg >= 60) {
+  if (d.vazioPct >= 1) {
     partes.push(
-      `O operador esteve ausente ${duracaoHumana(vazioSeg)}` +
-      ` — o equivalente a ${Math.round(d.vazioPct)}% do que foi filmado.`,
+      `O operador esteve ausente em ${Math.round(d.vazioPct)}% do que foi filmado.`,
     );
   } else {
     partes.push("O operador esteve no posto praticamente o tempo todo filmado.");

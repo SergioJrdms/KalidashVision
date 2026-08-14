@@ -21,7 +21,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, PanelHead, Empty, Icon, toast } from "../design/ui";
 import { leanCor } from "../design/helpers";
-import { nomeHumano, duracaoHumana } from "../design/rotulos";
+import { nomeHumano } from "../design/rotulos";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { CategoriaLean, DistribuicaoComportamento } from "../lib/types";
 
@@ -94,12 +94,13 @@ export default function Arvore({ proc }: { proc: ProcHeaderMock }) {
       <Card style={{ padding: 20 }}>
         <PanelHead
           titulo="O que é trabalho"
-          ajuda="Tudo o que o sistema já viu neste posto, agrupado pelo que conta como produtivo e pelo que não conta. O tamanho de cada barra é o tempo que aquilo ocupou."
+          ajuda="Tudo o que o sistema já viu neste posto, agrupado pelo que conta como produtivo e pelo que não conta. O tamanho de cada barra é a fatia do turno que aquilo ocupou."
           leitura="Achou algo no lugar errado? Arraste para o outro lado — ou use os botões. Sua decisão vale mais que a do sistema e não é desfeita depois."
         />
         <div className="row gap2 wrap" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
-          <span><b style={{ color: "var(--ink)" }}>{duracaoHumana(totalS)}</b> observadas</span>
-          <span>·</span>
+          {/* ⛔ Fase 101 — nenhuma duração. A captura amostra ~50% de cada
+              hora: o percentual é estimativa correta do turno, o minuto
+              absoluto seria METADE da verdade. */}
           <span><b style={{ color: "var(--ink)" }}>{dist.length}</b> tipos de atividade reconhecidos</span>
         </div>
       </Card>
@@ -158,7 +159,7 @@ function BlocoRamo({ ramo, itens, totalS, maiorS, salvando, arrastando,
           {pct.toFixed(0)}%
         </span>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>
-          {duracaoHumana(somaS)} · {itens.length} atividade(s)
+          {itens.length} atividade(s)
         </span>
         <span className="grow" />
         <span style={{ fontSize: 11.5, color: "var(--faint)", textAlign: "right" }}>{ramo.ajuda}</span>
@@ -216,9 +217,7 @@ function Folha({ d, maiorS, cor, ramo, salvando, onArrastar, onClassificar }: {
         <span className="tnum" style={{ fontSize: 13, fontWeight: 700, color: cor }}>
           {d.pct_tempo.toFixed(0)}%
         </span>
-        <span className="tnum" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-          {duracaoHumana(d.tempo_total_s)}
-        </span>
+
         {humano && (
           // A decisão humana fica visível e é a que manda: nada automático a
           // sobrescreve depois.

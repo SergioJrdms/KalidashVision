@@ -2318,7 +2318,12 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #       vira curva própria, separada da dúvida; cam2 só quando desambigua
 #   7 = a produtividade vem da PERMANÊNCIA (posição + orientação + julgamento
 #       do VLM). O rótulo deixa de decidir; a cadeia Lean sai do caminho
-VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "7"))
+#   8 = (14/08) o NÚMERO PRINCIPAL passa a ser a permanência pura — presença
+#       na zona, contada direto, sem VLM e sem rótulo. A descrição vira
+#       EVIDÊNCIA (Pareto e fila), não insumo do número. Nenhuma superfície do
+#       cliente mostra duração absoluta: a captura amostra ~50% de cada hora,
+#       então só o percentual é estimativa correta do turno.
+VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "8"))
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -4243,6 +4248,23 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         "_dim": o.get("bbox_dim") if tem else None,
         "_caixas": [list(o["bbox"])] if tem else [],
         "maos_maquina": o.get("maos_maquina"),
+        # ⚠️ Fase 101 — A ORIENTAÇÃO ESTAVA SENDO PERDIDA AQUI, e é por isso
+        # que a coluna `orientacao` tinha ZERO linhas em 3.447 eventos.
+        #
+        # A Fase 97 gravou a orientação na OBSERVAÇÃO (`descritores_track`) e
+        # escreveu a coluna no evento. O que faltava era o meio do caminho:
+        # `_abrir_evento` copiava `maos_maquina` e não copiava `orientacao`, e
+        # `_orientacao_do_minuto` lê justamente daqui. O minuto nunca via nada,
+        # a coluna nascia nula sempre, e o gate da orientação ficou travado
+        # esperando um dado que o código jogava fora um passo antes.
+        #
+        # É a QUARTA vez que este padrão morde (maquina/imovel na 88, t_ini/
+        # t_fim na 92, a própria orientação na 97). Sinal calculado que não
+        # atravessa TODAS as fronteiras até o banco não existe.
+        "orientacao": o.get("orientacao"),
+        # Moda por evento cru: o minuto pondera as modas dos crus, então o cru
+        # precisa da sua. Um quadro isolado não decide para onde a pessoa olha.
+        "_orient": Counter([o["orientacao"]] if o.get("orientacao") else []),
         # Fase 86: o discriminador acompanha o evento até a origem/validação e
         # até o fato das camadas.
         "maquina": o.get("maquina"),
@@ -4311,6 +4333,9 @@ def etapa_segmentar_eventos(
                     atual["n_amostras"] += 1
                 _og = o.get("origem_gate") or "analisado"
                 atual["origens"][_og] = atual["origens"].get(_og, 0) + 1
+                # Fase 101: acumula a orientação de cada amostra do cru.
+                if o.get("orientacao"):
+                    atual["_orient"][o["orientacao"]] += 1
                 for _k in ("n_posto_cam2", "n_cena_cam2"):
                     _v = o.get(_k)
                     if _v is not None:
@@ -4343,6 +4368,10 @@ def etapa_segmentar_eventos(
         # sequência do MESMO rótulo: a concordância é total. O que pode faltar
         # é EVIDÊNCIA — e isso `n_amostras` já diz, sem precisar fingir de %.
         e["confianca"] = 1.0 if e["n_amostras"] >= MIN_AMOSTRAS_EVIDENCIA else None
+        # Fase 101: fecha a orientação do cru pela MODA das suas amostras.
+        # Vazio → None, e None nunca vira "de frente" por omissão.
+        _oc = e.pop("_orient", None)
+        e["orientacao"] = max(_oc, key=_oc.get) if _oc else None
         # Fase 82: fecha o resumo do corpo com as caixas acumuladas do evento.
         e["bbox_stats"] = _resumo_bbox(e.pop("_caixas", []), e.pop("_dim", None),
                                        e.get("bbox_cam"))
@@ -11490,6 +11519,116 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     return (CATEGORIA_SEM_EVIDENCIA, "duvida",
             "no posto, de outro lado, e não deu para dizer se é serviço — "
             "entra na fila", estado)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 101 — O NÚMERO PRINCIPAL É A PERMANÊNCIA. Decisão dos sócios, 12/08.
+#
+# Fernando: "a única coisa que a gente conseguiu medir é tempo de permanência".
+# Iago: "se ele está apontando pra máquina, ele está trabalhando. Não vamos
+# inventar mais nada, até pelo prazo".
+#
+# A esteira antiga — frames → VLM descreve → cluster nomeia → nome recebe
+# categoria → produtivo — erra em cada etapa e o erro chega ao número. Em três
+# dias a produtividade deu 41%, 49%, 56% e 80% com o MESMO operador. A esteira
+# mudou, não o chão de fábrica.
+#
+# ⚠️ ESTA FUNÇÃO NÃO LÊ RÓTULO, DESCRIÇÃO, CATEGORIA NEM `trabalho`.
+# É por CONSTRUÇÃO que rótulo errado não move o número — não por filtro. Um
+# filtro precisaria estar certo sobre o que excluir; não ler nada não precisa
+# estar certo sobre nada. É a diferença entre "não deve influenciar" e "não
+# tem como influenciar".
+#
+# ⚠️ SOBRE EXCLUIR "TRACK SINTÉTICO", QUE O PEDIDO PEDIA — NÃO FOI FEITO, E É
+# DE PROPÓSITO. Medido no banco: só existem dois ids negativos, e nenhum dos
+# dois é fabricação.
+#   -1 (1.187 eventos) = `posto_vazio`: o detector NÃO achou ninguém na zona.
+#      Isso não é um track inventado — é a própria medição de "fora do posto".
+#      Excluí-lo apagaria TODA a evidência de ausência e a permanência daria
+#      ~100% por construção. Ficaria ótimo na tela e seria falso.
+#   -2 (1.617 eventos) = operador visto pela CAM2 quando a cam1 não o vê
+#      (oclusão total pela máquina). Também é detecção real, de outra câmera —
+#      e é justamente o minuto em que ele está mais colado no torno. Excluir
+#      derrubaria a permanência para baixo pelo motivo oposto.
+# Excluir os dois enviesaria o número nas DUAS direções ao mesmo tempo.
+#
+# ⚠️ SOBRE `n_amostras = 0`: esse contador é de amostras que foram ao VLM. O
+# DETECTOR roda em todo minuto — o gate suprime a chamada de visão, não a
+# detecção. Presença continua medida. Como esta função só lê presença, minuto
+# sem amostra analisada entra normalmente e o denominador fica honesto.
+# ═════════════════════════════════════════════════════════════════════════
+def permanencia_do_dia(eventos: list, frente_maquina: str | None = None) -> dict:
+    """Os três estados, em PERCENTUAL do tempo observado. Função pura.
+
+    Zero chamada de API. Zero leitura de rótulo. Os três somam 100%.
+
+    Com a orientação NÃO verificada, `no_posto_torno` e `no_posto_outro_lado`
+    colapsam em `no_posto` — melhor um número simples e certo do que um detalhe
+    que pode estar invertido.
+    """
+    seg = {EST_NO_TORNO: 0.0, EST_OUTRO_LADO: 0.0, EST_FORA: 0.0}
+    for e in eventos or []:
+        if e.get("principal") is False:
+            continue
+        dur = max(0.0, float(e.get("tempo_fim_s") or 0)
+                  - float(e.get("tempo_inicio_s") or 0))
+        if dur <= 0:
+            continue
+        estado, _voltado = estado_permanencia(e, frente_maquina)
+        seg[estado] = seg.get(estado, 0.0) + dur
+
+    total = sum(seg.values())
+    if total <= 0:
+        return {"no_posto_pct": 0.0, "no_posto_torno_pct": 0.0,
+                "no_posto_outro_lado_pct": 0.0, "fora_pct": 0.0,
+                "orientacao_verificada": _ORIENTACAO_VERIFICADA,
+                "detalhado": False, "sem_dado": True}
+
+    def pct(x):
+        return round(100.0 * x / total, 1)
+
+    no_posto = seg[EST_NO_TORNO] + seg[EST_OUTRO_LADO]
+    saida = {
+        "no_posto_pct": pct(no_posto),
+        "fora_pct": pct(seg[EST_FORA]),
+        "orientacao_verificada": _ORIENTACAO_VERIFICADA,
+        # `detalhado=False` é a instrução para a tela mostrar SÓ permanência.
+        "detalhado": bool(_ORIENTACAO_VERIFICADA),
+        "sem_dado": False,
+    }
+    if _ORIENTACAO_VERIFICADA:
+        saida["no_posto_torno_pct"] = pct(seg[EST_NO_TORNO])
+        saida["no_posto_outro_lado_pct"] = pct(seg[EST_OUTRO_LADO])
+    else:
+        # Colapsados: expor os dois separados aqui seria oferecer à tela um
+        # detalhe que pode estar invertido.
+        saida["no_posto_torno_pct"] = None
+        saida["no_posto_outro_lado_pct"] = None
+
+    # ⚠️ Os três (ou dois) TÊM de fechar 100%. Sem estado "indefinido", sem
+    # "não classificado", sem sobra: todo instante observado está em um e só um.
+    _soma = saida["no_posto_pct"] + saida["fora_pct"]
+    if abs(_soma - 100.0) > 0.2:
+        log.warning("[permanencia] os estados somaram %.1f%%, não 100%% — "
+                    "há tempo observado fora dos estados.", _soma)
+    return saida
+
+
+def frase_permanencia(p: dict) -> str:
+    """A frase que o cliente lê. Português de chão de fábrica, sem jargão e —
+    ⚠️ REGRA ABSOLUTA — SEM DURAÇÃO. Só percentual.
+
+    O motivo é estatístico, não estético: a captura amostra ~50% de cada hora,
+    então o percentual é estimativa correta do turno e o minuto absoluto seria
+    METADE da verdade. Mostrar minuto seria ERRADO, não apenas feio.
+    """
+    if p.get("sem_dado"):
+        return "Ainda não há observação suficiente para medir o turno."
+    base = f"O operador esteve no posto em {p['no_posto_pct']:.0f}% do turno."
+    if p.get("detalhado") and p.get("no_posto_torno_pct") is not None:
+        base += (f" Desse tempo no posto, "
+                 f"{p['no_posto_torno_pct']:.0f}% do turno voltado para o torno.")
+    return base
 
 
 # ═════════════════════════════════════════════════════════════════════════

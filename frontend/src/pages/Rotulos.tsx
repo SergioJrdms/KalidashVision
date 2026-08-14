@@ -13,7 +13,7 @@
 // separá-las: classificar rápido, começando pelo rótulo que representa mais
 // TEMPO — porque é ele que move o número.
 //
-// Ordenado por minutos, não por número de eventos: 4 eventos de 15 min pesam
+// Ordenado por FATIA DO TEMPO, não por número de eventos: 4 eventos longos pesam
 // mais que 300 de 8 segundos.
 // ============================================================
 import { useState } from "react";
@@ -70,12 +70,12 @@ export default function Rotulos({ proc }: { proc: ProcHeaderMock }) {
             <span>·</span>
             <span>
               <b className="tnum" style={{ color: d.pct_sem_categoria >= 10 ? "var(--desp)" : "var(--ink)" }}>
-                {d.minutos_sem_categoria.toFixed(0)} min
+                {d.pct_sem_categoria.toFixed(0)}%
               </b>{" "}
               ({d.pct_sem_categoria.toFixed(1)}% do tempo observado)
             </span>
             <span>·</span>
-            <span className="tnum">{d.minutos_observados.toFixed(0)} min observados no total</span>
+            <span className="tnum">{d.n_rotulos} rótulo(s) sem categoria</span>
           </div>
         )}
       </Card>
@@ -133,10 +133,10 @@ function LinhaRotulo({ r, salvando, onClassificar }: {
               {nomeHumano(r.label)}
             </code>
             <span className="tnum" style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>
-              {r.minutos.toFixed(0)} min
+              {r.pct_do_tempo.toFixed(1)}%
             </span>
             <span style={{ fontSize: 12, color: "var(--muted)" }}>
-              {r.pct_do_tempo.toFixed(1)}% do tempo · {r.n_eventos} evento(s)
+              do tempo observado · {r.n_eventos} evento(s)
             </span>
             {assumido && (
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--apoio)" }}>
@@ -160,12 +160,11 @@ function LinhaRotulo({ r, salvando, onClassificar }: {
             // série comparável; a decomposição é o detalhe que ganhamos agora.
             <div className="col" style={{ gap: 3, borderLeft: "2px solid var(--line)", paddingLeft: 9, marginTop: 2 }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>
-                família <b>{nomeHumano(r.familia)}</b> ·{" "}
-                {r.familia_minutos.toFixed(0)} min no total
+                família <b>{nomeHumano(r.familia)}</b>
               </span>
               {r.familia_variantes.map((v) => (
                 <span key={v.label} style={{ fontSize: 11, color: "var(--faint)" }}>
-                  <b>{nomeHumano(v.label)}</b> · {v.minutos.toFixed(0)} min ·{" "}
+                  <b>{nomeHumano(v.label)}</b> ·{" "}
                   {v.categoria
                     ? leanLabel(v.categoria === "valor_agregado" ? "va" : "desp")
                     : "sem categoria"}

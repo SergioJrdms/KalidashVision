@@ -7,11 +7,11 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapDashboard, type DetMock, type CompMock, type ProcHeaderMock, type SugMock } from "../lib/adapt";
-import { leanCor, leanLabel, leanLong, leanShort, fmtDur, type LeanShort } from "../design/helpers";
+import { leanCor, leanLabel, leanLong, leanShort, type LeanShort } from "../design/helpers";
 import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, Ring, toast } from "../design/ui";
 import { leituraDoPosto, nomeHumano } from "../design/rotulos";
 import type { Go } from "../design/Shell";
-import type { AcaoSugestao, InsightsQuantitativos, PerguntaGestor, PlacarProcesso } from "../lib/types";
+import type { AcaoSugestao, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
@@ -40,7 +40,12 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
           cobertura ou muita dúvida, ela diz isso em vez de fingir precisão. */}
       <LeituraEmPortugues det={det} />
 
-      {/* Fase 19 — HERÓI: o processo comparado com o melhor dia dele mesmo. */}
+      {/* ⭐ Fase 101 — O NÚMERO PRINCIPAL, acima de tudo. Vem de contagem
+          direta de presença na zona: sem VLM, sem rótulo, sem categoria. Se a
+          esteira de rótulo estiver toda errada, ISTO continua certo. */}
+      <PermanenciaHero p={det.permanencia} />
+
+      {/* Fase 19 — o placar da esteira antiga vira DETALHE, abaixo. */}
       <PlacarHero placar={det.insights?.placar || null} />
 
       {/* Fase 20 — a ação de maior alavancagem agora (1 por vez). */}
@@ -211,6 +216,91 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Fase 101 — PERMANÊNCIA: o número principal.
+//
+// "a única coisa que a gente conseguiu medir é tempo de permanência"
+// (Fernando, 12/08). Frames → detecção → está no polígono do posto? → acumula.
+//
+// ⛔ SÓ PERCENTUAL, NUNCA DURAÇÃO. A captura é uma amostra sistemática de ~50%
+// de cada hora: o percentual é estimativa não-enviesada do turno, o minuto
+// absoluto seria METADE da verdade. Mostrar minuto seria ERRADO, não só feio.
+// ═══════════════════════════════════════════════════════════════════════
+function PermanenciaHero({ p }: { p: Permanencia | null }) {
+  if (!p || p.sem_dado) {
+    return (
+      <Card style={{ padding: "20px 22px" }}>
+        <div className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>
+          Permanência no posto
+        </div>
+        <p style={{ fontSize: 14, color: "var(--muted)", margin: "6px 0 0" }}>
+          Ainda não há observação suficiente para medir o turno.
+        </p>
+      </Card>
+    );
+  }
+  const cor = p.no_posto_pct >= 75 ? leanCor("va") : p.no_posto_pct >= 55 ? "#c98a00" : leanCor("desp");
+  return (
+    <Card style={{ padding: "22px 24px", borderLeft: `3px solid ${cor}`, background: "linear-gradient(120deg, var(--soft), #fff 60%)" }}>
+      <div className="row gap4 wrap" style={{ alignItems: "center" }}>
+        <Ring pct={p.no_posto_pct} size={104} stroke={10} color={cor}>
+          <div className="col" style={{ alignItems: "center", lineHeight: 1 }}>
+            <span className="font-display tnum" style={{ fontSize: 30, fontWeight: 700, color: "var(--ink)" }}>
+              {p.no_posto_pct.toFixed(0)}%
+            </span>
+            <span style={{ fontSize: 9, color: "var(--muted)", fontWeight: 700 }}>NO POSTO</span>
+          </div>
+        </Ring>
+        <div className="col grow" style={{ gap: 8, minWidth: 240 }}>
+          <div className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>
+            Permanência no posto
+            <Help width={280} text="Contado direto: para cada instante observado, o sistema verifica se há alguém dentro do polígono do posto. Não depende do que a câmera achou que a pessoa estava fazendo — só de onde ela estava." />
+          </div>
+          <p style={{ fontSize: 17, fontWeight: 700, color: "var(--ink)", margin: 0, lineHeight: 1.35 }}>
+            {p.frase}
+          </p>
+          {/* A ÁRVORE — três folhas (duas enquanto a orientação não é
+              verificada). Somam 100% do tempo observado, sem sobra. */}
+          <ArvorePermanencia p={p} />
+          {!p.orientacao_verificada && (
+            <span style={{ fontSize: 11.5, color: "var(--faint)", lineHeight: 1.5 }}>
+              O detalhe de para onde o operador estava voltado ainda não é
+              mostrado: a referência da câmera não foi confirmada com dado. Melhor
+              um número simples e certo do que um detalhe que pode estar invertido.
+            </span>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function ArvorePermanencia({ p }: { p: Permanencia }) {
+  const folhas = p.detalhado && p.no_posto_torno_pct !== null
+    ? [
+        { rot: "No posto, voltado para o torno", pct: p.no_posto_torno_pct as number, cor: leanCor("va") },
+        { rot: "No posto, voltado para outro lado", pct: p.no_posto_outro_lado_pct as number, cor: "#c98a00" },
+        { rot: "Fora do posto", pct: p.fora_pct, cor: leanCor("desp") },
+      ]
+    : [
+        { rot: "No posto", pct: p.no_posto_pct, cor: leanCor("va") },
+        { rot: "Fora do posto", pct: p.fora_pct, cor: leanCor("desp") },
+      ];
+  return (
+    <div className="col" style={{ gap: 4, marginTop: 2 }}>
+      {folhas.map((f) => (
+        <div key={f.rot} className="row gap2" style={{ alignItems: "center", fontSize: 12.5 }}>
+          <span style={{ width: 9, height: 9, borderRadius: 3, background: f.cor, flexShrink: 0 }} />
+          <span style={{ color: "var(--text)" }}>{f.rot}</span>
+          <span className="grow" />
+          <span className="tnum" style={{ fontWeight: 700, color: "var(--ink)" }}>{f.pct.toFixed(0)}%</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
 // Fase 19 — Placar do processo: "rodou a X% do seu melhor dia".
 // O processo comparado com ELE MESMO — máximo julgamento, zero micro-gestão.
 // Acende com 2+ dias; 1 dia → compara por sessão; 1 sessão → linha de base.
@@ -286,7 +376,11 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
             <div className="row gap1" style={{ marginTop: 2, padding: "6px 10px", borderRadius: 8, background: "var(--accent-soft)", width: "fit-content", maxWidth: "100%" }}>
               <Icon name="gem" size={14} color="var(--accent-deep)" />
               <span style={{ fontSize: 12.5, color: "var(--accent-deep)", fontWeight: 600 }}>
-                Rodando como o melhor {uni}, cada turno de {p.ganho.turno_h}h ganha <b>+{fmtDur(p.ganho.por_turno_s)} produtivas</b> (~+{fmtDur(p.ganho.por_mes_s)}/mês).
+                {/* ⛔ Fase 101 — o ganho vira PONTOS PERCENTUAIS. Ele era
+                    exibido em horas por turno e por mês; com captura amostrada
+                    a ~50% de cada hora, essas horas eram metade da verdade e a
+                    projeção mensal multiplicava o erro por 22. */}
+                Rodando como o melhor {uni}, o turno ganha <b>+{(p.dia_melhor.va_pct - p.dia_atual.va_pct).toFixed(0)} pontos percentuais</b>.
               </span>
             </div>
           )}
@@ -503,7 +597,7 @@ function LeituraEmPortugues({ det }: { det: DetMock }) {
   const s = det.snapshot;
   const l = leituraDoPosto({
     vaPct: s.va, vazioPct: s.vazio,
-    tempoObservadoMin: s.tempoObservadoMin,
+    limiarCoberturaMin: s.coberturaMin,   // limiar interno, não exibido
     semEvidenciaPct: s.semEvidencia,
   });
   const cor = l.tom === "ok" ? leanCor("va") : l.tom === "atencao" ? "var(--apoio)" : "var(--muted)";

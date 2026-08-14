@@ -637,8 +637,11 @@ check("o endpoint devolve a raiz da família", '"familia": familia_label(lbl)' i
 check("e o retrato da família inteira, com as variantes já classificadas",
       '"familia_variantes"' in src and '"familia_minutos"' in src)
 rot = open("frontend/src/pages/Rotulos.tsx").read()
+# Fase 101: o "min no total" saiu — duração absoluta não vai a superfície do
+# cliente (captura amostrada a ~50% de cada hora). A família continua na tela,
+# que é o que este bloco protege.
 check("a tela mostra a família com as variantes",
-      "familia_variantes" in rot and "min no total" in rot)
+      "familia_variantes" in rot and "família" in rot)
 check("e explica o histórico sem renomear nada",
       "o instrumento não coletava o estado da máquina" in rot)
 check("distinguindo 'não perguntávamos' de 'perguntamos e não deu para ver'",

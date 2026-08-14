@@ -174,20 +174,24 @@ check("Configurações fica no rodapé, fora do grupo",
       and 'tab: "configuracoes"' not in avanc and 'tab: "configuracoes"' not in visiveis)
 
 print("\n[8] A conclusão em português — e ela degrada com honestidade")
-r = js_eval("leituraDoPosto({vaPct: 75, vazioPct: 25, tempoObservadoMin: 520, "
+r = js_eval("leituraDoPosto({vaPct: 75, vazioPct: 25, limiarCoberturaMin: 520, "
             "semEvidenciaPct: 3})")
 check("gera a frase do dia cheio", r.returncode == 0, r.stderr[-300:])
 if r.returncode == 0:
     L = json.loads(r.stdout)
     check("cita o rendimento em %", "75%" in L["frase"], L["frase"])
-    check("e a ausência em h/min, não em minutos crus",
-          "2h10" in L["frase"], L["frase"])
+    # ⛔ Fase 101 — REVOGADO. A frase dizia "o operador esteve ausente 2h10".
+    # A captura amostra ~50% de cada hora: esse "2h10" era METADE do tempo real
+    # de ausência, apresentado como se fosse o total. Era ERRADO, não feio.
+    check("a ausência vem em PERCENTUAL, nunca em duração",
+          "25%" in L["frase"] and not re.search(r"\d+h\d*|\d+\s*min\b", L["frase"]),
+          L["frase"])
     for proibido in ("valor agregado", "categoria Lean", "não classificado",
                      "concordância", "desperdício"):
         check(f"não usa jargão: '{proibido}'", proibido not in L["frase"].lower()
               or proibido == "desperdício", L["frase"])
 # Pouca cobertura: NÃO finge precisão.
-r = js_eval("leituraDoPosto({vaPct: 100, vazioPct: 0, tempoObservadoMin: 12})")
+r = js_eval("leituraDoPosto({vaPct: 100, vazioPct: 0, limiarCoberturaMin: 12})")
 if r.returncode == 0:
     L = json.loads(r.stdout)
     check("dia com pouca cobertura NÃO afirma percentual",
@@ -195,7 +199,7 @@ if r.returncode == 0:
     check("e diz o porquê", "pouco material" in L["frase"], L["frase"])
     check("com tom fraco", L["tom"] == "fraco", L["tom"])
 # Muita dúvida: a frase sai, com a ressalva colada.
-r = js_eval("leituraDoPosto({vaPct: 80, vazioPct: 10, tempoObservadoMin: 400, "
+r = js_eval("leituraDoPosto({vaPct: 80, vazioPct: 10, limiarCoberturaMin: 400, "
             "semEvidenciaPct: 35})")
 if r.returncode == 0:
     L = json.loads(r.stdout)

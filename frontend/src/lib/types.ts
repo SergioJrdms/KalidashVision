@@ -182,7 +182,24 @@ export interface PerguntaProcesso {
   criada_em: string;
 }
 
+/** Fase 101 — O NÚMERO PRINCIPAL. Vem de presença na zona, contado direto:
+ *  sem VLM, sem rótulo, sem categoria. Só percentual — a captura amostra ~50%
+ *  de cada hora, então duração absoluta seria metade da verdade. */
+export interface Permanencia {
+  no_posto_pct: number;
+  fora_pct: number;
+  /** null enquanto a orientação não foi verificada com dado. */
+  no_posto_torno_pct: number | null;
+  no_posto_outro_lado_pct: number | null;
+  orientacao_verificada: boolean;
+  /** false = a tela mostra SÓ permanência (os dois estados colapsados). */
+  detalhado: boolean;
+  sem_dado: boolean;
+  frase: string;
+}
+
 export interface DashboardData {
+  permanencia?: Permanencia;
   snapshot: {
     videos_analisados: number;
     tempo_total_observado_min: number;

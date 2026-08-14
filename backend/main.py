@@ -70,6 +70,10 @@ from .pipeline import (
     comparar_arvore,
     reavaliar_correcao,
     limpar_sufixo_estado,
+    # Fase 101 — o número principal.
+    permanencia_do_dia,
+    frase_permanencia,
+    frente_maquina_do_processo,
     custo_reavaliacao_usd,
     chave_frame_evento,
     limiares_movimento,
@@ -2969,7 +2973,9 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         sb, "eventos",
         "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
         "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-        "origem_validacao, confianca, principal, zona_contexto",
+        "origem_validacao, confianca, principal, zona_contexto, "
+        # Fase 101: o NÚMERO PRINCIPAL sai destas duas colunas e de mais nada.
+        "papel_pessoa, orientacao",
         empresa=user.empresa, processo=nome,
     )
     videos = varrer(
@@ -3121,8 +3127,19 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         for d in dist_enriquecida[:15]
     ]
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Fase 101 — O NÚMERO PRINCIPAL. Calculado DEPOIS de tudo e sem depender
+    # de nada acima: não lê `dist_enriquecida`, não lê `comps_full`, não lê
+    # categoria. Se toda a esteira de rótulo/categoria estiver errada, este
+    # número continua certo — é o ponto da fase.
+    # ═══════════════════════════════════════════════════════════════════
+    _frente = frente_maquina_do_processo(sb, user.empresa, nome)
+    permanencia = permanencia_do_dia(evs, _frente)
+    permanencia["frase"] = frase_permanencia(permanencia)
+
     return {
         "snapshot": snapshot,
+        "permanencia": permanencia,
         "sugestoes": sugs,
         "eventos_pendentes": pendentes.count or 0,
         "perguntas_pendentes": perguntas_pend.count or 0,
