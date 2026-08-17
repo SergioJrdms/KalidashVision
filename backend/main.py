@@ -3586,22 +3586,37 @@ def listar_eventos(
 ):
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
-    q = (
-        sb.table("eventos")
-        .select(
-            "id, video_id, comportamento_label, descricao_bruta, tempo_inicio_s, "
-            "tempo_fim_s, confianca, validado_humano, validacao_correto, n_amostras, "
-            "label_corrigido, origem_validacao, frame_inicio, frame_fim, bbox_inicio, pessoa_track_id, principal, papel_pessoa"
-        )
-        .eq("empresa", user.empresa)
-        .eq("processo", nome)
+    _COLS = (
+        "id, video_id, comportamento_label, descricao_bruta, tempo_inicio_s, "
+        "tempo_fim_s, confianca, validado_humano, validacao_correto, n_amostras, "
+        "label_corrigido, origem_validacao, frame_inicio, frame_fim, bbox_inicio, "
+        "pessoa_track_id, principal, papel_pessoa"
     )
-    if status_filter == "pendente":
-        q = q.or_("validado_humano.eq.false,validado_humano.is.null")
-    elif status_filter == "validado":
-        q = q.eq("validado_humano", True)
 
-    r = q.order("tempo_inicio_s").limit(500).execute()
+    def _buscar(cols: str):
+        _q = (
+            sb.table("eventos")
+            .select(cols)
+            .eq("empresa", user.empresa)
+            .eq("processo", nome)
+        )
+        if status_filter == "pendente":
+            _q = _q.or_("validado_humano.eq.false,validado_humano.is.null")
+        elif status_filter == "validado":
+            _q = _q.eq("validado_humano", True)
+        return _q.order("tempo_inicio_s").limit(500).execute()
+
+    # A NARRATIVA é opcional no banco: o SQL é rodado à mão, e a fila não pode
+    # ficar de pé esperando isso. Pede-se a coluna; se ela não existir, repete
+    # sem ela e a tela simplesmente não mostra o parágrafo.
+    try:
+        r = _buscar(_COLS + ", narrativa")
+    except Exception as _e:  # noqa: BLE001
+        if "narrativa" not in str(_e):
+            raise
+        log.warning("[fila] coluna `narrativa` não existe neste banco — "
+                    "seguindo sem ela (rode o schema.sql para tê-la).")
+        r = _buscar(_COLS)
     itens = r.data or []
     # Fase 16: só os PRINCIPAIS (1/min) vão pros cards de validação; os crus de
     # auditoria (principal=False) ficam de fora. Vídeos antigos (null) seguem.

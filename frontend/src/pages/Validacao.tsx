@@ -540,9 +540,27 @@ function FilaFoco({
             </div>
             {passo === "descricao" && phase === "idle" && (
               <div className="col" style={{ gap: 12, marginBottom: 6 }}>
-                <p className="pretty font-display" style={{ fontSize: 18, fontWeight: 600, color: "var(--ink)", lineHeight: 1.4, margin: 0, maxWidth: 620 }}>
-                  “{evento.descricao}”
-                </p>
+                {/* A NARRATIVA vem PRIMEIRO e maior. `descricao` é a frase de
+                    UM instante — a primeira do bloco dominante do minuto —, e
+                    era ela sozinha que aparecia aqui: um quadro falando pelo
+                    trecho inteiro. A narrativa conta a sequência toda; a frase
+                    curta continua abaixo, porque é ela que vira rótulo e o
+                    gestor precisa ver as duas para julgar a diferença. */}
+                {evento.narrativa ? (
+                  <>
+                    <p className="pretty font-display" style={{ fontSize: 18, fontWeight: 600, color: "var(--ink)", lineHeight: 1.5, margin: 0, maxWidth: 680 }}>
+                      {evento.narrativa}
+                    </p>
+                    <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
+                      resumido como{" "}
+                      <b style={{ color: "var(--text)" }}>“{evento.descricao}”</b>
+                    </p>
+                  </>
+                ) : (
+                  <p className="pretty font-display" style={{ fontSize: 18, fontWeight: 600, color: "var(--ink)", lineHeight: 1.4, margin: 0, maxWidth: 620 }}>
+                    “{evento.descricao}”
+                  </p>
+                )}
                 <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
                   É isso que está acontecendo nas imagens?
                 </p>

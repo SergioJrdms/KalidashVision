@@ -1983,12 +1983,20 @@ REGRA ÚNICA DE PRODUTIVIDADE DO OPERADOR ESCOLHIDO:
 O CONTEXTO de mãos/orientação vem de sensores e prevalece sobre impressão visual. Não use categoria Lean, vocabulário, estado mecânico da máquina ou conhecimento presumido do processo.
 
 Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). Em "acoes", descreva cada pessoa marcada para a decisão ser auditável.
+
+Além das entradas por imagem, escreva um campo "resumo": a NARRATIVA do que aconteceu ao longo de TODA a sequência.
+- Percorra as imagens EM ORDEM e conte a passagem: onde a pessoa estava, o que mudou de uma para outra, o que permaneceu igual.
+- NÃO conclua numa ação só. Não escolha "a" atividade do trecho; se houve duas coisas, conte as duas, na ordem.
+- Não precisa ser curto. Duas ou três frases. Prefira ser específico a ser econômico.
+- Se nada mudou entre as imagens, DIGA ISSO — permanecer na mesma posição é um fato observado, não falta de informação.
+- Só o que se VÊ. Nada de rótulo, categoria, produtividade, estado da máquina ou suposição sobre a intenção.
+- Exemplo: "O operador está de pé à esquerda do torno, de costas para a câmera. Nas duas primeiras imagens as mãos estão sobre a máquina; na terceira ele se afasta meio passo e vira o corpo para a bancada. Ninguém mais entra no posto durante a sequência."
 - "operador_estado" deve ser "identificado" quando exatamente um candidato ocupa funcionalmente o posto, "ausente" quando está claro que nenhum candidato é o operador, ou "incerto" quando há oclusão/evidência insuficiente;
 - "operador" é obrigatório somente em "identificado" e deve ser um rótulo visível naquela imagem; nos outros estados deve ser null;
 - "trabalho" só pode ser true/false em "identificado"; nos outros estados deve ser null;
 - "motivo" deve ser um destes valores: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa_ou_celular", "sem_atividade", "sem_leitura".
 
-{{"trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "conversando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "ausente", "operador": null, "acoes": {{"P1": "passando ao lado do posto"}}, "imovel": false, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
+{{"resumo": "Duas ou três frases contando a sequência em ordem, sem concluir uma ação.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "conversando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "ausente", "operador": null, "acoes": {{"P1": "passando ao lado do posto"}}, "imovel": false, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA_CAM2_V8 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
@@ -3720,6 +3728,51 @@ def _contexto_zonas(amostra: Amostra, modo_op: bool,
     return txt
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# A NARRATIVA DO MINUTO. Descrever primeiro, rotular depois.
+#
+# O PROBLEMA, medido no código: o VLM já descreve TODOS os quadros — o prompt
+# pede uma entrada por imagem e ele devolve 12 num minuto. Mas `_abrir_evento`
+# guarda `descricao_bruta` da PRIMEIRA observação do bloco dominante e nunca a
+# atualiza conforme o bloco cresce. As outras onze são descartadas.
+#
+# Resultado: o card de 180s→240s mostra a frase de UM instante como se fosse o
+# minuto. Não é "sempre o último frame" — é o primeiro do bloco vencedor —, mas
+# o efeito é o mesmo: um instante falando pelo minuto inteiro.
+#
+# ⚠️ A NARRATIVA ACOMPANHA, NÃO SUBSTITUI. As descrições por instante seguem
+# existindo: são elas que permitem `etapa_segmentar_eventos` cortar o minuto
+# quando a ação muda ("operou 40s, saiu 20s"). Trocá-las por uma narrativa só
+# colapsaria o minuto num bloco e apagaria transições que são REAIS. A
+# narrativa é para o humano ler; as por instante são para a máquina cortar.
+#
+# ⚠️ E ELA NÃO DECIDE NADA. Desde a Fase 101 o número vem da permanência, que
+# não lê descrição. É por isso que mexer no prompt ficou seguro — não era, duas
+# semanas atrás.
+#
+# CUSTO: nenhuma chamada nova (o campo entra no MESMO JSON, e o modelo já está
+# olhando todos os quadros). ~60 tokens de saída por minuto analisado.
+# ═════════════════════════════════════════════════════════════════════════
+_NARRATIVA = os.environ.get("KV_NARRATIVA", "off").strip().lower() not in (
+    "off", "0", "false", "no", "")
+
+
+def _resumo_da_sequencia(bruto: dict) -> str | None:
+    """A narrativa do minuto, se o modelo a devolveu e a flag estiver ligada.
+
+    Fora da flag devolve None — e None não vira texto nenhum no banco, em vez
+    de virar string vazia que depois ninguém sabe se é "não pedimos" ou "o
+    modelo não respondeu"."""
+    if not _NARRATIVA:
+        return None
+    r = (bruto or {}).get("resumo")
+    if not isinstance(r, str):
+        return None
+    r = r.strip()
+    # Uma ou duas palavras não é narrativa — é ruído com cara de resposta.
+    return r if len(r) >= 25 else None
+
+
 def _analisar_sequencia_vlm(
     groq_client: Groq,
     grupo: list[Amostra],
@@ -3822,7 +3875,9 @@ def _analisar_sequencia_vlm(
             max_tokens=180 * max(1, n_cam1),
             imagens_extra=imgs[1:],
         )
-        trechos = (json.loads(resposta) or {}).get("trechos", [])
+        # Guarda o objeto INTEIRO: `resumo` é irmão de `trechos`, não filho.
+        bruto = json.loads(resposta) or {}
+        trechos = bruto.get("trechos", [])
     except json.JSONDecodeError:
         log.warning("[sequencia] JSON inválido no grupo de %d frames", n_cam1)
         return {}
@@ -3862,6 +3917,10 @@ def _analisar_sequencia_vlm(
                         if isinstance(t.get("trabalho"), bool)
                         else None
                     ),
+                    # A narrativa é do MINUTO, não do instante — por isso ela
+                    # viaja igual em todas as observações do grupo. Quem a
+                    # grava é o evento, uma vez só.
+                    "resumo": _resumo_da_sequencia(bruto),
                 }
         return saida
 
@@ -3931,6 +3990,10 @@ def _analisar_sequencia_vlm(
             "operador_track_id": operador_tid,
             "trabalho": trabalho,
             "produtividade_motivo": motivo,
+            # A narrativa é do MINUTO, não do instante — por isso ela viaja
+            # igual em todas as observações do grupo. Quem a grava é o evento,
+            # uma vez só.
+            "resumo": _resumo_da_sequencia(bruto),
         }
         if i in indices_vistos:
             # Duas respostas para a mesma imagem são uma contradição do
@@ -4566,6 +4629,7 @@ def etapa_analise_vlm(
             do_instante = _bloco.get("acoes") or {}
             cena_maq, cena_imovel = _bloco.get("maquina"), _bloco.get("imovel")
             cena_trabalho = _bloco.get("trabalho")
+            cena_narrativa = _bloco.get("resumo")
             cena_motivo = _bloco.get("produtividade_motivo")
             operador_estado = _bloco.get("operador_estado")
             operador_tid = _bloco.get("operador_track_id")
@@ -4714,6 +4778,10 @@ def etapa_analise_vlm(
                     "produtividade_motivo": (
                         cena_motivo if papel_obs == "operador" else None
                     ),
+                    # A narrativa é do MINUTO inteiro, então é a MESMA em todas
+                    # as observações do grupo — inclusive nas de visitante: ela
+                    # conta a cena, não julga a pessoa.
+                    "narrativa": cena_narrativa,
                     # Fase 91: o que a LATERAL contou no mesmo instante. Viaja
                     # junto para o fato das camadas — sem virar observação
                     # própria, porque descrever a segunda pessoa exigiria uma
@@ -5115,6 +5183,11 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         # t_fim na 92, a própria orientação na 97). Sinal calculado que não
         # atravessa TODAS as fronteiras até o banco não existe.
         "orientacao": o.get("orientacao"),
+        # A NARRATIVA DO MINUTO. Diferente de `descricao_bruta`, que é a frase
+        # de UM instante (a primeira do bloco), esta conta a sequência inteira.
+        # Ela não é atualizada conforme o bloco cresce porque não precisa: é a
+        # mesma em todas as observações do minuto, por construção.
+        "narrativa": o.get("narrativa"),
         # Moda por evento cru: o minuto pondera as modas dos crus, então o cru
         # precisa da sua. Um quadro isolado não decide para onde a pessoa olha.
         "_orient": Counter([o["orientacao"]] if o.get("orientacao") else []),
@@ -5498,6 +5571,11 @@ def etapa_consolidar_principais(
             bucket_operador = no_bucket
         principais.append({
             "pessoa_track_id": rep["pessoa_track_id"],
+            # A narrativa do minuto vem de qualquer observação do balde — é a
+            # mesma em todas. `rep` primeiro por consistência com o resto.
+            "narrativa": (rep.get("narrativa")
+                          or next((e.get("narrativa") for e, _ in bucket_papel
+                                   if e.get("narrativa")), None)),
             "comportamento_label": escolhido,
             "descricao_bruta": rep["descricao_bruta"],
             "tempo_inicio_s": round(ws, 2),
@@ -7781,6 +7859,10 @@ def etapa_persistir(
             # assim que dá para comparar antes/depois no mesmo dado.
             "maos_maquina": e.get("maos_maquina"),
             "orientacao": e.get("orientacao"),
+            # A NARRATIVA DO MINUTO (`KV_NARRATIVA`). Só é escrita quando existe
+            # — assim o `insert` não carrega a chave em banco que ainda não tem
+            # a coluna, e a fase pode subir antes do SQL rodar.
+            **({"narrativa": e["narrativa"]} if e.get("narrativa") else {}),
             # A decisão binária já era produzida pelo VLM e atravessava a
             # consolidação, mas era descartada exatamente nesta fronteira.
             # Sem persistência, todo reload apagava a produtividade direta e
@@ -7898,7 +7980,23 @@ def etapa_persistir(
     CHUNK = 100
     inseridos: list[dict] = []
     for i in range(0, len(linhas_eventos), CHUNK):
-        resp = sb.table("eventos").insert(linhas_eventos[i : i + CHUNK]).execute()
+        lote = linhas_eventos[i : i + CHUNK]
+        try:
+            resp = sb.table("eventos").insert(lote).execute()
+        except Exception as erro:   # noqa: BLE001
+            # ⚠️ A NARRATIVA NÃO PODE DERRUBAR UM VÍDEO DA CAMPANHA. Ela é
+            # texto para o humano ler; o vídeo carrega presença, pose e tempo,
+            # que são o produto. Se a coluna ainda não existe no banco (o SQL
+            # é rodado à mão), o lote é reenviado SEM ela e a ingestão segue —
+            # a narrativa passa a aparecer sozinha no dia em que a coluna
+            # existir, sem redeploy.
+            if "narrativa" not in str(erro):
+                raise
+            log.warning("[narrativa] coluna `narrativa` não existe neste banco "
+                        "— gravando sem ela (rode o schema.sql para tê-la).")
+            for _l in lote:
+                _l.pop("narrativa", None)
+            resp = sb.table("eventos").insert(lote).execute()
         inseridos.extend(resp.data or [])
     # Fase 36: ids dos PRINCIPAIS (mesma ordem de `eventos` — os primeiros N
     # de linhas_eventos), p/ pré-extrair os frames enquanto o vídeo é local.

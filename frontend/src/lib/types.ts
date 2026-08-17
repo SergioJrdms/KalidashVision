@@ -336,6 +336,9 @@ export interface EventoPendente {
   /** Hora de PAREDE da fábrica, já formatada pelo servidor. O navegador não
    *  reinterpreta: formatar no cliente relia o carimbo como UTC e subtraía o
    *  fuso — 07h virava 04h. */
+  /** A NARRATIVA do minuto: o trecho contado por inteiro, em vez da frase de
+   *  um instante só. Ausente enquanto a coluna não existir no banco. */
+  narrativa?: string | null;
   instante_fabrica?: string | null;
   faixa_hora_fabrica?: string | null;
   instante_iso?: string | null;

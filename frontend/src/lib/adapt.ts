@@ -64,7 +64,7 @@ export interface DetMock {
 }
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
-export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; hora: string | null; faixaHora: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
+export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; narrativa: string | null; hora: string | null; faixaHora: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[] }
 export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null; papel: string | null; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; desp: number }[] }
@@ -194,6 +194,9 @@ export function mapPendentes(rows: EventoPendente[]): PendMock[] {
     // fábrica. Calcular no navegador era o bug do "04h": o carimbo está em
     // hora de parede e o navegador em São Paulo o relia como UTC, tirando três
     // horas. Aqui não há `new Date` — não há o que deslocar.
+    // A narrativa acompanha a descrição, não a substitui: as duas aparecem, e
+    // a diferença entre elas é justamente o que o gestor precisa ver.
+    narrativa: e.narrativa ?? null,
     hora: e.instante_fabrica ?? null,
     faixaHora: e.faixa_hora_fabrica ?? null,
     irmaos: (e.irmaos || []).map((s) => ({

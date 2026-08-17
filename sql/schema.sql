@@ -1578,3 +1578,29 @@ alter table amostragem_cega enable row level security;
 drop policy if exists amostragem_cega_rw on amostragem_cega;
 create policy amostragem_cega_rw on amostragem_cega for all using (true) with check (true);
 grant select, insert, update, delete on amostragem_cega to anon, authenticated;
+
+
+-- ════════════════════════════════════════════════════════════════════════
+-- A NARRATIVA DO MINUTO (KV_NARRATIVA)
+--
+-- `descricao_bruta` é a frase de UM instante — a primeira do bloco dominante
+-- do minuto. O VLM já descreve todos os quadros (uma entrada por imagem), mas
+-- o evento guardava só uma e descartava as outras onze. O card de 180s→240s
+-- mostrava um instante como se fosse o minuto inteiro.
+--
+-- `narrativa` é o mesmo minuto contado por inteiro: onde a pessoa estava, o
+-- que mudou de um quadro para o outro, o que permaneceu igual. Sem concluir
+-- uma ação, sem rótulo, sem julgamento.
+--
+-- ⚠️ ELA ACOMPANHA, NÃO SUBSTITUI. `descricao_bruta` continua sendo o que
+-- alimenta o cluster e o corte do evento dentro do minuto. A narrativa é para
+-- o humano ler; a descrição por instante é para a máquina cortar.
+--
+-- ⚠️ E NÃO DECIDE NADA. Desde a Fase 101 o número vem da permanência, que não
+-- lê descrição nenhuma.
+--
+-- Sem esta coluna o sistema continua funcionando: a ingestão detecta a
+-- ausência, regrava o lote sem o campo e segue. A narrativa passa a aparecer
+-- sozinha assim que a coluna existir, sem redeploy.
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists narrativa text;
