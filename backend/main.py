@@ -73,6 +73,8 @@ from .pipeline import (
     limpar_sufixo_estado,
     # Fase 101 — o número principal.
     permanencia_do_dia,
+    # Sugestões por regra, a partir dos números medidos.
+    sugestoes_do_posto,
     # Fase 102 — a precisão da descrição, medida.
     origens_sem_observacao,
     descricoes_que_afirmam_estado,
