@@ -21,6 +21,56 @@ import type { AcaoValidacao } from "../lib/types";
 
 const TAMANHO_LOTE = 10;
 
+// ═══════════════════════════════════════════════════════════════════════
+// A FILA SEGUE O RELÓGIO DA FÁBRICA.
+//
+// O gestor validava 06h, 14h, 09h, 07h em sequência e aquilo parecia sorteio.
+// Não era: a ordenação usava `tempo_inicio_s`, que é o tempo DENTRO do vídeo —
+// e todo vídeo começa em 0s. Com 46 vídeos no dia, saíam primeiro todos os
+// trechos de 0s de todos os vídeos, depois todos os de 10s, e assim por diante.
+//
+// A chave certa é o instante de relógio (gravação do vídeo + deslocamento
+// dentro dele), e o backend passou a ordenar por ela. O que muda AQUI é só a
+// leitura: o bloco ganha marcos de hora, para o gestor ver que está
+// atravessando o turno em ordem — 06h, depois 07h, depois 08h.
+//
+// ⚠️ SÓ APRESENTAÇÃO. O conjunto da fila, o gate, o que é aprendido e como se
+// valida continuam exatamente os mesmos.
+// ═══════════════════════════════════════════════════════════════════════
+
+/** "07h" — a faixa horária do trecho, no relógio de quem está lendo. */
+function faixaHora(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${String(d.getHours()).padStart(2, "0")}h`;
+}
+
+/** "07:42" — o instante exato, para o gestor localizar o momento no turno.
+ *  É LOCALIZADOR, não métrica: a regra que proíbe duração em tela do cliente
+ *  vale para "quanto tempo", não para "quando". */
+function horaMinuto(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** Marco de hora: aparece quando o card inicia uma faixa horária nova. */
+function MarcoHora({ hora }: { hora: string }) {
+  return (
+    <div className="row gap2" style={{ alignItems: "center", margin: "4px 0 2px" }}>
+      <span style={{
+        fontSize: 12, fontWeight: 800, letterSpacing: ".04em", color: "var(--accent-deep)",
+        background: "var(--accent-soft)", borderRadius: 999, padding: "3px 11px",
+      }}>{hora}</span>
+      <span style={{ flex: 1, height: 1, background: "var(--line)" }} />
+    </div>
+  );
+}
+
+
+
 // "cam1" → "Câmera 1"; fallback gracioso para ids fora do padrão.
 function camLabel(camId: string | null | undefined): string {
   if (!camId) return "Câmera";
@@ -434,6 +484,7 @@ function FilaFoco({
         totalLotes={totalLotes}
         restantesBloco={restantesBloco}
         naFilaAposBloco={naFilaAposBloco}
+        faixa={faixaHora(evento.quandoISO)}
       />
 
       <div style={{ position: "relative" }}>
@@ -451,6 +502,17 @@ function FilaFoco({
         >
           <div className="row gap2" style={{ justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--line-2)" }}>
             <span className="row gap2" style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)", flexWrap: "wrap" }}>
+              {/* O INSTANTE DO TURNO vem primeiro, e em destaque: é por ele
+                  que o gestor se situa na linha do tempo. O par
+                  `120.0s→180.0s` continua ao lado como localizador dentro do
+                  arquivo de vídeo — ferramenta interna, não métrica. */}
+              {horaMinuto(evento.quandoISO) && (
+                <span style={{ fontFamily: "var(--sans)", fontWeight: 800, fontSize: 12.5,
+                               color: "var(--accent-deep)", background: "var(--accent-soft)",
+                               borderRadius: 999, padding: "2px 10px" }}>
+                  {horaMinuto(evento.quandoISO)}
+                </span>
+              )}
               <Icon name="user" size={13} /> {evento.papel === "operador" ? "OPERADOR" : evento.papel === "visitante" ? "VISITANTE NO POSTO" : `PESSOA-${String(evento.pessoa).padStart(3, "0")}`} · {evento.ini.toFixed(1)}s→{evento.fim.toFixed(1)}s · {fmtSeg(evento.fim - evento.ini)}
               {((evento.irmaos && evento.irmaos.length > 0) || evento.segundoAngulo) && (
                 <span className="badge badge-purple" style={{ fontFamily: "var(--sans)" }}>
@@ -634,13 +696,21 @@ function FilaFoco({
   );
 }
 
-function BarraLote({ loteIdx, totalLotes, restantesBloco, naFilaAposBloco }: { loteIdx: number; totalLotes: number; restantesBloco: number; naFilaAposBloco: number }) {
+function BarraLote({ loteIdx, totalLotes, restantesBloco, naFilaAposBloco, faixa }: { loteIdx: number; totalLotes: number; restantesBloco: number; naFilaAposBloco: number; faixa?: string | null }) {
   return (
     <Card style={{ padding: "10px 14px", background: "var(--soft)" }}>
       <div className="row gap2" style={{ alignItems: "center", flexWrap: "wrap" }}>
         <span className="row gap1" style={{ fontSize: 11.5, fontWeight: 700, color: "var(--accent-deep)", background: "var(--accent-soft)", border: "1px solid var(--p-200)", borderRadius: 99, padding: "3px 10px" }}>
           <Icon name="layers" size={12} /> Lote {loteIdx} de {totalLotes}
         </span>
+        {/* Onde o gestor está no TURNO. A fila anda com o relógio, e ver a
+            faixa avançar (06h → 07h → 08h) é o que torna a ordem perceptível
+            no modo de foco único, onde só um card aparece por vez. */}
+        {faixa && (
+          <span className="row gap1" style={{ fontSize: 11.5, fontWeight: 700, color: "var(--ink)" }}>
+            <Icon name="clock" size={12} /> por volta das {faixa}
+          </span>
+        )}
         <span style={{ fontSize: 12.5, color: "var(--text)" }}>
           <b className="tnum" style={{ color: "var(--ink)" }}>{restantesBloco}</b> {restantesBloco === 1 ? "item neste lote" : "itens neste lote"}
         </span>
@@ -679,9 +749,22 @@ function LoteConcluido({ loteIdx, totalLotes, restantesFila, tamanhoLote, onProx
 }
 
 function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolver: (ev: PendMock, k: AcaoValidacao, l?: string) => void; labels: string[] }) {
+  // Marca a troca de faixa horária. A fila já chega em ordem cronológica do
+  // backend; aqui só se torna visível que ela está em ordem.
+  let horaAnterior: string | null = null;
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(min(100%, 320px),1fr))", gap: 14 }}>
-      {queue.map((ev) => <CardEvento key={ev.id} ev={ev} onResolver={onResolver} labels={labels} />)}
+      {queue.map((ev) => {
+        const h = faixaHora(ev.quandoISO);
+        const novaFaixa = h !== null && h !== horaAnterior;
+        if (h !== null) horaAnterior = h;
+        return (
+          <div key={ev.id} className="col" style={{ gap: 6 }}>
+            {novaFaixa && <MarcoHora hora={h!} />}
+            <CardEvento ev={ev} onResolver={onResolver} labels={labels} />
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -3749,6 +3749,29 @@ def listar_eventos(
             )
         itens = relevantes
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ORDEM CRONOLÓGICA REAL — a fila segue o relógio da fábrica.
+    #
+    # `q.order("tempo_inicio_s")` lá em cima ordena pelo tempo DENTRO do vídeo,
+    # e todo vídeo começa em 0s. Com 46 vídeos no dia, o resultado é: todos os
+    # trechos de 0s de todos os vídeos, depois todos os de 10s, e assim por
+    # diante — o gestor recebia 06h, 14h, 09h, 07h em sequência. Parecia
+    # sorteio e não era; era ordenação pela chave errada.
+    #
+    # A chave certa é o instante de RELÓGIO: quando o vídeo foi gravado mais o
+    # deslocamento dentro dele. `gravado_em` já vem anexado pelo bloco de
+    # agrupamento acima, então isto não custa consulta nenhuma.
+    #
+    # ⚠️ SÓ ORDEM. Nada de o que entra, o que é escondido pelo gate, o que é
+    # aprendido ou como se valida — o conjunto é exatamente o mesmo, em outra
+    # sequência. Evento sem `gravado_em` (vídeo antigo) vai para o fim em vez
+    # de para o começo: sem relógio, ele não tem lugar na linha do tempo, e
+    # jogá-lo no início desalinharia justamente a primeira hora.
+    def _instante(e: dict) -> tuple:
+        g = e.get("gravado_em")
+        return (0 if g else 1, str(g or ""), float(e.get("tempo_inicio_s") or 0))
+
+    itens.sort(key=_instante)
     return itens
 
 
