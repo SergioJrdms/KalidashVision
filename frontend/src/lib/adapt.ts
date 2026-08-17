@@ -11,6 +11,7 @@ import type {
   InsightsQuantitativos,
   PadraoGlobal,
   Permanencia,
+  ProdutividadePosto,
   PadraoProcesso,
   PerguntaProcesso,
   Processo,
@@ -58,6 +59,8 @@ export interface DetMock {
   insights: InsightsQuantitativos | null;
   /** Fase 101 — o número principal, passado adiante sem transformação. */
   permanencia: Permanencia | null;
+  /** Contrato comercial: sem rótulos Lean e sem duração pública. */
+  produtividade: ProdutividadePosto | null;
 }
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
@@ -118,6 +121,7 @@ export function mapHeader(p: ProcessoDetalhe): ProcHeaderMock {
 export function mapDashboard(d: DashboardData): DetMock {
   const s = d.snapshot;
   const permanencia = d.permanencia ?? null;
+  const produtividade = d.produtividade_posto ?? null;
   const cv = d.composicao_valor;
   const top = s.distribuicao_comportamentos[0];
   const comportamentos: CompMock[] = s.distribuicao_comportamentos.map((c) => ({
@@ -169,6 +173,7 @@ export function mapDashboard(d: DashboardData): DetMock {
     perguntasPendentes: d.perguntas_pendentes || 0,
     insights: d.insights_quantitativos || null,
     permanencia,
+    produtividade,
   };
 }
 

@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from .auth import CurrentUser, get_current_user
 from .jobs import JOBS
+from .productivity import agregar_produtividade
 from .pipeline import (
     extrair_3_frames_evento,
     extrair_3_frames_tempo,
@@ -3134,7 +3135,11 @@ def _processo_nome(sb, user: CurrentUser, processo_id: str) -> str:
 
 
 @app.get("/processos/{processo_id}/dashboard")
-def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
+def dashboard(
+    processo_id: str,
+    janela_dias: int = Query(7, ge=1, le=30),
+    user: CurrentUser = Depends(get_current_user),
+):
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
 
@@ -3154,12 +3159,15 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
         "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
         "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
         "origem_validacao, confianca, principal, zona_contexto, "
-        # Fase 101: o NÚMERO PRINCIPAL sai destas duas colunas e de mais nada.
-        "papel_pessoa, orientacao",
+        # Caso de uso comercial: identidade/presença + decisão binária da
+        # descrição. Cluster, vocabulário e categoria Lean não entram na conta.
+        "papel_pessoa, maos_maquina, orientacao, trabalho, descricao_bruta, "
+        "n_amostras, versao_instrumento",
         empresa=user.empresa, processo=nome,
     )
     videos = varrer(
-        sb, "videos", "id, nome, duracao_s, total_eventos, total_pessoas, processado_em",
+        sb, "videos", "id, nome, duracao_s, total_eventos, total_pessoas, "
+        "cam_id, gravado_em, processado_em",
         empresa=user.empresa, processo=nome,
     )
     videos.sort(key=lambda v: v.get("processado_em") or "", reverse=True)
@@ -3326,9 +3334,86 @@ def dashboard(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     permanencia = permanencia_do_dia(evs, _frente)
     permanencia["frase"] = frase_permanencia(permanencia)
 
+    # ── O PRODUTO VENDIDO ──────────────────────────────────────────────
+    # O dashboard antigo misturava presença, labels de vocabulário e Lean.
+    # Este contrato usa uma única decisão por evento e separa os dois
+    # denominadores: presença no período e produtividade quando o operador foi
+    # identificado. A cobertura impede que falha de identidade vire acusação
+    # de improdutividade.
+    _tz_fabrica, _ = fuso_do_processo(sb, user.empresa, nome)
+    _meta_video: dict[str, tuple[datetime, str | None]] = {}
+    for _v in videos:
+        _dt = _inicio_video_dt(_v)
+        if _v.get("id") and _dt is not None:
+            if _dt.tzinfo is None:
+                _dt = _dt.replace(tzinfo=_tz_fabrica)
+            else:
+                _dt = _dt.astimezone(_tz_fabrica)
+            _meta_video[str(_v["id"])] = (_dt, _v.get("cam_id"))
+
+    _eventos_prod: list[dict] = []
+    for _e in evs:
+        # V1–V8 elegeram P1 por permanência/bbox e não persistiram a decisão
+        # direta. Reinterpretar esse histórico com o contrato novo misturaria
+        # instrumentos incompatíveis no mesmo percentual.
+        if int(_e.get("versao_instrumento") or 0) < 9:
+            continue
+        _meta = _meta_video.get(str(_e.get("video_id")))
+        if not _meta:
+            continue
+        _dt, _cam = _meta
+        _ee = dict(_e)
+        _ee["_capturado_em"] = _dt
+        _ee["_dia"] = _dt.date().isoformat()
+        _ee["_cam_id"] = _cam
+        _eventos_prod.append(_ee)
+
+    _frentes_por_camera: dict[str, str] = {}
+    _orientacao_liberada = os.environ.get(
+        "KV_ORIENTACAO_VERIFICADA", "off"
+    ).strip().lower() in {"1", "true", "on", "yes"}
+    try:
+        for _z in varrer(
+            sb,
+            "zonas_camera",
+            "cam_id, papel, frente_maquina, ativo",
+            empresa=user.empresa,
+            processo=nome,
+        ):
+            if (
+                _orientacao_liberada
+                and
+                _z.get("ativo") is not False
+                and _z.get("papel") == "maquina"
+                and _z.get("cam_id")
+                and _z.get("frente_maquina")
+            ):
+                _frentes_por_camera[str(_z["cam_id"])] = str(_z["frente_maquina"])
+    except Exception as _exc:  # noqa: BLE001
+        log.warning("[produtividade] configuração por câmera indisponível: %s", _exc)
+
+    _ultimo_inicio = max(
+        (_e["_capturado_em"] for _e in _eventos_prod), default=None
+    )
+    _inicio_janela = (
+        _ultimo_inicio - timedelta(days=janela_dias) if _ultimo_inicio else None
+    )
+    _eventos_janela = [
+        _e for _e in _eventos_prod
+        if _inicio_janela is None or _e["_capturado_em"] >= _inicio_janela
+    ]
+    produtividade_posto = agregar_produtividade(
+        _eventos_janela,
+        frentes_por_camera=_frentes_por_camera,
+        eventos_estado_atual=_eventos_prod,
+        janela_dias=janela_dias,
+        agora=datetime.now(timezone.utc),
+    )
+
     return {
         "snapshot": snapshot,
         "permanencia": permanencia,
+        "produtividade_posto": produtividade_posto,
         # Fase 102: a descrição é o diferencial — e vem com o próprio
         # certificado de origem ao lado.
         "descricao_diagnostico": _diag_desc,

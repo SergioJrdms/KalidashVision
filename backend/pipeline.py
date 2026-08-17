@@ -904,6 +904,7 @@ def _anexar_segundo_angulo(
                 n_posto2 = 0              # Fase 91: quantas pessoas no posto
                 n_cena2 = 0               # Fase 91: quantas pessoas no quadro
                 bbox_no_posto = None      # Fase 82: a caixa de quem está no posto
+                candidatos_posto2: list[tuple[dict, int, bool]] = []
                 if res and res[0].boxes is not None and len(res[0].boxes) > 0:
                     boxes2 = res[0].boxes.xyxy.cpu().numpy()
                     ids2 = None
@@ -932,19 +933,14 @@ def _anexar_segundo_angulo(
                         )
                         n_cena2 += 1
                         if no_posto2:
-                            achou = True
                             n_posto2 += 1
-                            # Fase 82: guarda a MAIOR caixa dentro do posto. Com
-                            # duas pessoas na zona, a maior é a mais próxima da
-                            # câmera — mesmo critério de desempate que a eleição
-                            # do titular já usa na cam1.
                             bx1, by1, bx2, by2 = pessoa2["bbox"]
                             area2 = max(0, bx2 - bx1) * max(0, by2 - by1)
-                            if bbox_no_posto is None or area2 > bbox_no_posto[1]:
-                                bbox_no_posto = (pessoa2["bbox"], area2)
-                        # Fase 44: punho na zona 'maquina' da cam2 = operando.
-                        if rois2_maq and not maos and _maos_na_maquina(pessoa2, rois2_maq, w2, h2):
-                            maos = True
+                            maos_pessoa = bool(
+                                rois2_maq
+                                and _maos_na_maquina(pessoa2, rois2_maq, w2, h2)
+                            )
+                            candidatos_posto2.append((pessoa2, area2, maos_pessoa))
                         # Fase 84: descritor da cam2, do MESMO frame já decodificado
                         # e da MESMA inferência — custo adicional zero.
                         # Detecção sem id não vira descritor: sem chave estável,
@@ -958,8 +954,31 @@ def _anexar_segundo_angulo(
                                 # tracks do dia saíram sem rótulo — sem ele não
                                 # dá nem para medir separabilidade na lateral.
                                 no_posto=no_posto2,
-                                papel=("operador" if no_posto2 else "visitante"),
+                                papel=(
+                                    None
+                                    if PRODUTIVIDADE_OPERADOR_V9
+                                    else ("operador" if no_posto2 else "visitante")
+                                ),
                             )
+                    if PRODUTIVIDADE_OPERADOR_V9:
+                        # A lateral só confirma identidade geométrica com um
+                        # único ocupante. Duas pessoas não viram "a maior bbox"
+                        # e mãos pertencem exclusivamente ao candidato único.
+                        if len(candidatos_posto2) == 1:
+                            pessoa2, area2, maos = candidatos_posto2[0]
+                            achou = True
+                            bbox_no_posto = (pessoa2["bbox"], area2)
+                        elif len(candidatos_posto2) > 1:
+                            achou = None
+                            maos = False
+                    else:
+                        achou = bool(candidatos_posto2)
+                        maos = any(c[2] for c in candidatos_posto2)
+                        if candidatos_posto2:
+                            pessoa2, area2, _ = max(
+                                candidatos_posto2, key=lambda c: c[1]
+                            )
+                            bbox_no_posto = (pessoa2["bbox"], area2)
                     if bbox_no_posto is not None:
                         am.bbox_cam2 = bbox_no_posto[0]
                         am.dim_cam2 = (w2, h2)
@@ -1003,8 +1022,19 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
     n_op_cam1 = n_rebaixaria = 0
     for am in amostras:
         op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
-        rebaixaria = politica == "dupla" and op_cam1 and am.op_cam2 is False
-        resgataria = politica == "dupla" and not op_cam1 and am.op_cam2 is True
+        if PRODUTIVIDADE_OPERADOR_V9:
+            # A frontal produz candidatos, não identidade. A lateral só abre
+            # resgate quando a frontal realmente não viu pessoa; havendo
+            # candidato, os dois ângulos alimentam a mesma decisão visual.
+            rebaixaria = False
+            resgataria = (
+                politica == "dupla"
+                and not am.pessoas
+                and am.op_cam2 is True
+            )
+        else:
+            rebaixaria = politica == "dupla" and op_cam1 and am.op_cam2 is False
+            resgataria = politica == "dupla" and not op_cam1 and am.op_cam2 is True
         n_op_cam1 += 1 if op_cam1 else 0
         n_rebaixaria += 1 if rebaixaria else 0
         decisoes.append((am, op_cam1, rebaixaria, resgataria))
@@ -1023,13 +1053,26 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
 
     # Fase 2: aplicar.
     stats = {"slots": len(amostras), "presentes": 0, "vazios": 0,
-             "rebaixados": 0, "resgatados_cam2": 0, "pontes": 0}
+             "inconclusivos": 0, "rebaixados": 0,
+             "resgatados_cam2": 0, "pontes": 0}
     for am, op_cam1, rebaixaria, resgataria in decisoes:
         if aplicar_negacao and rebaixaria:
             am.pessoas = [p for p in am.pessoas if p.get("papel") != "operador"]
             stats["rebaixados"] += 1
             op_cam1 = False
-        presente = op_cam1 or resgataria
+        if PRODUTIVIDADE_OPERADOR_V9:
+            if am.pessoas:
+                # A identidade será decidida pelo contrato visual estruturado.
+                presente = None
+            elif politica == "dupla":
+                # Triestado: True/False são medições; None significa que a
+                # lateral não mediu (stride, defasagem ou falha).
+                presente = am.op_cam2 if isinstance(am.op_cam2, bool) else None
+            else:
+                # Política explicitamente cam1: quadro vazio é a própria medida.
+                presente = False
+        else:
+            presente = op_cam1 or resgataria
         if resgataria and not op_cam1:
             stats["resgatados_cam2"] += 1
         am.operador_presente = presente
@@ -1053,10 +1096,12 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
                 stats["pontes"] += 1
 
     for am in amostras:
-        if am.operador_presente:
+        if am.operador_presente is True:
             stats["presentes"] += 1
-        elif not am.pessoas:
+        elif am.operador_presente is False and not am.pessoas:
             stats["vazios"] += 1
+        elif am.operador_presente is None:
+            stats["inconclusivos"] += 1
     return stats
 
 
@@ -1110,6 +1155,8 @@ _OPERADOR_GAP_SLOTS = max(0, int(os.environ.get("KV_OPERADOR_GAP_SLOTS", "3")))
 POSTO_VAZIO_LABEL = "posto_vazio"
 POSTO_VAZIO_TID = -1
 POSTO_VAZIO_DESC = "posto de trabalho vazio (operador ausente)"
+POSTO_INCONCLUSIVO_TID = -3
+POSTO_INCONCLUSIVO_DESC = "presença do operador não confirmada"
 # Fase 33: operador estabelecido pela CÂMERA LATERAL (cam1 não o detectou —
 # oclusão total pela máquina — mas a cam2 o vê na zona do posto).
 OPERADOR_CAM2_TID = -2
@@ -1593,10 +1640,36 @@ _BLOCO_EXEMPLOS_DESCRICAO = """EXEMPLOS DE DESCRIÇÃO (o que se vê, não o jul
 - "andando entre o posto e a bancada, mãos vazias"
 """
 
-_REGRAS_DESCRICAO = """- Descreva o OBSERVÁVEL, em UMA FRASE CURTA (até 10 palavras) por instante.
+_REGRAS_DESCRICAO_V8 = """- Descreva o OBSERVÁVEL, em UMA FRASE CURTA (até 10 palavras) por instante.
   NÃO classifique o trabalho como produtivo ou improdutivo, e não escolha
   rótulos de eficiência: isso é decidido depois, por outra etapa, a partir da
   sua descrição.
+- AUSÊNCIA DE MUDANÇA É UMA OBSERVAÇÃO, não uma falha da imagem. Se a pessoa
+  está na mesma posição em todas as imagens, diga isso. NÃO preencha com a
+  ação mais provável nem com a ação anterior.
+- ⚠️ NÃO AFIRME O ESTADO DA MÁQUINA. Nada de "máquina parada", "em ciclo",
+  "torno rodando", "eixo girando". Fase 89: isso foi MEDIDO e o estado que
+  você afirmava não tinha persistência entre minutos seguidos — trocava como
+  cara ou coroa. Um torno em ciclo e um parado são idênticos num quadro; a
+  diferença é MOVIMENTO, e imagem parada não tem movimento. Quem mede a
+  máquina é sensor. Descreva a PESSOA.
+- Só diga que ele OPERA, manipula, prepara, ajusta ou mede se você VÊ as MÃOS
+  dele na máquina, na ferramenta ou na peça, em ação, em alguma das imagens.
+- EXCEÇÃO (o CONTEXTO manda): se o CONTEXTO disser que ele está com as MÃOS na
+  máquina, isso vem da posição REAL das mãos (sensor) — ele ESTÁ operando,
+  mesmo que o corpo pareça parado.
+- ORIENTAÇÃO NÃO SE ADIVINHA. Só diga que a pessoa está de frente, de costas ou
+  de lado para alguma coisa se o CONTEXTO disser — ele vem da pose (sensor). Se
+  o CONTEXTO não disser, NÃO mencione orientação nenhuma na descrição, e em
+  hipótese alguma escreva "de frente ao torno" por hábito.
+- Se não der para dizer o que acontece, escreva "ação não identificada".
+- NÃO invente o que não está visível."""
+
+
+_REGRAS_DESCRICAO_V9 = """- Descreva o OBSERVÁVEL, em UMA FRASE CURTA (até 10 palavras) por instante.
+  Não esconda julgamento dentro da frase e não escolha rótulo Lean. A decisão
+  binária fica SOMENTE no campo `trabalho`, usando a regra de produtividade
+  declarada abaixo do contexto.
 - AUSÊNCIA DE MUDANÇA É UMA OBSERVAÇÃO, não uma falha da imagem. Se a pessoa
   está na mesma posição em todas as imagens, diga isso. NÃO preencha com a
   ação mais provável nem com a ação anterior.
@@ -1855,7 +1928,7 @@ def familia_label(label: str | None) -> str:
     return base
 
 
-PROMPT_VLM_SEQUENCIA = """Você é um analista de processos industriais observando UM posto de trabalho.
+PROMPT_VLM_SEQUENCIA_V8 = """Você é um analista de processos industriais observando UM posto de trabalho.
 
 Você recebe uma SEQUÊNCIA de {n_frames} imagens da câmera principal, EM ORDEM CRONOLÓGICA, cobrindo {duracao_s} segundos ({intervalo_s}s entre imagens consecutivas).{linha_cam2}
 
@@ -1883,7 +1956,42 @@ Julgue a ATIVIDADE, não a pessoa: a pergunta é se aquilo é serviço do posto,
 {{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}, "imovel": true, "trabalho": true}}, {{"i": 1, "acoes": {{"P1": "..."}}, "imovel": false, "trabalho": null}}]}}"""
 
 
-PROMPT_VLM_SEQUENCIA_CAM2 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
+PROMPT_VLM_SEQUENCIA = """Você é um analista visual observando UM operador de torno mecânico.
+
+Você recebe uma SEQUÊNCIA de {n_frames} imagens da câmera principal, EM ORDEM CRONOLÓGICA, cobrindo {duracao_s} segundos ({intervalo_s}s entre imagens consecutivas).{linha_cam2}
+
+P1, P2, P3... são CANDIDATOS. NÃO presuma que P1 é o operador. A eleição automática pode ter confundido um colega ou visitante. Em CADA imagem, escolha como "operador" a pessoa que ocupa funcionalmente o posto do torno.
+
+IDENTIDADE E PRODUTIVIDADE SÃO PERGUNTAS SEPARADAS. Conversar, virar de costas, usar celular ou ficar improdutivo NÃO transforma o operador em visitante. Use continuidade, roupa, posição habitual e relação funcional com o torno para decidir quem é o ocupante do posto. Só marque visitante quando estiver claro que a pessoa apenas passa, entrega algo ou interage com o ocupante sem assumir o posto. Se isso não estiver claro, use "incerto".
+
+ATENÇÃO: os rótulos são desenhados em CADA imagem separadamente — sempre se refira à pessoa pelo rótulo que aparece NAQUELA imagem. O mesmo rótulo pode representar outra pessoa no quadro seguinte; use posição, roupa, continuidade e relação com o torno, nunca o número P1 por hábito.
+
+Sua tarefa é identificar o operador, descrever somente o OBSERVÁVEL e decidir a produtividade pela regra simples abaixo. COMPARE as imagens entre si: o que mudou de uma para a outra? O que ficou igual?
+
+REGRAS DE DESCRIÇÃO:
+{regras}
+
+{exemplos}
+CONTEXTO: {contexto_zonas}
+
+NÃO AFIRME O ESTADO DA MÁQUINA. Não diga "máquina parada", "em ciclo", "torno rodando" nem equivalente — nem na descrição, nem em campo nenhum. Você NÃO consegue julgar isso a partir de imagens paradas, e isso foi MEDIDO: o estado que você afirmava não se mantinha entre minutos seguidos, trocava como cara ou coroa. Descreva o que a PESSOA está fazendo; a máquina, quem mede é sensor.
+
+REGRA ÚNICA DE PRODUTIVIDADE DO OPERADOR ESCOLHIDO:
+- true: está com a mão no torno/peça/ferramenta OU está voltado para o torno, acompanhando a operação;
+- false: está de costas ou de lado para o torno, conversando, no celular ou sem atenção ao posto;
+- null: não foi possível identificar o operador ou a evidência visual é insuficiente.
+O CONTEXTO de mãos/orientação vem de sensores e prevalece sobre impressão visual. Não use categoria Lean, vocabulário, estado mecânico da máquina ou conhecimento presumido do processo.
+
+Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). Em "acoes", descreva cada pessoa marcada para a decisão ser auditável.
+- "operador_estado" deve ser "identificado" quando exatamente um candidato ocupa funcionalmente o posto, "ausente" quando está claro que nenhum candidato é o operador, ou "incerto" quando há oclusão/evidência insuficiente;
+- "operador" é obrigatório somente em "identificado" e deve ser um rótulo visível naquela imagem; nos outros estados deve ser null;
+- "trabalho" só pode ser true/false em "identificado"; nos outros estados deve ser null;
+- "motivo" deve ser um destes valores: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa_ou_celular", "sem_atividade", "sem_leitura".
+
+{{"trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "conversando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "ausente", "operador": null, "acoes": {{"P1": "passando ao lado do posto"}}, "imovel": false, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
+
+
+PROMPT_VLM_SEQUENCIA_CAM2_V8 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
 O OPERADOR TITULAR está DENTRO da área de trabalho dele, atrás da máquina — visível nestas imagens (a câmera frontal não o enxerga nestes instantes porque a máquina o esconde).
 
 Você recebe uma SEQUÊNCIA de {n_frames} imagens EM ORDEM CRONOLÓGICA, cobrindo {duracao_s} segundos ({intervalo_s}s entre imagens consecutivas).
@@ -1901,6 +2009,62 @@ NÃO AFIRME O ESTADO DA MÁQUINA — nem "parada", nem "em ciclo", nem equivalen
 Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira).
 Devolva também "imovel" (true/false) por imagem — true se a pessoa está na MESMA posição da imagem anterior:
 {{"trechos": [{{"i": 0, "acao": "...", "imovel": true}}, {{"i": 1, "acao": "...", "imovel": false}}]}}"""
+
+
+PROMPT_VLM_SEQUENCIA_CAM2 = """Você é um analista visual observando o posto de um torno pela CÂMERA LATERAL (com profundidade).
+As pessoas visíveis são CANDIDATAS. A câmera principal não conseguiu identificar o operador neste instante; não presuma que qualquer pessoa dentro da zona seja o titular.
+
+Você recebe uma SEQUÊNCIA de {n_frames} imagens EM ORDEM CRONOLÓGICA, cobrindo {duracao_s} segundos ({intervalo_s}s entre imagens consecutivas).
+
+Diga o que o operador fez AO LONGO da sequência, não o que se vê num frame isolado. COMPARE as imagens entre si: o que mudou? O que ficou igual?
+
+REGRAS DE DESCRIÇÃO:
+{regras}
+
+{exemplos}
+CONTEXTO: {contexto_zonas}
+
+NÃO AFIRME O ESTADO DA MÁQUINA — nem "parada", nem "em ciclo", nem equivalente. Você não consegue julgar isso a partir de imagens paradas, e isso foi medido. Descreva o que a PESSOA faz.
+
+IDENTIDADE E PRODUTIVIDADE SÃO PERGUNTAS SEPARADAS. Um operador conversando, de costas ou no celular continua sendo o operador — apenas fica improdutivo. Use "ausente" somente quando estiver claro que a pessoa visível não assumiu o posto; na dúvida use "incerto".
+
+REGRA ÚNICA DE PRODUTIVIDADE:
+- true: mão no torno/peça/ferramenta OU voltado para o torno acompanhando a operação;
+- false: de costas/de lado, conversando, no celular ou sem atenção ao posto;
+- null: evidência insuficiente.
+
+Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). "operador_estado" deve ser "identificado", "ausente" ou "incerto". "trabalho" só pode ser true/false quando identificado; nos demais casos deve ser null. "motivo" deve ser: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa_ou_celular", "sem_atividade" ou "sem_leitura".
+{{"trechos": [{{"i": 0, "operador_estado": "identificado", "acao": "mãos no torno, ajustando a peça", "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "incerto", "acao": "pessoa parcialmente oclusa ao lado", "imovel": true, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
+
+
+_MOTIVOS_PRODUTIVOS_V9 = frozenset({
+    "maos_no_torno", "voltado_para_torno",
+})
+_MOTIVOS_IMPRODUTIVOS_V9 = frozenset({
+    "costas_ou_lado", "conversa_ou_celular", "sem_atividade",
+})
+_MOTIVOS_V9 = (
+    _MOTIVOS_PRODUTIVOS_V9
+    | _MOTIVOS_IMPRODUTIVOS_V9
+    | {"sem_leitura"}
+)
+
+
+def _trabalho_v9_validado(valor, motivo: str, acao: str | None):
+    """Aceita decisão apenas quando JSON, motivo e auditoria concordam."""
+    texto = str(acao or "").strip().lower()
+    if (
+        not isinstance(valor, bool)
+        or not texto
+        or "ação não identificada" in texto
+        or "acao nao identificada" in texto
+    ):
+        return None
+    if valor is True and motivo in _MOTIVOS_PRODUTIVOS_V9:
+        return True
+    if valor is False and motivo in _MOTIVOS_IMPRODUTIVOS_V9:
+        return False
+    return None
 
 
 def _analisar_operador_cam2(
@@ -2611,7 +2775,25 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #       EVIDÊNCIA (Pareto e fila), não insumo do número. Nenhuma superfície do
 #       cliente mostra duração absoluta: a captura amostra ~50% de cada hora,
 #       então só o percentual é estimativa correta do turno.
-VERSAO_INSTRUMENTO = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "8"))
+#   9 = caso de uso comercial do torno: P1/P2 são candidatos, o VLM escolhe o
+#       ocupante funcional por frame e decide `trabalho` diretamente. Sinais de
+#       visitante não entram no operador e identidade ambígua vira inconclusiva.
+def _env_ligada(nome: str, padrao: str = "off") -> bool:
+    """Flags críticas são fail-closed: só uma allowlist explícita liga."""
+    return os.environ.get(nome, padrao).strip().lower() in {
+        "1", "true", "on", "yes",
+    }
+
+
+PRODUTIVIDADE_OPERADOR_V9 = _env_ligada("KV_PRODUTIVIDADE_OPERADOR_V9")
+try:
+    _VERSAO_LEGADA = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "8"))
+except (TypeError, ValueError):
+    _VERSAO_LEGADA = 8
+# A flag é comportamental e o carimbo acompanha a flag. Assim uma env antiga
+# fixada em 8 nunca consegue gravar comportamento novo como se fosse V8, e a
+# V9 pode ser desligada sem apagar dado algum.
+VERSAO_INSTRUMENTO = 9 if PRODUTIVIDADE_OPERADOR_V9 else min(8, _VERSAO_LEGADA)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -2744,7 +2926,7 @@ def histograma_cor(frame, bbox) -> dict | None:
     isto não separa ninguém. Vai junto porque é o mais barato de todos e porque
     a resposta "não separa" também é resultado.
     """
-    if not _bbox_valido(bbox):
+    if frame is None or not hasattr(frame, "shape") or not _bbox_valido(bbox):
         return None
     x1, y1, x2, y2 = (int(v) for v in bbox[:4])
     h, w = frame.shape[:2]
@@ -3205,14 +3387,22 @@ def etapa_detectar_e_amostrar(
                         pessoa["frame_idx"] = frame_idx
                         pessoas.append(pessoa)
                     if modo_op and pessoas:
-                        # Eleição do OPERADOR: entre quem está no posto, vence o
-                        # track com maior presença acumulada (desempate: maior
-                        # bbox). Demais no posto e todos em 'interacao' são
-                        # visitantes. Operador reordenado p/ 1º → P1 = operador.
                         no_posto = [p for p in pessoas if p["_papel_zona"] == "posto_operador"]
                         for p in no_posto:
                             presenca_zona[p["track_id"]] = presenca_zona.get(p["track_id"], 0) + 1
-                        if no_posto:
+                        if PRODUTIVIDADE_OPERADOR_V9:
+                            # Na V9 esta etapa só produz CANDIDATOS. Nenhum
+                            # track recebe identidade por tempo de zona ou bbox;
+                            # a decisão funcional pertence ao contrato visual.
+                            for p in pessoas:
+                                p["papel"] = None
+                            pessoas.sort(
+                                key=lambda p: (
+                                    p.get("bbox", (0, 0, 0, 0))[0],
+                                    p.get("track_id", 0),
+                                )
+                            )
+                        elif no_posto:
                             def _rank_op(p):
                                 bx1, by1, bx2, by2 = p["bbox"]
                                 return (-presenca_zona.get(p["track_id"], 0),
@@ -3393,7 +3583,23 @@ def _interpolar_sequencia(descricoes: dict, idx_cam1: list) -> set:
         if descricoes.get(i):
             continue
         j = min(com_desc, key=lambda k: (abs(k - i), k))
-        descricoes[i] = descricoes[j]
+        if not PRODUTIVIDADE_OPERADOR_V9:
+            descricoes[i] = descricoes[j]
+            interpolados.add(i)
+            continue
+        vizinho = descricoes[j] or {}
+        # Só o texto cobre o buraco entre dois quadros vistos. Identidade e
+        # produtividade pertencem ao frame analisado e não podem ser fabricadas
+        # por proximidade temporal — especialmente quando P1/P2 trocam de track.
+        descricoes[i] = {
+            "acoes": dict(vizinho.get("acoes") or {}),
+            "maquina": None,
+            "imovel": None,
+            "operador_estado": "incerto",
+            "operador_track_id": None,
+            "trabalho": None,
+            "produtividade_motivo": "sem_leitura",
+        }
         interpolados.add(i)
     return interpolados
 
@@ -3407,6 +3613,14 @@ def _cam2_ajuda(grupo: list) -> bool:
     errado, e rótulo errado é mais caro que uma imagem.
     """
     for am in grupo or []:
+        if (
+            PRODUTIVIDADE_OPERADOR_V9
+            and isinstance(getattr(am, "op_cam2", None), bool)
+        ):
+            # Tanto a confirmação quanto a negação medida desambiguam quem a
+            # frontal vê. O booleano não decide sozinho; libera a imagem
+            # lateral para o mesmo julgamento estruturado.
+            return True
         # Operador presente no posto mas invisível na cam1 = oclusão total: é
         # exatamente o caso que a lateral foi posta para resolver.
         if getattr(am, "operador_presente", None) and not any(
@@ -3431,7 +3645,8 @@ def _cam2_ajuda(grupo: list) -> bool:
 
 def _contexto_zonas(amostra: Amostra, modo_op: bool,
                     frente_maquina: str | None = None,
-                    movimento: dict | None = None) -> str:
+                    movimento: dict | None = None,
+                    identidade_em_aberto: bool = False) -> str:
     """Linha de CONTEXTO do prompt para UMA amostra (zonas, mãos, orientação).
 
     Fase 89: o MOVIMENTO da máquina entra aqui, no mesmo lugar e do mesmo
@@ -3444,16 +3659,29 @@ def _contexto_zonas(amostra: Amostra, modo_op: bool,
         zona_txt = p.get("zona_desc") or p.get("zona")
         if not zona_txt:
             continue
-        quem = "o OPERADOR" if p.get("papel") == "operador" else p["rotulo"]
+        # Na sequência de produtividade o próprio objetivo é descobrir quem é
+        # o operador. Repetir aqui a eleição heurística como se fosse fato
+        # faria o VLM apenas confirmar o erro de entrada.
+        quem = ("candidato ao posto" if identidade_em_aberto
+                else ("o OPERADOR" if p.get("papel") == "operador" else p["rotulo"]))
         linha = (f"{p['rotulo']} ({quem}) está em: {zona_txt}"
                  if modo_op else f"{p['rotulo']} está em {zona_txt}")
-        op_maos = p.get("maos_maquina") or (p.get("papel") == "operador" and maos_cam2)
+        op_maos = p.get("maos_maquina") or (
+            not identidade_em_aberto
+            and p.get("papel") == "operador"
+            and maos_cam2
+        )
         if op_maos:
             linha += (" — e está com as MÃOS na máquina (torno), tocando/"
                       "manipulando o equipamento (logo, OPERANDO, não apenas monitorando)")
         # Fase 86: a orientação vem do SENSOR (keypoints da pose), não do olho
         # do modelo. Injetada como fato, do mesmo jeito que as mãos.
-        orient = p.get("orientacao")
+        orientacao_liberada = _env_ligada("KV_ORIENTACAO_VERIFICADA")
+        orient = (
+            p.get("orientacao")
+            if not PRODUTIVIDADE_OPERADOR_V9 or orientacao_liberada
+            else None
+        )
         if orient:
             _MAPA = {"frente": "DE FRENTE para a câmera",
                      "costas": "DE COSTAS para a câmera",
@@ -3464,6 +3692,20 @@ def _contexto_zonas(amostra: Amostra, modo_op: bool,
                 linha += f", ou seja, {vs_maq}"
         partes.append(linha)
     txt = ". ".join(partes) if partes else "sem zonas pré-definidas"
+    if identidade_em_aberto and getattr(amostra, "op_cam2", None) is False:
+        txt += (
+            ". A câmera lateral foi medida e não detectou pessoa na zona do "
+            "posto neste instante; use esse fato junto com as duas imagens, "
+            "sem concluir identidade apenas por ele"
+        )
+    elif identidade_em_aberto and getattr(amostra, "op_cam2", None) is True:
+        txt += (
+            ". A câmera lateral detectou uma pessoa na zona do posto; use a "
+            "imagem para relacioná-la ao candidato correto"
+        )
+    if identidade_em_aberto and maos_cam2:
+        txt += (". A câmera lateral detectou mãos de uma pessoa na máquina; "
+                "use a imagem para atribuir esse fato ao candidato correto")
     # Atrás de `KV_MOVIMENTO_INJETAR`: o sinal GRAVA desde já, mas só passa a
     # influenciar o modelo quando o dono olhar os números e ligar a chave.
     # Medir e influenciar são decisões diferentes e não precisam do mesmo deploy.
@@ -3532,16 +3774,40 @@ def _analisar_sequencia_vlm(
     n_cam1 = len(usados)
     dur = round((n_cam1 - 1) * float(intervalo_s), 1) if n_cam1 > 1 else float(intervalo_s)
 
-    prompt = PROMPT_VLM_SEQUENCIA.format(
+    contexto_prompt = (
+        "\n".join(
+            f"IMAGEM {i}: " + _contexto_zonas(
+                am, modo_op, frente_maquina, movimento,
+                identidade_em_aberto=True,
+            )
+            for i, am in enumerate(usados)
+        )
+        if PRODUTIVIDADE_OPERADOR_V9
+        else _contexto_zonas(meio, modo_op, frente_maquina, movimento)
+    )
+    template_sequencia = (
+        PROMPT_VLM_SEQUENCIA
+        if PRODUTIVIDADE_OPERADOR_V9
+        else PROMPT_VLM_SEQUENCIA_V8
+    )
+    prompt = template_sequencia.format(
         n_frames=n_cam1,
         duracao_s=dur,
         intervalo_s=round(float(intervalo_s), 1),
         linha_cam2=linha_cam2,
         bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
-        regras=_REGRAS_DESCRICAO,
+        regras=(
+            _REGRAS_DESCRICAO_V9
+            if PRODUTIVIDADE_OPERADOR_V9
+            else _REGRAS_DESCRICAO_V8
+        ),
         exemplos=_BLOCO_EXEMPLOS_DESCRICAO,
-        contexto_zonas=_contexto_zonas(meio, modo_op, frente_maquina, movimento),
+        # O contexto antigo vinha apenas do quadro do meio e era apresentado
+        # como se valesse para a sequência toda. Assim, "mãos no torno" em um
+        # único instante contaminava todos os demais. Agora cada imagem leva
+        # os próprios fatos de zona, mãos e orientação.
+        contexto_zonas=contexto_prompt,
     )
     if not tem_operador:
         prompt = prompt.replace(
@@ -3569,7 +3835,40 @@ def _analisar_sequencia_vlm(
     # separadamente, então a tradução rótulo→track usa o mapa DAQUELA amostra.
     idx_no_grupo = {id(a): i for i, a in enumerate(grupo)}
     saida: dict[int, dict] = {}
+    if not PRODUTIVIDADE_OPERADOR_V9:
+        for t in trechos if isinstance(trechos, list) else []:
+            if not isinstance(t, dict):
+                continue
+            try:
+                i = int(t.get("i"))
+            except Exception:  # noqa: BLE001
+                continue
+            if not (0 <= i < len(usados)):
+                continue
+            am = usados[i]
+            mapa = {p["rotulo"]: p["track_id"] for p in am.pessoas}
+            por_track = {
+                mapa[rot]: d.strip().lower()
+                for rot, d in (t.get("acoes") or {}).items()
+                if rot in mapa and isinstance(d, str) and d.strip()
+            }
+            if por_track:
+                saida[idx_no_grupo[id(am)]] = {
+                    "acoes": por_track,
+                    "maquina": _maquina_do_vlm(t),
+                    "imovel": bool(t.get("imovel")),
+                    "trabalho": (
+                        t.get("trabalho")
+                        if isinstance(t.get("trabalho"), bool)
+                        else None
+                    ),
+                }
+        return saida
+
+    indices_vistos: set[int] = set()
     for t in trechos if isinstance(trechos, list) else []:
+        if not isinstance(t, dict):
+            continue
         try:
             i = int(t.get("i"))
         except Exception:   # noqa: BLE001
@@ -3578,25 +3877,75 @@ def _analisar_sequencia_vlm(
             continue
         am = usados[i]
         mapa = {p["rotulo"]: p["track_id"] for p in am.pessoas}
+        acoes = t.get("acoes") if isinstance(t.get("acoes"), dict) else {}
         por_track = {
-            mapa[rot]: d.strip().lower()
-            for rot, d in (t.get("acoes") or {}).items()
-            if rot in mapa and isinstance(d, str) and d.strip()
+            tid: (
+                str(acoes.get(rot)).strip().lower()
+                if isinstance(acoes.get(rot), str) and str(acoes.get(rot)).strip()
+                else "ação não identificada"
+            )
+            for rot, tid in mapa.items()
         }
-        if por_track:
-            # Fase 86: o discriminador vem em CAMPO, não enterrado na frase.
-            # Extrair "máquina em ciclo" do texto por regra seria frágil (o VLM
-            # escreve "torno girando" com a mesma facilidade); pedir o campo
-            # custa alguns tokens de saída e elimina o parsing por adivinhação.
-            saida[idx_no_grupo[id(am)]] = {
-                "acoes": por_track,
-                "maquina": _maquina_do_vlm(t),
-                "imovel": bool(t.get("imovel")),
-                # Fase 97: o julgamento vem no MESMO JSON — zero chamada nova.
-                # `null` explícito é resposta legítima e NUNCA vira produtivo.
-                "trabalho": (bool(t["trabalho"])
-                             if isinstance(t.get("trabalho"), bool) else None),
-            }
+
+        estado = str(t.get("operador_estado") or "").strip().lower()
+        operador_rotulo = t.get("operador")
+        operador_tid = (
+            mapa.get(operador_rotulo)
+            if isinstance(operador_rotulo, str)
+            else None
+        )
+        # Contrato fechado: exatamente um rótulo válido em `identificado`;
+        # nenhum nos outros estados. Qualquer desvio vira incerto.
+        if estado not in {"identificado", "ausente", "incerto"}:
+            estado = "incerto"
+        if estado == "identificado" and operador_tid is None:
+            estado = "incerto"
+        if estado != "identificado" and operador_rotulo is not None:
+            estado = "incerto"
+        if estado != "identificado":
+            operador_tid = None
+
+        motivo = str(t.get("motivo") or "sem_leitura").strip().lower()
+        if motivo not in _MOTIVOS_V9:
+            motivo = "sem_leitura"
+        acao_operador = (
+            acoes.get(operador_rotulo)
+            if isinstance(operador_rotulo, str)
+            else None
+        )
+        trabalho = (
+            _trabalho_v9_validado(
+                t.get("trabalho"), motivo, acao_operador
+            )
+            if estado == "identificado"
+            else None
+        )
+
+        destino = idx_no_grupo[id(am)]
+        bloco = {
+            "acoes": por_track,
+            "maquina": _maquina_do_vlm(t),
+            "imovel": (t.get("imovel")
+                       if isinstance(t.get("imovel"), bool) else None),
+            "operador_estado": estado,
+            "operador_track_id": operador_tid,
+            "trabalho": trabalho,
+            "produtividade_motivo": motivo,
+        }
+        if i in indices_vistos:
+            # Duas respostas para a mesma imagem são uma contradição do
+            # instrumento. Conserva o texto para auditoria, mas não a decisão.
+            anterior = saida.get(destino) or bloco
+            anterior.update({
+                "operador_estado": "incerto",
+                "operador_track_id": None,
+                "trabalho": None,
+                "produtividade_motivo": "sem_leitura",
+            })
+            saida[destino] = anterior
+            continue
+        indices_vistos.add(i)
+        saida[destino] = bloco
     return saida
 
 
@@ -3625,18 +3974,35 @@ def _analisar_sequencia_cam2(
     usados = [a for a in usados if a.img_b64_secundario]
 
     contexto = zona_desc or "área de trabalho do operador, atrás da máquina"
-    if any(getattr(a, "maos_cam2", False) for a in usados):
+    if PRODUTIVIDADE_OPERADOR_V9:
+        fatos_maos = [
+            f"IMAGEM {i}: o sensor detectou mãos na zona do torno"
+            for i, a in enumerate(usados)
+            if getattr(a, "maos_cam2", False)
+        ]
+        if fatos_maos:
+            contexto += ". " + ". ".join(fatos_maos)
+    elif any(getattr(a, "maos_cam2", False) for a in usados):
         contexto += (" — em algum destes instantes ele está com as MÃOS na máquina "
                      "(torno), tocando/manipulando o equipamento")
     n = len(usados)
     dur = round((n - 1) * float(intervalo_s), 1) if n > 1 else float(intervalo_s)
-    prompt = PROMPT_VLM_SEQUENCIA_CAM2.format(
+    template_cam2 = (
+        PROMPT_VLM_SEQUENCIA_CAM2
+        if PRODUTIVIDADE_OPERADOR_V9
+        else PROMPT_VLM_SEQUENCIA_CAM2_V8
+    )
+    prompt = template_cam2.format(
         n_frames=n,
         duracao_s=dur,
         intervalo_s=round(float(intervalo_s), 1),
         bloco_processo=construir_bloco_dominio(descricao_processo, conhecimento_adquirido),
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
-        regras=_REGRAS_DESCRICAO,
+        regras=(
+            _REGRAS_DESCRICAO_V9
+            if PRODUTIVIDADE_OPERADOR_V9
+            else _REGRAS_DESCRICAO_V8
+        ),
         exemplos=_BLOCO_EXEMPLOS_DESCRICAO,
         contexto_zonas=contexto,
     )
@@ -3652,19 +4018,63 @@ def _analisar_sequencia_cam2(
 
     idx_no_grupo = {id(a): i for i, a in enumerate(grupo)}
     saida: dict[int, dict] = {}
+    indices_vistos: set[int] = set()
     for t in trechos if isinstance(trechos, list) else []:
+        if not isinstance(t, dict):
+            continue
         try:
             i = int(t.get("i"))
         except Exception:   # noqa: BLE001
             continue
         if not (0 <= i < len(usados)):
             continue
+        destino = idx_no_grupo[id(usados[i])]
+        if i in indices_vistos:
+            # Mesma falha segura do parser da câmera principal: respostas
+            # duplicadas são contraditórias; a última nunca pode vencer.
+            anterior = saida.get(destino) or {
+                "acao": "ação não identificada",
+                "maquina": None,
+                "imovel": None,
+            }
+            anterior.update({
+                "operador_estado": "incerto",
+                "trabalho": None,
+                "produtividade_motivo": "sem_leitura",
+            })
+            saida[destino] = anterior
+            continue
+        indices_vistos.add(i)
         acao = (t.get("acao") or "").strip().lower()
         if acao:
-            saida[idx_no_grupo[id(usados[i])]] = {
+            estado = str(t.get("operador_estado") or "").strip().lower()
+            if PRODUTIVIDADE_OPERADOR_V9:
+                if estado not in {"identificado", "ausente", "incerto"}:
+                    estado = "incerto"
+            else:
+                estado = "identificado"
+            motivo = str(t.get("motivo") or "sem_leitura").strip().lower()
+            if motivo not in _MOTIVOS_V9:
+                motivo = "sem_leitura"
+            trabalho = (
+                _trabalho_v9_validado(t.get("trabalho"), motivo, acao)
+                if PRODUTIVIDADE_OPERADOR_V9 and estado == "identificado"
+                else (
+                    t.get("trabalho")
+                    if not PRODUTIVIDADE_OPERADOR_V9
+                    and estado == "identificado"
+                    and isinstance(t.get("trabalho"), bool)
+                    else None
+                )
+            )
+            saida[destino] = {
                 "acao": acao,
                 "maquina": _maquina_do_vlm(t),
-                "imovel": bool(t.get("imovel")),
+                "imovel": (t.get("imovel")
+                           if isinstance(t.get("imovel"), bool) else None),
+                "operador_estado": estado,
+                "trabalho": trabalho,
+                "produtividade_motivo": motivo,
             }
     return saida
 
@@ -3890,10 +4300,26 @@ def etapa_analise_vlm(
         plano: list[tuple[str, Amostra]] = []
         for am in grupo:
             tem_op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
-            if zona_posto and am.operador_presente and not tem_op_cam1:
+            if (
+                zona_posto
+                and not tem_op_cam1
+                and (
+                    am.operador_presente
+                    or (
+                        PRODUTIVIDADE_OPERADOR_V9
+                        and int(getattr(am, "n_posto_cam2", 0) or 0) > 0
+                    )
+                )
+            ):
                 # Fase 33: RESGATE pela lateral — a cam1 não vê o operador
                 # (oclusão total) e a cam2 vê.
                 plano.append(("ponte" if am.operador_ponte else "resgate", am))
+            elif (
+                PRODUTIVIDADE_OPERADOR_V9
+                and not am.pessoas
+                and am.operador_presente is None
+            ):
+                plano.append(("inconclusivo", am))
             elif not am.pessoas:
                 plano.append(("vazio", am))
             else:
@@ -3911,6 +4337,14 @@ def etapa_analise_vlm(
                 precisa_vlm = True
                 continue
             d_am: dict[int, tuple[str, str]] = {}
+            if zona_posto and len(am.pessoas) > 1:
+                # Identidade ambígua nunca herda âncora. O custo de uma chamada
+                # extra é pequeno; o custo de descrever o visitante como
+                # operador contamina presença e produtividade juntas.
+                d_am = {p["track_id"]: ("analisar", "") for p in am.pessoas}
+                decisoes[i] = d_am
+                precisa_vlm = True
+                continue
             for p in am.pessoas:
                 tid = p["track_id"]
                 anc = ancoras.get(tid)
@@ -3952,6 +4386,13 @@ def etapa_analise_vlm(
                         d_am[tid] = ("analisar", "")
                         precisa_vlm = True
             decisoes[i] = d_am
+
+        if idx_cam1 and zona_posto and PRODUTIVIDADE_OPERADOR_V9:
+            # O gate continua economizando DESCRIÇÃO repetida por track, mas
+            # não pode suprimir a pergunta comercial do minuto. Uma sequência
+            # ocupada sempre passa pelo contrato estruturado de identidade e
+            # produtividade; é uma chamada por bucket, não uma por pessoa.
+            precisa_vlm = True
 
         # ── 3) As chamadas do grupo: no máximo uma cam1 + uma cam2 ──
         descricoes_seq: dict[int, dict[int, str]] = {}
@@ -4001,6 +4442,12 @@ def etapa_analise_vlm(
                 _r = desc_resgate.get(i) or {}
                 desc_cam2 = _r.get("acao") if tipo == "resgate" else ultima_desc_op
                 cena_maq, cena_imovel = _r.get("maquina"), _r.get("imovel")
+                cena_trabalho = (_r.get("trabalho") if tipo == "resgate" else None)
+                estado_cam2 = (
+                    _r.get("operador_estado")
+                    if tipo == "resgate"
+                    else "incerto"
+                )
                 if tipo == "ponte":
                     # A ponte herda SEM ver imagem nenhuma. Com teto, como todo
                     # o resto: passado o limite, o operador presente por
@@ -4021,7 +4468,21 @@ def etapa_analise_vlm(
                         n_herdadas += 1
                 elif desc_cam2 and not _eh_indefinida(desc_cam2):
                     heranca_seguidas = 0
+                if PRODUTIVIDADE_OPERADOR_V9 and not desc_cam2:
+                    desc_cam2 = "ação não identificada"
+                    origem_resgate = "falha_descricao_vlm"
+                    estado_cam2 = "incerto"
                 if desc_cam2:
+                    if not PRODUTIVIDADE_OPERADOR_V9:
+                        papel_cam2 = "operador"
+                    elif tipo == "ponte":
+                        papel_cam2 = None
+                    elif estado_cam2 == "identificado":
+                        papel_cam2 = "operador"
+                    elif estado_cam2 == "ausente":
+                        papel_cam2 = "visitante"
+                    else:
+                        papel_cam2 = None
                     # Fase 82: a caixa vem da câmera que VIU a pessoa; na ponte
                     # ninguém foi visto em instante nenhum, e ali ela é nula.
                     bbox_obs = am.bbox_cam2 if tipo == "resgate" else None
@@ -4035,16 +4496,52 @@ def etapa_analise_vlm(
                         "bbox_cam": "cam2" if bbox_obs else None,
                         "bbox_dim": am.dim_cam2 if bbox_obs else None,
                         "zona": zona_posto,
-                        "papel": "operador",
+                        "papel": papel_cam2,
                         "origem_gate": origem_resgate,
                         "mudanca_contexto": origem_resgate == "resgate_cam2",
                         "maquina": cena_maq,
                         "imovel": cena_imovel,
+                        "maos_maquina": (
+                            True
+                            if papel_cam2 == "operador"
+                            and tipo == "resgate"
+                            and getattr(am, "maos_cam2", False)
+                            else None
+                        ),
+                        "orientacao": None,
+                        "trabalho": (
+                            cena_trabalho if papel_cam2 == "operador" else None
+                        ),
+                        "produtividade_motivo": _r.get("produtividade_motivo"),
+                        "produtividade_observada": (
+                            papel_cam2 == "operador"
+                            and tipo == "resgate"
+                            and isinstance(cena_trabalho, bool)
+                        ),
                     })
-                    if not _eh_indefinida(desc_cam2):
+                    if papel_cam2 == "operador" and not _eh_indefinida(desc_cam2):
                         ultima_desc_op = desc_cam2
                         if origem_resgate == "resgate_cam2":
                             ultimo_tid_op = OPERADOR_CAM2_TID
+                continue
+
+            if tipo == "inconclusivo":
+                observacoes.append({
+                    "tempo_s": am.tempo_s,
+                    "frame_idx": am.frame_idx,
+                    "track_id": POSTO_INCONCLUSIVO_TID,
+                    "descricao": POSTO_INCONCLUSIVO_DESC,
+                    "bbox": None, "bbox_cam": None, "bbox_dim": None,
+                    "zona": zona_posto,
+                    "papel": None,
+                    "origem_gate": "confirmacao_presenca_indisponivel",
+                    "mudanca_contexto": False,
+                    "maquina": None, "imovel": None,
+                    "maos_maquina": None, "orientacao": None,
+                    "trabalho": None,
+                    "produtividade_motivo": "sem_leitura",
+                    "produtividade_observada": False,
+                })
                 continue
 
             if tipo == "vazio":
@@ -4069,10 +4566,55 @@ def etapa_analise_vlm(
             do_instante = _bloco.get("acoes") or {}
             cena_maq, cena_imovel = _bloco.get("maquina"), _bloco.get("imovel")
             cena_trabalho = _bloco.get("trabalho")
+            cena_motivo = _bloco.get("produtividade_motivo")
+            operador_estado = _bloco.get("operador_estado")
+            operador_tid = _bloco.get("operador_track_id")
+            if PRODUTIVIDADE_OPERADOR_V9:
+                # Falha, ausência de campo e `incerto` permanecem abstenção.
+                # Nem candidato único autoriza ressuscitar a eleição por bbox.
+                if operador_estado not in {"identificado", "ausente", "incerto"}:
+                    operador_estado = "incerto"
+                    operador_tid = None
+            else:
+                # Compatibilidade V8 atrás da flag de rollback.
+                if operador_estado == "incerto" and len(am.pessoas) == 1:
+                    unico = am.pessoas[0]
+                    if unico.get("papel") == "operador":
+                        operador_estado = "identificado"
+                        operador_tid = unico.get("track_id")
+                if operador_estado not in {"identificado", "ausente", "incerto"}:
+                    if len(am.pessoas) == 1 and am.pessoas[0].get("papel") == "operador":
+                        operador_estado = "identificado"
+                        operador_tid = am.pessoas[0].get("track_id")
+                    elif len(am.pessoas) > 1:
+                        operador_estado = "incerto"
+                        operador_tid = None
             d_am = decisoes.get(i, {})
             for p in am.pessoas:
                 tid = p["track_id"]
-                if not _GATE_ENABLE:
+                if not PRODUTIVIDADE_OPERADOR_V9:
+                    papel_obs = p.get("papel")
+                elif operador_estado == "identificado":
+                    papel_obs = "operador" if tid == operador_tid else "visitante"
+                elif operador_estado == "ausente":
+                    papel_obs = "visitante"
+                elif operador_estado == "incerto":
+                    papel_obs = None
+                else:
+                    papel_obs = p.get("papel")
+                if PRODUTIVIDADE_OPERADOR_V9:
+                    # A chamada V9 já observou este instante para decidir
+                    # identidade/produtividade. Usar a âncora antiga só no
+                    # texto criava contradição (ex.: descrição "operando" com
+                    # trabalho=False) e ainda registrava n_amostras=0. A saída
+                    # fresca é a única descrição válida; quadros realmente
+                    # interpolados continuam explicitamente não observados.
+                    desc = do_instante.get(tid)
+                    origem_gate = (
+                        "interpolado_sequencia" if i in interp else "analisado"
+                    )
+                    repeticoes_seguidas[tid] = 0
+                elif not _GATE_ENABLE:
                     desc = do_instante.get(tid)
                     origem_gate = "analisado"
                 else:
@@ -4090,13 +4632,21 @@ def etapa_analise_vlm(
                         n_repeticao += 1
                         repeticoes_seguidas[tid] = repeticoes_seguidas.get(tid, 0) + 1
                 if not desc:
-                    continue
+                    if not PRODUTIVIDADE_OPERADOR_V9:
+                        continue
+                    # Detecção/posição continuam sendo uma observação mesmo
+                    # quando o VLM falha ou omite uma pessoa. Apagar a linha
+                    # apagava presença junto com a descrição. A origem deixa
+                    # explícito que ninguém descreveu este instante e não vota
+                    # como evidência semântica.
+                    desc = "ação não identificada"
+                    origem_gate = "falha_descricao_vlm"
                 # Fase 34/85: operador com "ação não identificada" herda a última
                 # ação conhecida — mas só por `_HERANCA_MAX_SEGUIDAS` amostras.
                 # Sem o teto, um trecho longo de ilegível vira trabalho
                 # produtivo por eco, que é a conversão mais silenciosa de
                 # DESCONHECIDO em PRODUTIVO que este sistema tinha.
-                if p.get("papel") == "operador":
+                if papel_obs == "operador":
                     if _eh_indefinida(desc) and ultima_desc_op:
                         if heranca_seguidas >= _HERANCA_MAX_SEGUIDAS:
                             n_teto_heranca += 1      # fica "ação não identificada"
@@ -4118,7 +4668,7 @@ def etapa_analise_vlm(
                         # continuidade precisa para decidir se este track e o
                         # próximo são a mesma pessoa.
                         "t": am.tempo_s, "centro": _centro_rel(p, _W_VID, _H_VID),
-                        "papel": p.get("papel"),
+                        "papel": papel_obs,
                         "n_no_posto": _n_no_posto(am),
                     }
                 observacoes.append({
@@ -4130,7 +4680,7 @@ def etapa_analise_vlm(
                     "bbox_cam": "cam1",
                     "bbox_dim": am.dim,
                     "zona": p["zona"],
-                    "papel": p.get("papel"),
+                    "papel": papel_obs,
                     # Fase 82: `maos_maquina` era LIDO em montar_fato_evento e a
                     # chave morria aqui — o sinal do punho na zona da máquina
                     # nunca entrou em fato nenhum.
@@ -4148,7 +4698,22 @@ def etapa_analise_vlm(
                     # cluster, que particiona por ele.
                     "maquina": cena_maq,
                     "imovel": cena_imovel,
-                    "trabalho": cena_trabalho,
+                    # A decisão é sobre o operador escolhido, não sobre a cena
+                    # inteira. Visitante nunca herda o mesmo booleano.
+                    "trabalho": (
+                        cena_trabalho
+                        if not PRODUTIVIDADE_OPERADOR_V9 or papel_obs == "operador"
+                        else None
+                    ),
+                    "produtividade_observada": (
+                        PRODUTIVIDADE_OPERADOR_V9
+                        and papel_obs == "operador"
+                        and i not in interp
+                        and isinstance(cena_trabalho, bool)
+                    ),
+                    "produtividade_motivo": (
+                        cena_motivo if papel_obs == "operador" else None
+                    ),
                     # Fase 91: o que a LATERAL contou no mesmo instante. Viaja
                     # junto para o fato das camadas — sem virar observação
                     # própria, porque descrever a segunda pessoa exigiria uma
@@ -4557,7 +5122,19 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         # até o fato das camadas.
         "maquina": o.get("maquina"),
         "imovel": o.get("imovel"),
-        "trabalho": o.get("trabalho"),
+        "trabalho": (o.get("trabalho")
+                     if o.get("produtividade_observada")
+                     and isinstance(o.get("trabalho"), bool) else None),
+        "produtividade_motivo": o.get("produtividade_motivo"),
+        # Votos separados do texto/label. O evento pode manter a mesma ação e
+        # mudar de produtividade; guardar apenas o primeiro frame congelava o
+        # julgamento até o fim do trecho.
+        "_trabalho": Counter(
+            [o["trabalho"]]
+            if o.get("produtividade_observada")
+            and isinstance(o.get("trabalho"), bool)
+            else []
+        ),
         "zona_contexto": o["zona"],
         "papel_pessoa": o.get("papel"),
         # Fase 91: o MÁXIMO que a lateral contou dentro deste evento.
@@ -4609,10 +5186,27 @@ def etapa_segmentar_eventos(
             gap = o["tempo_s"] - atual["tempo_fim_s"]
             # Fase 28: mudança de PAPEL (operador↔visitante) quebra o evento —
             # o mesmo track em papéis diferentes conta separado nas métricas.
+            estado_comercial_igual = (
+                atual.get("trabalho")
+                == (
+                    o.get("trabalho")
+                    if o.get("produtividade_observada")
+                    and isinstance(o.get("trabalho"), bool)
+                    else None
+                )
+                and atual.get("maos_maquina") == o.get("maos_maquina")
+                and atual.get("orientacao") == o.get("orientacao")
+                and atual.get("produtividade_motivo")
+                == o.get("produtividade_motivo")
+            )
             if (
                 o["label"] == atual["comportamento_label"]
                 and o.get("papel") == atual.get("papel_pessoa")
                 and gap <= janela_continuidade_s
+                and (
+                    not PRODUTIVIDADE_OPERADOR_V9
+                    or estado_comercial_igual
+                )
             ):
                 atual["tempo_fim_s"] = o["tempo_s"]
                 atual["frame_fim"] = o["frame_idx"]
@@ -4641,6 +5235,9 @@ def etapa_segmentar_eventos(
                 if o.get("maos_maquina") is not None:
                     atual["maos_maquina"] = bool(
                         atual.get("maos_maquina")) or bool(o["maos_maquina"])
+                if (o.get("produtividade_observada")
+                        and isinstance(o.get("trabalho"), bool)):
+                    atual["_trabalho"][o["trabalho"]] += 1
             else:
                 eventos.append(atual)
                 atual = _abrir_evento(tid, o)
@@ -4660,6 +5257,10 @@ def etapa_segmentar_eventos(
         # Vazio → None, e None nunca vira "de frente" por omissão.
         _oc = e.pop("_orient", None)
         e["orientacao"] = max(_oc, key=_oc.get) if _oc else None
+        _tc = e.pop("_trabalho", None)
+        _sim = (_tc or {}).get(True, 0)
+        _nao = (_tc or {}).get(False, 0)
+        e["trabalho"] = (True if _sim > _nao else False if _nao > _sim else None)
         # Fase 82: fecha o resumo do corpo com as caixas acumuladas do evento.
         e["bbox_stats"] = _resumo_bbox(e.pop("_caixas", []), e.pop("_dim", None),
                                        e.get("bbox_cam"))
@@ -4682,6 +5283,62 @@ def _orientacao_do_minuto(no_bucket: list) -> str | None:
         if o:
             peso[o] += float(ov or 1.0)
     return max(peso, key=peso.get) if peso else None
+
+
+def _papel_do_minuto(
+    no_bucket: list, inicio_bucket: float, fim_bucket: float
+) -> str | None:
+    """Papel dominante em fatias exclusivas, nunca em pessoa-segundos.
+
+    Dois visitantes simultâneos ocupam um instante, não dois. Operador junto a
+    visitante continua operador; identidade indefinida ou vazio contradito por
+    pessoa tornam somente aquela fatia inconclusiva.
+    """
+    peso: dict[str | None, float] = defaultdict(float)
+    limites = {float(inicio_bucket), float(fim_bucket)}
+    for e, _ov in no_bucket:
+        limites.add(max(float(inicio_bucket), float(e.get("tempo_inicio_s") or 0)))
+        limites.add(min(float(fim_bucket), float(e.get("tempo_fim_s") or 0)))
+    ordenados = sorted(l for l in limites if inicio_bucket <= l <= fim_bucket)
+    for inicio, fim in zip(ordenados, ordenados[1:]):
+        if fim <= inicio:
+            continue
+        ativos = [
+            e for e, _ov in no_bucket
+            if float(e.get("tempo_inicio_s") or 0) < fim
+            and float(e.get("tempo_fim_s") or 0) > inicio
+        ]
+        if not ativos:
+            continue
+        papeis = {
+            e.get("papel_pessoa")
+            if e.get("papel_pessoa") in {"operador", "visitante", "posto_vazio"}
+            else None
+            for e in ativos
+        }
+        if None in papeis or (
+            "posto_vazio" in papeis
+            and ("operador" in papeis or "visitante" in papeis)
+        ):
+            papel = None
+        elif "operador" in papeis:
+            papel = "operador"
+        elif "visitante" in papeis:
+            papel = "visitante"
+        elif "posto_vazio" in papeis:
+            papel = "posto_vazio"
+        else:
+            papel = None
+        peso[papel] += fim - inicio
+    if not peso:
+        return None
+    maior = max(peso.values())
+    empatados = {papel for papel, valor in peso.items() if abs(valor - maior) < 1e-9}
+    if len(empatados) == 1:
+        return next(iter(empatados))
+    if empatados == {"operador", "visitante"}:
+        return "operador"
+    return None
 
 
 def _merge_bbox_stats(eventos: list[dict]) -> dict | None:
@@ -4778,32 +5435,67 @@ def etapa_consolidar_principais(
     for b in range(n_buckets):
         ws, we = b * bucket_s, min((b + 1) * bucket_s, duracao_s)
         no_bucket: list[tuple[dict, float]] = []
-        dur_por_label: dict[str, float] = defaultdict(float)
         for e in eventos_crus:
             ov = min(e["tempo_fim_s"], we) - max(e["tempo_inicio_s"], ws)
             if ov > 0:
                 no_bucket.append((e, ov))
-                dur_por_label[e["comportamento_label"]] += ov
         if not no_bucket:
             continue  # minuto sem atividade → sem principal
+
+        # Identidade/presença é resolvida ANTES do rótulo. O desenho anterior
+        # escolhia a ação dominante e copiava o papel do representante dessa
+        # ação; assim um visitante podia virar o "operador" do minuto.
+        if PRODUTIVIDADE_OPERADOR_V9:
+            papel_minuto = _papel_do_minuto(no_bucket, ws, we)
+            bucket_papel = [
+                (e, ov) for e, ov in no_bucket
+                if (
+                    e.get("papel_pessoa") == papel_minuto
+                    if papel_minuto is not None
+                    else e.get("papel_pessoa") not in {
+                        "operador", "visitante", "posto_vazio"
+                    }
+                )
+            ]
+            if not bucket_papel:
+                bucket_papel = no_bucket
+        else:
+            # Rollback real: V8 escolhia o rótulo sobre a cena inteira e só
+            # depois copiava o papel do representante.
+            papel_minuto = None
+            bucket_papel = no_bucket
+        dur_por_label: dict[str, float] = defaultdict(float)
+        for e, ov in bucket_papel:
+            dur_por_label[e["comportamento_label"]] += ov
         total = sum(dur_por_label.values())
         top_label, top_dur = max(dur_por_label.items(), key=lambda kv: kv[1])
         share = (top_dur / total) if total > 0 else 1.0
         escolhido = top_label
         if share < dominancia and len(dur_por_label) > 1:
-            escolhido = _principal_por_ia(no_bucket, catalogo) or top_label
+            escolhido = _principal_por_ia(bucket_papel, catalogo) or top_label
         # Representante = evento do rótulo escolhido com MAIOR sobreposição no minuto.
         # Fase 90: VOTOS são quadros olhados. Herdada/interpolada mantêm o
         # minuto coberto mas não afirmam nada — quem não olhou não vota.
-        _n_votos = sum(e.get("n_amostras", 0) for e, _ in no_bucket)
+        _n_votos = sum(e.get("n_amostras", 0) for e, _ in bucket_papel)
         _n_obs = sum(e.get("n_observacoes", e.get("n_amostras", 0))
-                     for e, _ in no_bucket)
+                     for e, _ in bucket_papel)
         _origens: dict = {}
-        for _e, _ in no_bucket:
+        for _e, _ in bucket_papel:
             for k, v in (_e.get("origens") or {}).items():
                 _origens[k] = _origens.get(k, 0) + v
-        reps = [(e, ov) for (e, ov) in no_bucket if e["comportamento_label"] == escolhido]
-        rep = (max(reps, key=lambda x: x[1]) if reps else max(no_bucket, key=lambda x: x[1]))[0]
+        reps = [(e, ov) for (e, ov) in bucket_papel
+                if e["comportamento_label"] == escolhido]
+        rep = (max(reps, key=lambda x: x[1])
+               if reps else max(bucket_papel, key=lambda x: x[1]))[0]
+        if PRODUTIVIDADE_OPERADOR_V9:
+            bucket_operador = (
+                [(e, ov) for e, ov in bucket_papel
+                 if e.get("papel_pessoa") == "operador"]
+                if papel_minuto == "operador" else []
+            )
+        else:
+            papel_minuto = rep.get("papel_pessoa")
+            bucket_operador = no_bucket
         principais.append({
             "pessoa_track_id": rep["pessoa_track_id"],
             "comportamento_label": escolhido,
@@ -4821,20 +5513,20 @@ def etapa_consolidar_principais(
                             else None),
             "bbox_cam": rep.get("bbox_cam"),
             "bbox_stats": _merge_bbox_stats(
-                [e for e, _ in no_bucket
+                [e for e, _ in bucket_papel
                  if e.get("pessoa_track_id") == rep.get("pessoa_track_id")]),
             "maos_maquina": (True if any(e.get("maos_maquina")
-                                         for e, _ in no_bucket) else None),
+                                         for e, _ in bucket_operador) else None),
             # Fase 97: a orientação DOMINANTE do minuto — é ela que decide o
             # nível 2. Moda simples: o minuto é um regime, não um instante.
-            "orientacao": _orientacao_do_minuto(no_bucket),
+            "orientacao": _orientacao_do_minuto(bucket_operador),
             "maquina": rep.get("maquina"),
             "imovel": rep.get("imovel"),
             # Fase 97: o julgamento do minuto — maioria simples entre os crus,
             # e `None` vence empate (na dúvida, dúvida).
-            "trabalho": _trabalho_do_minuto(no_bucket),
+            "trabalho": _trabalho_do_minuto(bucket_operador),
             "zona_contexto": rep["zona_contexto"],
-            "papel_pessoa": rep.get("papel_pessoa"),
+            "papel_pessoa": papel_minuto,
             "n_amostras": _n_votos,
             # Cobertura e composição: é o par que permite dizer "este minuto
             # ficou sem evidência POR supressão do gate" em vez de o teto
@@ -4872,7 +5564,7 @@ def etapa_consolidar_principais(
             principais[-1]["movimento_detalhe"] = _mov.get("detalhe")
             # Fase 94: o MODO é composto aqui porque é aqui que `maos_maquina`
             # existe — ele vem dos crus do minuto, não do sensor.
-            _maos = any(e.get("maos_maquina") for e, _ in no_bucket)
+            _maos = any(e.get("maos_maquina") for e, _ in bucket_operador)
             principais[-1]["modo_operacao"] = modo_operacao(
                 _mov.get("movimento"), _mov.get("detalhe"), _maos)
         # Fase 95: o NÍVEL que a árvore usaria é calculado e gravado mesmo com
@@ -4889,6 +5581,9 @@ def etapa_consolidar_principais(
         # Fase 57: CAMADAS DE DÚVIDA — determinísticas, em CPU, ZERO chamada
         # extra ao VLM. Camada nunca corrige o rótulo: só marca dúvida.
         if camadas:
+            # As camadas auditam a CENA inteira (inclusive contradições entre
+            # posto vazio e uma pessoa em parte do minuto). Só os sinais
+            # comerciais acima são restritos ao operador escolhido.
             fato = montar_fato_evento(principais[-1], no_bucket, share,
                                       len(dur_por_label), rastreia_papel=_rastreia_papel)
             em_duvida, disparos, avaliacao = avaliar_camadas(fato, escolhido, camadas)
@@ -7086,6 +7781,13 @@ def etapa_persistir(
             # assim que dá para comparar antes/depois no mesmo dado.
             "maos_maquina": e.get("maos_maquina"),
             "orientacao": e.get("orientacao"),
+            # A decisão binária já era produzida pelo VLM e atravessava a
+            # consolidação, mas era descartada exatamente nesta fronteira.
+            # Sem persistência, todo reload apagava a produtividade direta e
+            # forçava o dashboard a voltar para rótulo/Lean.
+            "trabalho": (
+                e.get("trabalho") if PRODUTIVIDADE_OPERADOR_V9 else None
+            ),
             "decidido_por": e.get("decidido_por"),
             # Fase 90: cobertura e composição, ao lado da evidência.
             "n_observacoes": e.get("n_observacoes"),
@@ -7164,6 +7866,15 @@ def etapa_persistir(
             "bbox_stats": e.get("bbox_stats"),
             "zona_contexto": e["zona_contexto"],
             "papel_pessoa": e.get("papel_pessoa"),
+            "maos_maquina": (
+                e.get("maos_maquina") if PRODUTIVIDADE_OPERADOR_V9 else None
+            ),
+            "orientacao": (
+                e.get("orientacao") if PRODUTIVIDADE_OPERADOR_V9 else None
+            ),
+            "trabalho": (
+                e.get("trabalho") if PRODUTIVIDADE_OPERADOR_V9 else None
+            ),
             "versao_instrumento": VERSAO_INSTRUMENTO,
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
             "n_observacoes": e.get("n_observacoes"),
@@ -7358,7 +8069,7 @@ def _seg_token_nome(nome: str | None) -> str | None:
 
 
 def _parse_gravado_em_nome(nome: str | None) -> str | None:
-    """Extrai o relógio do nome do segmento → ISO 8601 (com TZ local do server).
+    """Extrai o relógio do nome do segmento → ISO 8601 no fuso da fábrica.
 
     Nome típico: '<uuid>_seg_20260626_155058_roi.mp4' → '2026-06-26T15:50:58-03:00'.
     Usado como fallback de `gravado_em` quando o edge não envia explícito (para
@@ -7374,10 +8085,15 @@ def _parse_gravado_em_nome(nome: str | None) -> str | None:
             int(data[0:4]), int(data[4:6]), int(data[6:8]),
             int(hora[0:2]), int(hora[2:4]), int(hora[4:6]),
         )
-        # Carimba a TZ local do servidor (mesma origem do edge clock); o
-        # importante é que cam1 e cam2 com o mesmo seg_TIMESTAMP gerem o MESMO
-        # valor — e geram, pois o parse é idêntico.
-        return dt.astimezone().isoformat()
+        try:
+            from zoneinfo import ZoneInfo
+            tz_edge = ZoneInfo(os.environ.get("KV_TZ", "America/Sao_Paulo"))
+        except Exception:
+            # Render costuma rodar UTC; usar o timezone local do container
+            # deslocava a captura três horas. O fallback explícito preserva o
+            # relógio da instalação atual mesmo sem tzdata na imagem.
+            tz_edge = timezone(timedelta(hours=-3), "UTC-3")
+        return dt.replace(tzinfo=tz_edge).isoformat()
     except Exception:
         return None
 
@@ -11315,9 +12031,13 @@ _LEAN_ROTULO = {
 
 
 def _inicio_video_dt(v: dict) -> datetime | None:
-    """Instante REAL de gravação do vídeo: relógio no nome (edge, token
-    seg_YYYYMMDD_HHMMSS) com fallback em processado_em. None se nada parsear."""
-    iso = _parse_gravado_em_nome(v.get("nome")) or v.get("processado_em")
+    """Instante REAL: gravado_em, relógio do nome e, só então, processamento.
+    None se nada parsear."""
+    iso = (
+        v.get("gravado_em")
+        or _parse_gravado_em_nome(v.get("nome"))
+        or v.get("processado_em")
+    )
     if not iso:
         return None
     try:
@@ -11708,26 +12428,30 @@ _PERMANENCIA = os.environ.get("KV_PERMANENCIA", "on") not in (
 # Até lá o nível 2 ABSTÉM-SE: o minuto cai no nível 3 e o VLM julga. Isso
 # degrada com segurança (nada vira produtivo por engano) e liga com uma
 # variável de ambiente, sem deploy, no dia em que o dado confirmar.
-_ORIENTACAO_VERIFICADA = os.environ.get("KV_ORIENTACAO_VERIFICADA", "off") not in (
-    "off", "0", "false", "False", "")
+_ORIENTACAO_VERIFICADA = _env_ligada("KV_ORIENTACAO_VERIFICADA")
 
 EST_FORA = "fora_do_posto"
 EST_NO_TORNO = "no_posto_torno"
 EST_OUTRO_LADO = "no_posto_outro_lado"
-ESTADOS_PERMANENCIA = (EST_NO_TORNO, EST_OUTRO_LADO, EST_FORA)
+EST_INCONCLUSIVO = "inconclusivo"
+ESTADOS_PERMANENCIA = (EST_NO_TORNO, EST_OUTRO_LADO, EST_FORA, EST_INCONCLUSIVO)
 
 
 def _trabalho_do_minuto(no_bucket: list):
-    """Maioria simples do julgamento do VLM no minuto. `None` vence empate —
-    na dúvida, dúvida."""
-    sim = nao = 0
-    for e, _ov in no_bucket:
+    """Maioria ponderada do julgamento do operador no minuto.
+
+    O chamador entrega somente eventos do operador. A sobreposição temporal
+    evita que um evento curto valha o mesmo que o regime dominante; empate
+    continua sendo dúvida.
+    """
+    sim = nao = 0.0
+    for e, ov in no_bucket:
         t = e.get("trabalho")
         if t is True:
-            sim += 1
+            sim += float(ov or 0.0) if PRODUTIVIDADE_OPERADOR_V9 else 1.0
         elif t is False:
-            nao += 1
-    if sim == nao:
+            nao += float(ov or 0.0) if PRODUTIVIDADE_OPERADOR_V9 else 1.0
+    if abs(sim - nao) < 1e-9:
         return None
     return sim > nao
 
@@ -11747,6 +12471,11 @@ def estado_permanencia(e: dict, frente_maquina: str | None) -> tuple:
         # Visitante não é o titular do posto: o tempo dele não é permanência
         # do operador. Conta como fora.
         return EST_FORA, None
+    if papel != "operador" and PRODUTIVIDADE_OPERADOR_V9:
+        # Ausência de identidade não é presença. Antes, `None` caía no mesmo
+        # ramo do operador e inflava permanência justamente quando o sistema
+        # não sabia quem estava no posto.
+        return EST_INCONCLUSIVO, None
     # Sem verificação, a orientação não decide — ver `_ORIENTACAO_VERIFICADA`.
     voltado = (orientacao_vs_maquina(e.get("orientacao"), frente_maquina)
                if _ORIENTACAO_VERIFICADA else None)
@@ -11782,6 +12511,10 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
                 NIVEL_HUMANO, "você decidiu este trecho", est)
 
     estado, voltado = estado_permanencia(e, frente_maquina)
+
+    if estado == EST_INCONCLUSIVO:
+        return (CATEGORIA_SEM_EVIDENCIA, "identidade",
+                "não foi possível identificar o operador neste trecho", estado)
 
     # ── 1 — fora do posto ──
     if estado == EST_FORA:
@@ -11854,7 +12587,12 @@ def permanencia_do_dia(eventos: list, frente_maquina: str | None = None) -> dict
     colapsam em `no_posto` — melhor um número simples e certo do que um detalhe
     que pode estar invertido.
     """
-    seg = {EST_NO_TORNO: 0.0, EST_OUTRO_LADO: 0.0, EST_FORA: 0.0}
+    seg = {
+        EST_NO_TORNO: 0.0,
+        EST_OUTRO_LADO: 0.0,
+        EST_FORA: 0.0,
+        EST_INCONCLUSIVO: 0.0,
+    }
     for e in eventos or []:
         if e.get("principal") is False:
             continue
@@ -11865,10 +12603,13 @@ def permanencia_do_dia(eventos: list, frente_maquina: str | None = None) -> dict
         estado, _voltado = estado_permanencia(e, frente_maquina)
         seg[estado] = seg.get(estado, 0.0) + dur
 
-    total = sum(seg.values())
+    total_bruto = sum(seg.values())
+    total = total_bruto - seg[EST_INCONCLUSIVO]
     if total <= 0:
         return {"no_posto_pct": 0.0, "no_posto_torno_pct": 0.0,
                 "no_posto_outro_lado_pct": 0.0, "fora_pct": 0.0,
+                "cobertura_pct": 0.0,
+                "inconclusivo_pct": (100.0 if total_bruto > 0 else 0.0),
                 "orientacao_verificada": _ORIENTACAO_VERIFICADA,
                 "detalhado": False, "sem_dado": True}
 
@@ -11879,6 +12620,11 @@ def permanencia_do_dia(eventos: list, frente_maquina: str | None = None) -> dict
     saida = {
         "no_posto_pct": pct(no_posto),
         "fora_pct": pct(seg[EST_FORA]),
+        "cobertura_pct": round(100.0 * total / total_bruto, 1)
+        if total_bruto > 0 else 0.0,
+        "inconclusivo_pct": round(
+            100.0 * seg[EST_INCONCLUSIVO] / total_bruto, 1
+        ) if total_bruto > 0 else 0.0,
         "orientacao_verificada": _ORIENTACAO_VERIFICADA,
         # `detalhado=False` é a instrução para a tela mostrar SÓ permanência.
         "detalhado": bool(_ORIENTACAO_VERIFICADA),
@@ -12790,7 +13536,8 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
         # Fase 85: a versão do instrumento entra na análise diária para a tela
         # poder MARCAR o dia em que a medição mudou. Sem isso, a queda de
         # produtividade do deploy seria indistinguível de queda real.
-        "n_amostras, origem_validacao, camadas_disparadas, versao_instrumento",
+        "n_amostras, origem_validacao, camadas_disparadas, versao_instrumento, "
+        "maos_maquina, orientacao, trabalho",
         empresa=empresa, processo=processo,
     )
     eventos = [
@@ -13767,10 +14514,12 @@ def processar_video(
         stats_op = etapa_confirmar_operador(amostras, politica)
         log.info(
             "[operador] política=%s · %d slots: %d com operador (%d resgatados "
-            "pela cam2, %d por ponte temporal), %d vazios, %d rebaixados pela cam2",
+            "pela cam2, %d por ponte temporal), %d vazios, %d inconclusivos, "
+            "%d rebaixados pela cam2",
             politica, stats_op["slots"], stats_op["presentes"],
             stats_op["resgatados_cam2"], stats_op["pontes"],
-            stats_op["vazios"], stats_op["rebaixados"],
+            stats_op["vazios"], stats_op["inconclusivos"],
+            stats_op["rebaixados"],
         )
 
     observacoes = etapa_analise_vlm(

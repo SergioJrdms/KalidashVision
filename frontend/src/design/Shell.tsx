@@ -78,14 +78,12 @@ export function Sidebar({
   // posto, quanto tempo fica lá, o posto está rendendo. O resto continua a um
   // clique, agrupado.
   const procNav = [
-    { tab: "dashboard", label: "Dashboard", icon: "layout-dashboard" },
-    { tab: "diaadia", label: "Dia a dia", icon: "calendar-days" },
-    // Fase 96: a árvore é a peça mais provável de aparecer num criativo — ela
-    // responde "o que o sistema considera trabalho?" numa imagem só.
-    { tab: "arvore", label: "O que é trabalho", icon: "git-branch" },
-    { tab: "validacao", label: "Validação", icon: "git-pull-request-arrow", badge: proc?.pendencias },
+    { tab: "dashboard", label: "Visão do posto", icon: "layout-dashboard" },
   ];
   const procNavAvancado = [
+    { tab: "diaadia", label: "Dia a dia", icon: "calendar-days" },
+    { tab: "arvore", label: "O que é trabalho", icon: "git-branch" },
+    { tab: "validacao", label: "Validação", icon: "git-pull-request-arrow", badge: proc?.pendencias },
     // Fase 80: auditar é olhar um dia por amostragem, sem julgar nada.
     { tab: "auditoria", label: "Auditoria do dia", icon: "search" },
     // Fase 102: a taxa de acerto MEDIDA, por julgamento cego.
@@ -240,7 +238,7 @@ export function Sidebar({
 
 export function Topbar({ route, proc, go, onOpenPrism, action, isMobile = false, onMenu }: { route: Route; proc?: ProcHeaderMock | null; go: Go; onOpenPrism: () => void; action?: ReactNode; isMobile?: boolean; onMenu?: () => void }) {
   const inProc = route.screen === "processo";
-  const tabLabels: Record<string, string> = { dashboard: "Dashboard", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", rotulos: "Classificar rótulos", titular: "Quem dominou o posto", arvore: "O que é trabalho", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
+  const tabLabels: Record<string, string> = { dashboard: "Visão do posto", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", rotulos: "Classificar rótulos", titular: "Quem dominou o posto", arvore: "O que é trabalho", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
   return (
     <header className="row" style={{ height: isMobile ? 54 : 60, padding: isMobile ? "0 12px" : "0 26px", borderBottom: "1px solid var(--line)", background: "rgba(255,255,255,.82)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 30, justifyContent: "space-between", gap: isMobile ? 8 : 16 }}>
       <div className="row gap2" style={{ fontSize: 13.5, color: "var(--muted)", minWidth: 0 }}>

@@ -10,7 +10,7 @@ import { supabase } from "./lib/supabase";
 import { api } from "./lib/api";
 import { mapProcessos, mapHeader, type ProcHeaderMock } from "./lib/adapt";
 import { iniciaisDe } from "./design/helpers";
-import { ToastHost, Btn } from "./design/ui";
+import { ToastHost } from "./design/ui";
 import { Sidebar, Topbar, type Route, type Go } from "./design/Shell";
 import Login from "./pages/Login";
 import Processos from "./pages/Processos";
@@ -134,10 +134,9 @@ function AppShell() {
   }
   if (!content) content = <Processos go={goTyped} />;
 
-  const topAction =
-    route.screen === "processo" && proc && route.tab !== "upload" ? (
-      <Btn size="sm" icon="upload" onClick={() => go("processo", proc.id, "upload")}>{isMobile ? "" : "Novo vídeo"}</Btn>
-    ) : null;
+  // A captura é automática no caso comercial. Upload manual continua nas
+  // ferramentas avançadas, mas não compete com a leitura principal.
+  const topAction = null;
 
   return (
     <div className="row" style={{ alignItems: "stretch", minHeight: "100vh" }}>

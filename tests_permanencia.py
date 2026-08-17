@@ -146,7 +146,7 @@ _c, _n, _m, est = pl.decidir_permanencia(ev(orient="costas"), None)
 check("sem `frente_maquina` configurado, o nível 2 não afirma",
       est == pl.EST_OUTRO_LADO, est)
 
-print("\n[6] Os três estados somam 100% do tempo observado")
+print("\n[6] Os estados incluem a identidade inconclusiva")
 casos = [ev(papel="posto_vazio", label="posto_vazio"),
          ev(orient="costas"), ev(orient="frente", trabalho=True),
          ev(orient="frente", trabalho=None), ev(orient=None),
@@ -154,8 +154,10 @@ casos = [ev(papel="posto_vazio", label="posto_vazio"),
 estados = [pl.estado_permanencia(e, OPOSTA)[0] for e in casos]
 check("todo evento cai em exatamente um estado",
       all(x in pl.ESTADOS_PERMANENCIA for x in estados), estados)
-check("os três estados existem no vocabulário",
-      set(pl.ESTADOS_PERMANENCIA) == {pl.EST_NO_TORNO, pl.EST_OUTRO_LADO, pl.EST_FORA})
+check("o vocabulário inclui inconclusivo sem misturá-lo com presença",
+      set(pl.ESTADOS_PERMANENCIA) == {
+          pl.EST_NO_TORNO, pl.EST_OUTRO_LADO, pl.EST_FORA, pl.EST_INCONCLUSIVO
+      })
 check("nenhum caso ficou sem estado", None not in estados)
 
 print("\n[7] Correção humana é INVIOLÁVEL")
@@ -190,8 +192,8 @@ check("validado_humano sem correção nem confirmação NÃO sequestra a decisã
 print("\n[8] Zero chamada de API nova — `trabalho` vai no JSON que já existe")
 check("o prompt da sequência pede o campo", '"trabalho"' in fonte)
 check("com as três respostas possíveis explicadas",
-      "null  = não dá para dizer" in fonte)
-check("e proíbe o chute", "nunca chute true" in fonte)
+      "true/false em \"identificado\"" in fonte and "deve ser null" in fonte)
+check("e falha fechado quando não identifica", "evidência visual é insuficiente" in fonte)
 check("o parser aceita só booleano de verdade (string não vira True)",
       'isinstance(t.get("trabalho"), bool)' in fonte)
 seq = fonte[fonte.index("def _analisar_sequencia_vlm"):
@@ -434,7 +436,7 @@ check("a REGRA que mandava descrever a máquina virou proibição",
 check("e o porquê está no prompt (foi medido, trocava como moeda)",
       "trocava como cara ou coroa" in fonte)
 check("`imovel` continua sendo pedido (esse a pose mede)",
-      '"imovel": true se a pessoa está na MESMA posição' in fonte)
+      '"imovel": false' in fonte)
 
 print("\n[22] A correção humana também não reintroduz o sufixo")
 main2 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -469,11 +471,11 @@ check("o parser NUNCA aceita estado de máquina do VLM",
       and pl._maquina_do_vlm({"maquina": "parada"}) is None
       and pl._maquina_do_vlm({}) is None)
 check("mas a imobilidade da PESSOA continua sendo lida — ela é observável",
-      '"imovel": bool(t.get("imovel"))' in fonte)
+      'if isinstance(t.get("imovel"), bool) else None' in fonte)
 check("e o descarte é LOGADO, para a violação da proibição aparecer",
       "o modelo afirmou estado da máquina" in fonte)
-check("os dois pontos de parse usam a guarda, não o normalizador cru",
-      fonte.count('"maquina": _maquina_do_vlm(t)') == 2
+check("todos os pontos de parse usam a guarda, não o normalizador cru",
+      fonte.count('"maquina": _maquina_do_vlm(t)') >= 2
       and '"maquina": _normalizar_maquina(t.get("maquina"))' not in fonte)
 
 # (c) O cache do cluster exigia que a cena batesse com o sufixo do label
