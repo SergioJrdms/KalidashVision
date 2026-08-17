@@ -230,8 +230,20 @@ export interface ProdutividadePosto extends MetricasProdutividadePosto {
   };
 }
 
+/** Sugestão gerada por REGRA a partir de um número medido. Nunca nasce sem
+ *  gatilho numérico — é o que impede de falar de um problema que o dado não
+ *  mostra. `passos` é obrigatório: sugestão sem o "como fazer" é opinião. */
+export interface SugestaoPratica {
+  chave: string;
+  titulo: string;
+  porque: string;
+  passos: string[];
+  tom: "ruim" | "atencao" | "info";
+}
+
 export interface DashboardData {
   permanencia?: Permanencia;
+  sugestoes_praticas?: SugestaoPratica[];
   produtividade_posto?: ProdutividadePosto;
   snapshot: {
     videos_analisados: number;

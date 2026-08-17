@@ -11,6 +11,7 @@ import type {
   InsightsQuantitativos,
   PadraoGlobal,
   Permanencia,
+  SugestaoPratica,
   ProdutividadePosto,
   PadraoProcesso,
   PerguntaProcesso,
@@ -59,6 +60,8 @@ export interface DetMock {
   insights: InsightsQuantitativos | null;
   /** Fase 101 — o número principal, passado adiante sem transformação. */
   permanencia: Permanencia | null;
+  /** Sugestões por regra, já ordenadas por peso pelo backend. */
+  sugestoesPraticas: SugestaoPratica[];
   /** Contrato comercial: sem rótulos Lean e sem duração pública. */
   produtividade: ProdutividadePosto | null;
 }
@@ -173,6 +176,7 @@ export function mapDashboard(d: DashboardData): DetMock {
     perguntasPendentes: d.perguntas_pendentes || 0,
     insights: d.insights_quantitativos || null,
     permanencia,
+    sugestoesPraticas: d.sugestoes_praticas || [],
     produtividade,
   };
 }

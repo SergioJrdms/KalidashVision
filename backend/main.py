@@ -3463,6 +3463,21 @@ def dashboard(
     # histórico, é dizer quanto dele está ali. Quem lê o payload consegue
     # distinguir "presença medida por 12 mil leituras antigas" de "cobertura de
     # produtividade zerada porque o instrumento novo ainda não rodou".
+    _iq = montar_insights_quantitativos(
+        dist_enriquecida, composicao_valor, base, videos, cat_por_label
+    )
+
+    # SUGESTÕES POR REGRA — nascem dos números acima, não de um consultor de
+    # LLM. Zero token, e impossível falarem de um problema que o dado não
+    # mostra: cada uma exige um gatilho numérico.
+    sugestoes_praticas = sugestoes_do_posto(
+        permanencia=permanencia,
+        produtividade=produtividade_posto,
+        pendentes=(pendentes.count or 0),
+        por_hora=(_iq or {}).get("por_hora"),
+        diagnostico_descricao=_diag_desc,
+    )
+
     produtividade_posto["leituras_do_instrumento_legado"] = _n_historico
     produtividade_posto["historico_incluido"] = bool(_HISTORICO_PRESENCA)
 
@@ -3470,6 +3485,7 @@ def dashboard(
         "snapshot": snapshot,
         "permanencia": permanencia,
         "produtividade_posto": produtividade_posto,
+        "sugestoes_praticas": sugestoes_praticas,
         # Fase 102: a descrição é o diferencial — e vem com o próprio
         # certificado de origem ao lado.
         "descricao_diagnostico": _diag_desc,
@@ -3486,9 +3502,7 @@ def dashboard(
         "pareto": pareto,
         # Fase 17: insights simples e numéricos (frases + tempo por ação + Lean +
         # ROI + tendência), determinísticos, a partir dos eventos principais.
-        "insights_quantitativos": montar_insights_quantitativos(
-            dist_enriquecida, composicao_valor, base, videos, cat_por_label
-        ),
+        "insights_quantitativos": _iq,
         # mesma cap (50 mais recentes) que existia antes; videos foi buscado
         # uma vez no topo, mas só os mais recentes vão para a resposta.
         "videos": videos[:50],

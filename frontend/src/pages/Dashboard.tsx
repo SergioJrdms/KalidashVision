@@ -11,7 +11,7 @@ import { leanCor, leanLabel, leanLong, leanShort, type LeanShort } from "../desi
 import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, Ring, toast } from "../design/ui";
 import { leituraDoPosto, nomeHumano } from "../design/rotulos";
 import type { Go } from "../design/Shell";
-import type { AcaoSugestao, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso } from "../lib/types";
+import type { AcaoSugestao, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso, SugestaoPratica } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
@@ -153,6 +153,11 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
           </div>
         </Card>
       </div>
+
+      {/* Depois de "79,7% no posto" e da qualidade da leitura, a próxima
+          coisa que o gestor quer é o que fazer com isso. Some sozinho quando
+          não há gatilho medido. */}
+      <OQueFazerAgora itens={det.sugestoesPraticas} />
 
       <SerieComercial pontos={p.serie_diaria} />
     </div>
@@ -389,6 +394,54 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
     </Card>
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// O QUE FAZER AGORA — sugestões por REGRA, com o passo a passo.
+//
+// As antigas vinham de um consultor Lean de LLM e saíam genéricas ("implantar
+// 5S", "reduzir setup"), com nome complicado e sem dizer COMO. O gestor lia,
+// concordava e não fazia nada.
+//
+// Estas nascem de um número medido — e sem o número não existem. Cada uma traz
+// o gatilho ("o posto ficou vazio em 20% do turno"), o porquê em uma frase, e
+// os passos na ordem de fazer. No máximo três: lista de dez é lista de zero.
+// ═══════════════════════════════════════════════════════════════════════
+function OQueFazerAgora({ itens }: { itens: SugestaoPratica[] }) {
+  if (!itens.length) return null;
+  const cor = (t: string) =>
+    t === "ruim" ? leanCor("desp") : t === "info" ? "var(--muted)" : "#c98a00";
+  return (
+    <Card style={{ padding: "18px 20px" }}>
+      <div className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 12 }}>
+        O que fazer agora
+      </div>
+      <div className="col" style={{ gap: 14 }}>
+        {itens.map((s) => (
+          <div key={s.chave} className="col"
+               style={{ gap: 6, paddingLeft: 14, borderLeft: `3px solid ${cor(s.tom)}` }}>
+            <span style={{ fontSize: 15.5, fontWeight: 700, color: "var(--ink)", lineHeight: 1.35 }}>
+              {s.titulo}
+            </span>
+            <span style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5 }}>
+              {s.porque}
+            </span>
+            {/* O "como fazer" é o que separa isto de opinião. Numerado porque
+                a ordem importa — o primeiro passo é sempre o de descobrir, e
+                só o último é o de mudar alguma coisa. */}
+            <ol className="col" style={{ gap: 3, margin: "2px 0 0", paddingLeft: 18 }}>
+              {s.passos.map((p, i) => (
+                <li key={i} style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
+                  {p}
+                </li>
+              ))}
+            </ol>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // Fase 101 — PERMANÊNCIA: o número principal.

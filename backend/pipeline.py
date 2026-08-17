@@ -13417,6 +13417,149 @@ def montar_insights_quantitativos(
     }
 
 
+
+# ═════════════════════════════════════════════════════════════════════════
+# SUGESTÕES DO POSTO — por REGRA, a partir do que foi medido.
+#
+# As antigas vinham de `PROMPT_ANALISE`, um consultor Lean de LLM. Saíam
+# genéricas ("implementar 5S na área", "reduzir setup via SMED"), com nome
+# complicado e sem dizer COMO fazer — o gestor lia, concordava e não agia.
+# Também custavam token e podiam inventar um problema que o dado não mostrava.
+#
+# Estas são o oposto, e as três propriedades são o ponto:
+#
+#  1. SÓ NASCEM DE UM NÚMERO MEDIDO. Cada regra tem um gatilho explícito e
+#     carrega o número que a disparou. Sem o número, a sugestão não existe —
+#     é impossível ela falar de um problema que o dado não mostra.
+#  2. NOME DE CHÃO DE FÁBRICA. "O posto ficou vazio um quinto do turno", não
+#     "oportunidade de otimização da taxa de ocupação do recurso".
+#  3. SEMPRE COM O COMO. Cada uma traz passos concretos, na ordem de fazer.
+#     Sugestão sem passo é opinião.
+#
+# ⚠️ ZERO CHAMADA DE API e função PURA: entra o payload que a tela já tem,
+# sai a lista. Não lê banco, não chama modelo, não custa nada.
+#
+# ⚠️ E NÃO MOVE NÚMERO NENHUM. Ela LÊ os números; nada aqui volta para o
+# cálculo.
+# ═════════════════════════════════════════════════════════════════════════
+def sugestoes_do_posto(
+    permanencia: dict | None = None,
+    produtividade: dict | None = None,
+    pendentes: int = 0,
+    por_hora: list | None = None,
+    diagnostico_descricao: dict | None = None,
+    max_itens: int = 3,
+) -> list[dict]:
+    """As sugestões que a tela mostra. Ordenadas por PESO, não por categoria.
+
+    `max_itens` é baixo de propósito: uma lista de dez sugestões é uma lista de
+    zero. O gestor faz uma coisa por vez, e a primeira tem de ser a que mais
+    pesa hoje.
+    """
+    prod = produtividade or {}
+    perm = permanencia or {}
+    itens: list[dict] = []
+
+    def add(peso, chave, titulo, porque, passos, tom="atencao"):
+        itens.append({"chave": chave, "titulo": titulo, "porque": porque,
+                      "passos": passos, "tom": tom, "_peso": peso})
+
+    # ── 1) A captura parou. Vem antes de tudo: sem dado novo, toda leitura
+    # abaixo é sobre o passado, e agir sobre o passado achando que é o presente
+    # é o pior erro que esta tela pode induzir.
+    if prod.get("captura_atrasada"):
+        add(100, "captura_parada",
+            "A câmera parou de mandar imagem",
+            "O último trecho recebido não é recente. O que a tela mostra é o "
+            "que já tinha sido gravado, não o que está acontecendo agora.",
+            ["Veja se o computador da borda está ligado e com internet.",
+             "Confira se as duas câmeras estão energizadas e enxergando o posto.",
+             "Se estiver tudo de pé, abra a Fila e veja se há trecho preso em "
+             "'processando'."],
+            tom="ruim")
+
+    # ── 2) Posto vazio. É o achado mais acionável que este produto tem hoje,
+    # porque é 100% medido: presença sai de detecção + polígono, sem IA.
+    vazio = prod.get("posto_vazio_pct")
+    if vazio is None:
+        vazio = perm.get("fora_pct")
+    if isinstance(vazio, (int, float)) and vazio >= 15:
+        add(90 if vazio >= 25 else 72, "posto_vazio",
+            f"O posto ficou vazio em {vazio:.0f}% do turno",
+            "Esse é o tempo em que a máquina tinha trabalho para fazer e não "
+            "havia ninguém nela.",
+            ["Abra o Dia a dia e veja em que horas o posto mais esvazia.",
+             "Naquelas horas, pergunte ao operador o que ele foi fazer — "
+             "quase sempre é buscar material, ferramenta ou desenho.",
+             "O que se repetir vira tarefa de outra pessoa ou vai para perto "
+             "do posto."])
+
+    # ── 3) Concentração numa faixa de hora. Um vazio espalhado é rotina; um
+    # vazio concentrado tem CAUSA, e causa tem conserto.
+    horas = [h for h in (por_hora or []) if isinstance(h.get("desp_pct"), (int, float))]
+    if len(horas) >= 3:
+        pior = max(horas, key=lambda h: h["desp_pct"])
+        media = sum(h["desp_pct"] for h in horas) / len(horas)
+        if pior["desp_pct"] - media >= 15:
+            add(80, "hora_ruim",
+                f"O posto rende bem menos por volta das {int(pior['hora']):02d}h",
+                f"Nessa faixa o tempo perdido é {pior['desp_pct'] - media:.0f} "
+                "pontos maior que na média do turno. Uma hora fora da curva "
+                "costuma ter uma causa só.",
+                [f"Assista a um trecho das {int(pior['hora']):02d}h na Validação.",
+                 "Veja se coincide com troca de turno, refeição ou entrega de "
+                 "material.",
+                 "Se coincidir, mude o horário do que atrapalha — não o do "
+                 "operador."])
+
+    # ── 4) Não dá para dizer se é produtivo. Enquadrado como CONFIGURAÇÃO,
+    # que é o que de fato falta, e não como falha da IA.
+    cob = prod.get("cobertura_produtividade_pct")
+    if isinstance(cob, (int, float)) and cob < 30 and (prod.get("presenca_pct") or 0) > 0:
+        add(65, "sem_lado_maquina",
+            "Falta dizer ao sistema de que lado fica o torno",
+            "Sabemos quanto tempo o operador ficou no posto, mas ainda não se "
+            "ele estava voltado para a máquina. É por isso que a produtividade "
+            "está sem número.",
+            ["Abra Configurações e desenhe a zona da máquina, se ainda não "
+             "estiver desenhada.",
+             "Marque se o operador aparece de frente ou de costas para a "
+             "câmera quando está trabalhando.",
+             "Salve e processe um vídeo novo — a produtividade aparece a "
+             "partir dele."])
+
+    # ── 5) A fila. O trabalho de maior alavancagem que existe aqui, e o único
+    # em que o gestor ensina o sistema em vez de só ler.
+    if pendentes >= 40:
+        add(60, "fila",
+            f"{pendentes} trechos esperando sua conferência",
+            "Cada trecho que você confere ensina o sistema a errar menos no "
+            "próximo — e a fila já é grande o bastante para atrapalhar.",
+            ["Abra a Validação e faça um lote de dez.",
+             "Responda pelo que você VÊ na imagem, não pelo que costuma "
+             "acontecer.",
+             "Dez minutos por dia dão conta; não precisa zerar de uma vez."])
+
+    # ── 6) Descrição sem observação. Só entra quando é grande — abaixo disso é
+    # ruído de instrumento e não merece a atenção do gestor.
+    diag = diagnostico_descricao or {}
+    sem_obs = diag.get("pct_sem_observacao")
+    if isinstance(sem_obs, (int, float)) and sem_obs >= 30:
+        add(50, "sem_observacao",
+            f"Em {sem_obs:.0f}% dos trechos o sistema não olhou a imagem",
+            "Nesses trechos o tempo é real e a presença foi medida, mas a "
+            "descrição do que aconteceu foi herdada do trecho anterior.",
+            ["Isso costuma ser economia de análise apertada demais.",
+             "Se você precisa da descrição para investigar, avise — dá para "
+             "afrouxar o limite.",
+             "O percentual de presença NÃO é afetado por isso."],
+            tom="info")
+
+    itens.sort(key=lambda x: -x["_peso"])
+    for x in itens:
+        x.pop("_peso", None)
+    return itens[:max_itens]
+
 # ═════════════════════════════════════════════════════════════════════════
 # Fase 87 — ABRIR O BIN DA JORNADA
 #
