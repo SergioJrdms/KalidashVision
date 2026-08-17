@@ -172,64 +172,100 @@ ck("erro não-de-coluna → payload completo, sem KeyError na tela",
 # ═════════════════════════════════════════════════════════════════════════
 # A FILA SEGUE O RELÓGIO DA FÁBRICA (pedido do dono).
 #
-# O gestor recebia 06h, 14h, 09h, 07h em sequência e aquilo parecia sorteio.
-# Não era: a ordenação usava `tempo_inicio_s`, que é o tempo DENTRO do vídeo, e
-# todo vídeo começa em 0s. Com 46 vídeos no dia, saíam primeiro todos os
-# trechos de 0s de todos os vídeos, depois todos os de 10s.
+# Dois defeitos, encontrados em sequência:
+#
+# (1) ORDEM. O gestor recebia 06h, 14h, 09h, 07h e aquilo parecia sorteio. Não
+#     era: a ordenação usava `tempo_inicio_s`, o tempo DENTRO do vídeo — e todo
+#     vídeo começa em 0s. Com 46 vídeos no dia, saíam primeiro todos os trechos
+#     de 0s de todos os vídeos, depois todos os de 10s.
+#
+# (2) HORA. Corrigida a ordem, a etiqueta mostrava 04h para um trecho das 07h.
+#     Duas causas somadas: a referência era `videos.gravado_em` (derivado, que
+#     cai para o instante de PROCESSAMENTO quando o nome não tem relógio), e a
+#     formatação acontecia no NAVEGADOR — que relia o carimbo de hora de parede
+#     como UTC e subtraía três horas. Agora a âncora é o carimbo do SEGMENTO e
+#     quem formata é o servidor, que conhece o fuso do processo.
 #
 # ⚠️ SÓ ORDEM E LEITURA. O conjunto da fila, o gate de relevância, o que é
 # aprendido e como se valida continuam idênticos — este bloco protege isso.
 # ═════════════════════════════════════════════════════════════════════════
-print("\n[F] A fila em ordem cronológica")
+print("\n[F] A fila em ordem cronológica, no relógio da fábrica")
 _main = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "backend", "main.py"), encoding="utf-8").read()
 
 ck("a ordenação final usa o instante de RELÓGIO, não o tempo do arquivo",
-      "def _instante(e: dict) -> tuple:" in _main and "itens.sort(key=_instante)" in _main)
+   "def _instante(e: dict) -> tuple:" in _main and "itens.sort(key=_instante)" in _main)
 ck("com o diagnóstico escrito: a chave estava errada, não aleatória",
-      "todo vídeo começa em 0s" in _main)
+   "todo vídeo começa em 0s" in _main)
 
-# A função de ordenação, replicada — é contrato, não detalhe.
-def _instante(e):
-    g = e.get("gravado_em")
-    return (0 if g else 1, str(g or ""), float(e.get("tempo_inicio_s") or 0))
+# ── (2) A ÂNCORA É O SEGMENTO ──────────────────────────────────────────
+ck("⭐ o relógio vem do SEGMENTO, que é o que a borda carimbou",
+   'sb.table("segmentos")' in _main and '_seg_por_video[_k] = _s' in _main)
+ck("e o vídeo fica só como reserva",
+   '_base = (_s or {}).get("gravado_em") or i.get("gravado_em")' in _main)
+ck("com o porquê: `videos.gravado_em` cai para o instante de PROCESSAMENTO",
+   "PROCESSAMENTO" in _main)
+ck("do vídeo usa-se o segmento MAIS ANTIGO — é a âncora de tempo_inicio_s",
+   "O MAIS ANTIGO do vídeo" in _main)
+ck("a origem do relógio viaja no payload, para o defeito ser diagnosticável",
+   '"hora_de"' in _main)
 
-_fila = [
-    {"id": "b", "gravado_em": "2026-08-14T09:00:00+00:00", "tempo_inicio_s": 0},
-    {"id": "a", "gravado_em": "2026-08-14T06:00:00+00:00", "tempo_inicio_s": 540},
-    {"id": "d", "gravado_em": "2026-08-14T14:00:00+00:00", "tempo_inicio_s": 0},
-    {"id": "c", "gravado_em": "2026-08-14T09:00:00+00:00", "tempo_inicio_s": 300},
-]
-_fila.sort(key=_instante)
-ck("06h vem antes de 09h, mesmo com deslocamento maior dentro do vídeo",
-      [x["id"] for x in _fila] == ["a", "b", "c", "d"], [x["id"] for x in _fila])
-
-# Sem relógio o evento não tem lugar na linha do tempo. Ele vai para o FIM:
-# no começo, desalinharia justamente a primeira hora, que é onde o gestor
-# ancora a leitura do turno.
-_com_orfao = _fila + [{"id": "orfao", "gravado_em": None, "tempo_inicio_s": 0}]
-_com_orfao.sort(key=_instante)
-ck("evento sem `gravado_em` vai para o FIM, não para o começo",
-      [x["id"] for x in _com_orfao][-1] == "orfao", [x["id"] for x in _com_orfao])
-
-ck("a ordenação roda DEPOIS do gate — ordenar não muda o que entra",
-      _main.index("itens = relevantes") < _main.index("itens.sort(key=_instante)"))
-
+# ── (2b) QUEM FORMATA É O SERVIDOR ─────────────────────────────────────
+ck("⭐ o servidor entrega a hora PRONTA, no fuso do processo",
+   '_tz, _ = fuso_do_processo(sb, user.empresa, nome)' in _main
+   and 'i["instante_fabrica"] = _d.strftime("%H:%M")' in _main)
+ck("carimbo sem fuso é hora de PAREDE da fábrica, não UTC",
+   "_d.replace(tzinfo=_tz) if _d.tzinfo is None else _d.astimezone(_tz)" in _main)
 _val = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "frontend", "src", "pages", "Validacao.tsx"),
             encoding="utf-8").read()
+_adapt = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "frontend", "src", "lib", "adapt.ts"), encoding="utf-8").read()
+ck("⭐ a tela NÃO recalcula instante nenhum — era daí que vinha o 04h",
+   "new Date" not in _val.replace("// ⚠️ NENHUM `new Date` AQUI", ""))
+ck("e o adaptador só repassa o texto do servidor",
+   "e.instante_fabrica ?? null" in _adapt and "new Date(new Date(e.gravado_em)" not in _adapt)
+
+# ── (1) A ORDEM, como contrato ─────────────────────────────────────────
+def _instante(e):
+    g = e.get("instante_iso") or e.get("gravado_em")
+    return (0 if g else 1, str(g or ""), float(e.get("tempo_inicio_s") or 0))
+
+_fila = [
+    {"id": "b", "instante_iso": "2026-08-14T09:00:00-03:00", "tempo_inicio_s": 0},
+    {"id": "a", "instante_iso": "2026-08-14T06:09:00-03:00", "tempo_inicio_s": 540},
+    {"id": "d", "instante_iso": "2026-08-14T14:00:00-03:00", "tempo_inicio_s": 0},
+    {"id": "c", "instante_iso": "2026-08-14T09:05:00-03:00", "tempo_inicio_s": 300},
+]
+_fila.sort(key=_instante)
+ck("06h vem antes de 09h, mesmo com deslocamento maior dentro do vídeo",
+   [x["id"] for x in _fila] == ["a", "b", "c", "d"], [x["id"] for x in _fila])
+
+# Sem relógio o evento não tem lugar na linha do tempo. Vai para o FIM: no
+# começo, desalinharia justamente a primeira hora, que é onde o gestor ancora
+# a leitura do turno.
+_com_orfao = _fila + [{"id": "orfao", "instante_iso": None, "tempo_inicio_s": 0}]
+_com_orfao.sort(key=_instante)
+ck("evento sem relógio vai para o FIM, não para o começo",
+   [x["id"] for x in _com_orfao][-1] == "orfao", [x["id"] for x in _com_orfao])
+
+ck("ordenar e exibir usam a MESMA âncora — senão a fila parece fora de ordem",
+   'g = e.get("instante_iso") or e.get("gravado_em")' in _main)
+ck("a ordenação roda DEPOIS do gate — ordenar não muda o que entra",
+   _main.index("itens = relevantes") < _main.index("itens.sort(key=_instante)"))
+
+# ── LEITURA ────────────────────────────────────────────────────────────
 ck("a tela marca a troca de faixa horária", "function MarcoHora" in _val)
-ck("e mostra o instante do turno no card em foco", "horaMinuto(evento.quandoISO)" in _val)
+ck("e mostra o instante do turno no card em foco", "{evento.hora}" in _val)
 ck("com a faixa na barra do lote, para o foco único também mostrar a ordem",
-      "por volta das {faixa}" in _val)
-ck("o instante de relógio é derivado no adaptador, sem conta nova na tela",
-      "quandoISO" in open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                       "frontend", "src", "lib", "adapt.ts"),
-                          encoding="utf-8").read())
-# ⚠️ O QUE NÃO PODE TER MUDADO.
+   "por volta das {faixa}" in _val)
+
+# ── ⚠️ O QUE NÃO PODE TER MUDADO ───────────────────────────────────────
 ck("o gate de relevância continua igual",
-      "evento_relevante_para_validacao(i, ocorr, maturidade)" in _main)
+   "evento_relevante_para_validacao(i, ocorr, maturidade)" in _main)
 ck("e a rotação do PULAR continua (é ação do gestor, não desordem)",
-      "Empurra o item da frente pro fim do lote" in _val)
+   "Empurra o item da frente pro fim do lote" in _val)
+ck("a leitura da hora é NÃO-FATAL: falhou, usa o vídeo e segue",
+   "hora do segmento não lida" in _main)
 
 print(f"\n== {ok} ok, {fail} fail ==")

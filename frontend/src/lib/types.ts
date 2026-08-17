@@ -333,6 +333,14 @@ export interface EventoPendente {
   categoria_lean_prevista?: string | null;
   cam_id?: string | null;
   gravado_em?: string | null;
+  /** Hora de PAREDE da fábrica, já formatada pelo servidor. O navegador não
+   *  reinterpreta: formatar no cliente relia o carimbo como UTC e subtraía o
+   *  fuso — 07h virava 04h. */
+  instante_fabrica?: string | null;
+  faixa_hora_fabrica?: string | null;
+  instante_iso?: string | null;
+  /** 'segmento' | 'video' — de onde saiu o relógio. */
+  hora_de?: string | null;
   irmaos?: EventoIrmaoPendente[];
   // Fase 6 (dual-angle): 2º ângulo (segmento da cam2) p/ mostrar no card de
   // validação quando o evento foi processado com os 2 ângulos juntos (sem irmão).

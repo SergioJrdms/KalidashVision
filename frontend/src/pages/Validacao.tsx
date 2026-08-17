@@ -38,23 +38,13 @@ const TAMANHO_LOTE = 10;
 // valida continuam exatamente os mesmos.
 // ═══════════════════════════════════════════════════════════════════════
 
-/** "07h" — a faixa horária do trecho, no relógio de quem está lendo. */
-function faixaHora(iso: string | null): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return `${String(d.getHours()).padStart(2, "0")}h`;
-}
-
-/** "07:42" — o instante exato, para o gestor localizar o momento no turno.
- *  É LOCALIZADOR, não métrica: a regra que proíbe duração em tela do cliente
- *  vale para "quanto tempo", não para "quando". */
-function horaMinuto(iso: string | null): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
+// ⚠️ NENHUM `new Date` AQUI, e é o ponto. A hora chega do servidor já
+// formatada no fuso da fábrica, a partir do carimbo do SEGMENTO — que é o que
+// a borda gravou. A versão anterior calculava no navegador e mostrava 04h para
+// um trecho das 07h: o carimbo está em hora de parede e o navegador, em São
+// Paulo, o relia como UTC e subtraía três horas. Reinterpretar instante no
+// cliente é o tipo de conta que erra em silêncio — o servidor conhece o fuso
+// do processo, então quem formata é ele.
 
 /** Marco de hora: aparece quando o card inicia uma faixa horária nova. */
 function MarcoHora({ hora }: { hora: string }) {
@@ -484,7 +474,7 @@ function FilaFoco({
         totalLotes={totalLotes}
         restantesBloco={restantesBloco}
         naFilaAposBloco={naFilaAposBloco}
-        faixa={faixaHora(evento.quandoISO)}
+        faixa={evento.faixaHora}
       />
 
       <div style={{ position: "relative" }}>
@@ -506,11 +496,11 @@ function FilaFoco({
                   que o gestor se situa na linha do tempo. O par
                   `120.0s→180.0s` continua ao lado como localizador dentro do
                   arquivo de vídeo — ferramenta interna, não métrica. */}
-              {horaMinuto(evento.quandoISO) && (
+              {evento.hora && (
                 <span style={{ fontFamily: "var(--sans)", fontWeight: 800, fontSize: 12.5,
                                color: "var(--accent-deep)", background: "var(--accent-soft)",
                                borderRadius: 999, padding: "2px 10px" }}>
-                  {horaMinuto(evento.quandoISO)}
+                  {evento.hora}
                 </span>
               )}
               <Icon name="user" size={13} /> {evento.papel === "operador" ? "OPERADOR" : evento.papel === "visitante" ? "VISITANTE NO POSTO" : `PESSOA-${String(evento.pessoa).padStart(3, "0")}`} · {evento.ini.toFixed(1)}s→{evento.fim.toFixed(1)}s · {fmtSeg(evento.fim - evento.ini)}
@@ -755,7 +745,7 @@ function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolve
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(min(100%, 320px),1fr))", gap: 14 }}>
       {queue.map((ev) => {
-        const h = faixaHora(ev.quandoISO);
+        const h = ev.faixaHora;
         const novaFaixa = h !== null && h !== horaAnterior;
         if (h !== null) horaAnterior = h;
         return (

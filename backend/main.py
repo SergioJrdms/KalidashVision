@@ -3654,6 +3654,69 @@ def listar_eventos(
             i["cam_id"] = mv.get("cam_id")
             i["gravado_em"] = mv.get("gravado_em")
 
+        # ═══════════════════════════════════════════════════════════════
+        # O RELÓGIO DO TRECHO VEM DO SEGMENTO, e é formatado AQUI.
+        #
+        # Dois problemas, um conserto:
+        #
+        # (1) REFERÊNCIA. `videos.gravado_em` é derivado (cai para o relógio do
+        #     nome do arquivo e, na falta dele, para o instante de
+        #     PROCESSAMENTO — que não tem relação com quando a cena aconteceu).
+        #     O SEGMENTO é o que a borda carimbou na hora de gravar; é ele que
+        #     sabe que horas eram na fábrica.
+        #
+        # (2) FUSO. A hora saía formatada no NAVEGADOR. O carimbo está em hora
+        #     de fábrica, e o navegador em São Paulo o relia como UTC e subtraía
+        #     três horas: 07h aparecia como 04h. Formatar no servidor, que já
+        #     conhece o fuso do processo, elimina a conversão dupla — o cliente
+        #     recebe texto pronto, não instante para reinterpretar.
+        # ═══════════════════════════════════════════════════════════════
+        _tz, _ = fuso_do_processo(sb, user.empresa, nome)
+        _seg_por_video: dict[str, dict] = {}
+        if vids:
+            try:
+                _rsg = (
+                    sb.table("segmentos")
+                    .select("video_id, cam_id, gravado_em")
+                    .eq("empresa", user.empresa)
+                    .in_("video_id", list(vids))
+                    .execute()
+                    .data
+                ) or []
+                for _s in _rsg:
+                    if not _s.get("gravado_em"):
+                        continue
+                    _k = str(_s.get("video_id"))
+                    _ant = _seg_por_video.get(_k)
+                    # O MAIS ANTIGO do vídeo: é o começo da gravação, que é a
+                    # âncora de `tempo_inicio_s`. Um segmento posterior daria
+                    # um instante deslocado para a frente.
+                    if _ant is None or str(_s["gravado_em"]) < str(_ant["gravado_em"]):
+                        _seg_por_video[_k] = _s
+            except Exception as e:  # noqa: BLE001
+                log.warning("[fila] hora do segmento não lida (%s) — usando o vídeo.", e)
+
+        for i in itens:
+            _s = _seg_por_video.get(str(i.get("video_id")))
+            _base = (_s or {}).get("gravado_em") or i.get("gravado_em")
+            i["instante_iso"] = None
+            i["instante_fabrica"] = None
+            i["faixa_hora_fabrica"] = None
+            i["hora_de"] = "segmento" if _s else ("video" if _base else None)
+            if not _base:
+                continue
+            try:
+                _d = datetime.fromisoformat(str(_base).replace("Z", "+00:00"))
+            except Exception:  # noqa: BLE001
+                continue
+            # Carimbo sem fuso é hora de PAREDE da fábrica — é assim que a
+            # borda grava. Só o com fuso precisa de conversão.
+            _d = _d.replace(tzinfo=_tz) if _d.tzinfo is None else _d.astimezone(_tz)
+            _d = _d + timedelta(seconds=float(i.get("tempo_inicio_s") or 0))
+            i["instante_iso"] = _d.isoformat()
+            i["instante_fabrica"] = _d.strftime("%H:%M")
+            i["faixa_hora_fabrica"] = _d.strftime("%Hh")
+
         grupos, secundarios = agrupar_eventos_multicamera(itens)
         # Anexa irmãos ao primário; eventos solo ficam com irmaos=[].
         for i in itens:
@@ -3767,8 +3830,12 @@ def listar_eventos(
     # sequência. Evento sem `gravado_em` (vídeo antigo) vai para o fim em vez
     # de para o começo: sem relógio, ele não tem lugar na linha do tempo, e
     # jogá-lo no início desalinharia justamente a primeira hora.
+    # A mesma âncora que a tela mostra: o carimbo do SEGMENTO, no fuso da
+    # fábrica. Ordenar por uma referência e exibir outra faria a fila parecer
+    # fora de ordem mesmo estando ordenada — que é o defeito que acabou de ser
+    # consertado, com outra roupa.
     def _instante(e: dict) -> tuple:
-        g = e.get("gravado_em")
+        g = e.get("instante_iso") or e.get("gravado_em")
         return (0 if g else 1, str(g or ""), float(e.get("tempo_inicio_s") or 0))
 
     itens.sort(key=_instante)

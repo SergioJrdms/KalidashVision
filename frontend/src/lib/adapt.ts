@@ -64,7 +64,7 @@ export interface DetMock {
 }
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
-export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; quandoISO: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
+export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; hora: string | null; faixaHora: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[] }
 export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null; papel: string | null; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; desp: number }[] }
@@ -189,12 +189,13 @@ export function mapPendentes(rows: EventoPendente[]): PendMock[] {
     conf: e.confianca || 0,
     sugestao: leanShort(e.categoria_lean_prevista),
     camId: e.cam_id ?? null,
-    // Instante de RELÓGIO do trecho: quando o vídeo foi gravado + o
-    // deslocamento dentro dele. É o que permite a fila seguir a linha do
-    // tempo da fábrica em vez do tempo interno de cada arquivo.
-    quandoISO: e.gravado_em
-      ? new Date(new Date(e.gravado_em).getTime() + (e.tempo_inicio_s || 0) * 1000).toISOString()
-      : null,
+    // ⚠️ TEXTO PRONTO DO SERVIDOR, não instante para reinterpretar.
+    // A hora vem do carimbo do SEGMENTO (o que a borda gravou), já no fuso da
+    // fábrica. Calcular no navegador era o bug do "04h": o carimbo está em
+    // hora de parede e o navegador em São Paulo o relia como UTC, tirando três
+    // horas. Aqui não há `new Date` — não há o que deslocar.
+    hora: e.instante_fabrica ?? null,
+    faixaHora: e.faixa_hora_fabrica ?? null,
     irmaos: (e.irmaos || []).map((s) => ({
       id: s.id,
       camId: s.cam_id ?? null,
