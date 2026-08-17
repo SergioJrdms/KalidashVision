@@ -19,59 +19,234 @@ const COMP_VISIVEL_PADRAO = 5;
 
 export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const isMobile = useIsMobile();
-  const q = useQuery({ queryKey: ["dashboard", proc.id], queryFn: () => api.processos.dashboard(proc.id) });
+  const [janela, setJanela] = useState<1 | 7 | 30>(7);
+  const q = useQuery({
+    queryKey: ["dashboard", proc.id, janela],
+    queryFn: () => api.processos.dashboard(proc.id, janela),
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+  });
   if (q.isLoading) return <Card><Empty icon="loader" title="Carregando dashboard…" /></Card>;
   if (!q.data) return <Card><Empty icon="alert-triangle" title="Não foi possível carregar" /></Card>;
   const det = mapDashboard(q.data);
   if (det.snapshot.videos === 0) {
     return (
       <Card>
-        <Empty icon="video" title="Nenhum vídeo processado ainda" desc="Envie o primeiro vídeo. Em poucos minutos você verá comportamentos, distribuição do tempo e as primeiras sugestões." action={<Btn icon="upload" onClick={() => go("processo", proc.id, "upload")}>Enviar vídeo</Btn>} />
+        <Empty icon="video" title="Aguardando a primeira captura do posto" desc="Assim que a captura automática for processada, esta tela mostrará presença, posto vazio e produtividade." />
       </Card>
     );
   }
-  const temPosto = (det.insights?.por_roi?.length || 0) > 1;
+  const p = det.produtividade;
+  if (!p) {
+    return (
+      <Card style={{ padding: 24 }}>
+        <Empty
+          icon="alert-triangle"
+          title="Leitura do posto indisponível"
+          desc="A plataforma ainda não recebeu uma leitura compatível de presença e produtividade. Nenhum indicador antigo será exibido como substituto."
+        />
+      </Card>
+    );
+  }
+
+  const atual = p.sem_dado
+    ? { titulo: "Sem leitura válida", detalhe: "Ainda não há uma leitura compatível neste período.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" as IconeNome }
+    : p.captura_atrasada
+      ? { titulo: "Captura desatualizada", detalhe: "A última leitura foi preservada, mas não representa o estado atual.", cor: "#a46c00", fundo: "#fff6df", icone: "clock-alert" as IconeNome }
+      : leituraAtual(p.estado_atual);
+  const dataLeitura = formatarLeitura(p.estado_atual.leitura_em);
   return (
-    <div className="col" style={{ gap: 18 }}>
-      <DashHeader proc={proc} det={det} go={go} />
-
-      {/* Fase 96 — A CONCLUSÃO EM PORTUGUÊS, acima dos cards. Gerada por
-          REGRA (previsível e sem custo de token) e honesta: com pouca
-          cobertura ou muita dúvida, ela diz isso em vez de fingir precisão. */}
-      <LeituraEmPortugues det={det} />
-
-      {/* ⭐ Fase 101 — O NÚMERO PRINCIPAL, acima de tudo. Vem de contagem
-          direta de presença na zona: sem VLM, sem rótulo, sem categoria. Se a
-          esteira de rótulo estiver toda errada, ISTO continua certo. */}
-      <PermanenciaHero p={det.permanencia} />
-
-      {/* Fase 19 — o placar da esteira antiga vira DETALHE, abaixo. */}
-      <PlacarHero placar={det.insights?.placar || null} />
-
-      {/* Fase 20 — a ação de maior alavancagem agora (1 por vez). */}
-      <ProximoPasso det={det} proc={proc} go={go} />
-
-      {/* A resposta em 1 olhada: os 3 números que importam. */}
-      <KpisExecutivos det={det} />
-
-      {/* Insights rápidos — leitura de 5s (frases da Fase 17). */}
-      <InsightsNumericos iq={det.insights} />
-
-      {/* Onde o tempo vai — por ação (com reclassificação Lean) e por posto. */}
-      <div style={{ display: "grid", gridTemplateColumns: isMobile || !temPosto ? "1fr" : "1.4fr 1fr", gap: 16, alignItems: "start" }}>
-        <TempoPorComportamento det={det} processoId={proc.id} />
-        {temPosto && <PorPosto iq={det.insights} />}
+    <div className="col" style={{ gap: 16 }}>
+      <div className="row wrap" style={{ gap: 14, alignItems: "flex-end", justifyContent: "space-between" }}>
+        <div className="col" style={{ gap: 4 }}>
+          <span style={{ color: "var(--accent)", fontSize: 11, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase" }}>Visão do posto</span>
+          <h1 className="font-display" style={{ margin: 0, color: "var(--ink)", fontSize: isMobile ? 25 : 31, lineHeight: 1.1 }}>Produtividade do operador</h1>
+          <p style={{ margin: 0, color: "var(--muted)", fontSize: 13.5 }}>{proc.nome} · torno mecânico</p>
+        </div>
+        <div className="row" style={{ gap: 5, padding: 4, border: "1px solid var(--line)", borderRadius: 11, background: "#fff" }} aria-label="Período analisado">
+          {([1, 7, 30] as const).map((dias) => (
+            <button
+              key={dias}
+              onClick={() => setJanela(dias)}
+              aria-pressed={janela === dias}
+              style={{
+                border: 0,
+                borderRadius: 8,
+                padding: "7px 11px",
+                background: janela === dias ? "var(--grad-cta)" : "transparent",
+                color: janela === dias ? "#fff" : "var(--muted)",
+                fontSize: 12,
+                fontWeight: 750,
+                cursor: "pointer",
+              }}
+            >
+              {dias === 1 ? "1 dia" : `${dias} dias`}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Agir: perguntas prontas pro chão de fábrica + sugestões curadas. */}
-      <PerguntasGestor perguntas={det.insights?.perguntas || []} />
-      <Sugestoes det={det} processoId={proc.id} />
+      <Card style={{ padding: isMobile ? 18 : "20px 22px", borderLeft: `4px solid ${atual.cor}` }}>
+        <div className="row wrap" style={{ gap: 14, justifyContent: "space-between", alignItems: "center" }}>
+          <div className="row" style={{ gap: 12, minWidth: 0 }}>
+            <span className="center" style={{ width: 42, height: 42, flex: "none", borderRadius: 12, background: atual.fundo, color: atual.cor }}>
+              <Icon name={atual.icone} size={21} />
+            </span>
+            <div className="col" style={{ gap: 2, minWidth: 0 }}>
+              <span style={{ color: "var(--muted)", fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".07em" }}>Última leitura</span>
+              <strong style={{ color: "var(--ink)", fontSize: isMobile ? 16 : 19 }}>{atual.titulo}</strong>
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>{atual.detalhe}</span>
+            </div>
+          </div>
+          <div className="col" style={{ gap: 5, alignItems: isMobile ? "flex-start" : "flex-end" }}>
+            <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{dataLeitura}</span>
+            <span style={{ padding: "5px 9px", borderRadius: 999, background: p.publicavel ? "#eaf7ef" : "#fff6df", color: p.publicavel ? "#187a43" : "#8a5a00", fontSize: 10.5, fontWeight: 800 }}>
+              {p.sem_dado ? "Sem dados válidos no período" : p.captura_atrasada ? "Aguardando nova captura" : p.publicavel ? "Leitura pronta para apresentação" : "Leitura em calibração"}
+            </span>
+          </div>
+        </div>
+      </Card>
 
-      {/* Fase 21 — a operação em gráficos: evolução, ritmo do dia e as
-          demais óticas visuais, para quem quer se aprofundar. */}
-      <OperacaoEmGraficos det={det} iq={det.insights} processoId={proc.id} />
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,minmax(0,1fr))", gap: 14 }}>
+        <KpiComercial titulo="Produtividade" valor={p.produtividade_pct} detalhe="entre leituras com operador identificado e decisão válida" cor="#187a43" icone="gauge" />
+        <KpiComercial titulo="Operador no posto" valor={p.presenca_pct} detalhe="entre as leituras de presença válidas" cor="var(--accent)" icone="user-check" />
+        <KpiComercial titulo="Posto vazio" valor={p.posto_vazio_pct} detalhe="entre as leituras de presença válidas" cor="#b74a3a" icone="user-x" />
+      </div>
 
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.15fr .85fr", gap: 14, alignItems: "stretch" }}>
+        <Card style={{ padding: 20 }}>
+          <div className="row" style={{ justifyContent: "space-between", gap: 12, marginBottom: 18 }}>
+            <div>
+              <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>Leitura do período</h2>
+              <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 12 }}>Percentuais calculados somente sobre leituras válidas do posto.</p>
+            </div>
+          </div>
+          <BarraComercial
+            titulo="Produtividade com operador presente"
+            partes={[
+              { nome: "Produtivo", valor: p.produtividade_pct, cor: "#2e9d62" },
+              { nome: "Improdutivo", valor: p.improdutividade_pct, cor: "#d66755" },
+            ]}
+          />
+          <div style={{ height: 18 }} />
+          <BarraComercial
+            titulo="Ocupação do posto"
+            partes={[
+              { nome: "Operador", valor: p.presenca_pct, cor: "var(--accent)" },
+              { nome: "Outra pessoa", valor: p.outra_pessoa_no_posto_pct, cor: "#c79232" },
+              { nome: "Vazio", valor: p.posto_vazio_pct, cor: "#d9dde6" },
+            ]}
+          />
+        </Card>
+
+        <Card style={{ padding: 20 }}>
+          <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>Qualidade da leitura</h2>
+          <p style={{ margin: "4px 0 16px", color: "var(--muted)", fontSize: 12 }}>Incerteza fica visível; não vira improdutividade.</p>
+          <QualidadeItem titulo="Cobertura da identificação" valor={p.cobertura_identificacao_pct} />
+          <QualidadeItem titulo="Decisão de produtividade" valor={p.cobertura_produtividade_pct} />
+          <div style={{ marginTop: 16, padding: "11px 12px", borderRadius: 10, background: "var(--soft)", color: "var(--text)", fontSize: 12.5, lineHeight: 1.45 }}>
+            {p.sem_dado
+              ? "Ainda não há leituras válidas neste período. A plataforma não exibe zero como se fosse um resultado."
+              : p.inconclusivo_pct != null && p.inconclusivo_pct > 0
+              ? `${p.inconclusivo_pct.toFixed(1)}% das leituras ficaram inconclusivas e foram excluídas da decisão.`
+              : "Nenhuma leitura inconclusiva neste período."}
+          </div>
+        </Card>
+      </div>
+
+      <SerieComercial pontos={p.serie_diaria} />
     </div>
+  );
+}
+
+type IconeNome = Parameters<typeof Icon>[0]["name"];
+
+function formatarLeitura(iso: string | null): string {
+  if (!iso) return "Sem horário de captura disponível";
+  const data = new Date(iso);
+  if (Number.isNaN(data.getTime())) return "Horário de captura indisponível";
+  return `Capturado em ${new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(data)}`;
+}
+
+function leituraAtual(estado: NonNullable<DetMock["produtividade"]>["estado_atual"]): { titulo: string; detalhe: string; cor: string; fundo: string; icone: IconeNome } {
+  if (estado.presenca === "posto_vazio") return { titulo: "Posto vazio", detalhe: "Nenhum operador identificado no posto.", cor: "#b74a3a", fundo: "#fff0ed", icone: "user-x" };
+  if (estado.presenca === "fora_do_posto") return { titulo: "Operador fora do posto", detalhe: "Há outra pessoa na área, mas não o operador.", cor: "#a46c00", fundo: "#fff6df", icone: "users" };
+  if (estado.presenca === "no_posto" && estado.produtividade === "produtivo") return { titulo: "Operador no posto · produtivo", detalhe: "Mão no torno ou atenção voltada para a operação.", cor: "#187a43", fundo: "#eaf7ef", icone: "circle-check" };
+  if (estado.presenca === "no_posto" && estado.produtividade === "improdutivo") return { titulo: "Operador no posto · improdutivo", detalhe: "Sem interação ou atenção ao torno nesta leitura.", cor: "#b74a3a", fundo: "#fff0ed", icone: "circle-alert" };
+  if (estado.presenca === "no_posto") return { titulo: "Operador no posto", detalhe: "A produtividade desta leitura ficou inconclusiva.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" };
+  return { titulo: "Leitura inconclusiva", detalhe: "Não foi possível identificar o operador com segurança.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" };
+}
+
+function KpiComercial({ titulo, valor, detalhe, cor, icone }: { titulo: string; valor: number | null; detalhe: string; cor: string; icone: IconeNome }) {
+  return (
+    <Card style={{ padding: 20 }}>
+      <div className="row" style={{ justifyContent: "space-between", gap: 12 }}>
+        <span style={{ color: "var(--muted)", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em" }}>{titulo}</span>
+        <Icon name={icone} size={18} color={cor} />
+      </div>
+      <div className="font-display tnum" style={{ marginTop: 12, color: valor == null ? "var(--faint)" : cor, fontSize: 38, lineHeight: 1, fontWeight: 750 }}>
+        {valor == null ? "—" : `${valor.toFixed(1)}%`}
+      </div>
+      <p style={{ margin: "9px 0 0", color: "var(--muted)", fontSize: 11.5, lineHeight: 1.4 }}>{detalhe}</p>
+    </Card>
+  );
+}
+
+function BarraComercial({ titulo, partes }: { titulo: string; partes: Array<{ nome: string; valor: number | null; cor: string }> }) {
+  const validas = partes.filter((p) => p.valor != null && p.valor > 0);
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>{titulo}</div>
+      <div className="row" style={{ height: 12, overflow: "hidden", borderRadius: 999, background: "var(--line-2)", gap: 0 }}>
+        {validas.map((p) => <span key={p.nome} style={{ height: "100%", width: `${p.valor}%`, background: p.cor }} title={`${p.nome}: ${p.valor?.toFixed(1)}%`} />)}
+      </div>
+      <div className="row wrap" style={{ gap: 12, marginTop: 9 }}>
+        {partes.map((p) => (
+          <span key={p.nome} className="row" style={{ gap: 5, color: "var(--muted)", fontSize: 11 }}>
+            <i style={{ width: 8, height: 8, borderRadius: 999, background: p.cor }} />
+            {p.nome} <strong className="tnum" style={{ color: "var(--text)" }}>{p.valor == null ? "—" : `${p.valor.toFixed(1)}%`}</strong>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function QualidadeItem({ titulo, valor }: { titulo: string; valor: number | null }) {
+  const pct = Math.max(0, Math.min(100, valor ?? 0));
+  const cor = pct >= 80 ? "#2e9d62" : pct >= 60 ? "#c79232" : "#d66755";
+  return (
+    <div style={{ marginTop: 13 }}>
+      <div className="row" style={{ justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+        <span style={{ color: "var(--text)", fontWeight: 650 }}>{titulo}</span>
+        <strong className="tnum" style={{ color: cor }}>{valor == null ? "—" : `${valor.toFixed(1)}%`}</strong>
+      </div>
+      <div style={{ height: 7, borderRadius: 999, background: "var(--line-2)", overflow: "hidden" }}><div style={{ width: `${pct}%`, height: "100%", background: cor, borderRadius: 999 }} /></div>
+    </div>
+  );
+}
+
+function SerieComercial({ pontos }: { pontos: NonNullable<DetMock["produtividade"]>["serie_diaria"] }) {
+  if (pontos.length < 2) return null;
+  return (
+    <Card style={{ padding: 20 }}>
+      <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>Evolução diária</h2>
+      <p style={{ margin: "4px 0 17px", color: "var(--muted)", fontSize: 12 }}>Produtividade e presença no mesmo instrumento.</p>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${pontos.length}, minmax(34px,1fr))`, gap: 8, minHeight: 150, alignItems: "end", overflowX: "auto" }}>
+        {pontos.map((ponto) => (
+          <div key={ponto.dia} className="col" role="group" aria-label={`${ponto.dia}: produtividade ${ponto.produtividade_pct ?? "sem dado"}; presença ${ponto.presenca_pct ?? "sem dado"}`} style={{ gap: 7, alignItems: "center", minWidth: 42 }}>
+            <div className="row" style={{ height: 108, width: "100%", maxWidth: 42, alignItems: "end", gap: 3 }}>
+              {ponto.produtividade_pct != null && <span aria-hidden="true" style={{ width: "50%", height: `${ponto.produtividade_pct}%`, borderRadius: "5px 5px 2px 2px", background: "#2e9d62" }} />}
+              {ponto.presenca_pct != null && <span aria-hidden="true" style={{ width: "50%", height: `${ponto.presenca_pct}%`, borderRadius: "5px 5px 2px 2px", background: "var(--accent)" }} />}
+            </div>
+            <span style={{ fontSize: 9.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{ponto.dia.slice(8, 10)}/{ponto.dia.slice(5, 7)}</span>
+            <span className="tnum" style={{ fontSize: 8.5, color: "var(--muted)", whiteSpace: "nowrap" }}>P {ponto.produtividade_pct == null ? "—" : `${ponto.produtividade_pct.toFixed(0)}%`}</span>
+            <span className="tnum" style={{ fontSize: 8.5, color: "var(--muted)", whiteSpace: "nowrap" }}>O {ponto.presenca_pct == null ? "—" : `${ponto.presenca_pct.toFixed(0)}%`}</span>
+          </div>
+        ))}
+      </div>
+      <div className="row" style={{ gap: 14, marginTop: 10, fontSize: 11, color: "var(--muted)" }}><span>● <b style={{ color: "#2e9d62" }}>Produtividade</b></span><span>● <b style={{ color: "var(--accent)" }}>Presença</b></span></div>
+    </Card>
   );
 }
 

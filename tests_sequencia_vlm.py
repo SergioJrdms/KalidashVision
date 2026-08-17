@@ -35,6 +35,7 @@ sys.modules["openai"].OpenAI = object
 sys.modules["numpy"].ndarray = object
 os.environ.setdefault("SUPABASE_URL", "https://x.supabase.co")
 os.environ.setdefault("SUPABASE_KEY", "k")
+os.environ["KV_PRODUTIVIDADE_OPERADOR_V9"] = "on"
 
 import re  # noqa: E402
 
@@ -85,14 +86,14 @@ check("respeita o teto", len(s) == 5, s)
 check("mantém o primeiro e o último — é neles que está o 'começou/terminou'",
       s[0] == 0 and s[-1] == 19, s)
 
-src = open("backend/pipeline.py").read()
+src = open("backend/pipeline.py", encoding="utf-8").read()
 
 print("\n[3] O prompt DESCREVE; não escolhe rótulo nem lado")
 p_seq = pl.PROMPT_VLM_SEQUENCIA
 p_cam2 = pl.PROMPT_VLM_SEQUENCIA_CAM2
 # As regras são texto quebrado em várias linhas; comparar substring crua daria
 # falso negativo. Normaliza os espaços antes de procurar.
-regras = re.sub(r"\s+", " ", pl._REGRAS_DESCRICAO)
+regras = re.sub(r"\s+", " ", pl._REGRAS_DESCRICAO_V9)
 exemplos = pl._BLOCO_EXEMPLOS_DESCRICAO
 check("o desempate que só tinha saídas produtivas SUMIU dos dois prompts",
       "escolha MONITORAR" not in regras
@@ -101,8 +102,8 @@ check("e o mapeamento parado→'monitorando o ciclo' também",
       "é \"monitorando o ciclo da máquina\"" not in regras)
 check("e some do prompt do resgate, que era a rota alternativa",
       "escolha MONITORAR" not in p_cam2)
-check("o VLM é proibido de classificar produtivo/improdutivo",
-      "NÃO classifique o trabalho como produtivo ou improdutivo" in regras)
+check("o julgamento não contamina a descrição e fica no campo estruturado",
+      "decisão binária fica SOMENTE no campo `trabalho`" in regras)
 check("ausência de mudança é observação legítima",
       "AUSÊNCIA DE MUDANÇA É UMA OBSERVAÇÃO" in regras)
 check("e é proibido preencher com a ação mais provável",
@@ -129,8 +130,7 @@ check("Fase 86: o exemplo não carrega mais a muleta 'de frente ao torno'",
       "de frente ao torno" not in exemplos, exemplos)
 check("há exemplos claramente produtivos", "operando o torno, mãos na peça" in exemplos)
 check("e claramente improdutivos", "mexendo no celular" in exemplos)
-check("o prompt NUNCA diz qual dos dois é produtivo — quem decide é o gestor, "
-      "depois, pela categoria Lean",
+check("os exemplos continuam só observáveis; a regra decide fora da frase",
       "produtivo" not in exemplos.replace("improdutivo", ""))
 
 print("\n[5] A pergunta mudou de 'o que se vê' para 'o que aconteceu'")
@@ -145,6 +145,11 @@ check("a saída é POR INSTANTE, não um resumo do minuto",
 check("os rótulos P1/P2 são declarados como POR IMAGEM (o mesmo P1 pode ser "
       "outra pessoa em outro frame)",
       "desenhados em CADA imagem separadamente" in p_seq)
+check("P1/P2 são candidatos, não identidade presumida",
+      "NÃO presuma que P1 é o operador" in p_seq)
+check("a saída distingue identificado, ausente e incerto",
+      '"operador_estado"' in p_seq and all(x in p_seq for x in (
+          '"identificado"', '"ausente"', '"incerto"')))
 check("a cam2 é declarada como contexto, não como instante a mais",
       "não gere entrada" in re.sub(r"\s+", " ", src))
 
@@ -167,7 +172,7 @@ print("\n[7] O resgate pela cam2 usa o prompt NOVO (3ª porta dos fundos)")
 i = src.index("def _analisar_sequencia_cam2(")
 corpo = src[i:src.index("def _gate_vlm_binario(")]
 check("o resgate virou sequência", "PROMPT_VLM_SEQUENCIA_CAM2" in corpo)
-check("com as mesmas regras de descrição", "regras=_REGRAS_DESCRICAO" in corpo)
+check("com as regras V9 de descrição", "_REGRAS_DESCRICAO_V9" in corpo)
 check("e os mesmos exemplos simétricos", "exemplos=_BLOCO_EXEMPLOS_DESCRICAO" in corpo)
 check("o comentário registra por que ela entrou junto",
       "rota preferencial da produtividade" in corpo)
@@ -338,17 +343,17 @@ try:
     check("e a caixa vem da cam2 (Fase 82)",
           all(o["bbox_cam"] == "cam2" for o in obsr))
 
-    # TETO DA PONTE: presença por continuidade herda, mas não para sempre.
+    # PONTE: pode preservar cobertura textual, nunca identidade/produtividade.
     chamadas["cam2"] = 0
     ponte = [am(0, [], sec="S0", presente=True)] + [
         am(t, [], presente=True, ponte=True) for t in (8, 16, 24, 32, 40)]
     obsp = pl.etapa_analise_vlm(None, ponte, "torno", {}, _nada, zona_posto="posto",
                                 intervalo_s=8.0)
-    pontes = [o for o in obsp if o["origem_gate"] == "ponte_temporal"]
-    check("a ponte herda por no máximo _HERANCA_MAX_SEGUIDAS amostras",
-          len(pontes) == pl._HERANCA_MAX_SEGUIDAS, len(pontes))
-    check("passado o teto, o instante deixa de virar trabalho por eco",
-          len(obsp) == 1 + pl._HERANCA_MAX_SEGUIDAS, len(obsp))
+    check("a ponte preserva as leituras sem inventar ausência",
+          len(obsp) == len(ponte), len(obsp))
+    check("ponte e falha nunca herdam identidade ou produtividade",
+          all(o.get("papel") is None and o.get("trabalho") is None for o in obsp),
+          obsp)
 finally:
     pl._analisar_sequencia_vlm, pl._analisar_sequencia_cam2, pl._gate_vlm_binario = (
         _seq_real, _cam2_real, _bin_real)

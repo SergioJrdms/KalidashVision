@@ -198,8 +198,41 @@ export interface Permanencia {
   frase: string;
 }
 
+export interface MetricasProdutividadePosto {
+  produtividade_pct: number | null;
+  improdutividade_pct: number | null;
+  presenca_pct: number | null;
+  posto_vazio_pct: number | null;
+  outra_pessoa_no_posto_pct: number | null;
+  cobertura_produtividade_pct: number | null;
+  cobertura_presenca_pct: number | null;
+  cobertura_identificacao_pct: number | null;
+  inconclusivo_pct: number | null;
+  publicavel: boolean;
+  sem_dado: boolean;
+}
+
+export interface ProdutividadePosto extends MetricasProdutividadePosto {
+  janela_dias: number;
+  captura_atrasada: boolean;
+  estado_atual: {
+    presenca: "no_posto" | "fora_do_posto" | "posto_vazio" | "sem_leitura";
+    posto: "ocupado" | "vazio" | "indeterminado";
+    produtividade: "produtivo" | "improdutivo" | null;
+    motivo: string;
+    leitura_em: string | null;
+  };
+  serie_diaria: Array<MetricasProdutividadePosto & { dia: string }>;
+  regra: {
+    produtivo: string;
+    improdutivo: string;
+    presenca: string;
+  };
+}
+
 export interface DashboardData {
   permanencia?: Permanencia;
+  produtividade_posto?: ProdutividadePosto;
   snapshot: {
     videos_analisados: number;
     tempo_total_observado_min: number;

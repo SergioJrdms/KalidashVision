@@ -5,8 +5,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapProcessos, mapInsights, mapPadroesGlobais, type ProcMock } from "../lib/adapt";
-import { nivelDe } from "../design/helpers";
-import { Btn, Card, Icon, Prism, Help, Badge, PrioBadge, MaturityMeter, LeanBar, Modal, Empty, toast } from "../design/ui";
+import { Btn, Card, Icon, Prism, Help, Badge, PrioBadge, MaturityMeter, Modal, Empty, toast } from "../design/ui";
 import type { Go } from "../design/Shell";
 
 // Fase 25: a "visão geral do Prism" (insights + padrões de portfólio) está
@@ -29,23 +28,15 @@ export default function Processos({ go }: { go: Go }) {
     <div className="col" style={{ gap: 26, maxWidth: 1180, margin: "0 auto" }}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
         <div>
-          <h1 className="font-display" style={{ fontSize: 28, fontWeight: 700 }}>Sua operação</h1>
+          <h1 className="font-display" style={{ fontSize: 28, fontWeight: 700 }}>Postos monitorados</h1>
           <p className="pretty" style={{ fontSize: 14.5, color: "var(--muted)", marginTop: 6, maxWidth: 560 }}>
-            Cada processo é um contexto isolado de análise. O Prism aprende cada um separadamente — e cruza tudo na visão geral.
+            Acompanhe presença, posto vazio e produtividade do operador em uma única leitura.
           </p>
         </div>
         <Btn icon="plus" onClick={() => setNovo(true)}>Novo processo</Btn>
       </div>
 
-      {VISAO_GLOBAL_EM_BREVE ? (
-        <Card>
-          <Empty
-            icon="sparkles"
-            title="Visão geral do Prism — em breve"
-            desc="Estamos aprimorando a leitura de portfólio do Prism (insights e padrões cruzando todos os processos). Em breve por aqui."
-          />
-        </Card>
-      ) : (
+      {!VISAO_GLOBAL_EM_BREVE && (
         <>
           {(INSIGHTS.length > 0 || PROCESSOS.length > 0) && <InsightsGlobais insights={INSIGHTS} count={PROCESSOS.length} go={go} />}
           {PADROES_GLOBAIS.length > 0 && <PadroesGlobais padroes={PADROES_GLOBAIS} />}
@@ -55,7 +46,7 @@ export default function Processos({ go }: { go: Go }) {
       <div>
         <div className="row" style={{ justifyContent: "space-between", marginBottom: 14 }}>
           <h2 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>
-            Meus processos <span style={{ color: "var(--faint)", fontWeight: 500 }}>· {PROCESSOS.length}</span>
+            Estações <span style={{ color: "var(--faint)", fontWeight: 500 }}>· {PROCESSOS.length}</span>
           </h2>
         </div>
         {procs.isLoading ? (
@@ -140,22 +131,19 @@ function PadroesGlobais({ padroes }: { padroes: ReturnType<typeof mapPadroesGlob
 }
 
 function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
-  const nivel = nivelDe(p.maturidade);
   const [menuOpen, setMenuOpen] = useState(false);
   const [excluir, setExcluir] = useState(false);
   return (
     <>
-    <Card className="hoverlift click anim-fadeup" style={{ padding: 18, animationDelay: `${i * 60}ms`, display: "flex", flexDirection: "column" }} onClick={() => go("processo", p.id, "dashboard")}>
+    <Card className="hoverlift click anim-fadeup" role="link" tabIndex={0} aria-label={`Abrir visão do posto ${p.nome}`} style={{ padding: 18, animationDelay: `${i * 60}ms`, display: "flex", flexDirection: "column" }} onClick={() => go("processo", p.id, "dashboard")} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); go("processo", p.id, "dashboard"); } }}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
         <div className="grow" style={{ minWidth: 0 }}>
           <div className="row gap2" style={{ marginBottom: 4 }}>
             <span className="badge badge-neutral" style={{ fontSize: 10.5 }}>{p.area}</span>
-            {p.sugestoesAlta > 0 && <Badge tone="high">{p.sugestoesAlta} alta</Badge>}
           </div>
           <h3 className="font-display truncate" style={{ fontSize: 17, fontWeight: 700 }}>{p.nome}</h3>
         </div>
         <div className="row gap1" style={{ alignItems: "flex-start", flex: "none" }}>
-          <MaturityMeter pct={p.maturidade} size={46} compact />
           <div style={{ position: "relative" }} onClick={(e) => e.stopPropagation()}>
             <button
               onClick={() => setMenuOpen((v) => !v)}
@@ -188,21 +176,16 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
       </div>
       <p className="clamp2 pretty" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8, minHeight: 34, lineHeight: 1.45 }}>{p.descricao || "Sem descrição ainda."}</p>
 
-      <div style={{ marginTop: 12 }}>
-        <div className="row" style={{ justifyContent: "space-between", fontSize: 10.5, color: "var(--muted)", marginBottom: 4 }}>
-          <span className="row gap1" style={{ color: nivel.cor, fontWeight: 700 }}><Icon name="sparkles" size={11} /> Prism {nivel.rotulo.toLowerCase()}</span>
-          <span>produtivo <b className="tnum" style={{ color: "var(--va)" }}>{p.va}%</b></span>
+      <div className="row" style={{ gap: 10, marginTop: 12, padding: "10px 11px", borderRadius: 10, background: "var(--soft)", border: "1px solid var(--line-2)" }}>
+        <span className="center" style={{ width: 30, height: 30, borderRadius: 9, background: "var(--accent-soft)", color: "var(--accent)", flex: "none" }}><Icon name="scan-line" size={16} /></span>
+        <div className="col" style={{ gap: 1 }}>
+          <strong style={{ color: "var(--ink)", fontSize: 12.5 }}>Presença e produtividade</strong>
+          <span style={{ color: "var(--muted)", fontSize: 11 }}>Abrir visão do posto</span>
         </div>
-        <LeanBar va={p.va} desp={Math.max(0, 100 - p.va)} height={7} />
       </div>
 
       <div className="row" style={{ gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line-2)" }}>
         <MiniStat icon="video" valor={p.videos} label="vídeos" />
-        <MiniStat icon="check-check" valor={p.validado + "%"} label="validado" />
-        <MiniStat icon="inbox" valor={p.pendencias} label="pendências" alert={p.pendencias > 15} />
-      </div>
-      <div className="row gap1" style={{ marginTop: 10, fontSize: 11, color: "var(--faint)" }}>
-        <Icon name="clock" size={12} /> Último vídeo {p.ultimoVideo}
       </div>
     </Card>
     {excluir && <ExcluirProcessoModal p={p} onClose={() => setExcluir(false)} />}

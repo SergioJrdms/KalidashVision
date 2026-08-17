@@ -103,7 +103,8 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ historico, area_inicial }),
       }),
-    dashboard: (id: string) => req<DashboardData>(`/processos/${id}/dashboard`),
+    dashboard: (id: string, janelaDias = 7) =>
+      req<DashboardData>(`/processos/${id}/dashboard?janela_dias=${janelaDias}`),
     sugestoes: (id: string) => req<Sugestao[]>(`/processos/${id}/sugestoes`),
     eventosPendentes: (id: string, agrupar = false) =>
       req<EventoPendente[]>(

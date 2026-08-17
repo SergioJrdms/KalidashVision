@@ -227,19 +227,26 @@ check("a regra do percentual explica a amostragem de ~50%",
 check("na função da frase, que é o que o cliente lê",
       "METADE da verdade" in fonte.split("def frase_permanencia")[1][:900])
 
-print("\n[8] A tela mostra o número novo e explica o colapso")
+print("\n[8] A tela padrão mostra somente o contrato comercial")
 dash = open(os.path.join(RAIZ, "frontend", "src", "pages", "Dashboard.tsx"),
             encoding="utf-8").read()
-check("o herói da permanência existe e vem ANTES do placar antigo",
-      dash.index("<PermanenciaHero") < dash.index("<PlacarHero"))
-check("a árvore de permanência está na tela", "function ArvorePermanencia" in dash)
-check("com três folhas quando detalhado, duas quando colapsado",
-      "No posto, voltado para o torno" in dash and "Fora do posto" in dash)
-check("e o motivo do colapso aparece para o gestor",
-      "pode estar invertido" in dash)
-check("o número vem do backend sem transformação no meio do caminho",
-      "permanencia," in open(os.path.join(RAIZ, "frontend", "src", "lib", "adapt.ts"),
-                             encoding="utf-8").read())
+corpo_padrao = dash.split("export default function Dashboard", 1)[1].split(
+    "type IconeNome", 1
+)[0]
+check("o topo responde produtividade, presença e posto vazio",
+      all(x in corpo_padrao for x in (
+          'titulo="Produtividade"', 'titulo="Operador no posto"',
+          'titulo="Posto vazio"')))
+check("a cobertura técnica aparece e não vira acusação",
+      "Qualidade da leitura" in corpo_padrao and "Incerteza fica visível" in corpo_padrao)
+check("baixa cobertura bloqueia o uso em criativo",
+      "Leitura em calibração" in corpo_padrao)
+check("o dashboard padrão não renderiza o placar/Pareto Lean antigo",
+      "<PlacarHero" not in corpo_padrao and "<ParetoPanel" not in corpo_padrao)
+adapt = open(os.path.join(RAIZ, "frontend", "src", "lib", "adapt.ts"),
+             encoding="utf-8").read()
+check("o contrato vem do backend sem ser recalculado no frontend",
+      "produtividade: ProdutividadePosto" in adapt and "produtividade," in adapt)
 
 print("\n[9] Nada foi apagado nem desligado — só saiu da conta")
 check("o cluster continua existindo", "def etapa_clusterizar" in fonte)

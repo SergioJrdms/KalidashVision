@@ -44,7 +44,10 @@ ROTULOS = ler("design", "rotulos.ts")
 # Transpila o TS com o esbuild que já está no projeto e roda no node. Testar a
 # REGRA e não o texto do arquivo é o que pega uma refatoração que mude o
 # comportamento sem mudar as palavras.
-_ESBUILD = os.path.join(RAIZ, "frontend", "node_modules", ".bin", "esbuild")
+_ESBUILD = os.path.join(
+    RAIZ, "frontend", "node_modules", ".bin",
+    "esbuild.cmd" if os.name == "nt" else "esbuild",
+)
 _JS = None
 
 
@@ -162,12 +165,11 @@ check("recolhido por padrão", 'localStorage.getItem("kv.nav.avancado") === "1"'
 check("e o estado é PERSISTIDO", 'localStorage.setItem("kv.nav.avancado"' in shell)
 visiveis = re.search(r"const procNav = \[(.*?)\n  \];", shell, re.S).group(1)
 n_vis = visiveis.count('{ tab:')
-check(f"menu visível curto ({n_vis} itens)", n_vis <= 4, n_vis)
-for t in ("dashboard", "diaadia", "validacao", "arvore"):
-    check(f"'{t}' está no menu visível", f'tab: "{t}"' in visiveis)
+check(f"menu visível focado no caso comercial ({n_vis} item)", n_vis == 1, n_vis)
+check("'dashboard' está no menu visível", 'tab: "dashboard"' in visiveis)
 avanc = re.search(r"const procNavAvancado = \[(.*?)\n  \];", shell, re.S).group(1)
-for t in ("auditoria", "duvidas", "rotulos", "eventos", "padroes", "fila",
-          "upload", "descricao", "titular"):
+for t in ("diaadia", "validacao", "arvore", "auditoria", "duvidas", "rotulos",
+          "eventos", "padroes", "fila", "upload", "descricao", "titular"):
     check(f"'{t}' foi agrupado (não removido)", f'tab: "{t}"' in avanc)
 check("Configurações fica no rodapé, fora do grupo",
       'tab: "configuracoes"' in shell
