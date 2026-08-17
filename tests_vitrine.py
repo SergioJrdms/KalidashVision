@@ -147,7 +147,7 @@ print("\n[6] A tradução é SÓ exibição — a chave nunca muda")
 # a série histórica quebra em silêncio.
 arv = ler("pages", "Arvore.tsx")
 check("a classificação manda o IDENTIFICADOR, não o nome humano",
-      "label: arrastando" in arv and "d.comportamento," in arv,
+      "label: d.comportamento" in arv,
       "Arvore.tsx pode estar mandando nome traduzido para a API")
 check("nenhuma chamada de API recebe nomeHumano(",
       not re.search(r"setCategoriaPorLabel\([^)]*nomeHumano", arv))
@@ -168,9 +168,20 @@ n_vis = visiveis.count('{ tab:')
 check(f"menu visível focado no caso comercial ({n_vis} item)", n_vis == 1, n_vis)
 check("'dashboard' está no menu visível", 'tab: "dashboard"' in visiveis)
 avanc = re.search(r"const procNavAvancado = \[(.*?)\n  \];", shell, re.S).group(1)
-for t in ("diaadia", "validacao", "arvore", "auditoria", "duvidas", "rotulos",
-          "eventos", "padroes", "fila", "upload", "descricao", "titular"):
+for t in ("diaadia", "validacao", "arvore", "auditoria", "duvidas",
+          "eventos", "padroes", "fila", "descricao"):
     check(f"'{t}' foi agrupado (não removido)", f'tab: "{t}"' in avanc)
+# LIMPEZA DA VITRINE: quatro telas saíram do MENU. São ferramentas internas,
+# não etapas do percurso do cliente — e o menu é a vitrine.
+# `precisao` é a régua de acerto do time; `titular` é tela de sombra que já
+# mostrou a pessoa errada; `rotulos` nasceu quando o rótulo decidia o número
+# (desde a Fase 101 não decide); `upload` era muleta — a captura é automática.
+for t in ("precisao", "titular", "rotulos", "upload"):
+    check(f"'{t}' saiu do menu", f'tab: "{t}"' not in avanc and f'tab: "{t}"' not in visiveis)
+    # ⚠️ SAIU DO MENU, NÃO DO PRODUTO: a rota continua de pé, para reativar
+    # devolvendo uma linha — e para nenhum link salvo quebrar.
+    check(f"mas a rota de '{t}' continua viva",
+          f'route.tab === "{t}"' in ler("..", "src", "App.tsx"))
 check("Configurações fica no rodapé, fora do grupo",
       'tab: "configuracoes"' in shell
       and 'tab: "configuracoes"' not in avanc and 'tab: "configuracoes"' not in visiveis)
@@ -213,19 +224,35 @@ check("a frase é gerada por REGRA, não por LLM",
       and "POR REGRA" in ROTULOS.upper(),
       "rotulos.ts não pode chamar rede nem LLM")
 
-print("\n[9] A árvore: vocabulário real, peso proporcional, decisão humana")
-check("os três ramos existem, incluindo o vazio",
-      'id: "va"' in arv and 'id: "desp"' in arv and 'id: "sem"' in arv)
-check("o ramo 'sem classificação' aparece MESMO VAZIO",
-      "Nada pendente" in arv and "ramo.id === \"sem\"" in arv)
-check("peso visual proporcional ao tempo",
-      "d.tempo_total_s / maiorS" in arv)
-check("mover uma folha classifica (arrastar)",
-      "onDragStart" in arv and "onDrop" in arv)
-check("e há botões, porque arrastar não funciona no celular",
-      "BotaoMover" in arv and "celular" in arv)
+print("\n[9] A árvore: uma RAIZ por vez, folhas com tempo medido, decisão humana")
+# ⚠️ CONTRATO NOVO. Três listas empilhadas viraram ÁRVORE: uma raiz no topo,
+# as atividades pendendo dela por uma espinha, e um seletor para trocar de
+# raiz. Ver produtivo e improdutivo lado a lado convidava à comparação errada.
+check("os três lados continuam existindo no modelo",
+      '"va"' in arv and '"desp"' in arv and '"sem"' in arv)
+check("mas só UMA raiz é desenhada por vez",
+      "const [ramo, setRamo] = useState<Ramo>" in arv)
+check("com seletor para trocar de lado", "setRamo(r)" in arv)
+check("a raiz mostra o percentual do lado", "pctDoRamo(ramo)" in arv)
+check("e há espinha e cotovelo — é árvore, não lista",
+      "borderLeft: `2px solid ${atual.cor}`" in arv and "cotovelo do galho" in arv)
+# ⭐ O PEDIDO EXPLÍCITO DO DONO: "tenho tags com 0%, isso não pode."
+check("⭐ folha sem tempo medido NÃO É GALHO",
+      "if (!(d.tempo_total_s > 0)) continue;" in arv)
+check("e tempo real que arredonda para zero vira '<1%', nunca '0%'",
+      'if (pct >= 1) return `${Math.round(pct)}%`;' in arv and 'return "<1%";' in arv)
+check("com o motivo escrito: ausência de medida não é medida",
+      "nunca foi observada" in arv)
+check("o mesmo corte existe na ORIGEM, para não vazar por outra tela",
+      'if round(a["dur"], 1) <= 0:' in open(
+          os.path.join(RAIZ, "backend", "pipeline.py"), encoding="utf-8").read())
+check("mover uma folha continua classificando, por botão",
+      "onMover(t.cat)" in arv and "destinos" in arv)
+check("'sem classificação' só vira opção quando tem tempo lá",
+      'porRamo.sem.length > 0 ? ["va", "desp", "sem"] : ["va", "desp"]' in arv,
+      "aba permanentemente vazia treina o olho a ignorá-la")
 check("não se pode DESPROMOVER para 'sem classificação'",
-      'ramo.id !== "sem" && !!arrastando' in arv,
+      '"sem"' not in arv.split("const destinos")[1].split("];")[0],
       "despromover apagaria uma decisão humana")
 check("a decisão humana fica marcada na tela",
       'categoria_lean_origem === "humano"' in arv and "você decidiu" in arv)

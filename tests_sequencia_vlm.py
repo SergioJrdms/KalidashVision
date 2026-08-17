@@ -255,7 +255,12 @@ d2 = Path("frontend/src/pages/Dashboard2.tsx").read_text()
 
 check("a aba existe no tipo Tab",
       _re.search(r"export type Tab =[^;]*\"rotulos\"", shell) is not None)
-check("tem entrada no menu", _re.search(r"\{\s*tab:\s*\"rotulos\"", shell) is not None)
+# LIMPEZA DA VITRINE: "Classificar rótulos" saiu do MENU. Ela nasceu quando o
+# RÓTULO decidia o número; desde a Fase 101 o número vem da permanência e
+# nenhum rótulo decide, então classificar rótulo virou trabalho sem
+# consequência. A tela e a rota continuam — o que saiu foi o convite.
+check("saiu do menu (o rótulo não decide mais o número)",
+      _re.search(r"\{\s*tab:\s*\"rotulos\"", shell) is None)
 check("o roteador leva até a tela",
       'route.tab === "rotulos"' in app and "<Rotulos" in app)
 check("a tela chama o endpoint", "api.rotulos.semCategoria" in tela)

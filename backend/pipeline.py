@@ -11063,6 +11063,15 @@ def montar_snapshot_chat(
         # (foi observado), mas não vira folha nem barra.
         if rotulo_e_ausencia(l):
             continue
+        # ⚠️ RÓTULO SEM TEMPO MEDIDO NÃO É ATIVIDADE DO POSTO. Ele chegava à
+        # tela como "Lendo o desenho técnico — 0%", ao lado de atividades
+        # reais, e o cliente lia isso como "o sistema mediu e deu zero" quando
+        # o que houve foi NÃO TER MEDIDO NADA. É a mesma ausência-de-medida-
+        # virando-medida das Fases 82, 84, 97, 100 e 102 — a sexta aparição.
+        # Não altera conta nenhuma: `total_atividade` já foi somado acima e
+        # estes itens contribuem com zero.
+        if round(a["dur"], 1) <= 0:
+            continue
         distrib.append(
             {
                 "comportamento": l,

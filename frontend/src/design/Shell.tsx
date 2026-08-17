@@ -80,25 +80,34 @@ export function Sidebar({
   const procNav = [
     { tab: "dashboard", label: "Visão do posto", icon: "layout-dashboard" },
   ];
+  // ⚠️ LIMPEZA DA VITRINE. Quatro telas saíram do menu — e SÓ do menu: as
+  // rotas e o código continuam de pé, porque nenhuma delas é lixo. São
+  // ferramentas internas que não pertencem à vista que o cliente (ou um
+  // criativo) vai percorrer:
+  //   · "A IA acerta?" (precisao)  — instrumento de medição do time, não do
+  //     cliente. Mostrar ao cliente a régua de acerto da própria IA convida a
+  //     pergunta errada na hora errada.
+  //   · "Quem dominou o posto" (titular) — tela de SOMBRA desde a Fase 91.
+  //     Nunca decidiu nada e ainda mostra recorte de pessoa por id, que já
+  //     exibiu a pessoa errada uma vez (problema #19).
+  //   · "Classificar rótulos" (rotulos) — nasceu quando o RÓTULO decidia o
+  //     número. Desde a Fase 101 o número vem da permanência e nenhum rótulo
+  //     decide; classificar rótulo virou trabalho sem consequência.
+  //   · "Novo vídeo" (upload) — a captura é automática pela borda. Upload
+  //     manual era muleta de desenvolvimento.
+  // Para reativar qualquer uma, basta devolver a linha aqui.
   const procNavAvancado = [
     { tab: "diaadia", label: "Dia a dia", icon: "calendar-days" },
     { tab: "arvore", label: "O que é trabalho", icon: "git-branch" },
     { tab: "validacao", label: "Validação", icon: "git-pull-request-arrow", badge: proc?.pendencias },
     // Fase 80: auditar é olhar um dia por amostragem, sem julgar nada.
     { tab: "auditoria", label: "Auditoria do dia", icon: "search" },
-    // Fase 102: a taxa de acerto MEDIDA, por julgamento cego.
-    { tab: "precisao", label: "A IA acerta?", icon: "target" },
     // Fase 59: a fila da dúvida é o trabalho de maior alavancagem.
     { tab: "duvidas", label: "Dúvidas", icon: "help-circle" },
-    // Fase 85: rótulo sem categoria conta como NÃO-PRODUTIVO.
-    { tab: "rotulos", label: "Classificar rótulos", icon: "tags" },
     { tab: "eventos", label: "Eventos", icon: "table-2" },
     { tab: "padroes", label: "Padrões", icon: "activity" },
     { tab: "fila", label: "Fila", icon: "list-checks" },
-    { tab: "upload", label: "Novo vídeo", icon: "upload" },
     { tab: "descricao", label: "Descrição", icon: "file-text" },
-    // Fase 91: SOMBRA — tela de conferência, não de decisão.
-    { tab: "titular", label: "Quem dominou o posto", icon: "users" },
   ];
   const procNavRodape = [
     { tab: "configuracoes", label: "Configurações", icon: "settings" },
