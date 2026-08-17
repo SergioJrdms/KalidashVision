@@ -106,6 +106,20 @@ from .worker import executar_job, _baixar_video  # noqa: F401
 
 log = logging.getLogger("kalidash.api")
 
+# ═════════════════════════════════════════════════════════════════════════
+# O histórico V1–V8 entra na vitrine PARA PRESENÇA. Ligado por padrão: sem
+# isso a tela fica vazia até o instrumento novo acumular dias, e há 12.878
+# leituras com `papel_pessoa` preenchido esperando para responder a pergunta
+# que elas SABEM responder.
+#
+# `off` devolve exatamente o comportamento do corte original (só V9+), para
+# quem quiser conferir a vitrine sem histórico nenhum. A evidência de
+# PRODUTIVIDADE do histórico é neutralizada nos dois modos — ver o bloco no
+# dashboard, que explica por quê com o número medido.
+# ═════════════════════════════════════════════════════════════════════════
+_HISTORICO_PRESENCA = os.environ.get("KV_HISTORICO_PRESENCA", "on").strip().lower() not in (
+    "off", "0", "false", "no", "")
+
 app = FastAPI(title="Kalidash Vision", version="0.1.0")
 
 
@@ -3352,17 +3366,52 @@ def dashboard(
             _meta_video[str(_v["id"])] = (_dt, _v.get("cam_id"))
 
     _eventos_prod: list[dict] = []
+    _n_historico = 0
     for _e in evs:
         # V1–V8 elegeram P1 por permanência/bbox e não persistiram a decisão
         # direta. Reinterpretar esse histórico com o contrato novo misturaria
         # instrumentos incompatíveis no mesmo percentual.
-        if int(_e.get("versao_instrumento") or 0) < 9:
+        _legado = int(_e.get("versao_instrumento") or 0) < 9
+        if _legado and not _HISTORICO_PRESENCA:
             continue
         _meta = _meta_video.get(str(_e.get("video_id")))
         if not _meta:
             continue
         _dt, _cam = _meta
         _ee = dict(_e)
+        if _legado:
+            # ═══════════════════════════════════════════════════════════════
+            # O HISTÓRICO ENTRA SÓ PARA PRESENÇA — e a neutralização abaixo é
+            # o que impede que ele responda o que não pode.
+            #
+            # Medido em 14/08 (948 eventos, todos V7), rodando o contrato como
+            # está: `presenca_pct` = 78,8% com cobertura 100%. Bate com a
+            # permanência determinística da Fase 101 no mesmo dia (78,8%) — o
+            # dado antigo responde presença muito bem, porque presença sai de
+            # `papel_pessoa`, que está preenchido em 100% dos 12.878 eventos
+            # do banco, em todas as versões.
+            #
+            # ⛔ PRODUTIVIDADE, NÃO. E o motivo não é o suposto: no histórico a
+            # ÚNICA evidência de produtividade que existe é `maos_maquina`
+            # (`trabalho` é NULL em 100% dos eventos de TODAS as versões, e
+            # `orientacao` está atrás do gate de calibração). E `maos_maquina`
+            # só produz evidência A FAVOR: `true` decide produtivo, `false`
+            # não decide nada. Rodando o contrato sobre os principais de
+            # 14/08, o resultado é `produtividade_pct` = 100,0% com 80% de
+            # cobertura — um número que PARECE medido e é estruturalmente
+            # incapaz de sair diferente de 100%. Isso é pior que a tela vazia.
+            #
+            # Então a evidência de produtividade é zerada e o contrato do
+            # Codex, SEM NENHUMA ALTERAÇÃO, classifica essas leituras como
+            # `produtividade_inconclusiva` — que é exatamente o mecanismo de
+            # abstenção que ele já projetou para "presente, sem evidência".
+            # A cobertura mostra o buraco em vez de preenchê-lo.
+            # ═══════════════════════════════════════════════════════════════
+            _ee["maos_maquina"] = None
+            _ee["orientacao"] = None
+            _ee["trabalho"] = None
+            _ee["_instrumento_legado"] = True
+            _n_historico += 1
         _ee["_capturado_em"] = _dt
         _ee["_dia"] = _dt.date().isoformat()
         _ee["_cam_id"] = _cam
@@ -3409,6 +3458,13 @@ def dashboard(
         janela_dias=janela_dias,
         agora=datetime.now(timezone.utc),
     )
+    # A PROVENIÊNCIA VIAJA COM O NÚMERO. Misturar instrumentos em silêncio era
+    # a preocupação legítima do corte original; a resposta não é esconder o
+    # histórico, é dizer quanto dele está ali. Quem lê o payload consegue
+    # distinguir "presença medida por 12 mil leituras antigas" de "cobertura de
+    # produtividade zerada porque o instrumento novo ainda não rodou".
+    produtividade_posto["leituras_do_instrumento_legado"] = _n_historico
+    produtividade_posto["historico_incluido"] = bool(_HISTORICO_PRESENCA)
 
     return {
         "snapshot": snapshot,
