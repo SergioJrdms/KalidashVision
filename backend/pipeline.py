@@ -925,12 +925,26 @@ def _anexar_segundo_angulo(
                         pessoa2 = {"bbox": tuple(int(v) for v in b.astype(int))}
                         if kpts2 is not None and j < len(kpts2):
                             pessoa2["kpts"] = kpts2[j].astype("float32")
-                        # Fase 31: qualquer parte do corpo no posto conta.
-                        pontos2 = _pontos_da_pessoa(pessoa2, w2, h2)
-                        no_posto2 = any(
-                            _ponto_em_roi(px, py, i["polygon"])
-                            for i in rois2.values() for px, py in pontos2
-                        )
+                        # ⭐ A ZONA DO POSTO É LEI, também na lateral. A cam2
+                        # tinha a MESMA frouxidão da cam1 — qualquer um dos 17
+                        # keypoints dentro do polígono contava — e ela alimenta
+                        # `n_posto_cam2`, que vira `pessoas_no_posto` (o máximo
+                        # das duas câmeras) e o resgate do operador que a cam1
+                        # não vê. Corrigir só a cam1 deixaria o braço estendido
+                        # entrando pela porta de trás. `rois2` já é só
+                        # `posto_operador`; o que falta é a âncora.
+                        if _ZONA_ESTRITA:
+                            ax2, ay2 = _ponto_ancora(pessoa2, w2, h2)
+                            no_posto2 = any(
+                                _ponto_em_roi(ax2, ay2, i["polygon"])
+                                for i in rois2.values()
+                            )
+                        else:
+                            pontos2 = _pontos_da_pessoa(pessoa2, w2, h2)
+                            no_posto2 = any(
+                                _ponto_em_roi(px, py, i["polygon"])
+                                for i in rois2.values() for px, py in pontos2
+                            )
                         n_cena2 += 1
                         if no_posto2:
                             n_posto2 += 1
@@ -1225,12 +1239,59 @@ def _pontos_da_pessoa(pessoa: dict, w: int, h: int) -> list[tuple[float, float]]
     return pontos
 
 
-def _zona_da_pessoa(pontos: list[tuple[float, float]], rois: dict) -> tuple[str | None, str | None, str | None]:
-    """(nome_zona, papel, descricao) da pessoa: pertence à zona se QUALQUER
-    um dos seus pontos (kpts + âncora — Fase 31) cair no polígono. Prioridade
-    posto_operador > interacao (pé no posto + corpo na interação → posto).
-    Zona 'maquina' NÃO classifica pessoa (é contexto da cena). None em tudo =
-    fora das áreas de interesse."""
+# ═════════════════════════════════════════════════════════════════════════
+# ⭐ A ZONA DO POSTO É LEI. Só é analisado quem está DENTRO dela.
+#
+# Duas frouxidões somadas faziam a zona não ser respeitada na prática:
+#
+#  1. QUALQUER PONTO DO CORPO contava. Os 17 keypoints entravam no teste, então
+#     um pé esticado ou um braço estendido encostando na borda do polígono já
+#     classificava a pessoa como "no posto". Alguém parado AO LADO do posto,
+#     de braço estendido, virava o operador. A regra nasceu para sobreviver à
+#     oclusão pelo torno, mas a ÂNCORA (ombros → um ombro → nariz → topo do
+#     tronco) já resolve oclusão sem abrir a mão da localização: ela diz ONDE A
+#     PESSOA ESTÁ, não até onde ela alcança.
+#
+#  2. A ZONA `interacao` CLASSIFICAVA PESSOA. Quem passava por ali virava
+#     `visitante`, gerava evento, descrição e card de validação — sem nunca ter
+#     estado no posto. O gestor via na fila gente que não é do posto dele.
+#
+# Agora: só o `posto_operador`, e só pela âncora. Quem está fora é descartado
+# ANTES de virar pessoa, evento ou métrica. Visitante continua existindo — mas
+# só o visitante que está DENTRO do posto, que é o caso real de duas pessoas
+# disputando a estação.
+#
+# `KV_ZONA_ESTRITA=off` volta ao comportamento antigo, para comparar o número
+# dos dois jeitos no mesmo dia.
+# ═════════════════════════════════════════════════════════════════════════
+_ZONA_ESTRITA = os.environ.get("KV_ZONA_ESTRITA", "on").strip().lower() not in (
+    "off", "0", "false", "no", "")
+
+
+def _zona_da_pessoa(pontos: list[tuple[float, float]], rois: dict,
+                    ancora: tuple[float, float] | None = None
+                    ) -> tuple[str | None, str | None, str | None]:
+    """(nome_zona, papel, descricao) da pessoa.
+
+    ESTRITO (padrão): pertence ao posto se a ÂNCORA — o ponto que representa
+    onde a pessoa ESTÁ — cair no polígono do `posto_operador`. Nenhuma outra
+    zona classifica pessoa. Fora dele: (None, None, None), e o track é
+    descartado.
+
+    FROUXO (`KV_ZONA_ESTRITA=off`): o comportamento antigo — qualquer keypoint
+    em `posto_operador` ou `interacao`.
+    """
+    if _ZONA_ESTRITA:
+        alvo = ancora if ancora is not None else (pontos[-1] if pontos else None)
+        if alvo is None:
+            return (None, None, None)
+        for nome, info in rois.items():
+            if info.get("papel") != "posto_operador":
+                continue
+            if _ponto_em_roi(alvo[0], alvo[1], info["polygon"]):
+                return (nome, "posto_operador", info.get("descricao_contexto"))
+        return (None, None, None)
+
     achado: tuple[str | None, str | None, str | None] = (None, None, None)
     for nome, info in rois.items():
         papel = info.get("papel")
@@ -3381,14 +3442,18 @@ def etapa_detectar_e_amostrar(
                         if kpts_all is not None and j < len(kpts_all):
                             pessoa["kpts"] = kpts_all[j].astype("float32")
                         if modo_op:
-                            # Fase 28/31: classifica por QUALQUER parte do corpo
-                            # na zona (kpts: pé, braço, joelho... + âncora dos
-                            # ombros p/ pose parcial — robusto à oclusão pelo
-                            # torno). Fora das zonas de interesse = transeunte →
-                            # descartado ANTES de virar pessoa/evento/métrica.
+                            # ⭐ A ZONA DO POSTO É LEI (ver _zona_da_pessoa).
+                            # A ÂNCORA — ombros → um ombro → nariz → topo do
+                            # tronco — diz ONDE A PESSOA ESTÁ, sobrevivendo à
+                            # oclusão pelo torno sem contar quem só ESTICA um
+                            # braço/pé para dentro do polígono. Só o papel
+                            # `posto_operador` classifica.
                             pontos = _pontos_da_pessoa(pessoa, w, h)
-                            nome_z, papel_z, desc_z = _zona_da_pessoa(pontos, rois)
-                            if papel_z is None:
+                            nome_z, papel_z, desc_z = _zona_da_pessoa(
+                                pontos, rois, ancora=_ponto_ancora(pessoa, w, h))
+                            # ⭐ Fora do posto = descartado AQUI, antes de virar
+                            # pessoa, evento, descrição ou card de validação.
+                            if papel_z != "posto_operador":
                                 continue
                             pessoa["zona"] = nome_z
                             pessoa["zona_desc"] = desc_z
