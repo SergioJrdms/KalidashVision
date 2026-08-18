@@ -1989,6 +1989,43 @@ def familia_label(label: str | None) -> str:
     return base
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# ⭐ A NARRATIVA NÃO PERTENCE A UMA FLAG DE IDENTIFICAÇÃO.
+#
+# Este bloco vivia SÓ dentro de `PROMPT_VLM_SEQUENCIA` (o caminho V9). O
+# `PROMPT_VLM_SEQUENCIA_V8` — que é o PADRÃO, porque
+# `KV_PRODUTIVIDADE_OPERADOR_V9` é fail-closed e nasce desligada — nunca pediu
+# o campo `resumo`. Com ele ativo, `bruto.get("resumo")` era None SEMPRE, e a
+# descrição completa simplesmente não existia.
+#
+# É por isso que ela aparecia em alguns cards e não em outros: quem decidia não
+# era a qualidade da cena, era qual prompt tinha rodado naquele minuto. Duas
+# funcionalidades sem relação nenhuma — quem é o operador e o que se viu no
+# posto — estavam presas na mesma chave por acidente.
+#
+# Agora o bloco é UM só e entra nos dois prompts. A narrativa passa a depender
+# apenas de `KV_NARRATIVA`, que é o que o nome dela promete.
+# ═════════════════════════════════════════════════════════════════════════
+_BLOCO_RESUMO = """⚠️ O CAMPO MAIS IMPORTANTE DESTA RESPOSTA é "resumo": a NARRATIVA FIEL de tudo o que se vê ao longo da sequência inteira. As frases por imagem são índices curtos; o "resumo" é a observação de verdade, e é o que uma pessoa vai ler.
+
+COMO ESCREVER O "resumo":
+- Percorra as imagens EM ORDEM. Conte a passagem: o que havia na primeira, o que mudou na seguinte, o que permaneceu igual até o fim.
+- COBRIR, quando visível: (a) ONDE a pessoa está em relação ao torno e à bancada — à esquerda, à direita, em frente, afastada; (b) O QUE AS MÃOS FAZEM — sobre a máquina, segurando peça ou ferramenta, abaixadas junto ao corpo, fora de vista; (c) A POSTURA e para onde o corpo aponta; (d) O QUE MUDOU entre uma imagem e outra, mesmo que pouco — meio passo, virar o tronco, levantar o braço; (e) OUTRAS PESSOAS, se entram, saem ou permanecem; (f) OBJETOS manipulados.
+- NÃO RESUMA e NÃO CONCLUA. Não escolha "a" ação do trecho. Se houve duas coisas, conte as duas, na ordem em que aconteceram.
+- SEJA ESPECÍFICO, não econômico. Três a cinco frases é o normal. Um trecho rico merece mais; escrever pouco quando havia o que ver é o pior erro possível aqui.
+- Se NADA mudou entre as imagens, diga isso com todas as letras e descreva o estado que se manteve. Permanecer parado é um fato observado, não falta de informação — e é uma resposta tão boa quanto qualquer outra.
+- Só o que se VÊ. Nada de rótulo, categoria, produtividade, julgamento, estado da máquina ou suposição sobre a intenção. Se você não vê as mãos, escreva que não vê as mãos — não adivinhe o que elas fazem.
+
+⚠️ QUEM LÊ ISTO É UM DONO DE FÁBRICA, não um técnico. Escreva como se estivesse contando a ele o que aconteceu no posto. Isso PROÍBE, sem exceção:
+- NÚMERO DE IMAGEM. Nada de "imagem 3", "nas imagens 0-2", "no frame 5", "na primeira imagem", "a sequência". Use o TEMPO: "no começo", "logo depois", "no meio do trecho", "até o fim", "em seguida", "durante todo o trecho".
+- CÓDIGO DE PESSOA. Nada de "P1", "P2", "P3". Diga "o operador" para o titular do posto e "outra pessoa" / "um colega" para os demais — e, se houver como distinguir, use algo visível: "outra pessoa de camiseta roxa".
+- VOCABULÁRIO DE SISTEMA. Nada de "contexto", "sensor", "detecção", "câmera lateral", "segundo ângulo", "conforme indicado", "identificação do operador", "área da zona". A pessoa não sabe que existem duas câmeras nem o que é uma zona; ela quer saber o que o funcionário dela estava fazendo.
+- Se as duas câmeras mostram a mesma cena, conte UMA história só. Nunca diga "a outra câmera mostra" — junte o que as duas mostram numa narrativa única.
+
+- Exemplo do nível de detalhe E da linguagem esperada: "O operador está de pé à direita do torno, com o corpo voltado para a máquina. No começo do trecho ele está com as duas mãos sobre o equipamento, mexendo na região do carro do torno. Um pouco depois, outra pessoa de camiseta roxa aparece pela esquerda e fica na área da bancada, andando pouco por ali até o fim. O operador não sai do lugar e continua voltado para o torno o tempo todo. Ninguém mais entra no posto e nenhuma peça é carregada."
+"""
+
+
 PROMPT_VLM_SEQUENCIA_V8 = """Você é um analista de processos industriais observando UM posto de trabalho.
 
 Você recebe uma SEQUÊNCIA de {n_frames} imagens da câmera principal, EM ORDEM CRONOLÓGICA, cobrindo {duracao_s} segundos ({intervalo_s}s entre imagens consecutivas).{linha_cam2}
@@ -2014,7 +2051,8 @@ Responda também "trabalho" por imagem: a atividade descrita é TRABALHO DO POST
 - null  = não dá para dizer
 Julgue a ATIVIDADE, não a pessoa: a pergunta é se aquilo é serviço do posto, não se ele é produtivo em geral. Na dúvida, null — nunca chute true.
 
-{{"trechos": [{{"i": 0, "acoes": {{"P1": "..."}}, "imovel": true, "trabalho": true}}, {{"i": 1, "acoes": {{"P1": "..."}}, "imovel": false, "trabalho": null}}]}}"""
+"""  + _BLOCO_RESUMO + """
+{{"resumo": "TRÊS A CINCO FRASES contando a sequência em ordem, sem concluir uma ação. É o campo mais longo desta resposta.", "trechos": [{{"i": 0, "acoes": {{"P1": "..."}}, "imovel": true, "trabalho": true}}, {{"i": 1, "acoes": {{"P1": "..."}}, "imovel": false, "trabalho": null}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA = """Você é um analista visual observando UM operador de torno mecânico.
@@ -2045,29 +2083,12 @@ O CONTEXTO de mãos/orientação vem de sensores e prevalece sobre impressão vi
 
 Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). Em "acoes", descreva cada pessoa marcada para a decisão ser auditável.
 
-⚠️ O CAMPO MAIS IMPORTANTE DESTA RESPOSTA é "resumo": a NARRATIVA FIEL de tudo o que se vê ao longo da sequência inteira. As frases por imagem são índices curtos; o "resumo" é a observação de verdade, e é o que uma pessoa vai ler.
-
-COMO ESCREVER O "resumo":
-- Percorra as imagens EM ORDEM. Conte a passagem: o que havia na primeira, o que mudou na seguinte, o que permaneceu igual até o fim.
-- COBRIR, quando visível: (a) ONDE a pessoa está em relação ao torno e à bancada — à esquerda, à direita, em frente, afastada; (b) O QUE AS MÃOS FAZEM — sobre a máquina, segurando peça ou ferramenta, abaixadas junto ao corpo, fora de vista; (c) A POSTURA e para onde o corpo aponta; (d) O QUE MUDOU entre uma imagem e outra, mesmo que pouco — meio passo, virar o tronco, levantar o braço; (e) OUTRAS PESSOAS, se entram, saem ou permanecem; (f) OBJETOS manipulados.
-- NÃO RESUMA e NÃO CONCLUA. Não escolha "a" ação do trecho. Se houve duas coisas, conte as duas, na ordem em que aconteceram.
-- SEJA ESPECÍFICO, não econômico. Três a cinco frases é o normal. Um trecho rico merece mais; escrever pouco quando havia o que ver é o pior erro possível aqui.
-- Se NADA mudou entre as imagens, diga isso com todas as letras e descreva o estado que se manteve. Permanecer parado é um fato observado, não falta de informação — e é uma resposta tão boa quanto qualquer outra.
-- Só o que se VÊ. Nada de rótulo, categoria, produtividade, julgamento, estado da máquina ou suposição sobre a intenção. Se você não vê as mãos, escreva que não vê as mãos — não adivinhe o que elas fazem.
-
-⚠️ QUEM LÊ ISTO É UM DONO DE FÁBRICA, não um técnico. Escreva como se estivesse contando a ele o que aconteceu no posto. Isso PROÍBE, sem exceção:
-- NÚMERO DE IMAGEM. Nada de "imagem 3", "nas imagens 0-2", "no frame 5", "na primeira imagem", "a sequência". Use o TEMPO: "no começo", "logo depois", "no meio do trecho", "até o fim", "em seguida", "durante todo o trecho".
-- CÓDIGO DE PESSOA. Nada de "P1", "P2", "P3". Diga "o operador" para o titular do posto e "outra pessoa" / "um colega" para os demais — e, se houver como distinguir, use algo visível: "outra pessoa de camiseta roxa".
-- VOCABULÁRIO DE SISTEMA. Nada de "contexto", "sensor", "detecção", "câmera lateral", "segundo ângulo", "conforme indicado", "identificação do operador", "área da zona". A pessoa não sabe que existem duas câmeras nem o que é uma zona; ela quer saber o que o funcionário dela estava fazendo.
-- Se as duas câmeras mostram a mesma cena, conte UMA história só. Nunca diga "a outra câmera mostra" — junte o que as duas mostram numa narrativa única.
-
-- Exemplo do nível de detalhe E da linguagem esperada: "O operador está de pé à direita do torno, com o corpo voltado para a máquina. No começo do trecho ele está com as duas mãos sobre o equipamento, mexendo na região do carro do torno. Um pouco depois, outra pessoa de camiseta roxa aparece pela esquerda e fica na área da bancada, andando pouco por ali até o fim. O operador não sai do lugar e continua voltado para o torno o tempo todo. Ninguém mais entra no posto e nenhuma peça é carregada."
-- "operador_estado" deve ser "identificado" quando exatamente um candidato ocupa funcionalmente o posto, "ausente" quando está claro que nenhum candidato é o operador, ou "incerto" quando há oclusão/evidência insuficiente;
+"""  + _BLOCO_RESUMO + """- "operador_estado" deve ser "identificado" quando exatamente um candidato ocupa funcionalmente o posto, "ausente" quando está claro que nenhum candidato é o operador, ou "incerto" quando há oclusão/evidência insuficiente;
 - "operador" é obrigatório somente em "identificado" e deve ser um rótulo visível naquela imagem; nos outros estados deve ser null;
 - "trabalho" só pode ser true/false em "identificado"; nos outros estados deve ser null;
 - "motivo" deve ser um destes valores: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa_ou_celular", "sem_atividade", "sem_leitura".
 
-{{"resumo": "Duas ou três frases contando a sequência em ordem, sem concluir uma ação.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "conversando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "ausente", "operador": null, "acoes": {{"P1": "passando ao lado do posto"}}, "imovel": false, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
+{{"resumo": "TRÊS A CINCO FRASES contando a sequência em ordem, sem concluir uma ação. É o campo mais longo desta resposta.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "conversando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "ausente", "operador": null, "acoes": {{"P1": "passando ao lado do posto"}}, "imovel": false, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA_CAM2_V8 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
@@ -3868,8 +3889,74 @@ def _narrativa_humana(texto: str) -> str:
     return t
 
 
+# Palavras de TEMPO para a narrativa montada. Nunca número de imagem: quem lê
+# é dono de fábrica, e "imagem 3" denuncia que aquilo saiu de um sistema.
+_MOMENTOS = ("Logo depois", "Em seguida", "Mais adiante", "Perto do fim")
+
+
+def _narrativa_dos_instantes(bruto: dict) -> str | None:
+    """A narrativa montada a partir das frases POR INSTANTE, em ordem.
+
+    ⭐ A REDE QUE GARANTE QUE TODO CARD TENHA DESCRIÇÃO. O filtro de 120
+    caracteres existe por um bom motivo — resumo de uma linha é a frase curta
+    de novo com outro nome —, mas ele é tudo-ou-nada: quando o modelo devolve
+    pouco, o card ficava mudo, e card mudo é pior que card com texto simples.
+
+    Isto NÃO INVENTA NADA. As frases são as mesmas que o modelo escreveu para
+    cada imagem; o que fazemos é enfileirá-las na ordem do tempo e colapsar as
+    repetições. É, literalmente, a descrição baseada em todos os frames — só
+    que montada por nós em vez de escrita pelo modelo. Sai menos fluida, e é
+    por isso que ela é a segunda opção e não a primeira.
+    """
+    trechos = (bruto or {}).get("trechos")
+    if not isinstance(trechos, list):
+        return None
+    passos: list[str] = []
+    for t in sorted(
+        (x for x in trechos if isinstance(x, dict)),
+        key=lambda x: x.get("i") if isinstance(x.get("i"), int) else 0,
+    ):
+        acoes = t.get("acoes")
+        if not isinstance(acoes, dict):
+            continue
+        partes = [f"{rot}: {txt.strip()}" for rot, txt in acoes.items()
+                  if isinstance(txt, str) and txt.strip()]
+        if partes:
+            passos.append("; ".join(partes))
+    if not passos:
+        return None
+
+    # Instantes iguais seguidos viram um só. Sem isto, um minuto em que nada
+    # mudou vira cinco frases idênticas — que é o oposto de descrever.
+    blocos: list[list] = []
+    for p in passos:
+        if blocos and blocos[-1][0] == p:
+            blocos[-1][1] += 1
+        else:
+            blocos.append([p, 1])
+
+    frases: list[str] = []
+    n = len(blocos)
+    for k, (texto, vezes) in enumerate(blocos):
+        if k == 0:
+            quando = "No começo do trecho"
+        elif k == n - 1:
+            quando = "Até o fim do trecho"
+        else:
+            quando = _MOMENTOS[min(k - 1, len(_MOMENTOS) - 1)]
+        # "e segue assim" é fato observado (a cena não mudou entre amostras),
+        # não suposição sobre o que aconteceu entre elas.
+        segue = ", e segue assim" if vezes > 1 else ""
+        frases.append(f"{quando}, {texto}{segue}.")
+
+    txt = _narrativa_humana(" ".join(frases))
+    # Um instante só, de duas palavras, não vira narrativa nem montada.
+    return txt if len(txt) >= 60 else None
+
+
 def _resumo_da_sequencia(bruto: dict) -> str | None:
-    """A narrativa do minuto, se o modelo a devolveu e a flag estiver ligada.
+    """A narrativa do minuto: a do modelo se ela resumir de verdade, senão a
+    montada a partir dos instantes.
 
     Fora da flag devolve None — e None não vira texto nenhum no banco, em vez
     de virar string vazia que depois ninguém sabe se é "não pedimos" ou "o
@@ -3877,15 +3964,22 @@ def _resumo_da_sequencia(bruto: dict) -> str | None:
     if not _NARRATIVA:
         return None
     r = (bruto or {}).get("resumo")
-    if not isinstance(r, str):
-        return None
-    r = _narrativa_humana(r.strip())
-    # Uma ou duas palavras não é narrativa — é ruído com cara de resposta.
-    # Sobe de 25 para 120: com a instrução de três a cinco frases, qualquer
-    # coisa abaixo disso é o modelo devolvendo a frase curta de novo — e uma
-    # narrativa de uma linha não é narrativa, é a descrição antiga com outro
-    # nome. Melhor não exibir nada do que exibir um resumo que não resume.
-    return r if len(r) >= 120 else None
+    if isinstance(r, str):
+        r = _narrativa_humana(r.strip())
+        # Uma ou duas palavras não é narrativa — é ruído com cara de resposta.
+        # 120 caracteres: com a instrução de três a cinco frases, qualquer
+        # coisa abaixo disso é o modelo devolvendo a frase curta de novo — e
+        # uma narrativa de uma linha não é narrativa, é a descrição antiga com
+        # outro nome.
+        if len(r) >= 120:
+            return r
+    # O modelo não resumiu (ou resumiu de menos). Em vez de deixar o card mudo,
+    # monta a narrativa com as frases por instante que ele JÁ escreveu.
+    montada = _narrativa_dos_instantes(bruto)
+    if montada:
+        log.info("[narrativa] resumo curto/ausente — montada a partir de %d "
+                 "instante(s)", len((bruto or {}).get("trechos") or []))
+    return montada
 
 
 def _analisar_sequencia_vlm(
@@ -3989,8 +4083,11 @@ def _analisar_sequencia_vlm(
             groq_client, imgs[0], prompt, json_mode=True,
             # O teto cobre as frases por instante MAIS a narrativa. Uma
             # narrativa cortada no meio é pior que uma curta: some justamente
-            # o fim da sequência, que é onde mora a mudança.
-            max_tokens=220 * max(1, n_cam1) + 400,
+            # o fim da sequência, que é onde mora a mudança. E JSON truncado
+            # perde o minuto inteiro, não só o resumo — por isso a folga é
+            # generosa: três a cinco frases custam ~150 tokens, e o preço de
+            # errar para baixo é perder tudo.
+            max_tokens=220 * max(1, n_cam1) + 650,
             imagens_extra=imgs[1:],
         )
         # Guarda o objeto INTEIRO: `resumo` é irmão de `trechos`, não filho.

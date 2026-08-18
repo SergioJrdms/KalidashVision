@@ -213,7 +213,7 @@ print("\n[5b] O teto de tokens acompanha a narrativa")
 # Narrativa cortada no meio é pior que curta: some justamente o fim da
 # sequência, que é onde mora a mudança.
 check("o teto cresceu e tem folga fixa para o resumo",
-      "max_tokens=220 * max(1, n_cam1) + 400," in fonte)
+      "max_tokens=220 * max(1, n_cam1) + 650," in fonte)
 check("com o motivo escrito", "narrativa cortada no meio é pior que uma curta" in fonte)
 
 print("\n[6] Coluna ausente não derruba vídeo da campanha")
