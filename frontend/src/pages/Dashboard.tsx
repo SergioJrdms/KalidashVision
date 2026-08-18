@@ -49,10 +49,29 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
     );
   }
 
-  const atual = p.sem_dado
-    ? { titulo: "Sem leitura válida", detalhe: "Ainda não há uma leitura compatível neste período.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" as IconeNome }
-    : p.captura_atrasada
-      ? { titulo: "Captura desatualizada", detalhe: "A última leitura foi preservada, mas não representa o estado atual.", cor: "#a46c00", fundo: "#fff6df", icone: "clock-alert" as IconeNome }
+  // ═══════════════════════════════════════════════════════════════════
+  // O TOPO RESPONDE "COMO FOI O TURNO?", não "quando foi o último lote".
+  //
+  // Aqui ficava "CAPTURA DESATUALIZADA · aguardando nova captura", em amarelo
+  // de alerta. Contava a história errada (o que atrasa é a FILA DE
+  // PROCESSAMENTO — segmentos das 06:20 processados às 08:39, com a câmera
+  // filmando o tempo todo), alarmava um estado NORMAL (captura amostrada e
+  // processada em lote) e gastava o melhor espaço da tela com um assunto
+  // nosso. É o primeiro bloco que um dono de fábrica olha.
+  //
+  // O horário da última leitura continua visível, como linha discreta ao
+  // lado — informação, não alarme.
+  // ═══════════════════════════════════════════════════════════════════
+  const m = p.manchete;
+  const TOM: Record<string, { cor: string; fundo: string; icone: IconeNome }> = {
+    bom: { cor: "#187a43", fundo: "#eaf7ef", icone: "trending-up" },
+    atencao: { cor: "#a46c00", fundo: "#fff6df", icone: "trending-down" },
+    neutro: { cor: "var(--accent-deep)", fundo: "var(--accent-soft)", icone: "activity" },
+  };
+  const atual = m && !m.sem_dado
+    ? { titulo: m.titulo, detalhe: m.frase, ...TOM[m.tom] ?? TOM.neutro }
+    : p.sem_dado || m?.sem_dado
+      ? { titulo: m?.titulo ?? "Sem leitura válida", detalhe: m?.frase ?? "Ainda não há uma leitura compatível neste período.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" as IconeNome }
       : leituraAtual(p.estado_atual);
   const dataLeitura = formatarLeitura(p.estado_atual.leitura_em);
   return (
@@ -93,15 +112,20 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
               <Icon name={atual.icone} size={21} />
             </span>
             <div className="col" style={{ gap: 2, minWidth: 0 }}>
-              <span style={{ color: "var(--muted)", fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".07em" }}>Última leitura</span>
+              <span style={{ color: "var(--muted)", fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".07em" }}>O turno até agora</span>
               <strong style={{ color: "var(--ink)", fontSize: isMobile ? 16 : 19 }}>{atual.titulo}</strong>
               <span style={{ color: "var(--muted)", fontSize: 12 }}>{atual.detalhe}</span>
             </div>
           </div>
           <div className="col" style={{ gap: 5, alignItems: isMobile ? "flex-start" : "flex-end" }}>
-            <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{dataLeitura}</span>
+            <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+              {dataLeitura}
+            </span>
             <span style={{ padding: "5px 9px", borderRadius: 999, background: p.publicavel ? "#eaf7ef" : "#fff6df", color: p.publicavel ? "#187a43" : "#8a5a00", fontSize: 10.5, fontWeight: 800 }}>
-              {p.sem_dado ? "Sem dados válidos no período" : p.captura_atrasada ? "Aguardando nova captura" : p.publicavel ? "Leitura pronta para apresentação" : "Leitura em calibração"}
+              {/* "Aguardando nova captura" saiu: a fila estar processando é o
+                  funcionamento normal, e um selo de alerta no estado normal
+                  ensina o gestor a ignorar selo. */}
+              {p.sem_dado ? "Sem dados válidos no período" : p.publicavel ? "Leitura pronta para apresentação" : "Leitura em calibração"}
             </span>
           </div>
         </div>
@@ -170,7 +194,9 @@ function formatarLeitura(iso: string | null): string {
   if (!iso) return "Sem horário de captura disponível";
   const data = new Date(iso);
   if (Number.isNaN(data.getTime())) return "Horário de captura indisponível";
-  return `Capturado em ${new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(data)}`;
+  // "Capturado em" sugeria que a câmera tinha parado ali. O que este instante
+  // diz é até onde a FILA chegou — a captura segue rodando adiante dele.
+  return `Último trecho lido: ${new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(data)}`;
 }
 
 function leituraAtual(estado: NonNullable<DetMock["produtividade"]>["estado_atual"]): { titulo: string; detalhe: string; cor: string; fundo: string; icone: IconeNome } {

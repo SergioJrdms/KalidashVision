@@ -77,6 +77,8 @@ from .pipeline import (
     sugestoes_do_posto,
     # "Por que esta coluna está vazia?" — responde sem adivinhação.
     estado_dos_sinais,
+    # A manchete do posto: como foi o turno.
+    leitura_do_turno,
     # Fase 102 — a precisão da descrição, medida.
     origens_sem_observacao,
     descricoes_que_afirmam_estado,
@@ -3511,6 +3513,14 @@ def dashboard(
         # do produto: é dele que saem "tanto do turno é ciclo automático" e
         # "tanto é o operador andando pelo posto".
         atividades=dist_enriquecida,
+        serie=produtividade_posto.get("serie_diaria"),
+    )
+
+    # A MANCHETE. Vai no topo, no lugar onde antes havia um alarme sobre o
+    # relógio do nosso processamento.
+    produtividade_posto["manchete"] = leitura_do_turno(
+        permanencia=permanencia,
+        produtividade=produtividade_posto,
         serie=produtividade_posto.get("serie_diaria"),
     )
 

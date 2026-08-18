@@ -13496,6 +13496,91 @@ def montar_insights_quantitativos(
 
 
 
+
+# ═════════════════════════════════════════════════════════════════════════
+# A MANCHETE DO POSTO — o que o dono da fábrica quer ler primeiro.
+#
+# O topo do dashboard mostrava "CAPTURA DESATUALIZADA · aguardando nova
+# captura", em amarelo de alerta. Três problemas, e o terceiro é o que importa:
+#
+#  1. CONTAVA A HISTÓRIA ERRADA. O que atrasa não é a captura, é a FILA DE
+#     PROCESSAMENTO: medido em 18/08, segmentos gravados às 06:20 foram
+#     processados às 08:39. A câmera estava filmando o tempo todo.
+#  2. ALARMAVA O NORMAL. A captura é amostrada e processada em lote; a última
+#     leitura ser de meia hora atrás é o funcionamento esperado, não uma
+#     falha. Alarme que dispara no estado normal ensina a ignorar alarme.
+#  3. ⚠️ E OCUPAVA O MELHOR ESPAÇO DA TELA COM UM ASSUNTO NOSSO. Aquele é o
+#     primeiro bloco que um dono de fábrica olha. Ele não quer saber do
+#     relógio do nosso processamento — quer saber como foi o turno.
+#
+# Então o lugar passa a responder "como foi o turno?", e o horário da última
+# leitura vira uma linha discreta ao lado.
+#
+# ⚠️ COMPARA O POSTO COM ELE MESMO. Nada de meta inventada: a régua é a média
+# dos próprios dias anteriores. É a única comparação justa quando não existe
+# padrão de indústria para este posto.
+#
+# ⛔ E SEM DURAÇÃO, como todo o resto da vitrine. Hora de relógio ("07:55") é
+# localizador e pode; "há 35 minutos" é duração e não pode.
+# ═════════════════════════════════════════════════════════════════════════
+def leitura_do_turno(permanencia: dict | None = None,
+                     produtividade: dict | None = None,
+                     serie: list | None = None) -> dict:
+    """A manchete: um número, uma frase e a comparação com os dias anteriores.
+
+    Função pura, zero API. Devolve `sem_dado` quando não há o que dizer — e aí
+    a tela diz isso, em vez de mostrar zero como se fosse resultado.
+    """
+    prod = produtividade or {}
+    perm = permanencia or {}
+
+    atual = prod.get("presenca_pct")
+    if atual is None:
+        atual = perm.get("no_posto_pct")
+    if not isinstance(atual, (int, float)) or prod.get("sem_dado"):
+        return {"sem_dado": True,
+                "titulo": "Ainda não há leitura deste posto",
+                "frase": "Assim que o primeiro turno for processado, o "
+                         "resultado aparece aqui.",
+                "tom": "neutro"}
+
+    # A régua: os dias ANTERIORES deste mesmo posto, sem o dia corrente.
+    pontos = [s.get("presenca_pct") for s in (serie or [])
+              if isinstance(s.get("presenca_pct"), (int, float))]
+    anteriores = pontos[:-1] if len(pontos) >= 2 else []
+    media = (sum(anteriores) / len(anteriores)) if anteriores else None
+    delta = round(atual - media, 1) if media is not None else None
+
+    # ⚠️ 3 pontos é o piso para chamar de diferença. Abaixo disso é oscilação
+    # normal entre turnos, e apontá-la como notícia treina o gestor a duvidar
+    # do painel.
+    if delta is None:
+        comparacao = ("Primeiro turno medido deste posto — ele vira a régua "
+                      "dos próximos.")
+        tom = "neutro"
+    elif delta >= 3:
+        comparacao = (f"{delta:.0f} pontos acima da média dos dias anteriores "
+                      "deste posto.")
+        tom = "bom"
+    elif delta <= -3:
+        comparacao = (f"{abs(delta):.0f} pontos abaixo da média dos dias "
+                      "anteriores deste posto.")
+        tom = "atencao"
+    else:
+        comparacao = "Em linha com a média dos dias anteriores deste posto."
+        tom = "neutro"
+
+    return {
+        "sem_dado": False,
+        "titulo": f"O operador esteve no posto em {atual:.0f}% do turno",
+        "frase": comparacao,
+        "tom": tom,
+        "presenca_pct": round(float(atual), 1),
+        "media_anterior_pct": round(media, 1) if media is not None else None,
+        "delta_pontos": delta,
+        "n_dias_comparados": len(anteriores),
+    }
+
 # ═════════════════════════════════════════════════════════════════════════
 # POR QUE ESTA COLUNA ESTÁ VAZIA? — o diagnóstico que faltava.
 #

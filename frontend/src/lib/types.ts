@@ -215,6 +215,8 @@ export interface MetricasProdutividadePosto {
 export interface ProdutividadePosto extends MetricasProdutividadePosto {
   janela_dias: number;
   captura_atrasada: boolean;
+  /** A manchete que ocupa o topo do dashboard. */
+  manchete?: MancheteDoPosto;
   estado_atual: {
     presenca: "no_posto" | "fora_do_posto" | "posto_vazio" | "sem_leitura";
     posto: "ocupado" | "vazio" | "indeterminado";
@@ -239,6 +241,19 @@ export interface SugestaoPratica {
   porque: string;
   passos: string[];
   tom: "ruim" | "atencao" | "info";
+}
+
+/** A manchete do posto: o que o dono da fábrica lê primeiro. Compara o posto
+ *  com ele mesmo — a média dos próprios dias anteriores. */
+export interface MancheteDoPosto {
+  sem_dado: boolean;
+  titulo: string;
+  frase: string;
+  tom: "bom" | "atencao" | "neutro";
+  presenca_pct?: number;
+  media_anterior_pct?: number | null;
+  delta_pontos?: number | null;
+  n_dias_comparados?: number;
 }
 
 export interface DashboardData {
