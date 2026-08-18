@@ -546,20 +546,34 @@ function FilaFoco({
                     trecho inteiro. A narrativa conta a sequência toda; a frase
                     curta continua abaixo, porque é ela que vira rótulo e o
                     gestor precisa ver as duas para julgar a diferença. */}
-                {evento.narrativa ? (
-                  <>
-                    <p className="pretty font-display" style={{ fontSize: 18, fontWeight: 600, color: "var(--ink)", lineHeight: 1.5, margin: 0, maxWidth: 680 }}>
+                {/* A FRASE CURTA volta a ser o protagonista, e a narrativa
+                    vai para um detalhe recolhido. Ela é longa por desenho —
+                    três a cinco frases — e aberta por padrão empurrava os
+                    botões para fora da tela, transformando a pergunta simples
+                    ("é isso?") num texto para ler antes de responder. Quem
+                    quiser o detalhe abre; quem não quiser, decide na frase. */}
+                <p className="pretty font-display" style={{ fontSize: 18, fontWeight: 600, color: "var(--ink)", lineHeight: 1.4, margin: 0, maxWidth: 620 }}>
+                  “{evento.descricao}”
+                </p>
+                {evento.narrativa && (
+                  <details className="col" style={{ gap: 6, maxWidth: 680 }}>
+                    <summary style={{
+                      cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+                      color: "var(--accent-deep)", listStyle: "none",
+                      display: "inline-flex", alignItems: "center", gap: 5,
+                      width: "fit-content",
+                    }}>
+                      <Icon name="file-text" size={13} />
+                      Veja aqui a descrição completa
+                    </summary>
+                    <p style={{
+                      fontSize: 13.5, color: "var(--text)", lineHeight: 1.6,
+                      margin: "6px 0 0", paddingLeft: 11,
+                      borderLeft: "2px solid var(--line)",
+                    }}>
                       {evento.narrativa}
                     </p>
-                    <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
-                      resumido como{" "}
-                      <b style={{ color: "var(--text)" }}>“{evento.descricao}”</b>
-                    </p>
-                  </>
-                ) : (
-                  <p className="pretty font-display" style={{ fontSize: 18, fontWeight: 600, color: "var(--ink)", lineHeight: 1.4, margin: 0, maxWidth: 620 }}>
-                    “{evento.descricao}”
-                  </p>
+                  </details>
                 )}
                 <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
                   É isso que está acontecendo nas imagens?

@@ -84,13 +84,58 @@ check("e não precisa ser compacto — o outro pedido dele",
 check("⭐ escrever pouco é declarado como o PIOR erro",
       "escrever pouco quando havia o que ver é o pior erro" in p)
 check("e o exemplo mostra o nível de detalhe, não só o formato",
-      "nível de detalhe esperado" in p and "carro transversal" in p)
+      "nível de detalhe E da linguagem esperada" in p and "carro do torno" in p)
+
+print("\n[2b] ⭐ LINGUAGEM DE DONO DE FÁBRICA, não de técnico")
+# A primeira narrativa real saiu assim: "P1 permanece no posto... Nas imagens
+# 0-2, P1 está com as mãos na máquina, manipulando o equipamento conforme
+# indicado pelo contexto." Correto e ilegível para quem vai ver isso numa demo.
+check("⭐ o prompt declara quem lê", "QUEM LÊ ISTO É UM DONO DE FÁBRICA" in p)
+check("proíbe número de imagem", "NÚMERO DE IMAGEM" in p and '"imagem 3"' in p)
+check("e manda usar tempo no lugar",
+      '"no começo"' in p and '"no meio do trecho"' in p)
+check("proíbe código de pessoa", "CÓDIGO DE PESSOA" in p and '"P1"' in p)
+check("e manda dizer 'o operador' / 'outra pessoa'",
+      'Diga "o operador"' in p and "outra pessoa" in p)
+check("proíbe vocabulário de sistema",
+      "VOCABULÁRIO DE SISTEMA" in p
+      and all(x in p for x in ('"contexto"', '"sensor"', '"câmera lateral"')))
+check("e explica por quê — a pessoa não sabe que existem duas câmeras",
+      "não sabe que existem duas câmeras" in p)
+check("as duas câmeras viram UMA história só",
+      "conte UMA história só" in p and 'Nunca diga "a outra câmera mostra"' in p)
+# ⚠️ O exemplo é a instrução mais forte, e o meu era o culpado: ele mesmo dizia
+# "Na primeira imagem", "Na segunda". O modelo copiou.
+check("⭐ o próprio EXEMPLO usa tempo, não número de imagem",
+      "Na primeira imagem" not in p and "No começo do trecho" in p)
+check("e usa 'o operador', nunca P1",
+      "P1 está" not in p.split("Exemplo do nível")[1])
+
+print("\n[2c] A rede de segurança: se escorregar, limpa antes de gravar")
+REAL = ("P1 permanece no posto do operador durante toda a sequência. "
+        "Nas imagens 0-2, P1 está com as mãos na máquina. "
+        "A partir da imagem 3, uma segunda pessoa aparece. P2 circula pela bancada.")
+limpo = pl._narrativa_humana(REAL)
+check("⭐ 'P1' vira 'o operador'", "P1" not in limpo and "operador" in limpo, limpo)
+check("'P2' vira 'outra pessoa'", "P2" not in limpo and "utra pessoa" in limpo, limpo)
+check("'Nas imagens 0-2' vira tempo", "imagens 0-2" not in limpo, limpo)
+check("'A partir da imagem 3' vira 'Depois'", "imagem 3" not in limpo, limpo)
+check("⭐ nenhum número de imagem sobra",
+      not __import__("re").search(r"imagem\s+\d|imagens\s+\d|frame\s+\d", limpo), limpo)
+check("começo de frase volta a ter maiúscula", limpo[0].isupper(), limpo[:40])
+check("e depois de ponto também", ". o " not in limpo and ". n" not in limpo, limpo)
+# ⚠️ É rede, não conserto: o lugar de resolver é o prompt.
+check("o código diz que é rede, não conserto",
+      "É REDE, NÃO CONSERTO" in fonte)
+check("texto já humano passa intacto",
+      pl._narrativa_humana("O operador está de pé à direita do torno.")
+      == "O operador está de pé à direita do torno.")
 check("permanecer igual É observação, não falta de informação",
       "Permanecer parado é um fato observado" in p
       and "tão boa quanto qualquer outra" in p)
 check("sem rótulo, categoria nem estado da máquina na narrativa",
       "Nada de rótulo, categoria, produtividade, julgamento, estado da máquina" in p)
-check("com exemplo do formato esperado", "recua meio passo" in p)
+check("com exemplo do formato esperado", "andando pouco por ali até o fim" in p)
 
 print("\n[2] Zero chamada nova — o campo entra no MESMO JSON")
 check("`resumo` é irmão de `trechos` no mesmo objeto",
@@ -185,16 +230,23 @@ check("e a coluna está no schema, para o dia em que for rodado",
       "alter table eventos add column if not exists narrativa text;" in
       open(os.path.join(RAIZ, "sql", "schema.sql"), encoding="utf-8").read())
 
-print("\n[7] A tela mostra as DUAS, e a diferença entre elas")
+print("\n[7] Na tela: a frase curta decide, a narrativa fica a um clique")
 val = open(os.path.join(RAIZ, "frontend", "src", "pages", "Validacao.tsx"),
            encoding="utf-8").read()
-check("a narrativa aparece primeiro e em destaque", "{evento.narrativa}" in val)
-check("a frase curta continua visível, como resumo",
-      "resumido como" in val and "“{evento.descricao}”" in val)
+# Aberta por padrão, a narrativa empurrava os botões para fora da tela e
+# transformava a pergunta simples ("é isso?") num texto para ler antes.
+check("⭐ a narrativa fica recolhida num <details>",
+      "<details" in val and "{evento.narrativa}" in val)
+check("com o rótulo que o dono pediu",
+      "Veja aqui a descrição completa" in val)
+check("e menor que a frase curta",
+      "fontSize: 13.5" in val.split("Veja aqui a descrição completa")[1][:400])
+check("a frase curta volta a ser o protagonista",
+      "“{evento.descricao}”" in val
+      and val.index("“{evento.descricao}”") < val.index("Veja aqui a descrição completa"))
 check("sem narrativa, o card volta ao que era — nada quebra",
-      "evento.narrativa ? (" in val)
-check("o porquê está no código, para ninguém 'limpar' a duplicação",
-      "é ela que vira rótulo" in val)
+      "{evento.narrativa && (" in val)
+check("o porquê está no código", "empurrava\n                    os botões" in val or "empurrava" in val)
 
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

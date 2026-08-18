@@ -1993,7 +1993,14 @@ COMO ESCREVER O "resumo":
 - SEJA ESPECÍFICO, não econômico. Três a cinco frases é o normal. Um trecho rico merece mais; escrever pouco quando havia o que ver é o pior erro possível aqui.
 - Se NADA mudou entre as imagens, diga isso com todas as letras e descreva o estado que se manteve. Permanecer parado é um fato observado, não falta de informação — e é uma resposta tão boa quanto qualquer outra.
 - Só o que se VÊ. Nada de rótulo, categoria, produtividade, julgamento, estado da máquina ou suposição sobre a intenção. Se você não vê as mãos, escreva que não vê as mãos — não adivinhe o que elas fazem.
-- Exemplo do nível de detalhe esperado: "O operador está de pé à esquerda do torno, corpo voltado para a máquina e de costas para a câmera. Na primeira imagem as duas mãos estão apoiadas sobre a mesa da máquina, próximas ao carro transversal. Na segunda ele permanece na mesma posição, com a cabeça inclinada para baixo, na direção do ponto onde as mãos estão. Na terceira ele recua meio passo e o braço direito desce ao lado do corpo; as mãos deixam de aparecer sobre a máquina. Nenhuma outra pessoa entra no posto durante a sequência, e nenhum objeto é carregado."
+
+⚠️ QUEM LÊ ISTO É UM DONO DE FÁBRICA, não um técnico. Escreva como se estivesse contando a ele o que aconteceu no posto. Isso PROÍBE, sem exceção:
+- NÚMERO DE IMAGEM. Nada de "imagem 3", "nas imagens 0-2", "no frame 5", "na primeira imagem", "a sequência". Use o TEMPO: "no começo", "logo depois", "no meio do trecho", "até o fim", "em seguida", "durante todo o trecho".
+- CÓDIGO DE PESSOA. Nada de "P1", "P2", "P3". Diga "o operador" para o titular do posto e "outra pessoa" / "um colega" para os demais — e, se houver como distinguir, use algo visível: "outra pessoa de camiseta roxa".
+- VOCABULÁRIO DE SISTEMA. Nada de "contexto", "sensor", "detecção", "câmera lateral", "segundo ângulo", "conforme indicado", "identificação do operador", "área da zona". A pessoa não sabe que existem duas câmeras nem o que é uma zona; ela quer saber o que o funcionário dela estava fazendo.
+- Se as duas câmeras mostram a mesma cena, conte UMA história só. Nunca diga "a outra câmera mostra" — junte o que as duas mostram numa narrativa única.
+
+- Exemplo do nível de detalhe E da linguagem esperada: "O operador está de pé à direita do torno, com o corpo voltado para a máquina. No começo do trecho ele está com as duas mãos sobre o equipamento, mexendo na região do carro do torno. Um pouco depois, outra pessoa de camiseta roxa aparece pela esquerda e fica na área da bancada, andando pouco por ali até o fim. O operador não sai do lugar e continua voltado para o torno o tempo todo. Ninguém mais entra no posto e nenhuma peça é carregada."
 - "operador_estado" deve ser "identificado" quando exatamente um candidato ocupa funcionalmente o posto, "ausente" quando está claro que nenhum candidato é o operador, ou "incerto" quando há oclusão/evidência insuficiente;
 - "operador" é obrigatório somente em "identificado" e deve ser um rótulo visível naquela imagem; nos outros estados deve ser null;
 - "trabalho" só pode ser true/false em "identificado"; nos outros estados deve ser null;
@@ -3760,6 +3767,42 @@ _NARRATIVA = os.environ.get("KV_NARRATIVA", "on").strip().lower() not in (
     "off", "0", "false", "no", "")
 
 
+# Sobras de linguagem de máquina que o modelo às vezes deixa passar apesar da
+# proibição no prompt. Quem lê a narrativa é um dono de fábrica: "P1" e
+# "imagem 3" denunciam que aquilo saiu de um sistema, e é justamente isso que
+# não pode aparecer numa tela que vai virar material comercial.
+#
+# ⚠️ É REDE, NÃO CONSERTO. O lugar de resolver isto é o prompt — substituição
+# por regex não entende contexto e, aplicada demais, estraga a frase. Aqui só
+# entram trocas seguras: rótulo de pessoa e referência a número de imagem, que
+# têm forma fixa e não se confundem com nada do chão de fábrica.
+_TROCAS_HUMANAS = (
+    (r"\bP1\b", "o operador"),
+    (r"\bP(?:[2-9]|\d{2,})\b", "outra pessoa"),
+    (r"\b[Nn]as imagens?\s+\d+\s*[-–a]\s*\d+\b", "no começo do trecho"),
+    (r"\b[Nn]a imagem\s+\d+\b", "em seguida"),
+    (r"\b[Aa] partir da imagem\s+\d+\b", "depois"),
+    (r"\b[Nn]o frame\s+\d+\b", "em seguida"),
+    (r"\s*\(imagens?\s+[\d\s,\-–a]+\)", ""),
+)
+
+
+def _narrativa_humana(texto: str) -> str:
+    """Tira as sobras de linguagem de máquina da narrativa."""
+    t = texto
+    for padrao, troca in _TROCAS_HUMANAS:
+        t = re.sub(padrao, troca, t)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    # A troca entra em minúscula e pode cair em começo de frase ("P1 permanece"
+    # → "o operador permanece"). Sem isto a narrativa fica com cara de erro
+    # justo na primeira palavra, que é a que o gestor lê primeiro.
+    def _maiuscula(m):
+        return m.group(1) + m.group(2).upper()
+
+    t = re.sub(r"(^|[.!?]\s+)([a-zà-ú])", _maiuscula, t)
+    return t
+
+
 def _resumo_da_sequencia(bruto: dict) -> str | None:
     """A narrativa do minuto, se o modelo a devolveu e a flag estiver ligada.
 
@@ -3771,7 +3814,7 @@ def _resumo_da_sequencia(bruto: dict) -> str | None:
     r = (bruto or {}).get("resumo")
     if not isinstance(r, str):
         return None
-    r = r.strip()
+    r = _narrativa_humana(r.strip())
     # Uma ou duas palavras não é narrativa — é ruído com cara de resposta.
     # Sobe de 25 para 120: com a instrução de três a cinco frases, qualquer
     # coisa abaixo disso é o modelo devolvendo a frase curta de novo — e uma
