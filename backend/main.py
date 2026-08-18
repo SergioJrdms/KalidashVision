@@ -3469,15 +3469,18 @@ def dashboard(
         dist_enriquecida, composicao_valor, base, videos, cat_por_label
     )
 
-    # SUGESTÕES POR REGRA — nascem dos números acima, não de um consultor de
-    # LLM. Zero token, e impossível falarem de um problema que o dado não
+    # SUGESTÕES POR REGRA — sobre o PROCESSO e o OPERADOR, nunca sobre o
+    # produto. Zero token, e impossível falarem de um problema que o dado não
     # mostra: cada uma exige um gatilho numérico.
     sugestoes_praticas = sugestoes_do_posto(
         permanencia=permanencia,
         produtividade=produtividade_posto,
-        pendentes=(pendentes.count or 0),
         por_hora=(_iq or {}).get("por_hora"),
-        diagnostico_descricao=_diag_desc,
+        # O MIX DE ATIVIDADES é o que permite falar do PROCESSO em vez de falar
+        # do produto: é dele que saem "tanto do turno é ciclo automático" e
+        # "tanto é o operador andando pelo posto".
+        atividades=dist_enriquecida,
+        serie=produtividade_posto.get("serie_diaria"),
     )
 
     produtividade_posto["leituras_do_instrumento_legado"] = _n_historico

@@ -13419,42 +13419,70 @@ def montar_insights_quantitativos(
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# SUGESTÕES DO POSTO — por REGRA, a partir do que foi medido.
+# SUGESTÕES DO POSTO — sobre o PROCESSO e o OPERADOR, por regra.
 #
-# As antigas vinham de `PROMPT_ANALISE`, um consultor Lean de LLM. Saíam
-# genéricas ("implementar 5S na área", "reduzir setup via SMED"), com nome
-# complicado e sem dizer COMO fazer — o gestor lia, concordava e não agia.
-# Também custavam token e podiam inventar um problema que o dado não mostrava.
+# As primeiras vinham de `PROMPT_ANALISE`, um consultor Lean de LLM: genéricas
+# ("implantar 5S", "reduzir setup via SMED"), com nome complicado e sem dizer
+# como fazer. As segundas erraram para o outro lado — falavam do SpectraAI
+# ("veja se o computador da borda está ligado", "abra a Fila", "desenhe a zona
+# da máquina"). O cliente não tem acesso a hardware, a vídeo bruto nem às
+# entranhas do produto: aquilo era lista de tarefas NOSSA na tela DELE.
 #
-# Estas são o oposto, e as três propriedades são o ponto:
+# ⚠️ A REGRA QUE DEFINE ESTE MÓDULO: todo passo tem de ser executável no CHÃO
+# DE FÁBRICA por quem gere o posto. Falar com o operador, mudar de lugar o que
+# ele busca, remarcar um horário, redistribuir uma tarefa. Nada de abrir tela,
+# conferir cabo ou configurar sistema. Problema do produto vira aviso do
+# produto (o topo da tela já diz quando a captura atrasou) — nunca sugestão de
+# melhoria de processo.
 #
-#  1. SÓ NASCEM DE UM NÚMERO MEDIDO. Cada regra tem um gatilho explícito e
-#     carrega o número que a disparou. Sem o número, a sugestão não existe —
-#     é impossível ela falar de um problema que o dado não mostra.
-#  2. NOME DE CHÃO DE FÁBRICA. "O posto ficou vazio um quinto do turno", não
+# As três propriedades que continuam valendo:
+#
+#  1. SÓ NASCEM DE UM NÚMERO MEDIDO. Cada regra tem gatilho explícito e carrega
+#     o número no título. Sem número, a sugestão não existe — é impossível
+#     falar de um problema que o dado não mostra.
+#  2. NOME DE CHÃO DE FÁBRICA. "O operador sai do posto em 20% do turno", não
 #     "oportunidade de otimização da taxa de ocupação do recurso".
-#  3. SEMPRE COM O COMO. Cada uma traz passos concretos, na ordem de fazer.
-#     Sugestão sem passo é opinião.
+#  3. SEMPRE COM O COMO. Passos concretos, na ordem de fazer.
 #
-# ⚠️ ZERO CHAMADA DE API e função PURA: entra o payload que a tela já tem,
-# sai a lista. Não lê banco, não chama modelo, não custa nada.
+# ⚠️ E UMA QUARTA, QUE É ÉTICA E TAMBÉM É BOM PRODUTO: nenhuma sugestão acusa
+# o operador. O número mede o POSTO, não a pessoa. Um gestor que usa isto para
+# punir perde a cooperação de quem mais sabe onde o processo trava — e o
+# primeiro passo de quase toda sugestão é PERGUNTAR a ele, porque ele
+# geralmente já sabe a resposta.
 #
-# ⚠️ E NÃO MOVE NÚMERO NENHUM. Ela LÊ os números; nada aqui volta para o
-# cálculo.
+# ⚠️ ZERO CHAMADA DE API, função PURA, e não move número nenhum.
 # ═════════════════════════════════════════════════════════════════════════
+_ROTULOS_ACOMPANHAR = ("monitorar_maquina", "acompanhar_maquina", "observar")
+_ROTULOS_CONVERSA = ("conversando_colega", "interagir_com_colega_ou_lider",
+                     "conversa")
+_ROTULOS_BUSCA = ("deslocar_buscar_material_ferramenta", "deslocar_pelo_posto",
+                  "deslocamento", "buscar")
+
+
+def _fatia(atividades, prefixos) -> float:
+    """Quanto do tempo observado caiu em rótulos que começam por `prefixos`."""
+    total = 0.0
+    for a in atividades or []:
+        lbl = str(a.get("comportamento") or "")
+        if any(lbl.startswith(p) for p in prefixos):
+            v = a.get("pct_tempo")
+            if isinstance(v, (int, float)):
+                total += v
+    return total
+
+
 def sugestoes_do_posto(
     permanencia: dict | None = None,
     produtividade: dict | None = None,
-    pendentes: int = 0,
     por_hora: list | None = None,
-    diagnostico_descricao: dict | None = None,
+    atividades: list | None = None,
+    serie: list | None = None,
     max_itens: int = 3,
 ) -> list[dict]:
-    """As sugestões que a tela mostra. Ordenadas por PESO, não por categoria.
+    """As sugestões que o gestor lê. Ordenadas por PESO, não por categoria.
 
     `max_itens` é baixo de propósito: uma lista de dez sugestões é uma lista de
-    zero. O gestor faz uma coisa por vez, e a primeira tem de ser a que mais
-    pesa hoje.
+    zero. Faz-se uma coisa por vez, e a primeira tem de ser a que mais pesa.
     """
     prod = produtividade or {}
     perm = permanencia or {}
@@ -13464,96 +13492,114 @@ def sugestoes_do_posto(
         itens.append({"chave": chave, "titulo": titulo, "porque": porque,
                       "passos": passos, "tom": tom, "_peso": peso})
 
-    # ── 1) A captura parou. Vem antes de tudo: sem dado novo, toda leitura
-    # abaixo é sobre o passado, e agir sobre o passado achando que é o presente
-    # é o pior erro que esta tela pode induzir.
-    if prod.get("captura_atrasada"):
-        add(100, "captura_parada",
-            "A câmera parou de mandar imagem",
-            "O último trecho recebido não é recente. O que a tela mostra é o "
-            "que já tinha sido gravado, não o que está acontecendo agora.",
-            ["Veja se o computador da borda está ligado e com internet.",
-             "Confira se as duas câmeras estão energizadas e enxergando o posto.",
-             "Se estiver tudo de pé, abra a Fila e veja se há trecho preso em "
-             "'processando'."],
-            tom="ruim")
-
-    # ── 2) Posto vazio. É o achado mais acionável que este produto tem hoje,
-    # porque é 100% medido: presença sai de detecção + polígono, sem IA.
+    # ── 1) O operador sai do posto. É o achado mais acionável que existe aqui:
+    # a causa quase nunca é a pessoa, é o que falta ao alcance da mão.
     vazio = prod.get("posto_vazio_pct")
     if vazio is None:
         vazio = perm.get("fora_pct")
-    if isinstance(vazio, (int, float)) and vazio >= 15:
-        add(90 if vazio >= 25 else 72, "posto_vazio",
-            f"O posto ficou vazio em {vazio:.0f}% do turno",
-            "Esse é o tempo em que a máquina tinha trabalho para fazer e não "
-            "havia ninguém nela.",
-            ["Abra o Dia a dia e veja em que horas o posto mais esvazia.",
-             "Naquelas horas, pergunte ao operador o que ele foi fazer — "
-             "quase sempre é buscar material, ferramenta ou desenho.",
-             "O que se repetir vira tarefa de outra pessoa ou vai para perto "
-             "do posto."])
+    if isinstance(vazio, (int, float)) and vazio >= 12:
+        add(90 if vazio >= 25 else 78, "posto_vazio",
+            f"O operador sai do posto em {vazio:.0f}% do turno",
+            "Enquanto ele está fora, o torno não avança. Na maioria das vezes "
+            "a saída é para buscar algo que poderia estar ao alcance da mão.",
+            ["Pergunte ao operador o que ele mais precisa buscar durante o "
+             "turno — material, ferramenta, desenho ou medição.",
+             "O que ele citar duas vezes ganha um lugar fixo ao lado do torno, "
+             "abastecido antes do turno começar.",
+             "O que não couber ao lado do posto passa a ser trazido por quem "
+             "abastece, não buscado por quem opera."])
 
-    # ── 3) Concentração numa faixa de hora. Um vazio espalhado é rotina; um
-    # vazio concentrado tem CAUSA, e causa tem conserto.
-    horas = [h for h in (por_hora or []) if isinstance(h.get("desp_pct"), (int, float))]
+    # ── 2) Uma hora fora da curva. Vazio espalhado é rotina; vazio concentrado
+    # tem CAUSA, e causa tem conserto.
+    horas = [h for h in (por_hora or [])
+             if isinstance(h.get("desp_pct"), (int, float))
+             and h.get("hora") is not None]
     if len(horas) >= 3:
         pior = max(horas, key=lambda h: h["desp_pct"])
         media = sum(h["desp_pct"] for h in horas) / len(horas)
-        if pior["desp_pct"] - media >= 15:
-            add(80, "hora_ruim",
-                f"O posto rende bem menos por volta das {int(pior['hora']):02d}h",
-                f"Nessa faixa o tempo perdido é {pior['desp_pct'] - media:.0f} "
-                "pontos maior que na média do turno. Uma hora fora da curva "
-                "costuma ter uma causa só.",
-                [f"Assista a um trecho das {int(pior['hora']):02d}h na Validação.",
-                 "Veja se coincide com troca de turno, refeição ou entrega de "
-                 "material.",
-                 "Se coincidir, mude o horário do que atrapalha — não o do "
-                 "operador."])
+        delta = pior["desp_pct"] - media
+        if delta >= 15:
+            hh = f"{int(pior['hora']):02d}h"
+            add(84, "hora_ruim",
+                f"O torno para bem mais por volta das {hh}",
+                f"Nessa faixa o posto rende {delta:.0f} pontos abaixo da média "
+                "do turno. Uma hora que destoa todo dia costuma ter uma causa "
+                "só, e ela quase sempre é de agenda.",
+                [f"Descubra o que acontece de rotina por volta das {hh}: troca "
+                 "de turno, refeição, reunião, entrega de material ou "
+                 "abastecimento.",
+                 "Se for algo que vem de fora do posto, remarque para uma hora "
+                 "em que o torno já estaria parado de qualquer forma.",
+                 "Se for pausa da equipe, escalone: um começa mais cedo e "
+                 "outro mais tarde, para a máquina não parar junto."])
 
-    # ── 4) Não dá para dizer se é produtivo. Enquadrado como CONFIGURAÇÃO,
-    # que é o que de fato falta, e não como falha da IA.
-    cob = prod.get("cobertura_produtividade_pct")
-    if isinstance(cob, (int, float)) and cob < 30 and (prod.get("presenca_pct") or 0) > 0:
-        add(65, "sem_lado_maquina",
-            "Falta dizer ao sistema de que lado fica o torno",
-            "Sabemos quanto tempo o operador ficou no posto, mas ainda não se "
-            "ele estava voltado para a máquina. É por isso que a produtividade "
-            "está sem número.",
-            ["Abra Configurações e desenhe a zona da máquina, se ainda não "
-             "estiver desenhada.",
-             "Marque se o operador aparece de frente ou de costas para a "
-             "câmera quando está trabalhando.",
-             "Salve e processe um vídeo novo — a produtividade aparece a "
-             "partir dele."])
+    # ── 3) Muito tempo ACOMPANHANDO a máquina. Não é ociosidade — é ciclo
+    # automático rodando. O ganho não está em cobrar a pessoa; está em usar um
+    # tempo que hoje é só espera.
+    acompanhar = _fatia(atividades, _ROTULOS_ACOMPANHAR)
+    if acompanhar >= 20:
+        add(80, "tempo_de_ciclo",
+            f"{acompanhar:.0f}% do turno é o operador acompanhando a máquina",
+            "Esse tempo é do ciclo automático, não é parada. Ele está no posto "
+            "e atento — o que dá para ganhar é aproveitar o ciclo para "
+            "adiantar o que hoje é feito com a máquina parada.",
+            ["Liste com o operador o que ele faz HOJE com o torno parado: "
+             "medir a peça pronta, preparar o material, conferir o desenho.",
+             "O que puder ser feito com a máquina rodando passa para dentro do "
+             "ciclo — a peça seguinte fica preparada antes de a atual sair.",
+             "Se o ciclo for longo e ele ficar sem o que fazer, avalie se dá "
+             "para ele cuidar de uma segunda máquina próxima."])
 
-    # ── 5) A fila. O trabalho de maior alavancagem que existe aqui, e o único
-    # em que o gestor ensina o sistema em vez de só ler.
-    if pendentes >= 40:
-        add(60, "fila",
-            f"{pendentes} trechos esperando sua conferência",
-            "Cada trecho que você confere ensina o sistema a errar menos no "
-            "próximo — e a fila já é grande o bastante para atrapalhar.",
-            ["Abra a Validação e faça um lote de dez.",
-             "Responda pelo que você VÊ na imagem, não pelo que costuma "
-             "acontecer.",
-             "Dez minutos por dia dão conta; não precisa zerar de uma vez."])
+    # ── 4) Idas e vindas dentro do próprio posto. Diferente de sair: aqui ele
+    # não saiu, mas o posto o faz caminhar.
+    busca = _fatia(atividades, _ROTULOS_BUSCA)
+    if busca >= 8:
+        add(70, "arranjo_do_posto",
+            f"{busca:.0f}% do turno é o operador andando pelo posto",
+            "Deslocamento dentro do posto costuma ser arranjo, não pressa: as "
+            "coisas mais usadas ficam longe de onde ele trabalha.",
+            ["Fique dez minutos ao lado do torno e anote onde ele vai buscar "
+             "cada coisa.",
+             "O que ele pega mais de três vezes por hora vem para o alcance do "
+             "braço, sem passo nenhum.",
+             "Bancada, medidor e ferramenta de troca ficam do mesmo lado em "
+             "que ele já está de pé."])
 
-    # ── 6) Descrição sem observação. Só entra quando é grande — abaixo disso é
-    # ruído de instrumento e não merece a atenção do gestor.
-    diag = diagnostico_descricao or {}
-    sem_obs = diag.get("pct_sem_observacao")
-    if isinstance(sem_obs, (int, float)) and sem_obs >= 30:
-        add(50, "sem_observacao",
-            f"Em {sem_obs:.0f}% dos trechos o sistema não olhou a imagem",
-            "Nesses trechos o tempo é real e a presença foi medida, mas a "
-            "descrição do que aconteceu foi herdada do trecho anterior.",
-            ["Isso costuma ser economia de análise apertada demais.",
-             "Se você precisa da descrição para investigar, avise — dá para "
-             "afrouxar o limite.",
-             "O percentual de presença NÃO é afetado por isso."],
-            tom="info")
+    # ── 5) Conversa no posto. ⚠️ Só entra quando é grande, e enquadrada como
+    # INTERRUPÇÃO — o problema é onde as conversas acontecem, não que existam.
+    conversa = _fatia(atividades, _ROTULOS_CONVERSA)
+    if conversa >= 10:
+        add(60, "interrupcoes",
+            f"{conversa:.0f}% do turno tem conversa no posto",
+            "Boa parte disso é recado de trabalho chegando na hora errada. "
+            "Não é sobre proibir conversa — é sobre a conversa não precisar "
+            "acontecer com a máquina parada.",
+            ["Veja quem procura o operador durante o turno e para quê.",
+             "Recados que não são urgentes passam a ser dados na troca de "
+             "turno ou na pausa, num momento só.",
+             "Se for dúvida técnica que se repete, ela vira instrução escrita "
+             "ao lado do torno."])
+
+    # ── 6) A presença caiu em relação aos dias anteriores. Comparar o posto
+    # com ele mesmo é mais justo que comparar com uma meta inventada.
+    pontos = [s for s in (serie or [])
+              if isinstance(s.get("presenca_pct"), (int, float))]
+    if len(pontos) >= 3:
+        hoje = pontos[-1]["presenca_pct"]
+        antes = [s["presenca_pct"] for s in pontos[:-1]]
+        media_antes = sum(antes) / len(antes)
+        if media_antes - hoje >= 10:
+            add(76, "queda",
+                f"A presença no posto caiu {media_antes - hoje:.0f} pontos",
+                "Comparado com os dias anteriores deste mesmo posto, o "
+                "operador esteve bem menos tempo no torno. Queda de um dia "
+                "para o outro costuma ter motivo pontual.",
+                ["Pergunte o que foi diferente nesse dia: falta de material, "
+                 "manutenção, ajuda em outro posto, treinamento.",
+                 "Se foi falta de material, veja com o abastecimento o que "
+                 "atrasou.",
+                 "Se o motivo se repetir em outro dia, deixou de ser evento e "
+                 "virou processo — aí vale mudar o fluxo."])
 
     itens.sort(key=lambda x: -x["_peso"])
     for x in itens:
