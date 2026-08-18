@@ -11627,7 +11627,9 @@ def agregar_portfolio(
             .select(
                 "id, video_id, processo, comportamento_label, label_corrigido, "
                 "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
-                "origem_validacao, confianca, principal"
+                # `papel_pessoa` entra no scan que JÁ EXISTE: é o que permite o
+                # card da home mostrar presença sem uma consulta a mais.
+                "origem_validacao, confianca, principal, papel_pessoa"
             )
             .eq("empresa", empresa)
             .order("id")
@@ -11667,6 +11669,17 @@ def agregar_portfolio(
         p["eventos_considerados"] += 1
         if e.get("validado_humano"):
             p["n_validados"] += 1
+        # PRESENÇA por processo, pela mesma regra do dashboard: quem não é
+        # posto_vazio nem visitante estava no posto. Determinístico, sem IA.
+        _dur = max(0.0, float(e.get("tempo_fim_s") or 0)
+                   - float(e.get("tempo_inicio_s") or 0))
+        if _dur > 0:
+            p["_presenca_total_s"] = p.get("_presenca_total_s", 0.0) + _dur
+            _lbl = e.get("label_corrigido") or e.get("comportamento_label")
+            _fora = (e.get("papel_pessoa") in ("posto_vazio", "visitante")
+                     or (_lbl == POSTO_VAZIO_LABEL and not e.get("label_corrigido")))
+            if not _fora:
+                p["_no_posto_s"] = p.get("_no_posto_s", 0.0) + _dur
 
     # Loop 2: agregação de DURAÇÃO por categoria Lean — usa stream DEDUPLICADO
     # (Fase 3: cam1+cam2 da mesma ação contam 1 vez só).
@@ -11819,6 +11832,18 @@ def agregar_portfolio(
             "top_comportamentos": top_comportamentos,
             "composicao_valor": composicao,
             "maturidade": maturidade,
+            # PRESENÇA no card da home: o mesmo número do dashboard, pela mesma
+            # regra determinística. `None` quando não há tempo observado — a
+            # tela diz isso em vez de mostrar zero como se fosse resultado.
+            "presenca_pct": (
+                round(100.0 * p.get("_no_posto_s", 0.0) / p["_presenca_total_s"], 1)
+                if p.get("_presenca_total_s") else None
+            ),
+            "posto_vazio_pct": (
+                round(100.0 * (p["_presenca_total_s"] - p.get("_no_posto_s", 0.0))
+                      / p["_presenca_total_s"], 1)
+                if p.get("_presenca_total_s") else None
+            ),
         }
     return saida
 
@@ -13724,6 +13749,20 @@ def estado_dos_sinais() -> dict:
 # primeiro passo de quase toda sugestão é PERGUNTAR a ele, porque ele
 # geralmente já sabe a resposta.
 #
+# ⚠️ ESTABILIDADE É REQUISITO, não acaso. O gestor pediu que a lista mude com
+# BAIXA frequência — e a razão é boa: um painel que sugere coisa nova todo dia
+# ensina a não fazer nenhuma. O mecanismo não é congelar a lista; é PREFERIR
+# ACHADO ESTRUTURAL a oscilação do dia.
+#
+# Cada regra declara `estrutural`:
+#   · ESTRUTURAL (`True`) — fala da FORMA do processo: quanto do turno é ciclo
+#     automático, como o posto está arranjado, o quanto ele varia entre dias.
+#     Isso não muda de um dia para o outro, então a sugestão também não muda.
+#     Ganha um bônus de peso.
+#   · DO DIA (`False`) — fala do que aconteceu ontem. Só entra com magnitude
+#     grande, e perde para o estrutural em caso de empate. Assim uma hora ruim
+#     isolada não expulsa da tela um problema de arranjo que está lá há meses.
+#
 # ⚠️ ZERO CHAMADA DE API, função PURA, e não move número nenhum.
 # ═════════════════════════════════════════════════════════════════════════
 _ROTULOS_ACOMPANHAR = ("monitorar_maquina", "acompanhar_maquina", "observar")
@@ -13751,7 +13790,7 @@ def sugestoes_do_posto(
     por_hora: list | None = None,
     atividades: list | None = None,
     serie: list | None = None,
-    max_itens: int = 3,
+    max_itens: int = 4,
 ) -> list[dict]:
     """As sugestões que o gestor lê. Ordenadas por PESO, não por categoria.
 
@@ -13762,9 +13801,12 @@ def sugestoes_do_posto(
     perm = permanencia or {}
     itens: list[dict] = []
 
-    def add(peso, chave, titulo, porque, passos, tom="atencao"):
+    def add(peso, chave, titulo, porque, passos, tom="atencao", estrutural=False):
+        # O bônus é o que faz o achado de FORMA vencer o do dia num empate.
         itens.append({"chave": chave, "titulo": titulo, "porque": porque,
-                      "passos": passos, "tom": tom, "_peso": peso})
+                      "passos": passos, "tom": tom,
+                      "_peso": peso + (12 if estrutural else 0),
+                      "_estrutural": estrutural})
 
     # ── 1) O operador sai do posto. É o achado mais acionável que existe aqui:
     # a causa quase nunca é a pessoa, é o que falta ao alcance da mão.
@@ -13781,7 +13823,11 @@ def sugestoes_do_posto(
              "O que ele citar duas vezes ganha um lugar fixo ao lado do torno, "
              "abastecido antes do turno começar.",
              "O que não couber ao lado do posto passa a ser trazido por quem "
-             "abastece, não buscado por quem opera."])
+             "abastece, não buscado por quem opera."],
+            # Estrutural: a causa é abastecimento e arranjo, não o dia de
+            # ontem. Some quando o posto for reorganizado, não quando o
+            # operador tiver um dia melhor.
+            estrutural=True)
 
     # ── 2) Uma hora fora da curva. Vazio espalhado é rotina; vazio concentrado
     # tem CAUSA, e causa tem conserto.
@@ -13805,14 +13851,15 @@ def sugestoes_do_posto(
                  "Se for algo que vem de fora do posto, remarque para uma hora "
                  "em que o torno já estaria parado de qualquer forma.",
                  "Se for pausa da equipe, escalone: um começa mais cedo e "
-                 "outro mais tarde, para a máquina não parar junto."])
+                 "outro mais tarde, para a máquina não parar junto."],
+                estrutural=False)
 
     # ── 3) Muito tempo ACOMPANHANDO a máquina. Não é ociosidade — é ciclo
     # automático rodando. O ganho não está em cobrar a pessoa; está em usar um
     # tempo que hoje é só espera.
     acompanhar = _fatia(atividades, _ROTULOS_ACOMPANHAR)
     if acompanhar >= 20:
-        add(80, "tempo_de_ciclo",
+        add(74, "tempo_de_ciclo",
             f"{acompanhar:.0f}% do turno é o operador acompanhando a máquina",
             "Esse tempo é do ciclo automático, não é parada. Ele está no posto "
             "e atento — o que dá para ganhar é aproveitar o ciclo para "
@@ -13822,7 +13869,8 @@ def sugestoes_do_posto(
              "O que puder ser feito com a máquina rodando passa para dentro do "
              "ciclo — a peça seguinte fica preparada antes de a atual sair.",
              "Se o ciclo for longo e ele ficar sem o que fazer, avalie se dá "
-             "para ele cuidar de uma segunda máquina próxima."])
+             "para ele cuidar de uma segunda máquina próxima."],
+            estrutural=True)
 
     # ── 4) Idas e vindas dentro do próprio posto. Diferente de sair: aqui ele
     # não saiu, mas o posto o faz caminhar.
@@ -13837,7 +13885,8 @@ def sugestoes_do_posto(
              "O que ele pega mais de três vezes por hora vem para o alcance do "
              "braço, sem passo nenhum.",
              "Bancada, medidor e ferramenta de troca ficam do mesmo lado em "
-             "que ele já está de pé."])
+             "que ele já está de pé."],
+            estrutural=True)
 
     # ── 5) Conversa no posto. ⚠️ Só entra quando é grande, e enquadrada como
     # INTERRUPÇÃO — o problema é onde as conversas acontecem, não que existam.
@@ -13852,7 +13901,8 @@ def sugestoes_do_posto(
              "Recados que não são urgentes passam a ser dados na troca de "
              "turno ou na pausa, num momento só.",
              "Se for dúvida técnica que se repete, ela vira instrução escrita "
-             "ao lado do torno."])
+             "ao lado do torno."],
+            estrutural=True)
 
     # ── 6) A presença caiu em relação aos dias anteriores. Comparar o posto
     # com ele mesmo é mais justo que comparar com uma meta inventada.
@@ -13873,11 +13923,73 @@ def sugestoes_do_posto(
                  "Se foi falta de material, veja com o abastecimento o que "
                  "atrasou.",
                  "Se o motivo se repetir em outro dia, deixou de ser evento e "
-                 "virou processo — aí vale mudar o fluxo."])
+                 "virou processo — aí vale mudar o fluxo."],
+                estrutural=False)
+
+    # ── 7) O MELHOR DIA COMO META. Nem toda sugestão precisa ser problema —
+    # e uma meta que veio do próprio chão não se discute: já aconteceu ali.
+    presencas = [s.get("presenca_pct") for s in (serie or [])
+                 if isinstance(s.get("presenca_pct"), (int, float))]
+    if len(presencas) >= 3:
+        melhor = max(presencas)
+        media = sum(presencas) / len(presencas)
+        if melhor - media >= 5:
+            add(66, "melhor_dia",
+                f"O melhor turno deste posto foi {melhor:.0f}%",
+                f"A média fica em {media:.0f}%. A diferença não é sorte: já "
+                "aconteceu neste posto, com este operador e esta máquina — "
+                "então dá para repetir.",
+                ["Descubra com o operador o que foi diferente no melhor dia: "
+                 "material já separado, sem troca de ferramenta, sem "
+                 "interrupção.",
+                 "Escreva o que fez aquele dia funcionar e deixe à vista no "
+                 "posto.",
+                 "Use esse número como meta do mês — é a única meta que não "
+                 "dá para contestar."],
+                tom="info", estrutural=True)
+
+        # ── 8) CONSISTÊNCIA. Variar muito entre dias é problema de método, e é
+        # mais barato de resolver que ganhar pontos no topo.
+        pior = min(presencas)
+        if melhor - pior >= 20:
+            add(72, "consistencia",
+                f"O posto varia {melhor - pior:.0f} pontos entre os dias",
+                "Do melhor para o pior turno a diferença é grande. Quando o "
+                "mesmo posto e o mesmo operador rendem tão diferente, o que "
+                "muda é o que chega até ele, não o esforço.",
+                ["Compare o melhor e o pior dia com o operador: o que existia "
+                 "num e faltava no outro?",
+                 "Padronize o começo do turno — material, ferramenta e desenho "
+                 "conferidos antes de a máquina ligar.",
+                 "Repita por uma semana e veja se a diferença entre os dias "
+                 "diminui."],
+                estrutural=True)
+
+    # ── 9) O COMEÇO DO TURNO. A primeira hora costuma ser a mais fácil de
+    # corrigir, porque depende de preparação e não de ritmo.
+    if len(horas) >= 3:
+        horas_ord = sorted(horas, key=lambda h: h["hora"])
+        primeira = horas_ord[0]
+        resto = horas_ord[1:]
+        media_resto = sum(h["desp_pct"] for h in resto) / len(resto)
+        if primeira["desp_pct"] - media_resto >= 12:
+            add(68, "comeco_do_turno",
+                "O turno demora a engrenar",
+                f"Na primeira hora o posto rende bem menos que no resto do "
+                "dia. Começo lento quase sempre é preparação que só acontece "
+                "depois que o turno já começou.",
+                ["Veja o que o operador faz na primeira meia hora: procurar "
+                 "material, achar o desenho, acertar a ferramenta.",
+                 "O que der para deixar pronto na véspera passa para o fim do "
+                 "turno anterior.",
+                 "Defina qual é a primeira peça do dia antes de o operador "
+                 "chegar."],
+                estrutural=True)
 
     itens.sort(key=lambda x: -x["_peso"])
     for x in itens:
         x.pop("_peso", None)
+        x.pop("_estrutural", None)
     return itens[:max_itens]
 
 # ═════════════════════════════════════════════════════════════════════════

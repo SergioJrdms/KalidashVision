@@ -19,6 +19,9 @@ export interface Processo {
   tempo_total_min?: number;
   ultimo_video_em?: string | null;
   maturidade?: number;
+  /** Presença do operador no posto — o mesmo número do dashboard. */
+  presenca_pct?: number | null;
+  posto_vazio_pct?: number | null;
   composicao_valor?: ComposicaoValorLite | null;
 }
 

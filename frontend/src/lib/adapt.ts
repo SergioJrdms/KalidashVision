@@ -26,6 +26,8 @@ export interface ProcMock {
   descricao: string;
   area: string;
   videos: number;
+  presenca: number | null;
+  postoVazio: number | null;
   maturidade: number;
   validado: number;
   sugestoesAlta: number;
@@ -99,6 +101,9 @@ export function mapProcessos(rows: Processo[]): ProcMock[] {
       descricao: p.descricao || "",
       area: p.area || "Processo",
       videos: p.n_videos || 0,
+      // O card da home passa a falar do POSTO, não do nosso acervo de vídeos.
+      presenca: p.presenca_pct ?? null,
+      postoVazio: p.posto_vazio_pct ?? null,
       maturidade: p.maturidade || 0,
       validado: Math.round(p.pct_validado || 0),
       sugestoesAlta: p.n_sugestoes_alta || 0,

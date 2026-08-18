@@ -174,7 +174,43 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
           </div>
         </div>
       </div>
-      <p className="clamp2 pretty" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8, minHeight: 34, lineHeight: 1.45 }}>{p.descricao || "Sem descrição ainda."}</p>
+      {/* ═══════════════════════════════════════════════════════════════
+          O CARD FALA DO POSTO, NÃO DO NOSSO ACERVO.
+          Antes ele mostrava o despejo cru da descrição do processo — que
+          começa com uma linha de "=====" e "1. DESCRIÇÃO DO PROCESSO (INPUTS,
+          TAREFAS…" — e "791 VÍDEOS". Nenhum dono de fábrica quer saber quantos
+          arquivos temos guardados; ele quer saber se o posto está rendendo.
+          A descrição técnica continua existindo (é insumo do modelo), só saiu
+          da vitrine.
+          ═══════════════════════════════════════════════════════════════ */}
+      {p.presenca != null ? (
+        <div className="col" style={{ gap: 3, marginTop: 10, minHeight: 34 }}>
+          <div className="row" style={{ gap: 7, alignItems: "baseline" }}>
+            <span className="tnum font-display" style={{ fontSize: 30, fontWeight: 750, lineHeight: 1, color: p.presenca >= 75 ? "#187a43" : p.presenca >= 55 ? "#a46c00" : "var(--desp)" }}>
+              {Math.round(p.presenca)}%
+            </span>
+            <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>
+              do turno com o operador no posto
+            </span>
+          </div>
+          {p.postoVazio != null && p.postoVazio >= 1 && (
+            <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+              Posto vazio em {Math.round(p.postoVazio)}% do tempo observado.
+            </span>
+          )}
+        </div>
+      ) : (
+        <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 10, minHeight: 34, lineHeight: 1.45 }}>
+          Aguardando o primeiro turno processado deste posto.
+        </p>
+      )}
+
+      {/* A barra é a leitura de um olhada: quanto do turno tem gente no posto. */}
+      {p.presenca != null && (
+        <div className="row" style={{ height: 8, marginTop: 10, borderRadius: 999, overflow: "hidden", background: "var(--line-2)" }}>
+          <div style={{ width: `${Math.max(0, Math.min(100, p.presenca))}%`, background: p.presenca >= 75 ? "#187a43" : p.presenca >= 55 ? "#a46c00" : "var(--desp)" }} />
+        </div>
+      )}
 
       <div className="row" style={{ gap: 10, marginTop: 12, padding: "10px 11px", borderRadius: 10, background: "var(--soft)", border: "1px solid var(--line-2)" }}>
         <span className="center" style={{ width: 30, height: 30, borderRadius: 9, background: "var(--accent-soft)", color: "var(--accent)", flex: "none" }}><Icon name="scan-line" size={16} /></span>
@@ -184,9 +220,16 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
         </div>
       </div>
 
-      <div className="row" style={{ gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line-2)" }}>
-        <MiniStat icon="video" valor={p.videos} label="vídeos" />
-      </div>
+      {/* ⛔ "791 vídeos" saiu: é métrica do nosso acervo, não do posto. O que
+          fica é o que o gestor pode AGIR — trechos esperando conferência. */}
+      {p.pendencias > 0 && (
+        <div className="row" style={{ gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line-2)", alignItems: "center" }}>
+          <Icon name="git-pull-request-arrow" size={14} color="var(--muted)" />
+          <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+            <b className="tnum" style={{ color: "var(--ink)" }}>{p.pendencias}</b> trechos esperando sua conferência
+          </span>
+        </div>
+      )}
     </Card>
     {excluir && <ExcluirProcessoModal p={p} onClose={() => setExcluir(false)} />}
     </>

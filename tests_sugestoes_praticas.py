@@ -160,22 +160,86 @@ check("conversa só entra quando é grande",
       sug(atividades=[{"comportamento": "conversando_colega", "pct_tempo": 11.0}])[0]["chave"]
       == "interrupcoes"
       and sug(atividades=[{"comportamento": "conversando_colega", "pct_tempo": 6.0}]) == [])
+# A queda continua sendo detectada, mas não lidera: achado ESTRUTURAL (a
+# variação entre dias) vence evento do dia, que é a doutrina do bloco [7b].
 check("queda compara o posto COM ELE MESMO, não com meta inventada",
-      sug(serie=[{"presenca_pct": 90.0}, {"presenca_pct": 88.0},
-                 {"presenca_pct": 70.0}])[0]["chave"] == "queda")
+      "queda" in [x["chave"] for x in
+                  sug(serie=[{"presenca_pct": 90.0}, {"presenca_pct": 88.0},
+                             {"presenca_pct": 70.0}], max_itens=99)])
 check("série curta não conclui tendência",
       sug(serie=[{"presenca_pct": 90.0}, {"presenca_pct": 60.0}]) == [])
 check("rótulo desconhecido não é somado a fatia nenhuma",
       sug(atividades=[{"comportamento": "afiar_ferramenta", "pct_tempo": 90.0}]) == [])
 
 print("\n[7] Poucas por vez, ordenadas por peso")
-check("no máximo três por padrão",
+check("no máximo quatro por padrão",
       len(sug(produtividade={"posto_vazio_pct": 30.0},
               atividades=[{"comportamento": "monitorar_maquina", "pct_tempo": 25.0},
                           {"comportamento": "deslocar_pelo_posto", "pct_tempo": 9.0},
-                          {"comportamento": "conversando_colega", "pct_tempo": 12.0}])) == 3)
-check("a maior perda vem primeiro", TODOS[0]["chave"] in ("posto_vazio", "hora_ruim"),
-      TODOS[0]["chave"])
+                          {"comportamento": "conversando_colega", "pct_tempo": 12.0}])) == 4)
+
+print("\n[7b] ⭐ ESTABILIDADE: a lista não muda por oscilação do dia")
+# O gestor pediu que a lista mude com BAIXA frequência, e a razão é boa: um
+# painel que sugere coisa nova todo dia ensina a não fazer nenhuma. O
+# mecanismo não é congelar — é PREFERIR ACHADO ESTRUTURAL a evento do dia.
+_base = dict(
+    produtividade={"posto_vazio_pct": 20.0, "presenca_pct": 79.7},
+    atividades=[{"comportamento": "monitorar_maquina", "pct_tempo": 25.0},
+                {"comportamento": "deslocar_pelo_posto", "pct_tempo": 9.0},
+                {"comportamento": "conversando_colega", "pct_tempo": 11.0}],
+    serie=[{"presenca_pct": 58.0}, {"presenca_pct": 75.0},
+           {"presenca_pct": 88.0}, {"presenca_pct": 79.7}],
+)
+_com_hora_ruim = sug(**_base, por_hora=[{"hora": 6, "desp_pct": 34.0},
+                                        {"hora": 7, "desp_pct": 16.0},
+                                        {"hora": 8, "desp_pct": 15.0}])
+_sem_hora_ruim = sug(**_base, por_hora=[{"hora": 6, "desp_pct": 17.0},
+                                        {"hora": 7, "desp_pct": 16.0},
+                                        {"hora": 8, "desp_pct": 15.0}])
+check("⭐ uma hora ruim aparecer e sumir NÃO troca a lista",
+      [x["chave"] for x in _com_hora_ruim] == [x["chave"] for x in _sem_hora_ruim],
+      ([x["chave"] for x in _com_hora_ruim], [x["chave"] for x in _sem_hora_ruim]))
+check("e a lista entrega as quatro", len(_com_hora_ruim) == 4, len(_com_hora_ruim))
+check("todas as quatro são estruturais nesse cenário",
+      all(x["chave"] in ("tempo_de_ciclo", "posto_vazio", "consistencia",
+                         "arranjo_do_posto", "melhor_dia", "comeco_do_turno")
+          for x in _com_hora_ruim), [x["chave"] for x in _com_hora_ruim])
+check("o bônus estrutural existe e está documentado",
+      "12 if estrutural else 0" in fonte
+      and "PREFERIR\n# ACHADO ESTRUTURAL" in fonte)
+check("e o campo interno não vaza para a tela",
+      all("_estrutural" not in x for x in _com_hora_ruim))
+
+print("\n[7c] As três regras novas")
+_serie = [{"presenca_pct": 58.0}, {"presenca_pct": 75.0}, {"presenca_pct": 88.0}]
+_m = [x for x in sug(serie=_serie, max_itens=99) if x["chave"] == "melhor_dia"]
+# ⭐ Nem toda sugestão precisa ser problema. Uma meta que veio do próprio chão
+# não se discute: já aconteceu ali, com este operador e esta máquina.
+check("⭐ o melhor dia vira META, com tom de informação",
+      _m and _m[0]["tom"] == "info" and "88%" in _m[0]["titulo"], _m)
+check("e o argumento é que já aconteceu neste posto",
+      _m and "já aconteceu neste posto" in _m[0]["porque"])
+_c = [x for x in sug(serie=_serie, max_itens=99) if x["chave"] == "consistencia"]
+check("a variação entre dias vira achado de método",
+      _c and "30 pontos" in _c[0]["titulo"], _c)
+check("e não culpa o esforço do operador",
+      _c and "não o esforço" in _c[0]["porque"])
+_t = [x for x in sug(por_hora=[{"hora": 6, "desp_pct": 40.0},
+                               {"hora": 7, "desp_pct": 15.0},
+                               {"hora": 8, "desp_pct": 14.0}], max_itens=99)
+      if x["chave"] == "comeco_do_turno"]
+check("começo lento é detectado", _t and "demora a engrenar" in _t[0]["titulo"], _t)
+check("e enquadrado como preparação, não como ritmo",
+      _t and "preparação" in _t[0]["porque"])
+check("série curta não conclui melhor dia nem consistência",
+      not [x for x in sug(serie=[{"presenca_pct": 80.0}, {"presenca_pct": 50.0}],
+                          max_itens=99)
+           if x["chave"] in ("melhor_dia", "consistencia")])
+# ⭐ A PERDA vem antes da OPORTUNIDADE. "O posto ficou vazio" custa dinheiro
+# agora; "dá para aproveitar o ciclo automático" é ganho a conquistar. Um
+# gestor que abre a tela precisa ver primeiro o que está vazando.
+check("⭐ a maior PERDA vem antes da oportunidade",
+      TODOS[0]["chave"] == "posto_vazio", [x["chave"] for x in TODOS[:3]])
 check("o campo de peso não vaza para a tela", all("_peso" not in x for x in TODOS))
 
 print("\n[8] Zero API, função pura, e não move número")

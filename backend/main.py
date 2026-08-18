@@ -419,6 +419,9 @@ def listar_processos(user: CurrentUser = Depends(get_current_user)):
         row["ultimo_video_em"] = st.get("ultimo_video_em")
         row["composicao_valor"] = st.get("composicao_valor")
         row["maturidade"] = st.get("maturidade", 0)
+        # O card da home passa a mostrar o mesmo número do dashboard.
+        row["presenca_pct"] = st.get("presenca_pct")
+        row["posto_vazio_pct"] = st.get("posto_vazio_pct")
     return linhas
 
 
