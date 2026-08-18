@@ -1499,7 +1499,10 @@ def movimento_limiares(user: CurrentUser = Depends(get_current_user)):
 @app.get("/processos/{processo_id}/jornada/bin")
 def jornada_do_bin(
     processo_id: str,
-    dia: str = Query(..., description="AAAA-MM-DD no relógio da fábrica"),
+    dia: str | None = Query(
+        None, description="AAAA-MM-DD no relógio da fábrica. OMITIDO = modo "
+                          "AGREGADO: o mesmo bloco de relógio somado sobre "
+                          "todos os dias (a faixa 'jornada típica')"),
     minuto: float = Query(..., ge=0, le=1439.99,
                           description="Minuto-do-dia clicado; o bloco de "
                                       f"{BIN_JORNADA_MIN} min é derivado dele"),

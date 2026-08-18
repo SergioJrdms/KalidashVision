@@ -860,6 +860,8 @@ export interface ItemBinJornada {
   segundos: number;
   // Evento que atravessa a borda do bloco entra só com a fatia dele.
   segundos_no_bin: number;
+  // No agregado a hora sozinha não localiza o trecho: 09:12 acontece todo dia.
+  dia: string;
   parcial: boolean;
   papel: string | null;
   origem: string | null;
@@ -871,7 +873,11 @@ export interface ItemBinJornada {
   versao_instrumento: number;
 }
 export interface BinJornada {
-  dia: string;
+  // null no modo AGREGADO — o bloco é o mesmo horário somado sobre vários dias.
+  dia: string | null;
+  agregado: boolean;
+  dias: string[];
+  n_dias: number;
   bin: number;
   de: string;
   ate: string;

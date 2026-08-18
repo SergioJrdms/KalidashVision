@@ -14091,18 +14091,26 @@ def sugestoes_do_posto(
 BIN_JORNADA_MIN = 15          # tem de ser o MESMO passo do bucket da linha_tempo
 
 
-def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
+def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str | None,
                    minuto: float, limite: int = 300) -> dict:
-    """Os eventos que compõem UM bloco de 15 min da jornada de um dia.
+    """Os eventos que compõem UM bloco de 15 min da jornada.
 
     `minuto` é qualquer minuto-do-dia dentro do bloco (a tela manda o ponto
     clicado); o bloco é derivado dele. Só leitura — não toca em validação,
     não entra na fila, não muda categoria.
+
+    `dia=None` = MODO AGREGADO: o mesmo bloco de relógio somado sobre TODOS os
+    dias. A faixa "A jornada típica — todos os dias" é desenhada assim, e sem
+    isto o clique nela não tinha o que abrir: o gestor via um bloco vermelho no
+    padrão do posto e não conseguia perguntar "vermelho por quê?". Cada item
+    volta com o DIA a que pertence, porque no agregado a hora sozinha não
+    localiza o evento.
     """
-    try:
-        date.fromisoformat(dia)
-    except Exception:
-        return {"erro": f"data inválida: {dia!r} (esperado AAAA-MM-DD)"}
+    if dia is not None:
+        try:
+            date.fromisoformat(dia)
+        except Exception:
+            return {"erro": f"data inválida: {dia!r} (esperado AAAA-MM-DD)"}
     b = int(max(0.0, min(1439.0, float(minuto))) // BIN_JORNADA_MIN)
     jan_ini = b * float(BIN_JORNADA_MIN)
     jan_fim = jan_ini + BIN_JORNADA_MIN
@@ -14112,19 +14120,25 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
     # A véspera entra porque o vídeo que começa 23:5x carrega eventos que caem
     # no dia seguinte — e é assim que `montar_analise_diaria` os conta. Quem
     # decide o dia é o instante do EVENTO, não o do vídeo.
-    dias_fonte = {dia, (date.fromisoformat(dia) - timedelta(days=1)).isoformat()}
+    dias_fonte = None if dia is None else {
+        dia, (date.fromisoformat(dia) - timedelta(days=1)).isoformat()}
     inicio_por_video: dict[str, datetime] = {}
     meta_video: dict[str, dict] = {}
     for v in videos:
         dt0 = _inicio_video_dt(v)
-        if v.get("id") and dt0 and dt0.date().isoformat() in dias_fonte:
-            inicio_por_video[v["id"]] = dt0
-            meta_video[v["id"]] = v
+        if not v.get("id") or not dt0:
+            continue
+        if dias_fonte is not None and dt0.date().isoformat() not in dias_fonte:
+            continue
+        inicio_por_video[v["id"]] = dt0
+        meta_video[v["id"]] = v
     if not inicio_por_video:
-        return {"dia": dia, "bin": b, "de": _hhmm_do_minuto(jan_ini),
+        return {"dia": dia, "agregado": dia is None, "n_dias": 0, "bin": b,
+                "de": _hhmm_do_minuto(jan_ini),
                 "ate": _hhmm_do_minuto(jan_fim), "n_eventos": 0, "segundos": 0.0,
                 "por_categoria": {}, "acoes": [], "itens": [], "truncado": False,
-                "nota": "Nenhum vídeo com gravação nesta data."}
+                "nota": ("Nenhum vídeo processado neste processo." if dia is None
+                         else "Nenhum vídeo com gravação nesta data.")}
 
     comps = varrer(sb, "comportamentos", "label, categoria_lean",
                    empresa=empresa, processo=processo)
@@ -14161,7 +14175,8 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
         if dur <= 0:
             continue
         inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
-        if inst.date().isoformat() != dia:
+        dia_do_evento = inst.date().isoformat()
+        if dia is not None and dia_do_evento != dia:
             continue
         # Mesma aritmética de `montar_analise_diaria`: o evento é pintado a
         # partir do minuto do relógio em que COMEÇA e é cortado à meia-noite.
@@ -14181,6 +14196,9 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
         v = meta_video.get(e["video_id"]) or {}
         itens.append({
             "id": e.get("id"), "video_id": e.get("video_id"),
+            # No agregado, a hora sozinha não localiza o evento: 09:12 acontece
+            # em todos os dias. O dia vem junto, sempre.
+            "dia": dia_do_evento,
             "video_nome": v.get("nome"), "cam_id": v.get("cam_id"),
             "rotulo": label,
             # O rótulo é o que o cluster decidiu; a descrição é o que o VLM viu.
@@ -14208,13 +14226,17 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
             "_m": m_ini,
         })
 
-    itens.sort(key=lambda x: x["_m"])
+    itens.sort(key=lambda x: (x["dia"], x["_m"]))
+    dias_vistos = sorted({it["dia"] for it in itens})
     n_total = len(itens)
     for it in itens:
         it.pop("_m", None)
     seg_total = sum(por_cat.values())
     return {
         "dia": dia,
+        "agregado": dia is None,
+        "dias": dias_vistos,
+        "n_dias": len(dias_vistos),
         "bin": b,
         "de": _hhmm_do_minuto(jan_ini),
         "ate": _hhmm_do_minuto(jan_fim),
@@ -14238,10 +14260,14 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str,
         # `montar_analise_diaria` o pula). O detalhe não pode fingir que há
         # jornada ali — mas também não some, senão o clique parece quebrado.
         "buraco": bool(seg_total < 60),
-        "nota": ("As larguras desenhadas dentro do bloco são PROPORÇÃO de tempo, "
-                 "não horário: a ordem das cores na faixa é fixa (produtivo, "
-                 "desperdício, posto vazio). A hora de verdade de cada trecho "
-                 "está na lista abaixo."),
+        "nota": (
+            ("Este é o MESMO bloco de relógio somado sobre "
+             f"{len(dias_vistos)} dia(s): não é um dia real, é o padrão do "
+             "posto naquele horário. Cada trecho abaixo traz o dia dele. "
+             if dia is None else "")
+            + "As larguras desenhadas dentro do bloco são PROPORÇÃO de tempo, "
+              "não horário — a ordem das cores é de desenho. A hora de verdade "
+              "de cada trecho está na lista abaixo."),
     }
 
 

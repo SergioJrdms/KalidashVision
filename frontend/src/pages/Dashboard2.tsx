@@ -738,6 +738,13 @@ const CAT_NOMES: Record<string, string> = {
   va: "produtivo", desp: "desperdício", vazio: "posto vazio",
 };
 
+// "2026-08-14" → "14/08". No agregado a lista mistura dias e o dia precisa
+// caber ao lado da hora sem empurrar o rótulo para a linha de baixo.
+function fmtDiaCurto(d: string): string {
+  const p = (d || "").split("-");
+  return p.length === 3 ? `${p[2]}/${p[1]}` : d;
+}
+
 function fmtMin(m: number): string {
   return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(Math.round(m % 60)).padStart(2, "0")}`;
 }
@@ -782,7 +789,41 @@ const BIN_MIN = 15;
 // preencheria um horário em que ninguém filmou.
 // ═══════════════════════════════════════════════════════════════════════
 type Faixa = { ini_m: number; fim_m: number; cat: "va" | "desp" | "vazio" };
-const ORDEM_CAT: Record<string, number> = { va: 0, desp: 1, vazio: 2 };
+
+// ═══════════════════════════════════════════════════════════════════════
+// O VERMELHO VIRAVA FIO DE CABELO — e era efeito da ordem, não do dado.
+//
+// A ordem espelhada punha `desp` sempre no MEIO do bloco: [va][desp][vazio]
+// depois [vazio][desp][va]. Verde encontrava verde na virada, cinza
+// encontrava cinza, e o vermelho era a única categoria que NUNCA encostava
+// na vizinha — ficava isolado entre dois blocos gordos, com 2 px, parecendo
+// arranhão. Como o desperdício costuma ser a menor fatia, ele era também o
+// mais castigado justo sendo o que o gestor precisa enxergar.
+//
+// Agora `desp` é o EIXO do espelho: [va][vazio][desp] depois [desp][vazio][va].
+// O vermelho de um bloco encosta no vermelho do seguinte e os dois viram uma
+// marca só, com o dobro da largura. Nada foi somado nem inflado — é a mesma
+// aritmética de reordenar dentro do bloco que já valia antes, e que é legítima
+// porque a ordem dentro do bloco não carrega horário (é o mesmo motivo por que
+// o clique abre o BLOCO e não a fatia).
+//
+// Cinza passa a ser o isolado — e aguenta melhor, porque "posto vazio" costuma
+// vir em fatias grandes (almoço, folga). O que sobrar de fino em qualquer cor
+// é resolvido pelo PISO DE LARGURA abaixo.
+// ═══════════════════════════════════════════════════════════════════════
+const ORDEM_CAT: Record<string, number> = { va: 0, vazio: 1, desp: 2 };
+
+// Piso de largura DESENHADA. Abaixo disto a fatia some do olho — e uma
+// categoria invisível é lida como categoria ausente, que é mentira diferente
+// de "categoria pequena". A fatia é posicionada pelo horário REAL e só o
+// desenho ganha o piso: ela transborda alguns pixels por cima da vizinha em
+// vez de empurrá-la, então nenhum horário se desloca e nenhuma soma muda.
+const MIN_FATIA_PX = 3;
+
+// E quem transborda por cima de quem: o vermelho fica SEMPRE por cima. Era
+// isso que faltava — com o verde desenhado depois, ele cobria o fio vermelho e
+// o desperdício sumia da faixa sem nunca ter saído da conta.
+const CAMADA_CAT: Record<string, number> = { va: 1, vazio: 2, desp: 3 };
 
 function suavizarJornada(faixas: Faixa[], agregado: boolean): Faixa[] {
   if (faixas.length === 0) return faixas;
@@ -857,22 +898,33 @@ function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean
       <PanelHead
         titulo={agregado ? "A jornada típica — todos os dias" : `A jornada de ${d.dow} ${d.rot}`}
         ajuda={agregado
-          ? "O dia TÍPICO do operador: em cada faixa de 15 min, a proporção de cada categoria somando todos os dias. Verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = horário sem filmagem em nenhum dia."
+          ? "O dia TÍPICO do operador: em cada faixa de 15 min, a proporção de cada categoria somando todos os dias. Verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = horário sem filmagem em nenhum dia. Clique num bloco para ver os eventos daquele horário em todos os dias — é assim que se responde 'vermelho por quê?'."
           : "O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = sem filmagem naquele horário. Clique num bloco para ver os eventos que o compõem — rótulo, descrição e hora."}
         leitura={agregado
-          ? "O padrão do posto: onde o dia costuma render, o horário do almoço e as folgas típicas."
+          ? "O padrão do posto: onde o dia costuma render, o horário do almoço e as folgas típicas. Clique num horário para ver o que aconteceu ali, dia a dia."
           : "O filme do dia: dá pra ver quando começou, o almoço, os buracos e onde o dia rendeu. Clique num bloco de 15 min para abrir o que há dentro dele."}
       />
-      <div style={{ position: "relative", height: 46, marginTop: 6 }}>
-        <div style={{ position: "absolute", inset: "8px 0 14px", background: "var(--soft)", borderRadius: 8, border: "1px solid var(--line-2)" }} />
+      {/* Faixa mais alta: a mesma fatia fina de 2 px de largura fica bem mais
+          fácil de achar quando tem altura para ser vista. */}
+      <div style={{ position: "relative", height: 56, marginTop: 6 }}>
+        <div style={{ position: "absolute", inset: "8px 0 16px", background: "var(--soft)", borderRadius: 8, border: "1px solid var(--line-2)" }} />
         {faixas.map((f, i) => (
           <div key={i}
             title={`${fmtMin(f.ini_m)}–${fmtMin(f.fim_m)} · ${CAT_NOMES[f.cat]}`}
             style={{
-              position: "absolute", top: 8, bottom: 14,
+              position: "absolute", top: 8, bottom: 16,
               left: `${((f.ini_m - ini) / span) * 100}%`,
               width: `${((f.fim_m - f.ini_m) / span) * 100}%`,
-              background: CAT_CORES[f.cat], opacity: 0.92,
+              // Piso só de desenho — a posição continua sendo a do horário.
+              minWidth: MIN_FATIA_PX,
+              // Vermelho por cima: quem transborda o piso não pode ser coberto
+              // justamente pela cor que ele precisa denunciar.
+              zIndex: CAMADA_CAT[f.cat] ?? 1,
+              background: CAT_CORES[f.cat],
+              // A opacidade de 0.92 tirava contraste de quem menos podia
+              // perder: numa fatia de 3 px, 8% de transparência é o suficiente
+              // para o vermelho virar rosa em cima do cinza do trilho.
+              opacity: 1,
               // Canto por fatia era a terceira causa do confete: num retângulo
               // de 3 px o raio come a fatia e abre um vão claro entre vizinhas.
               // A faixa é uma banda contínua; só as PONTAS são arredondadas.
@@ -882,20 +934,25 @@ function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean
                 : 0,
             }} />
         ))}
-        {!agregado && [...binsCobertos].sort((a, b) => a - b).map((b) => {
+        {[...binsCobertos].sort((a, b) => a - b).map((b) => {
           const m0 = b * BIN_MIN;
           if (m0 + BIN_MIN <= ini || m0 >= fim) return null;
           const sel = binSel === b;
           return (
             <button key={`b${b}`} type="button"
-              title={`${fmtMin(m0)}–${fmtMin(m0 + BIN_MIN)} · ver o que compõe este bloco`}
+              title={agregado
+                ? `${fmtMin(m0)}–${fmtMin(m0 + BIN_MIN)} · ver os eventos deste horário em todos os dias`
+                : `${fmtMin(m0)}–${fmtMin(m0 + BIN_MIN)} · ver o que compõe este bloco`}
               aria-label={`Abrir o bloco de ${fmtMin(m0)} a ${fmtMin(m0 + BIN_MIN)}`}
               aria-pressed={sel}
               onClick={() => setBinSel(sel ? null : b)}
               style={{
-                position: "absolute", top: 4, bottom: 12, padding: 0,
+                position: "absolute", top: 4, bottom: 14, padding: 0,
                 left: `${((m0 - ini) / span) * 100}%`,
                 width: `${(BIN_MIN / span) * 100}%`,
+                // Acima de qualquer fatia, senão o `zIndex` das cores comeria
+                // o alvo do clique e o gráfico voltaria a não responder.
+                zIndex: 5,
                 cursor: "pointer", background: "transparent",
                 border: sel ? "2px solid var(--ink)" : "1px solid transparent",
                 borderRadius: 4,
@@ -914,12 +971,16 @@ function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean
             <i style={{ width: 9, height: 9, borderRadius: 3, background: CAT_CORES[c] }} /> {CAT_NOMES[c]}
           </span>
         ))}
-        {!agregado && (
-          <span style={{ color: "var(--faint)" }}>· clique num bloco de 15 min para abrir</span>
-        )}
+        <span style={{ color: "var(--faint)" }}>
+          · clique num bloco de 15 min para abrir
+          {agregado ? " os eventos daquele horário em todos os dias" : ""}
+        </span>
       </div>
-      {!agregado && binSel != null && (
-        <DetalheDoBin proc={proc} dia={d.dia} bin={binSel} onFechar={() => setBinSel(null)} />
+      {binSel != null && (
+        // No agregado o bloco não pertence a UM dia: `dia = null` pede ao
+        // servidor o mesmo horário somado sobre todos eles.
+        <DetalheDoBin proc={proc} dia={agregado ? null : d.dia} bin={binSel}
+                      onFechar={() => setBinSel(null)} />
       )}
     </Card>
   );
@@ -927,11 +988,11 @@ function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean
 
 // ═══ O que compõe um bloco de 15 min ═══
 function DetalheDoBin({ proc, dia, bin, onFechar }: {
-  proc: ProcHeaderMock; dia: string; bin: number; onFechar: () => void;
+  proc: ProcHeaderMock; dia: string | null; bin: number; onFechar: () => void;
 }) {
   const minuto = bin * BIN_MIN + BIN_MIN / 2;
   const q = useQuery({
-    queryKey: ["jornada-bin", proc.id, dia, bin],
+    queryKey: ["jornada-bin", proc.id, dia ?? "@todos", bin],
     queryFn: () => api.jornada.bin(proc.id, dia, minuto),
   });
   const b = q.data;
@@ -945,6 +1006,7 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
         {b && (
           <span style={{ fontSize: 12, color: "var(--muted)" }}>
             {b.n_eventos} evento(s)
+            {b.agregado && b.n_dias > 0 ? ` em ${b.n_dias} dia(s)` : ""}
             {b.truncado ? ` · mostrando ${b.itens.length}` : ""}
           </span>
         )}
@@ -973,6 +1035,15 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
       {b && b.n_eventos === 0 && (
         <span style={{ fontSize: 12, color: "var(--muted)" }}>
           Sem eventos neste bloco{b.buraco ? " — é um buraco de filmagem, e por isso a faixa está vazia aqui." : "."}
+        </span>
+      )}
+
+      {b && b.agregado && b.n_eventos > 0 && (
+        // Sem esta linha o painel do agregado mente por omissão: a lista
+        // parece o extrato de um dia e é a soma de vários.
+        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          Este horário somado sobre <b style={{ color: "var(--ink)" }}>{b.n_dias} dia(s)</b> —
+          não é um dia real, é o padrão do posto às {b.de}.
         </span>
       )}
 
@@ -1009,7 +1080,11 @@ function DetalheDoBin({ proc, dia, bin, onFechar }: {
               {b.itens.map((it) => (
                 <li key={it.id} className="col" style={{ gap: 3, borderLeft: `3px solid ${CAT_CORES[it.cat]}`, paddingLeft: 9 }}>
                   <div className="row gap2 wrap" style={{ alignItems: "baseline" }}>
-                    <span className="font-mono tnum" style={{ fontSize: 11.5, color: "var(--muted)" }}>{it.hora}</span>
+                    <span className="font-mono tnum" style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                      {/* No agregado, 09:12 acontece em todos os dias: sem a
+                          data a hora não localiza nada. */}
+                      {b.agregado ? `${fmtDiaCurto(it.dia)} ${it.hora}` : it.hora}
+                    </span>
                     <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }} title={it.rotulo}>
                       {nomeHumano(it.rotulo)}
                     </span>

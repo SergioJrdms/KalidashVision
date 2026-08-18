@@ -318,9 +318,12 @@ export const api = {
   jornada: {
     // Fase 87: o bloco de 15 min por trás de um pedaço da faixa. Só leitura —
     // clicar no gráfico não pode mudar nada do que o gráfico mostra.
-    bin: (processoId: string, dia: string, minuto: number) =>
+    // `dia = null` = a jornada TÍPICA: o mesmo bloco de relógio somado sobre
+    // todos os dias. Sem isso, clicar na faixa "todos os dias" não abria nada.
+    bin: (processoId: string, dia: string | null, minuto: number) =>
       req<BinJornada>(
-        `/processos/${processoId}/jornada/bin?dia=${dia}&minuto=${minuto}`,
+        `/processos/${processoId}/jornada/bin?minuto=${minuto}` +
+          (dia ? `&dia=${dia}` : ""),
       ),
   },
   descricoes: {
