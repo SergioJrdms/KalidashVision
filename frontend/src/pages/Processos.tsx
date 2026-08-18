@@ -205,10 +205,20 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
         </p>
       )}
 
-      {/* A barra é a leitura de um olhada: quanto do turno tem gente no posto. */}
+      {/* A barra é a leitura de uma olhada: quanto do turno tem gente no posto.
+
+          ⚠️ SEM `className="row"` AQUI, e é o que fazia a barra nascer vazia:
+          `.row` traz `align-items: center`, e o preenchimento não tem conteúdo
+          nem altura própria — com isso ele colapsava para 0 e só a trilha
+          aparecia. Altura explícita no filho não depende de herdar nada. */}
       {p.presenca != null && (
-        <div className="row" style={{ height: 8, marginTop: 10, borderRadius: 999, overflow: "hidden", background: "var(--line-2)" }}>
-          <div style={{ width: `${Math.max(0, Math.min(100, p.presenca))}%`, background: p.presenca >= 75 ? "#187a43" : p.presenca >= 55 ? "#a46c00" : "var(--desp)" }} />
+        <div style={{ height: 8, marginTop: 10, borderRadius: 999, overflow: "hidden", background: "var(--line-2)" }}>
+          <div style={{
+            height: "100%",
+            width: `${Math.max(0, Math.min(100, p.presenca))}%`,
+            borderRadius: 999,
+            background: p.presenca >= 75 ? "#187a43" : p.presenca >= 55 ? "#a46c00" : "var(--desp)",
+          }} />
         </div>
       )}
 
@@ -233,18 +243,6 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
     </Card>
     {excluir && <ExcluirProcessoModal p={p} onClose={() => setExcluir(false)} />}
     </>
-  );
-}
-
-function MiniStat({ icon, valor, label, alert }: { icon: string; valor: number | string; label: string; alert?: boolean }) {
-  return (
-    <div className="grow center" style={{ background: alert ? "var(--apoio-bg)" : "var(--soft)", borderRadius: 10, padding: "8px 6px", border: "1px solid var(--line-2)" }}>
-      <div className="col" style={{ alignItems: "center", gap: 2 }}>
-        <Icon name={icon} size={14} color={alert ? "#b8740b" : "var(--muted)"} />
-        <span className="tnum" style={{ fontSize: 15, fontWeight: 700, color: alert ? "#b8740b" : "var(--ink)" }}>{valor}</span>
-        <span style={{ fontSize: 9.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</span>
-      </div>
-    </div>
   );
 }
 

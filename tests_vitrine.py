@@ -269,5 +269,42 @@ for f in ("Arvore.tsx",):
 check("nenhum texto de interface em inglês na árvore",
       not re.search(r">\s*(Productive|Idle|Waste|Unclassified)\s*<", arv))
 
+
+print("\n[10] O card do posto fala do POSTO — e a barra tem preenchimento")
+proc = ler("pages", "Processos.tsx")
+check("o card mostra a presença como número grande",
+      "do turno com o operador no posto" in proc)
+check("e o posto vazio como apoio", "Posto vazio em" in proc)
+# ⛔ "791 vídeos" era métrica do NOSSO acervo, não do posto do cliente.
+# `p.videos` continua no MODAL DE EXCLUSÃO, e ali é essencial: diz o que você
+# está prestes a destruir. O que saiu foi o contador do CARD.
+_card = proc.split("O CARD FALA DO POSTO")[1].split("function ")[0]
+check("⛔ o contador de vídeos saiu do card",
+      'label="vídeos"' not in _card and "p.videos" not in _card)
+check("mas o modal de exclusão continua dizendo o que será apagado",
+      "p.videos} vídeo" in proc)
+check("e o componente órfão foi removido junto",
+      "function MiniStat(" not in proc)
+check("o que fica no rodapé é acionável", "esperando sua conferência" in proc)
+check("sem dado, o card diz isso em vez de mostrar zero",
+      "Aguardando o primeiro turno processado" in proc)
+
+# ⚠️ O BUG DA BARRA VAZIA, e ele é sutil: `.row` traz `align-items: center`, e
+# um preenchimento sem conteúdo nem altura própria colapsa para 0 — a trilha
+# aparece e a barra não. Duas defesas: a barra não usa `.row`, e o filho tem
+# altura explícita.
+# Só o JSX: o comentário logo acima CITA `className="row"` para explicar por
+# que ele não pode estar ali, e contá-lo daria falso positivo.
+_barra = proc.split("A barra é a leitura de uma olhada")[1].split("*/}")[1].split("</div>")[0]
+check("⭐ a barra NÃO usa className=\"row\"", 'className="row"' not in _barra, _barra[:200])
+check("⭐ e o preenchimento tem altura explícita", 'height: "100%"' in _barra)
+check("com o motivo registrado, para ninguém 'simplificar' de volta",
+      "colapsava para 0" in proc)
+# A outra barra da vitrine (composição do dashboard) já estava certa — o teste
+# fixa isso para as duas não divergirem.
+dash2 = ler("pages", "Dashboard.tsx")
+check("a barra do dashboard também preenche",
+      'style={{ height: "100%", width: `${p.valor}%`' in dash2)
+
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)
