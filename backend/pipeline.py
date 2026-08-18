@@ -8163,6 +8163,18 @@ def evento_relevante_para_validacao(
 # ═════════════════════════════════════════════════════════════════════════
 # MULTI-CÂMERA — pareamento por nome do segmento (Fase 6) e por evento (Fase 2)
 # ═════════════════════════════════════════════════════════════════════════
+def _tz_edge():
+    """Fuso da FÁBRICA. Render roda em UTC, e usar o fuso do container
+    deslocava toda a jornada três horas para a frente."""
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(os.environ.get("KV_TZ", "America/Sao_Paulo"))
+    except Exception:   # noqa: BLE001
+        # Sem tzdata na imagem, o offset explícito preserva o relógio da
+        # instalação atual em vez de silenciosamente virar UTC.
+        return timezone(timedelta(hours=-3), "UTC-3")
+
+
 def _seg_token_nome(nome: str | None) -> str | None:
     """Token de relógio do nome do segmento: 'seg_20260626_155058_roi.mp4'
     → '20260626_155058'. É a CHAVE de pareamento cam1/cam2 ("pelo nome",
@@ -8193,15 +8205,7 @@ def _parse_gravado_em_nome(nome: str | None) -> str | None:
             int(data[0:4]), int(data[4:6]), int(data[6:8]),
             int(hora[0:2]), int(hora[2:4]), int(hora[4:6]),
         )
-        try:
-            from zoneinfo import ZoneInfo
-            tz_edge = ZoneInfo(os.environ.get("KV_TZ", "America/Sao_Paulo"))
-        except Exception:
-            # Render costuma rodar UTC; usar o timezone local do container
-            # deslocava a captura três horas. O fallback explícito preserva o
-            # relógio da instalação atual mesmo sem tzdata na imagem.
-            tz_edge = timezone(timedelta(hours=-3), "UTC-3")
-        return dt.replace(tzinfo=tz_edge).isoformat()
+        return dt.replace(tzinfo=_tz_edge()).isoformat()
     except Exception:
         return None
 
@@ -12148,19 +12152,39 @@ _LEAN_ROTULO = {
 
 
 def _inicio_video_dt(v: dict) -> datetime | None:
-    """Instante REAL: gravado_em, relógio do nome e, só então, processamento.
-    None se nada parsear."""
+    """Instante REAL do trecho, SEMPRE no relógio da fábrica.
+
+    ⚠️ DUAS CORREÇÕES, e as duas vinham do mesmo lugar: a jornada aparecia das
+    6h às 18h quando a captura real ia das 3h às 15h20. Exatamente três horas
+    à frente.
+
+    (1) O FUSO. `gravado_em` é `timestamptz` e o PostgREST o devolve em UTC.
+        Quem fazia `dt.hour` lia a hora UTC e desenhava a barra três colunas
+        adiante. Render roda em UTC, então nem o fuso do container salvava.
+        Agora a conversão é explícita e acontece AQUI, num lugar só — todo
+        gráfico que pergunta "que horas foi isto" recebe a hora de parede.
+
+    (2) A ORDEM DAS FONTES. O NOME DO SEGMENTO vem primeiro, e é o pedido do
+        dono. Ele é o carimbo que a borda escreveu no instante da gravação —
+        já em hora local, imune a reinterpretação de fuso no banco e imune a
+        um `gravado_em` preenchido com a hora do upload. `gravado_em` vira
+        reserva; `processado_em` (quando o vídeo foi PROCESSADO, que não tem
+        relação com quando a cena aconteceu) fica por último e só existe para
+        o vídeo não sumir do dia.
+    """
     iso = (
-        v.get("gravado_em")
-        or _parse_gravado_em_nome(v.get("nome"))
+        _parse_gravado_em_nome(v.get("nome"))
+        or v.get("gravado_em")
         or v.get("processado_em")
     )
     if not iso:
         return None
     try:
-        return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-    except Exception:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except Exception:   # noqa: BLE001
         return None
+    # Carimbo sem fuso é hora de parede da fábrica — é assim que a borda grava.
+    return dt.replace(tzinfo=_tz_edge()) if dt.tzinfo is None else dt.astimezone(_tz_edge())
 
 
 # ═════════════════════════════════════════════════════════════════════════
