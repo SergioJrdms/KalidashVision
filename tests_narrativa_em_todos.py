@@ -203,5 +203,38 @@ check("e a narrativa só olha a chave que leva o nome dela",
 check("a montagem é registrada no log (dá para medir quanto se usa)",
       "montada a partir de" in fonte)
 
+# ═══════════ [6] A narrativa atravessa TODOS os tipos de observação ════
+print("\n[6] ⭐ Posto vazio, inconclusivo e cam2 também recebem a narrativa")
+
+# O segundo relato, com o print do banco: a maioria das linhas com `narrativa`
+# NULA. O código repetia em três comentários que "a narrativa é do MINUTO, não
+# do instante — por isso ela viaja igual em todas as observações do grupo", mas
+# ela era LIDA dentro do ramo `tipo == "cam1"` e anexada só ali. Posto vazio,
+# inconclusivo e cam2 (resgate/ponte) saíam sem ela — e são justamente as mais
+# numerosas quando o posto esvazia.
+_emissao = fonte.split("# ── 4) Emite as observações")[1].split("\ndef ")[0]
+check("⭐ a narrativa do grupo é calculada UMA vez, antes do laço",
+      "narrativa_grupo = next(" in fonte
+      and fonte.index("narrativa_grupo = next(")
+      < fonte.index("# ── 4) Emite as observações"))
+check("⭐ TODAS as observações emitidas carregam a chave",
+      _emissao.count("observacoes.append({") == 4
+      and _emissao.count('"narrativa"') == 4,
+      (_emissao.count("observacoes.append({"), _emissao.count('"narrativa"')))
+check("o posto vazio recebe — é o que o torna auditável",
+      "O QUE TORNA O \"POSTO VAZIO\" AUDITÁVEL" in fonte)
+check("o inconclusivo também", "O minuto foi observado mesmo quando ESTE instante não foi" in fonte)
+check("e o instante INTERPOLADO cai no grupo em vez de perder a narrativa",
+      '_bloco.get("resumo") or narrativa_grupo' in fonte)
+check("⭐ minuto inteiro vazio continua SEM narrativa (nada foi observado)",
+      "não houve nada para observar" in fonte
+      and '"não pedimos"' in fonte)
+check("⭐ orientacao/maos/trabalho seguem NULOS nessas observações, de propósito",
+      "Preencher seria fabricar medida onde só há" in fonte)
+check("com o motivo: não há pessoa, ou não há pose retida",
+      "Sem pose retida na cam2 — orientação é ausência, não zero." in fonte)
+check("o defeito está nomeado no código",
+      "a narrativa não atravessando a fronteira" in fonte)
+
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

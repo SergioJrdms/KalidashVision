@@ -4713,6 +4713,37 @@ def etapa_analise_vlm(
                             if 0 <= k < len(idx_resg)}
             n_completo += 1
 
+        # ═════════════════════════════════════════════════════════════
+        # ⭐ A NARRATIVA É DO MINUTO — e o minuto tem MAIS TIPOS DE
+        #    OBSERVAÇÃO do que só a cam1.
+        #
+        # O código repetia em três comentários que "a narrativa é do MINUTO,
+        # não do instante — por isso ela viaja igual em todas as observações do
+        # grupo". Só que ela era lida dentro do ramo `tipo == "cam1"` e
+        # anexada só ali. As observações de POSTO VAZIO, de INCONCLUSIVO e as
+        # da CAM2 (resgate/ponte) saíam sem ela — e são justamente as mais
+        # numerosas quando o posto esvazia, que é o caso em que o gestor mais
+        # precisa de contexto para julgar.
+        #
+        # Efeito no banco: a maioria das linhas com `narrativa` NULA. Não era o
+        # modelo falhando; era a narrativa não atravessando a fronteira.
+        #
+        # ⚠️ Quando o minuto INTEIRO foi vazio não há chamada de VLM na cam1,
+        # `descricoes_seq` vem vazio e a narrativa continua NULA — e está certo:
+        # não houve nada para observar. "Não temos" segue diferente de
+        # "não pedimos".
+        #
+        # ⚠️ `orientacao`, `maos_maquina` e `trabalho` continuam NULOS nessas
+        # observações, DE PROPÓSITO: não há pessoa (posto vazio/inconclusivo) ou
+        # não há pose retida (cam2). Preencher seria fabricar medida onde só há
+        # ausência — o erro que este projeto já cometeu quatro vezes.
+        # ═════════════════════════════════════════════════════════════
+        narrativa_grupo = next(
+            (b.get("resumo") for b in descricoes_seq.values()
+             if isinstance(b, dict) and b.get("resumo")),
+            None,
+        )
+
         # ── 4) Emite as observações, em ordem de tempo ──
         for i, (tipo, am) in enumerate(plano):
             if tipo in ("resgate", "ponte"):
@@ -4786,7 +4817,9 @@ def etapa_analise_vlm(
                             and getattr(am, "maos_cam2", False)
                             else None
                         ),
+                        # Sem pose retida na cam2 — orientação é ausência, não zero.
                         "orientacao": None,
+                        "narrativa": narrativa_grupo,
                         "trabalho": (
                             cena_trabalho if papel_cam2 == "operador" else None
                         ),
@@ -4817,6 +4850,8 @@ def etapa_analise_vlm(
                     "maquina": None, "imovel": None,
                     "maos_maquina": None, "orientacao": None,
                     "trabalho": None,
+                    # O minuto foi observado mesmo quando ESTE instante não foi.
+                    "narrativa": narrativa_grupo,
                     "produtividade_motivo": "sem_leitura",
                     "produtividade_observada": False,
                 })
@@ -4836,6 +4871,12 @@ def etapa_analise_vlm(
                         "origem_gate": "posto_vazio",
                         "mudanca_contexto": False,
                         "maquina": None, "imovel": None,
+                        # ⭐ O QUE TORNA O "POSTO VAZIO" AUDITÁVEL. A frase
+                        # `POSTO_VAZIO_DESC` diz o veredito e nada mais; a
+                        # narrativa do minuto conta o que se via em volta — e é
+                        # com ela que o gestor descobre se o posto esvaziou
+                        # mesmo ou se havia alguém que o sistema não contou.
+                        "narrativa": narrativa_grupo,
                     })
                 continue
 
@@ -4844,7 +4885,10 @@ def etapa_analise_vlm(
             do_instante = _bloco.get("acoes") or {}
             cena_maq, cena_imovel = _bloco.get("maquina"), _bloco.get("imovel")
             cena_trabalho = _bloco.get("trabalho")
-            cena_narrativa = _bloco.get("resumo")
+            # Cai no grupo quando ESTE índice veio de interpolação (bloco sem
+            # `resumo` próprio). O valor é o mesmo por construção — o que muda
+            # é não perder a narrativa nos instantes interpolados.
+            cena_narrativa = _bloco.get("resumo") or narrativa_grupo
             cena_motivo = _bloco.get("produtividade_motivo")
             operador_estado = _bloco.get("operador_estado")
             operador_tid = _bloco.get("operador_track_id")
