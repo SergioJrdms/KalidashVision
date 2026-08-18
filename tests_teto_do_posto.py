@@ -92,16 +92,27 @@ print("\n[2] O teto: o recorde do próprio posto vira a meta")
 check("o card existe", "function TetoDoPosto(" in D and "<TetoDoPosto" in D)
 check("com título de fábrica, não de instrumento", "O teto deste posto" in D)
 check("e a frase que desarma a objeção de meta",
-      "não é meta de escritório: já aconteceu aqui" in D)
-check("mostra piso, típico e teto",
-      "pior dia" in D and "dia típico" in D and "melhor dia" in D)
-check("⭐ a folga entre o típico e o teto é o destaque",
-      "pontos</b> de folga" in D and "f.melhor - f.tipico" in D)
+      "É a meta que ninguém contesta." in render)
+check("⭐ a faixa afirma UMA coisa, em forma de frase",
+      "no dia comum" in render and "no seu melhor dia" in render)
+check("⭐ o 'pior dia' saiu — não gerava ação e assustava sem motivo",
+      "pior dia" not in render)
+check("⭐ 'pontos de folga' saiu — ponto percentual é vocabulário de analista",
+      "de folga" not in render and "pontos</b>" not in render)
+check("o listrado ganhou nome ali do lado",
+      "o listrado é o que dá para ganhar" in render)
 check("aponta a DATA do melhor dia (dá para ir perguntar o que houve)",
-      "diaMelhor" in D and "o que foi\n          diferente em" in D)
-check("diz sobre quantos dias está falando", "dias medidos" in D)
+      "diaMelhor" in D and "o que foi diferente em" in render)
+check("o parágrafo de três linhas virou uma frase",
+      "Foi ele quem fez esse número." in render
+      and "Repetir o melhor dia em vez do dia típico" not in D)
+check("os dias medidos ficam, pequenos: é o que sustenta o recorde",
+      "dias medidos" in render)
 check("cobre presença E produtividade sem repetir componente",
       render.count("<FaixaTeto") == 2)
+check("o motivo da simplificação está escrito",
+      "ERA COMPLEXO DEMAIS" in D and "ponto percentual é jargão" not in D
+      and "não de chão de fábrica" in D)
 
 
 # ══════════════════ [3] Típico é MEDIANA, não média ════════════════════
@@ -150,7 +161,9 @@ check("a tela explica a espera em vez de mostrar caixa vazia",
       "o melhor deles é sorteio — não meta" in D)
 check("posto já no teto não inventa folga",
       js(f"faixaDa({json.dumps(serie(80,80,80))}, 'presenca_pct')")["melhor"] == 80
-      and "já está no seu melhor" in D)
+      and "— e é o seu melhor" in render)
+check("e nesse caso nem desenha o listrado nem a legenda dele",
+      "{temFolga && (" in D and "temFolga = f.melhor - f.tipico >= 1" in D)
 
 os.remove(_TS)
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")

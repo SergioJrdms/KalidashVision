@@ -289,7 +289,7 @@ function TetoDoPosto({ pontos }: { pontos: PontoSerie[] }) {
       <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>O teto deste posto</h2>
       <p style={{ margin: "4px 0 18px", color: "var(--muted)", fontSize: 12 }}>
         {base
-          ? "O melhor dia não é meta de escritório: já aconteceu aqui."
+          ? "O seu melhor dia já aconteceu. É a meta que ninguém contesta."
           : "Assim que houver alguns dias medidos, o melhor deles vira a meta."}
       </p>
 
@@ -303,17 +303,16 @@ function TetoDoPosto({ pontos }: { pontos: PontoSerie[] }) {
       {presenca && <FaixaTeto titulo="Operador no posto" cor="var(--accent)" f={presenca} />}
       {produtividade && (
         <>
-          <div style={{ height: 18 }} />
+          <div style={{ height: 20 }} />
           <FaixaTeto titulo="Produtividade" cor="#2e9d62" f={produtividade} />
         </>
       )}
 
       {base && (
-        <div style={{ marginTop: 16, padding: "11px 12px", borderRadius: 10, background: "var(--soft)", color: "var(--text)", fontSize: 12.5, lineHeight: 1.45 }}>
-          Repetir o melhor dia em vez do dia típico é o ganho que já está
-          provado neste posto. Comece perguntando ao operador o que foi
-          diferente em {fmtDia(base.diaMelhor)}.
-        </div>
+        <p style={{ margin: "16px 0 0", color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
+          Pergunte ao operador o que foi diferente em <b style={{ color: "var(--text)" }}>{fmtDia(base.diaMelhor)}</b>.
+          Foi ele quem fez esse número.
+        </p>
       )}
     </Card>
   );
@@ -323,25 +322,56 @@ function fmtDia(d: string): string {
   return d && d.length >= 10 ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : d;
 }
 
+// ⚠️ ERA COMPLEXO DEMAIS, e o motivo não era o gráfico — era a contagem de
+// coisas. A versão anterior pedia ao gestor que juntasse CINCO números (pior
+// dia, típico, melhor dia, pontos de folga, dias medidos), dois segmentos de
+// barra sem rótulo e um parágrafo de três linhas, para só então chegar à
+// ideia. E "pontos de folga" é jargão: ponto percentual é vocabulário de
+// analista, não de chão de fábrica.
+//
+// Agora a faixa afirma UMA coisa, em forma de frase que se lê em voz alta:
+// "no dia comum 76%, no seu melhor dia 87%". A barra ilustra a frase em vez
+// de exigir tradução, e a parte listrada ganhou nome ali do lado.
+//
+// O "pior dia" saiu. Ele não gera ação nenhuma (ninguém tem meta de piorar
+// menos), assustava — 8% costuma ser dia com pouca filmagem, não dia ruim —,
+// e ainda por cima nem aparecia na barra, então o leitor procurava no desenho
+// um número que não estava lá. O "N dias medidos" ficou, pequeno: é o que
+// sustenta o recorde, e sem ele a frase vira promessa.
 function FaixaTeto({ titulo, cor, f }: {
   titulo: string; cor: string;
   f: { pior: number; tipico: number; melhor: number; diaMelhor: string; n: number };
 }) {
-  const ganho = Math.max(0, f.melhor - f.tipico);
   const lim = (v: number) => Math.max(0, Math.min(100, v));
+  const temFolga = f.melhor - f.tipico >= 1;
   return (
     <div>
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", fontSize: 12, marginBottom: 8 }}>
-        <span style={{ color: "var(--text)", fontWeight: 650 }}>{titulo}</span>
-        <span style={{ color: "var(--muted)", fontSize: 11.5 }}>
-          {ganho >= 1
-            ? <>há <b className="tnum" style={{ color: "#a46c00" }}>{ganho.toFixed(0)} pontos</b> de folga</>
-            : <>já está no seu melhor</>}
-        </span>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: 9 }}>
+        <span style={{ color: "var(--text)", fontWeight: 650, fontSize: 12.5 }}>{titulo}</span>
+        <span style={{ color: "var(--faint)", fontSize: 10.5 }}>{f.n} dias medidos</span>
       </div>
 
-      {/* Escala 0–100 fixa. A barra cheia é o dia TÍPICO; o trecho em âmbar,
-          daí até o recorde, é a folga — o tamanho da oportunidade. */}
+      {/* A frase é o conteúdo; a barra abaixo só ilustra. */}
+      <div className="row wrap" style={{ gap: 10, alignItems: "baseline", marginBottom: 10 }}>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>
+          no dia comum <b className="tnum" style={{ color: "var(--ink)", fontSize: 18 }}>{f.tipico.toFixed(0)}%</b>
+        </span>
+        {temFolga && (
+          <>
+            <Icon name="arrow-right" size={15} color="var(--faint)" />
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>
+              no seu melhor dia <b className="tnum" style={{ color: "#a46c00", fontSize: 18 }}>{f.melhor.toFixed(0)}%</b>
+              <span style={{ color: "var(--faint)", fontSize: 11 }}> em {fmtDia(f.diaMelhor)}</span>
+            </span>
+          </>
+        )}
+        {!temFolga && (
+          <span style={{ fontSize: 12, color: "#187a43", fontWeight: 600 }}>— e é o seu melhor</span>
+        )}
+      </div>
+
+      {/* Escala 0–100 fixa. Cheio = dia comum; listrado = o que falta para o
+          recorde. Ampliar a faixa medida faria 76→87 parecer um abismo. */}
       <div style={{ position: "relative", height: 12, borderRadius: 999, background: "var(--line-2)", overflow: "hidden" }}>
         <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${lim(f.tipico)}%`, background: cor }} />
         <div style={{
@@ -351,15 +381,12 @@ function FaixaTeto({ titulo, cor, f }: {
         }} />
       </div>
 
-      <div className="row wrap" style={{ gap: 14, marginTop: 8, fontSize: 11, color: "var(--muted)" }}>
-        <span>pior dia <b className="tnum" style={{ color: "var(--text)" }}>{f.pior.toFixed(0)}%</b></span>
-        <span>dia típico <b className="tnum" style={{ color: "var(--ink)" }}>{f.tipico.toFixed(0)}%</b></span>
-        <span>
-          melhor dia <b className="tnum" style={{ color: "#a46c00" }}>{f.melhor.toFixed(0)}%</b>
-          {" "}<span style={{ color: "var(--faint)" }}>· {fmtDia(f.diaMelhor)}</span>
-        </span>
-        <span style={{ color: "var(--faint)" }}>{f.n} dias medidos</span>
-      </div>
+      {temFolga && (
+        <div className="row gap1" style={{ marginTop: 7, fontSize: 11, color: "var(--muted)" }}>
+          <i style={{ width: 18, height: 8, borderRadius: 3, flex: "none", background: "repeating-linear-gradient(135deg,#f0c86a,#f0c86a 4px,#f7dfa6 4px,#f7dfa6 8px)" }} />
+          o listrado é o que dá para ganhar repetindo o melhor dia
+        </div>
+      )}
     </div>
   );
 }
