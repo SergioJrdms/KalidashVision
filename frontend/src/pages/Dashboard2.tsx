@@ -750,15 +750,97 @@ function fmtMin(m: number): string {
 // parece um horário e é a leitura errada mais fácil de fazer.
 const BIN_MIN = 15;
 
+// ═══════════════════════════════════════════════════════════════════════
+// POR QUE A JORNADA "TODOS OS DIAS" FICAVA PICOTADA — e o conserto é só de
+// desenho: nenhum número muda, nenhuma fatia some.
+//
+// No dia único, cada bloco de 15 min costuma ter UMA categoria e o resultado
+// são barras longas, legíveis. No agregado, o mesmo bloco vira até três
+// fatias (produtivo + desperdício + vazio, na proporção somada dos dias), e
+// com ~40 blocos isso dá ~120 retângulos de 3 px. Três coisas somavam para
+// virar confete:
+//
+//  1. ORDEM ALEATÓRIA DENTRO DO BLOCO. A ordem das fatias dentro de um bloco
+//     NÃO CARREGA HORÁRIO — dentro dele largura é proporção, não instante
+//     (é o mesmo motivo por que o clique abre o BLOCO e não a fatia). Como a
+//     ordem não significava nada, ela vinha variando de bloco para bloco e
+//     quebrava a continuidade visual. Agora a ordem é fixa e ESPELHADA em
+//     blocos alternados — produtivo→desperdício→vazio, depois
+//     vazio→desperdício→produtivo. Assim o verde que termina um bloco encosta
+//     no verde que começa o seguinte, e os dois viram uma faixa só. Ordem
+//     fixa sem espelhar não bastava: o verde ficava sempre no começo do bloco
+//     e nunca alcançava o vizinho.
+//  2. FATIAS VIZINHAS IGUAIS DESENHADAS SEPARADAS. Duas fatias produtivas
+//     coladas no tempo eram dois retângulos. Agora viram um.
+//  3. CANTO ARREDONDADO EM CADA FATIA. Num retângulo de 3 px, `borderRadius`
+//     come a fatia inteira e deixa um vão claro entre vizinhas. O
+//     arredondamento passa para as PONTAS da faixa, não para cada pedaço.
+//
+// ⚠️ O QUE NÃO PODE MUDAR, e não muda: a soma de cada categoria em cada
+// bloco, e os BURACOS (horário sem filmagem). Fatias só se juntam quando são
+// contíguas no tempo — um buraco entre elas impede a fusão, senão o gráfico
+// preencheria um horário em que ninguém filmou.
+// ═══════════════════════════════════════════════════════════════════════
+type Faixa = { ini_m: number; fim_m: number; cat: "va" | "desp" | "vazio" };
+const ORDEM_CAT: Record<string, number> = { va: 0, desp: 1, vazio: 2 };
+
+function suavizarJornada(faixas: Faixa[], agregado: boolean): Faixa[] {
+  if (faixas.length === 0) return faixas;
+
+  let base = faixas;
+  if (agregado) {
+    // Reordena DENTRO de cada bloco de 15 min, preservando a largura total de
+    // cada categoria. Fora do bloco nada se move: o horário continua o mesmo.
+    const porBloco = new Map<number, Faixa[]>();
+    for (const f of faixas) {
+      const b = Math.floor(f.ini_m / BIN_MIN);
+      const arr = porBloco.get(b);
+      if (arr) arr.push(f); else porBloco.set(b, [f]);
+    }
+    base = [];
+    for (const b of [...porBloco.keys()].sort((x, y) => x - y)) {
+      const doBloco = porBloco.get(b)!;
+      // O bloco começa onde a primeira fatia dele começava e as larguras são
+      // recolocadas em sequência — a soma por categoria é idêntica.
+      let cursor = Math.min(...doBloco.map((f) => f.ini_m));
+      // Espelha em blocos alternados para as pontas iguais se encontrarem.
+      const sinal = b % 2 === 0 ? 1 : -1;
+      for (const f of [...doBloco].sort(
+        (a, c) => sinal * ((ORDEM_CAT[a.cat] ?? 9) - (ORDEM_CAT[c.cat] ?? 9))
+      )) {
+        const larg = f.fim_m - f.ini_m;
+        base.push({ ini_m: cursor, fim_m: cursor + larg, cat: f.cat });
+        cursor += larg;
+      }
+    }
+  }
+
+  // Funde vizinhas de mesma categoria — só quando ENCOSTAM no tempo. Buraco
+  // (horário sem filmagem) separa e continua aparecendo.
+  const fundidas: Faixa[] = [];
+  for (const f of base) {
+    const ult = fundidas[fundidas.length - 1];
+    if (ult && ult.cat === f.cat && Math.abs(ult.fim_m - f.ini_m) < 0.01) {
+      ult.fim_m = f.fim_m;
+    } else {
+      fundidas.push({ ...f });
+    }
+  }
+  return fundidas;
+}
+
+
 function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean; proc: ProcHeaderMock }) {
-  const faixas = d.linha_tempo || [];
+  const faixasCruas = d.linha_tempo || [];
   const [binSel, setBinSel] = useState<number | null>(null);
   // Trocar de dia (ou voltar pro agregado) tem de fechar o detalhe: senão o
   // painel fica mostrando os eventos de um dia que não está mais no gráfico.
   const chaveAlvo = agregado ? "@agregado" : d.dia;
   const [chaveAberta, setChaveAberta] = useState(chaveAlvo);
   if (chaveAberta !== chaveAlvo) { setChaveAberta(chaveAlvo); setBinSel(null); }
-  if (faixas.length === 0) return null;
+  if (faixasCruas.length === 0) return null;
+  // Só desenho: as somas por categoria e os buracos são os mesmos.
+  const faixas = suavizarJornada(faixasCruas, !!agregado);
   const ini = Math.max(0, faixas[0].ini_m - 15);
   const fim = Math.min(1440, faixas[faixas.length - 1].fim_m + 15);
   const span = Math.max(1, fim - ini);
@@ -767,7 +849,7 @@ function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean
   // Só os blocos que têm faixa desenhada viram alvo de clique. Clicar num
   // buraco abriria um painel vazio e pareceria bug.
   const binsCobertos = new Set<number>();
-  for (const f of faixas) {
+  for (const f of faixasCruas) {
     for (let b = Math.floor(f.ini_m / BIN_MIN); b * BIN_MIN < f.fim_m; b++) binsCobertos.add(b);
   }
   return (
@@ -791,7 +873,13 @@ function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean
               left: `${((f.ini_m - ini) / span) * 100}%`,
               width: `${((f.fim_m - f.ini_m) / span) * 100}%`,
               background: CAT_CORES[f.cat], opacity: 0.92,
-              borderRadius: 3,
+              // Canto por fatia era a terceira causa do confete: num retângulo
+              // de 3 px o raio come a fatia e abre um vão claro entre vizinhas.
+              // A faixa é uma banda contínua; só as PONTAS são arredondadas.
+              borderRadius:
+                i === 0 ? "6px 0 0 6px"
+                : i === faixas.length - 1 ? "0 6px 6px 0"
+                : 0,
             }} />
         ))}
         {!agregado && [...binsCobertos].sort((a, b) => a - b).map((b) => {
