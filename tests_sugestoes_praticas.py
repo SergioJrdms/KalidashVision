@@ -257,8 +257,11 @@ print("\n[9] Chega à tela com o passo a passo visível")
 dash = open(os.path.join(RAIZ, "frontend", "src", "pages", "Dashboard.tsx"),
             encoding="utf-8").read()
 check("o painel existe", "function OQueFazerAgora" in dash)
-check("vem depois da qualidade da leitura, antes da evolução diária",
-      dash.index("Qualidade da leitura") < dash.index("<OQueFazerAgora itens")
+# A âncora era "Qualidade da leitura", retirada na Fase 106. A ORDEM é que
+# importa e não mudou: primeiro o quadro do período, depois o que fazer com
+# ele, e só então a série histórica.
+check("vem depois do quadro do período, antes da evolução diária",
+      dash.index("<TetoDoPosto") < dash.index("<OQueFazerAgora itens")
       < dash.index("<SerieComercial pontos"))
 check("passos numerados", "<ol className" in dash and "s.passos.map" in dash)
 check("sem itens, o painel some", "if (!itens.length) return null;" in dash)

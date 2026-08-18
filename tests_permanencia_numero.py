@@ -237,8 +237,17 @@ check("o topo responde produtividade, presença e posto vazio",
       all(x in corpo_padrao for x in (
           'titulo="Produtividade"', 'titulo="Operador no posto"',
           'titulo="Posto vazio"')))
-check("a cobertura técnica aparece e não vira acusação",
-      "Qualidade da leitura" in corpo_padrao and "Incerteza fica visível" in corpo_padrao)
+# Fase 106 — DECISÃO DE PRODUTO: a cobertura saiu da tela do cliente. Ela
+# falava do MEDIDOR (quanto da leitura foi excluída), não da fábrica, e o dono
+# não compra o medidor. O que a suíte ainda protege é o que a cobertura
+# protegia: incerteza NÃO PODE virar improdutividade. Isso continua valendo no
+# backend — o número já nasce calculado só sobre leitura válida — e na tela
+# pelo selo de calibração, que barra o uso comercial de leitura fraca.
+check("a incerteza continua fora do número (o cálculo é só sobre leitura válida)",
+      "somente sobre leituras válidas do posto" in corpo_padrao)
+check("e a tela do cliente não expõe mais a instrumentação",
+      "Qualidade da leitura" not in corpo_padrao
+      and "inconclusivo_pct" not in corpo_padrao)
 check("baixa cobertura bloqueia o uso em criativo",
       "Leitura em calibração" in corpo_padrao)
 check("o dashboard padrão não renderiza o placar/Pareto Lean antigo",

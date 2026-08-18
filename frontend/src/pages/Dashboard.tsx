@@ -163,19 +163,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
           />
         </Card>
 
-        <Card style={{ padding: 20 }}>
-          <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>Qualidade da leitura</h2>
-          <p style={{ margin: "4px 0 16px", color: "var(--muted)", fontSize: 12 }}>Incerteza fica visível; não vira improdutividade.</p>
-          <QualidadeItem titulo="Cobertura da identificação" valor={p.cobertura_identificacao_pct} />
-          <QualidadeItem titulo="Decisão de produtividade" valor={p.cobertura_produtividade_pct} />
-          <div style={{ marginTop: 16, padding: "11px 12px", borderRadius: 10, background: "var(--soft)", color: "var(--text)", fontSize: 12.5, lineHeight: 1.45 }}>
-            {p.sem_dado
-              ? "Ainda não há leituras válidas neste período. A plataforma não exibe zero como se fosse um resultado."
-              : p.inconclusivo_pct != null && p.inconclusivo_pct > 0
-              ? `${p.inconclusivo_pct.toFixed(1)}% das leituras ficaram inconclusivas e foram excluídas da decisão.`
-              : "Nenhuma leitura inconclusiva neste período."}
-          </div>
-        </Card>
+        <TetoDoPosto pontos={p.serie_diaria} />
       </div>
 
       {/* Depois de "79,7% no posto" e da qualidade da leitura, a próxima
@@ -243,16 +231,135 @@ function BarraComercial({ titulo, partes }: { titulo: string; partes: Array<{ no
   );
 }
 
-function QualidadeItem({ titulo, valor }: { titulo: string; valor: number | null }) {
-  const pct = Math.max(0, Math.min(100, valor ?? 0));
-  const cor = pct >= 80 ? "#2e9d62" : pct >= 60 ? "#c79232" : "#d66755";
+// ═══════════════════════════════════════════════════════════════════════
+// O TETO DO POSTO — o gráfico que vira meta.
+//
+// Saiu daqui "Qualidade da leitura" (cobertura da identificação, cobertura da
+// decisão, % inconclusivo). Era instrumentação nossa: fala do MEDIDOR, não da
+// FÁBRICA. O dono não compra o medidor.
+//
+// O que entra responde a pergunta que o gestor faz sozinho olhando qualquer
+// número de produtividade — "e daí, quanto DÁ para melhorar?". A resposta não
+// é benchmark de consultoria nem meta de escritório: é o melhor dia que ESTE
+// posto já entregou, com ESTE operador e ESTA máquina. Ninguém contesta o
+// próprio recorde, e é por isso que ele funciona como meta.
+//
+// Não repete nada do resto da tela: os KPIs dão a média do período, a
+// "Evolução diária" dá a trajetória dia a dia, e aqui é a DISTRIBUIÇÃO — piso,
+// típico e teto — com a distância entre o típico e o teto em destaque, que é
+// o tamanho da oportunidade.
+//
+// Três decisões de honestidade:
+//  · "Típico" é a MEDIANA, não a média: com 7 pontos, um dia ruim de
+//    manutenção puxaria a média e inventaria uma oportunidade que não existe.
+//  · A escala é sempre 0–100%. Ampliar a faixa medida faria 78→89 parecer um
+//    abismo — é o truque de gráfico mais comum e o mais desonesto.
+//  · Menos de 3 dias com leitura válida NÃO desenha recorde: dois pontos não
+//    têm típico, e "melhor dia" com n=2 é sorteio.
+// ═══════════════════════════════════════════════════════════════════════
+type PontoSerie = NonNullable<DetMock["produtividade"]>["serie_diaria"][number];
+
+function mediana(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+function faixaDa(pontos: PontoSerie[], campo: "presenca_pct" | "produtividade_pct") {
+  const validos = pontos.filter((x) => typeof x[campo] === "number") as (PontoSerie & Record<string, number>)[];
+  if (validos.length < 3) return null;
+  const vals = validos.map((x) => x[campo] as number);
+  const melhor = Math.max(...vals);
+  const diaMelhor = validos.find((x) => (x[campo] as number) === melhor)?.dia ?? "";
+  return {
+    pior: Math.min(...vals),
+    tipico: mediana(vals),
+    melhor,
+    diaMelhor,
+    n: validos.length,
+  };
+}
+
+function TetoDoPosto({ pontos }: { pontos: PontoSerie[] }) {
+  const presenca = faixaDa(pontos, "presenca_pct");
+  const produtividade = faixaDa(pontos, "produtividade_pct");
+  const base = presenca ?? produtividade;
   return (
-    <div style={{ marginTop: 13 }}>
-      <div className="row" style={{ justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+    <Card style={{ padding: 20 }}>
+      <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>O teto deste posto</h2>
+      <p style={{ margin: "4px 0 18px", color: "var(--muted)", fontSize: 12 }}>
+        {base
+          ? "O melhor dia não é meta de escritório: já aconteceu aqui."
+          : "Assim que houver alguns dias medidos, o melhor deles vira a meta."}
+      </p>
+
+      {!base && (
+        <div style={{ padding: "11px 12px", borderRadius: 10, background: "var(--soft)", color: "var(--text)", fontSize: 12.5, lineHeight: 1.45 }}>
+          Ainda são poucos dias medidos para apontar um recorde. Com dois dias,
+          o melhor deles é sorteio — não meta.
+        </div>
+      )}
+
+      {presenca && <FaixaTeto titulo="Operador no posto" cor="var(--accent)" f={presenca} />}
+      {produtividade && (
+        <>
+          <div style={{ height: 18 }} />
+          <FaixaTeto titulo="Produtividade" cor="#2e9d62" f={produtividade} />
+        </>
+      )}
+
+      {base && (
+        <div style={{ marginTop: 16, padding: "11px 12px", borderRadius: 10, background: "var(--soft)", color: "var(--text)", fontSize: 12.5, lineHeight: 1.45 }}>
+          Repetir o melhor dia em vez do dia típico é o ganho que já está
+          provado neste posto. Comece perguntando ao operador o que foi
+          diferente em {fmtDia(base.diaMelhor)}.
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function fmtDia(d: string): string {
+  return d && d.length >= 10 ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : d;
+}
+
+function FaixaTeto({ titulo, cor, f }: {
+  titulo: string; cor: string;
+  f: { pior: number; tipico: number; melhor: number; diaMelhor: string; n: number };
+}) {
+  const ganho = Math.max(0, f.melhor - f.tipico);
+  const lim = (v: number) => Math.max(0, Math.min(100, v));
+  return (
+    <div>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", fontSize: 12, marginBottom: 8 }}>
         <span style={{ color: "var(--text)", fontWeight: 650 }}>{titulo}</span>
-        <strong className="tnum" style={{ color: cor }}>{valor == null ? "—" : `${valor.toFixed(1)}%`}</strong>
+        <span style={{ color: "var(--muted)", fontSize: 11.5 }}>
+          {ganho >= 1
+            ? <>há <b className="tnum" style={{ color: "#a46c00" }}>{ganho.toFixed(0)} pontos</b> de folga</>
+            : <>já está no seu melhor</>}
+        </span>
       </div>
-      <div style={{ height: 7, borderRadius: 999, background: "var(--line-2)", overflow: "hidden" }}><div style={{ width: `${pct}%`, height: "100%", background: cor, borderRadius: 999 }} /></div>
+
+      {/* Escala 0–100 fixa. A barra cheia é o dia TÍPICO; o trecho em âmbar,
+          daí até o recorde, é a folga — o tamanho da oportunidade. */}
+      <div style={{ position: "relative", height: 12, borderRadius: 999, background: "var(--line-2)", overflow: "hidden" }}>
+        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${lim(f.tipico)}%`, background: cor }} />
+        <div style={{
+          position: "absolute", top: 0, bottom: 0,
+          left: `${lim(f.tipico)}%`, width: `${lim(f.melhor) - lim(f.tipico)}%`,
+          background: "repeating-linear-gradient(135deg,#f0c86a,#f0c86a 4px,#f7dfa6 4px,#f7dfa6 8px)",
+        }} />
+      </div>
+
+      <div className="row wrap" style={{ gap: 14, marginTop: 8, fontSize: 11, color: "var(--muted)" }}>
+        <span>pior dia <b className="tnum" style={{ color: "var(--text)" }}>{f.pior.toFixed(0)}%</b></span>
+        <span>dia típico <b className="tnum" style={{ color: "var(--ink)" }}>{f.tipico.toFixed(0)}%</b></span>
+        <span>
+          melhor dia <b className="tnum" style={{ color: "#a46c00" }}>{f.melhor.toFixed(0)}%</b>
+          {" "}<span style={{ color: "var(--faint)" }}>· {fmtDia(f.diaMelhor)}</span>
+        </span>
+        <span style={{ color: "var(--faint)" }}>{f.n} dias medidos</span>
+      </div>
     </div>
   );
 }
