@@ -1984,13 +1984,16 @@ O CONTEXTO de mãos/orientação vem de sensores e prevalece sobre impressão vi
 
 Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). Em "acoes", descreva cada pessoa marcada para a decisão ser auditável.
 
-Além das entradas por imagem, escreva um campo "resumo": a NARRATIVA do que aconteceu ao longo de TODA a sequência.
-- Percorra as imagens EM ORDEM e conte a passagem: onde a pessoa estava, o que mudou de uma para outra, o que permaneceu igual.
-- NÃO conclua numa ação só. Não escolha "a" atividade do trecho; se houve duas coisas, conte as duas, na ordem.
-- Não precisa ser curto. Duas ou três frases. Prefira ser específico a ser econômico.
-- Se nada mudou entre as imagens, DIGA ISSO — permanecer na mesma posição é um fato observado, não falta de informação.
-- Só o que se VÊ. Nada de rótulo, categoria, produtividade, estado da máquina ou suposição sobre a intenção.
-- Exemplo: "O operador está de pé à esquerda do torno, de costas para a câmera. Nas duas primeiras imagens as mãos estão sobre a máquina; na terceira ele se afasta meio passo e vira o corpo para a bancada. Ninguém mais entra no posto durante a sequência."
+⚠️ O CAMPO MAIS IMPORTANTE DESTA RESPOSTA é "resumo": a NARRATIVA FIEL de tudo o que se vê ao longo da sequência inteira. As frases por imagem são índices curtos; o "resumo" é a observação de verdade, e é o que uma pessoa vai ler.
+
+COMO ESCREVER O "resumo":
+- Percorra as imagens EM ORDEM. Conte a passagem: o que havia na primeira, o que mudou na seguinte, o que permaneceu igual até o fim.
+- COBRIR, quando visível: (a) ONDE a pessoa está em relação ao torno e à bancada — à esquerda, à direita, em frente, afastada; (b) O QUE AS MÃOS FAZEM — sobre a máquina, segurando peça ou ferramenta, abaixadas junto ao corpo, fora de vista; (c) A POSTURA e para onde o corpo aponta; (d) O QUE MUDOU entre uma imagem e outra, mesmo que pouco — meio passo, virar o tronco, levantar o braço; (e) OUTRAS PESSOAS, se entram, saem ou permanecem; (f) OBJETOS manipulados.
+- NÃO RESUMA e NÃO CONCLUA. Não escolha "a" ação do trecho. Se houve duas coisas, conte as duas, na ordem em que aconteceram.
+- SEJA ESPECÍFICO, não econômico. Três a cinco frases é o normal. Um trecho rico merece mais; escrever pouco quando havia o que ver é o pior erro possível aqui.
+- Se NADA mudou entre as imagens, diga isso com todas as letras e descreva o estado que se manteve. Permanecer parado é um fato observado, não falta de informação — e é uma resposta tão boa quanto qualquer outra.
+- Só o que se VÊ. Nada de rótulo, categoria, produtividade, julgamento, estado da máquina ou suposição sobre a intenção. Se você não vê as mãos, escreva que não vê as mãos — não adivinhe o que elas fazem.
+- Exemplo do nível de detalhe esperado: "O operador está de pé à esquerda do torno, corpo voltado para a máquina e de costas para a câmera. Na primeira imagem as duas mãos estão apoiadas sobre a mesa da máquina, próximas ao carro transversal. Na segunda ele permanece na mesma posição, com a cabeça inclinada para baixo, na direção do ponto onde as mãos estão. Na terceira ele recua meio passo e o braço direito desce ao lado do corpo; as mãos deixam de aparecer sobre a máquina. Nenhuma outra pessoa entra no posto durante a sequência, e nenhum objeto é carregado."
 - "operador_estado" deve ser "identificado" quando exatamente um candidato ocupa funcionalmente o posto, "ausente" quando está claro que nenhum candidato é o operador, ou "incerto" quando há oclusão/evidência insuficiente;
 - "operador" é obrigatório somente em "identificado" e deve ser um rótulo visível naquela imagem; nos outros estados deve ser null;
 - "trabalho" só pode ser true/false em "identificado"; nos outros estados deve ser null;
@@ -3753,7 +3756,7 @@ def _contexto_zonas(amostra: Amostra, modo_op: bool,
 # CUSTO: nenhuma chamada nova (o campo entra no MESMO JSON, e o modelo já está
 # olhando todos os quadros). ~60 tokens de saída por minuto analisado.
 # ═════════════════════════════════════════════════════════════════════════
-_NARRATIVA = os.environ.get("KV_NARRATIVA", "off").strip().lower() not in (
+_NARRATIVA = os.environ.get("KV_NARRATIVA", "on").strip().lower() not in (
     "off", "0", "false", "no", "")
 
 
@@ -3770,7 +3773,11 @@ def _resumo_da_sequencia(bruto: dict) -> str | None:
         return None
     r = r.strip()
     # Uma ou duas palavras não é narrativa — é ruído com cara de resposta.
-    return r if len(r) >= 25 else None
+    # Sobe de 25 para 120: com a instrução de três a cinco frases, qualquer
+    # coisa abaixo disso é o modelo devolvendo a frase curta de novo — e uma
+    # narrativa de uma linha não é narrativa, é a descrição antiga com outro
+    # nome. Melhor não exibir nada do que exibir um resumo que não resume.
+    return r if len(r) >= 120 else None
 
 
 def _analisar_sequencia_vlm(
@@ -3872,7 +3879,10 @@ def _analisar_sequencia_vlm(
     try:
         resposta = groq_vision_call(
             groq_client, imgs[0], prompt, json_mode=True,
-            max_tokens=180 * max(1, n_cam1),
+            # O teto cobre as frases por instante MAIS a narrativa. Uma
+            # narrativa cortada no meio é pior que uma curta: some justamente
+            # o fim da sequência, que é onde mora a mudança.
+            max_tokens=220 * max(1, n_cam1) + 400,
             imagens_extra=imgs[1:],
         )
         # Guarda o objeto INTEIRO: `resumo` é irmão de `trechos`, não filho.

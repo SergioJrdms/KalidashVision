@@ -62,17 +62,35 @@ NARR = ("O operador está de pé à esquerda do torno, de costas para a câmera.
 print("\n[1] O prompt pede a narrativa da SEQUÊNCIA, não de um instante")
 p = pl.PROMPT_VLM_SEQUENCIA
 check("o campo `resumo` é pedido", '"resumo"' in p)
+# ⭐ A narrativa é o PRODUTO, não um extra. Se o prompt a tratar como
+# acessório, ela volta a sair em uma linha.
+check("⭐ é declarada como o campo MAIS IMPORTANTE da resposta",
+      "O CAMPO MAIS IMPORTANTE DESTA RESPOSTA" in p)
+check("e as frases por imagem são declaradas como ÍNDICE, não como a observação",
+      "índices curtos" in p and "observação de verdade" in p)
 check("percorrendo as imagens EM ORDEM", "Percorra as imagens EM ORDEM" in p)
+# O checklist é o que separa "descrição fiel" de "frase genérica".
+for item in ("ONDE a pessoa está", "O QUE AS MÃOS FAZEM", "A POSTURA",
+             "O QUE MUDOU", "OUTRAS PESSOAS", "OBJETOS"):
+    check(f"o checklist cobre {item!r}", item in p)
+check("e manda dizer quando NÃO vê as mãos, em vez de adivinhar",
+      "não vê as mãos" in p and "não adivinhe" in p)
 # ⭐ O pedido do dono, literal: "sem tentar definir ou concluir em 1 ação".
 check("⭐ é PROIBIDO concluir numa ação só",
-      "NÃO conclua numa ação só" in p and 'Não escolha "a" atividade' in p)
+      "NÃO RESUMA e NÃO CONCLUA" in p and 'Não escolha "a" ação do trecho' in p)
 check("e não precisa ser compacto — o outro pedido dele",
-      "Não precisa ser curto" in p and "Prefira ser específico a ser econômico" in p)
+      "SEJA ESPECÍFICO, não econômico" in p
+      and "Três a cinco frases é o normal" in p)
+check("⭐ escrever pouco é declarado como o PIOR erro",
+      "escrever pouco quando havia o que ver é o pior erro" in p)
+check("e o exemplo mostra o nível de detalhe, não só o formato",
+      "nível de detalhe esperado" in p and "carro transversal" in p)
 check("permanecer igual É observação, não falta de informação",
-      "permanecer na mesma posição é um fato observado" in p)
+      "Permanecer parado é um fato observado" in p
+      and "tão boa quanto qualquer outra" in p)
 check("sem rótulo, categoria nem estado da máquina na narrativa",
-      "Nada de rótulo, categoria, produtividade, estado da máquina" in p)
-check("com exemplo do formato esperado", "vira o corpo para a bancada" in p)
+      "Nada de rótulo, categoria, produtividade, julgamento, estado da máquina" in p)
+check("com exemplo do formato esperado", "recua meio passo" in p)
 
 print("\n[2] Zero chamada nova — o campo entra no MESMO JSON")
 check("`resumo` é irmão de `trechos` no mesmo objeto",
@@ -85,18 +103,23 @@ for chamada in ("groq_vision_call", "groq_text_call", "anthropic", "requests."):
     check(f"a extração não chama {chamada}", chamada not in _f)
 
 print("\n[3] A flag e o filtro de ruído")
-check("desligada por padrão", pl._NARRATIVA is False)
-check("com ela off, nada é extraído — nem string vazia",
-      pl._resumo_da_sequencia({"resumo": NARR}) is None)
+# ⭐ LIGADA POR PADRÃO. Ficou atrás de flag desligada por uma versão e o
+# resultado foi previsível: nada mudou na tela, porque a narrativa não existia.
+check("⭐ ligada por padrão", pl._NARRATIVA is True)
+check("a narrativa rica sai inteira", pl._resumo_da_sequencia({"resumo": NARR}) == NARR)
+# ⭐ O filtro de ruído: uma linha não é narrativa, é a descrição antiga com
+# outro nome. Melhor não exibir nada do que exibir um resumo que não resume.
+check("⭐ frase de uma linha é REJEITADA",
+      pl._resumo_da_sequencia(
+          {"resumo": "operador parado junto ao torno, observando a máquina"}) is None)
+check("resposta de uma palavra também", pl._resumo_da_sequencia({"resumo": "operando"}) is None)
+check("campo ausente devolve None", pl._resumo_da_sequencia({}) is None)
+check("tipo errado não quebra", pl._resumo_da_sequencia({"resumo": 42}) is None)
+check("objeto nulo não quebra", pl._resumo_da_sequencia(None) is None)
 _n = pl._NARRATIVA
-pl._NARRATIVA = True
+pl._NARRATIVA = False
 try:
-    check("ligada, a narrativa sai inteira", pl._resumo_da_sequencia({"resumo": NARR}) == NARR)
-    check("resposta curta demais NÃO é narrativa — é ruído com cara de resposta",
-          pl._resumo_da_sequencia({"resumo": "operando"}) is None)
-    check("campo ausente devolve None", pl._resumo_da_sequencia({}) is None)
-    check("tipo errado não quebra", pl._resumo_da_sequencia({"resumo": 42}) is None)
-    check("objeto nulo não quebra", pl._resumo_da_sequencia(None) is None)
+    check("e dá para desligar, se precisar", pl._resumo_da_sequencia({"resumo": NARR}) is None)
 finally:
     pl._NARRATIVA = _n
 
@@ -140,6 +163,13 @@ check("⭐ permanência IDÊNTICA com e sem narrativa", antes == depois, (antes,
 check("e não é empate trivial — o número existe", antes["no_posto_pct"] == 50.0)
 _perm = fonte.split("def permanencia_do_dia")[1].split("\ndef ")[0]
 check("a função da permanência nem menciona narrativa", "narrativa" not in _perm)
+
+print("\n[5b] O teto de tokens acompanha a narrativa")
+# Narrativa cortada no meio é pior que curta: some justamente o fim da
+# sequência, que é onde mora a mudança.
+check("o teto cresceu e tem folga fixa para o resumo",
+      "max_tokens=220 * max(1, n_cam1) + 400," in fonte)
+check("com o motivo escrito", "narrativa cortada no meio é pior que uma curta" in fonte)
 
 print("\n[6] Coluna ausente não derruba vídeo da campanha")
 check("a gravação regrava o lote SEM o campo se a coluna não existir",
