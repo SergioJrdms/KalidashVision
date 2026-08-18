@@ -12680,10 +12680,23 @@ def estado_permanencia(e: dict, frente_maquina: str | None) -> tuple:
         # Visitante não é o titular do posto: o tempo dele não é permanência
         # do operador. Conta como fora.
         return EST_FORA, None
-    if papel != "operador" and PRODUTIVIDADE_OPERADOR_V9:
-        # Ausência de identidade não é presença. Antes, `None` caía no mesmo
-        # ramo do operador e inflava permanência justamente quando o sistema
-        # não sabia quem estava no posto.
+    if papel != "operador":
+        # ⭐ REGRA PRIMÁRIA: SÓ CONTA QUEM ESTÁ NO POSTO.
+        #
+        # Ausência de identidade NÃO É PRESENÇA. Estava certo, mas atrás de
+        # `KV_PRODUTIVIDADE_OPERADOR_V9` — e com a chave desligada (o padrão,
+        # fail-closed) o `None` voltava a cair no mesmo ramo do operador.
+        #
+        # O caso que isso deixava passar é o pior possível: quando NÃO EXISTE
+        # zona de posto desenhada, a eleição inteira é pulada, `papel_pessoa`
+        # nasce nulo para todo mundo, e qualquer pessoa detectada em qualquer
+        # canto do quadro contava como "operador no posto". A permanência ia a
+        # 100% justamente quando o sistema não sabia onde o posto fica.
+        #
+        # Agora vale sempre, com ou sem flag: quem não foi identificado como
+        # operador não entra no numerador NEM no denominador — vira
+        # INCONCLUSIVO, que aparece como cobertura. "Não sei" não pode ser
+        # promovido a "sei que sim".
         return EST_INCONCLUSIVO, None
     # Sem verificação, a orientação não decide — ver `_ORIENTACAO_VERIFICADA`.
     voltado = (orientacao_vs_maquina(e.get("orientacao"), frente_maquina)

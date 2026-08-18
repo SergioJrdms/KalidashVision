@@ -257,5 +257,72 @@ check("`decidir_permanencia` (a esteira da Fase 97) continua de pé",
 check("a versão do instrumento subiu", pl.VERSAO_INSTRUMENTO >= 8)
 check("com a data e o motivo registrados", "8 = (14/08) o NÚMERO PRINCIPAL" in fonte)
 
+print("\n[9] ⭐ REGRA PRIMÁRIA: só conta quem está NO POSTO")
+# O dono viu a fila chamando de OPERADOR alguém fora do posto. Auditando, o
+# defeito era anterior e pior: a guarda "ausência de identidade não é presença"
+# existia, mas atrás de `KV_PRODUTIVIDADE_OPERADOR_V9` — que é fail-closed e
+# vem DESLIGADA. Com ela off, `papel_pessoa = None` voltava a cair no mesmo
+# ramo do operador.
+#
+# O caso que isso deixava passar é o pior: sem zona de posto desenhada, a
+# eleição inteira é pulada, o papel nasce nulo para todo mundo, e qualquer
+# pessoa em qualquer canto do quadro virava "operador no posto" — a permanência
+# ia a 100% justamente quando o sistema não sabia onde o posto fica.
+check("⭐ a guarda NÃO depende mais de flag nenhuma",
+      'if papel != "operador":' in fonte
+      and 'if papel != "operador" and PRODUTIVIDADE_OPERADOR_V9' not in fonte)
+check("com o motivo escrito", "REGRA PRIMÁRIA: SÓ CONTA QUEM ESTÁ NO POSTO" in fonte)
+
+_sem_papel = pl.permanencia_do_dia([ev(0, 60, papel=None), ev(60, 120, papel=None)], None)
+check("⭐ pessoa sem papel NÃO vira presença",
+      _sem_papel["no_posto_pct"] == 0.0, _sem_papel)
+check("e o tempo dela sai do DENOMINADOR — não vira 'fora' por tabela",
+      _sem_papel["fora_pct"] == 0.0 and _sem_papel["inconclusivo_pct"] == 100.0,
+      _sem_papel)
+check("o dia se declara sem dado em vez de mostrar 0% como resultado",
+      _sem_papel["sem_dado"] is True)
+
+check("visitante continua fora da permanência do titular",
+      pl.permanencia_do_dia(
+          [ev(0, 60, papel="operador"), ev(60, 120, papel="visitante")], None
+      )["no_posto_pct"] == 50.0)
+_normal = pl.permanencia_do_dia(
+    [ev(0, 60, papel="operador"),
+     ev(60, 120, papel="posto_vazio", label="posto_vazio")], None)
+check("e o caso normal não mudou — operador × posto vazio segue 50/50",
+      _normal["no_posto_pct"] == 50.0 and _normal["fora_pct"] == 50.0
+      and _normal["cobertura_pct"] == 100.0, _normal)
+# ⚠️ "Não sei" não pode ser promovido a "sei que sim", mas também não pode ser
+# rebaixado a "sei que não" — some do denominador e aparece como cobertura.
+check("o inconclusivo aparece como COBERTURA, não como fatia",
+      "cobertura_pct" in _normal and "inconclusivo_pct" in _normal)
+_misto = pl.permanencia_do_dia(
+    [ev(0, 60, papel="operador"), ev(60, 120, papel=None)], None)
+check("com metade inconclusiva, a cobertura cai e o percentual não mente",
+      _misto["no_posto_pct"] == 100.0 and _misto["cobertura_pct"] == 50.0, _misto)
+
+print("\n[10] A descrição completa abre — sem depender de <details>")
+val = open(os.path.join(RAIZ, "frontend", "src", "pages", "Validacao.tsx"),
+           encoding="utf-8").read()
+# `<details className="col">` põe `display: flex` no elemento, e mudar o
+# display de um <details> quebra o colapso nativo: o botão aparecia, o clique
+# registrava e o texto não abria.
+# Só o que é RENDERIZADO: o comentário acima do componente CITA `<details>`
+# para explicar por que ele saiu, e apagar essa memória é como o bug volta.
+_val_render = "\n".join(l for l in val.splitlines() if not l.strip().startswith("//"))
+check("⭐ não usa mais <details>", "<details" not in _val_render)
+check("mas o motivo de ter saído fica registrado", "<details" in val)
+check("e sim um estado controlado",
+      "function DescricaoCompleta(" in val and "const [aberto, setAberto]" in val)
+check("o texto só renderiza quando aberto", "{aberto && (" in val)
+check("o rótulo diz o que vai acontecer nos dois estados",
+      "Veja aqui a descrição completa" in val
+      and "Ocultar a descrição completa" in val)
+# Sem o key, o painel ficaria aberto ao trocar de card e o gestor leria a
+# descrição do trecho anterior achando que era a do atual.
+check("⭐ troca de card fecha o painel (key pelo id do evento)",
+      "<DescricaoCompleta key={evento.id}" in val)
+check("com o motivo registrado", "quebra o colapso nativo" in val)
+
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)

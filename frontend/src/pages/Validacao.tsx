@@ -556,24 +556,7 @@ function FilaFoco({
                   “{evento.descricao}”
                 </p>
                 {evento.narrativa && (
-                  <details className="col" style={{ gap: 6, maxWidth: 680 }}>
-                    <summary style={{
-                      cursor: "pointer", fontSize: 12.5, fontWeight: 600,
-                      color: "var(--accent-deep)", listStyle: "none",
-                      display: "inline-flex", alignItems: "center", gap: 5,
-                      width: "fit-content",
-                    }}>
-                      <Icon name="file-text" size={13} />
-                      Veja aqui a descrição completa
-                    </summary>
-                    <p style={{
-                      fontSize: 13.5, color: "var(--text)", lineHeight: 1.6,
-                      margin: "6px 0 0", paddingLeft: 11,
-                      borderLeft: "2px solid var(--line)",
-                    }}>
-                      {evento.narrativa}
-                    </p>
-                  </details>
+                  <DescricaoCompleta key={evento.id} texto={evento.narrativa} />
                 )}
                 <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
                   É isso que está acontecendo nas imagens?
@@ -714,6 +697,50 @@ function FilaFoco({
       <p className="row gap2" style={{ justifyContent: "center", fontSize: 11.5, color: "var(--faint)", marginTop: 4, flexWrap: "wrap", textAlign: "center" }}>
         <Icon name="mouse-pointer-click" size={13} /> Um clique resolve. Arraste o card pro lado, ou toque <b style={{ color: "var(--muted)" }}>Pular</b>, pra adiar e voltar ao fim do lote.
       </p>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// A DESCRIÇÃO COMPLETA, recolhida.
+//
+// ⚠️ NÃO USA `<details>`, e o motivo é específico: a primeira versão era
+// `<details className="col">`, e a classe `col` põe `display: flex` no
+// elemento. Mudar o `display` de um `<details>` quebra o colapso nativo do
+// navegador — o botão aparecia, o clique registrava e o texto não abria.
+//
+// Um estado controlado não depende de comportamento embutido de tag nenhuma.
+// E o `key={evento.id}` no uso garante que, ao trocar de card, ele volte
+// fechado: senão o gestor abriria uma descrição e leria a do trecho seguinte
+// achando que era a mesma.
+// ═══════════════════════════════════════════════════════════════════════
+function DescricaoCompleta({ texto }: { texto: string }) {
+  const [aberto, setAberto] = useState(false);
+  return (
+    <div className="col" style={{ gap: 6, maxWidth: 680 }}>
+      <button
+        type="button"
+        onClick={() => setAberto((v) => !v)}
+        aria-expanded={aberto}
+        style={{
+          cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+          color: "var(--accent-deep)", background: "transparent",
+          border: "none", padding: 0, width: "fit-content",
+          display: "inline-flex", alignItems: "center", gap: 5,
+        }}
+      >
+        <Icon name={aberto ? "chevron-down" : "chevron-right"} size={14} />
+        {aberto ? "Ocultar a descrição completa" : "Veja aqui a descrição completa"}
+      </button>
+      {aberto && (
+        <p style={{
+          fontSize: 13.5, color: "var(--text)", lineHeight: 1.6,
+          margin: "2px 0 0", paddingLeft: 11,
+          borderLeft: "2px solid var(--line)",
+        }}>
+          {texto}
+        </p>
+      )}
     </div>
   );
 }
