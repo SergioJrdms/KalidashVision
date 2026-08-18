@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from .auth import CurrentUser, get_current_user
 from .jobs import JOBS
 from .productivity import agregar_produtividade
+from . import pipeline as pl
 from .pipeline import (
     extrair_3_frames_evento,
     extrair_3_frames_tempo,
@@ -4630,6 +4631,47 @@ def listar_perguntas(
     return r.data or []
 
 
+# ⭐ A FILA QUE O GESTOR VÊ — poucas, e as que mais decidem primeiro.
+#
+# `listar_perguntas` serve por ordem de CRIAÇÃO, e é por isso que o topo da
+# fila de 200 é trivialidade: a última pergunta escrita não é a mais
+# importante. Esta rota reordena pelo impacto MEDIDO (quanto do tempo
+# observado os rótulos da pergunta ocupam hoje) e entrega só o topo.
+#
+# Não apaga nem esconde nada do banco: `/perguntas` continua devolvendo tudo.
+@app.get("/processos/{processo_id}/perguntas/prioritarias")
+def perguntas_prioritarias(
+    processo_id: str,
+    topo: int = Query(3, ge=1, le=20),
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    r = pl.priorizar_perguntas_abertas(sb, user.empresa, nome, topo=topo)
+    return {
+        "ok": True,
+        "abertas": r["abertas"],
+        "corte_pct": r["corte_pct"],
+        "n_abaixo_do_corte": len(r["abaixo_do_corte"]),
+        "itens": r["valem"],
+    }
+
+
+# Ação EXPLÍCITA do gestor. Nada aqui roda sozinho: arquivar a fila de alguém
+# sem pedir é decidir por ele. `dispensada` é estado, não exclusão — o texto
+# continua no banco.
+@app.post("/processos/{processo_id}/perguntas/arquivar-baixo-impacto")
+def arquivar_perguntas_fracas(
+    processo_id: str,
+    manter: int = Query(3, ge=0, le=50),
+    user: CurrentUser = Depends(get_current_user),
+):
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    return {"ok": True, **pl.arquivar_perguntas_de_baixo_impacto(
+        sb, user.empresa, nome, manter=manter)}
+
+
 @app.get("/processos/{processo_id}/perguntas/contagem")
 def contagem_perguntas(processo_id: str, user: CurrentUser = Depends(get_current_user)):
     sb = make_supabase_client()
@@ -4643,7 +4685,16 @@ def contagem_perguntas(processo_id: str, user: CurrentUser = Depends(get_current
         .limit(1)
         .execute()
     )
-    return {"pendentes": r.count or 0}
+    # O orçamento explica ao gestor por que a conversa está quieta — "200
+    # abertas" sozinho parece fila entupida sem dizer que o sistema PAROU de
+    # perguntar de propósito.
+    try:
+        orc = pl.orcamento_de_perguntas(sb, user.empresa, nome)
+    except Exception:
+        orc = {"vagas": None, "motivo": None}
+    return {"pendentes": r.count or 0,
+            "vagas": orc.get("vagas"), "orcamento": orc.get("motivo"),
+            "teto_semana": pl.PERG_MAX_SEMANA, "teto_abertas": pl.PERG_MAX_ABERTAS}
 
 
 @app.post("/perguntas/{pergunta_id}/responder")

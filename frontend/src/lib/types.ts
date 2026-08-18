@@ -929,3 +929,33 @@ export interface RotulosSemCategoria {
   minutos_observados: number;
   nota: string;
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// Fase 105 — O 80/20 DA CONVERSA RÁPIDA.
+// `impacto_pct` é quanto do TEMPO OBSERVADO a pergunta decide. É o número que
+// separa a pergunta que redesenha o Pareto da que só satisfaz curiosidade — e
+// pergunta sem comportamento relacionado vale 0, não "desconhecido".
+// ═══════════════════════════════════════════════════════════════════════
+export interface PerguntasPrioritarias {
+  ok: boolean;
+  abertas: number;
+  corte_pct: number;
+  n_abaixo_do_corte: number;
+  itens: (PerguntaProcesso & { impacto_pct: number })[];
+}
+export interface ArquivamentoPerguntas {
+  ok: boolean;
+  arquivadas: number;
+  mantidas: number;
+  mantidas_texto: string[];
+  corte_pct: number;
+}
+export interface ContagemPerguntas {
+  pendentes: number;
+  // Quantas perguntas o sistema AINDA pode fazer. `0` é o estado normal.
+  vagas: number | null;
+  orcamento: string | null;
+  teto_semana: number;
+  teto_abertas: number;
+}

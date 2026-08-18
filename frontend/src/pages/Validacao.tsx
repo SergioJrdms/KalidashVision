@@ -72,7 +72,11 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
   const qc = useQueryClient();
   const fila = t.validacao !== "cards";
   const pendQ = useQuery({ queryKey: ["pendentes", proc.id], queryFn: () => api.processos.eventosPendentes(proc.id, true) });
-  const pergQ = useQuery({ queryKey: ["perguntas", proc.id], queryFn: () => api.perguntas.listar(proc.id, "pendente") });
+  // ⭐ As PRIORITÁRIAS, não a lista crua. `/perguntas` devolve tudo por ordem
+  // de criação — com 200 abertas, o topo é a última trivialidade escrita, e
+  // foi assim que a conversa rápida virou ruído que ninguém responde. Aqui
+  // vêm três, ordenadas pelo tempo que cada uma DECIDE.
+  const pergQ = useQuery({ queryKey: ["perguntas-top", proc.id], queryFn: () => api.perguntas.prioritarias(proc.id, 3) });
   const dashQ = useQuery({ queryKey: ["dashboard", proc.id], queryFn: () => api.processos.dashboard(proc.id), staleTime: 30_000 });
 
   // Fase 99 — o que o gestor PODE atribuir. A distribuição traz os rótulos com
@@ -103,7 +107,7 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
     }
   }, [pendQ.data, seeded]);
   useEffect(() => {
-    if (pergQ.data) setPerguntas((cur) => (cur.length ? cur : mapPerguntas(pergQ.data).map((q) => ({ ...q, status: "open" as const, answer: null }))));
+    if (pergQ.data) setPerguntas((cur) => (cur.length ? cur : mapPerguntas(pergQ.data.itens).map((q) => ({ ...q, status: "open" as const, answer: null }))));
   }, [pergQ.data]);
 
   const totalInicial = pendQ.data?.length ?? 0;
@@ -179,7 +183,8 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
       <SessionHeader maturidade={maturidade} done={done} total={totalInicial} learned={learned} streak={streak} />
 
       {perguntas.some((q) => q.status === "open") && (
-        <PerguntasConversa perguntas={perguntas} onResponder={responder} onDispensar={dispensar} respondidas={respondidas} />
+        <PerguntasConversa perguntas={perguntas} onResponder={responder} onDispensar={dispensar} respondidas={respondidas}
+                           engavetadas={pergQ.data?.n_abaixo_do_corte ?? 0} corte={pergQ.data?.corte_pct ?? 0} />
       )}
 
       {restantesFila === 0 ? (
@@ -236,7 +241,7 @@ function SessionHeader({ maturidade, done, total, learned, streak }: { maturidad
 }
 
 type PQ = PergMock & { status: "open" | "answered" | "dismissed"; answer?: string | null };
-function PerguntasConversa({ perguntas, onResponder, onDispensar }: { perguntas: PQ[]; onResponder: (q: PergMock, a: string) => void; onDispensar: (q: PergMock) => void; respondidas: number }) {
+function PerguntasConversa({ perguntas, onResponder, onDispensar, engavetadas, corte }: { perguntas: PQ[]; onResponder: (q: PergMock, a: string) => void; onDispensar: (q: PergMock) => void; respondidas: number; engavetadas: number; corte: number }) {
   const abertas = perguntas.filter((q) => q.status === "open");
   const atual = abertas[0];
   const respondidasArr = perguntas.filter((q) => q.status === "answered");
@@ -246,9 +251,17 @@ function PerguntasConversa({ perguntas, onResponder, onDispensar }: { perguntas:
         <Prism size={28} ring />
         <div className="grow">
           <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>O Prism quer te perguntar</div>
-          <div style={{ fontSize: 11.5, color: "var(--accent-deep)" }}>Conversa rápida · cada resposta deixa as próximas análises mais certeiras</div>
+          {/* "200 abertas" era o retrato do problema: o gestor lia fila
+              entupida e desistia antes de ler a primeira. O que o número
+              PRECISA dizer agora é o contrário — são poucas, e foram
+              escolhidas. */}
+          <div style={{ fontSize: 11.5, color: "var(--accent-deep)" }}>
+            Só o que muda o número · {abertas.length} pergunta{abertas.length > 1 ? "s" : ""} escolhida{abertas.length > 1 ? "s" : ""} entre todas
+          </div>
         </div>
-        <span className="badge badge-purple">{abertas.length} aberta{abertas.length > 1 ? "s" : ""}</span>
+        <span className="badge badge-purple">
+          {abertas.length} pra responder
+        </span>
       </div>
       <div className="col" style={{ padding: 18, gap: 14 }}>
         {respondidasArr.slice(-1).map((q) => (
@@ -259,6 +272,14 @@ function PerguntasConversa({ perguntas, onResponder, onDispensar }: { perguntas:
           </div>
         ))}
         {atual && <PerguntaAtiva key={atual.id} q={atual} onResponder={onResponder} onDispensar={onDispensar} />}
+        {engavetadas > 0 && (
+          // Dizer que existem, e por que não estão aqui. Esconder em silêncio
+          // seria a mesma omissão de antes, só que ao contrário.
+          <span style={{ fontSize: 10.5, color: "var(--faint)", lineHeight: 1.5, paddingLeft: 38 }}>
+            Outras {engavetadas} dúvidas ficaram de fora: decidem menos de {corte}% do
+            tempo observado e não valem a sua interrupção.
+          </span>
+        )}
       </div>
     </Card>
   );
@@ -283,6 +304,14 @@ function PerguntaAtiva({ q, onResponder, onDispensar }: { q: PQ; onResponder: (q
     <div className="col anim-fadeup" style={{ gap: 12 }}>
       <Bubble who="prism" text={q.pergunta} />
       <div style={{ paddingLeft: 38 }}>
+        {q.impacto != null && q.impacto > 0 && (
+          // O motivo de valer a interrupção, em um número. Sem isto a pergunta
+          // parece curiosidade da IA; com ele, é uma decisão que o gestor toma.
+          <div className="row gap1" style={{ marginBottom: 8, fontSize: 11.5, color: "var(--accent-deep)", fontWeight: 600 }}>
+            <Icon name="target" size={13} strokeWidth={2.4} />
+            Sua resposta reclassifica <b className="tnum">{q.impacto.toFixed(0)}%</b> do tempo observado
+          </div>
+        )}
         {q.relacionados?.length > 0 && (
           <div className="row wrap gap1" style={{ marginBottom: 8 }}>
             {q.relacionados.map((c) => <code key={c} className="font-mono" style={{ fontSize: 10, background: "var(--line-2)", color: "var(--text)", padding: "2px 7px", borderRadius: 6 }}>{c}</code>)}

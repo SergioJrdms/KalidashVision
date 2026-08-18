@@ -70,7 +70,9 @@ export interface DetMock {
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
 export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; narrativa: string | null; hora: string | null; faixaHora: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
-export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[] }
+// `impacto`: % do tempo observado que a resposta reclassifica. É o que ordena
+// a fila e o que justifica interromper o gestor.
+export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[]; impacto: number | null }
 export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null; papel: string | null; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; desp: number }[] }
 export interface PadProcMock { id: string; tipo: string; confianca: string; relevancia: string; titulo: string; descricao: string; recomendacao: string | null; comportamentos: string[] }
@@ -236,6 +238,8 @@ export function mapPerguntas(rows: PerguntaProcesso[]): PergMock[] {
       motivo: q.motivo || "",
       relacionados: q.comportamentos_relacionados || [],
       chips: rapidas.length >= 2 ? rapidas : CHIPS_PADRAO,
+      impacto: typeof (q as { impacto_pct?: number }).impacto_pct === "number"
+        ? (q as { impacto_pct?: number }).impacto_pct! : null,
     };
   });
 }

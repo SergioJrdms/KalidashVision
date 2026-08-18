@@ -147,6 +147,13 @@ create table if not exists perguntas_processo (
     criada_em timestamptz default now()
 );
 alter table perguntas_processo add column if not exists respostas_rapidas jsonb;
+-- Fase 105 — o 80/20 da conversa rápida: % do tempo observado que a pergunta
+-- DECIDE. É o que ordena a fila na tela e o que permite conferir depois se o
+-- corte de impacto está calibrado. Pergunta sem comportamento relacionado tem
+-- impacto 0 — ausência de medida não vira medida.
+alter table perguntas_processo add column if not exists impacto_pct real;
+create index if not exists idx_perg_abertas
+    on perguntas_processo (empresa, processo, status, impacto_pct desc);
 
 -- Turnos de gravação por processo. Consumido pelo runner da borda (Pi)
 -- para abrir e fechar a captura RTSP nos horários definidos pelo gestor.

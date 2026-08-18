@@ -10228,17 +10228,32 @@ def gerar_pergunta_onboarding(
 # ═════════════════════════════════════════════════════════════════════════
 PROMPT_PERGUNTAS = """Você é a IA de análise de processos industriais do Kalidash Vision, observando a empresa "{empresa}" no processo "{processo}". Você já analisou alguns vídeos da operação. Sua tarefa AGORA não é gerar sugestões de melhoria (isso já foi feito em outra etapa) — é IDENTIFICAR LACUNAS no seu próprio entendimento da operação e formular PERGUNTAS GENUÍNAS ao cliente que, se respondidas, te permitiriam classificar e analisar com muito mais precisão a partir do próximo vídeo.
 
+⭐ A REGRA QUE MANDA EM TODAS AS OUTRAS — 80/20:
+O gestor está no chão de fábrica e cada pergunta interrompe o trabalho dele. Você tem direito a MUITO POUCAS perguntas por semana. Portanto: pergunte SÓ o que muda um NÚMERO ou uma CLASSIFICAÇÃO da análise. Se a resposta não reclassificaria tempo nem corrigiria um rótulo, a pergunta NÃO EXISTE.
+
+O teste antes de escrever qualquer pergunta — ela precisa passar nos TRÊS:
+  1. TEMPO: o comportamento envolvido ocupa uma fatia GRANDE do dia observado (veja os % abaixo). Pergunta sobre algo que ocupa 1% do dia é curiosidade, não análise. Só pergunte sobre o que está no topo da lista.
+  2. DECISÃO: a resposta muda como você classifica dali em diante. "É produtivo ou é espera?" muda. "Como vocês chamam isso?" quase nunca muda.
+  3. SÓ O CLIENTE SABE: a resposta não está na descrição do processo, no conhecimento já adquirido, nem é dedutível das imagens. Se dá para descobrir olhando mais vídeo, NÃO pergunte — descubra.
+
+EXEMPLOS DO QUE NÃO PERGUNTAR (todos já foram perguntados e nenhum foi respondido):
+  ✗ "Limpar cavaco costuma acontecer durante o ciclo automático ou depois?" — decide 0,3% do dia.
+  ✗ "Vocês chamam essa etapa de X ou de Y?" — nome não reclassifica tempo.
+  ✗ "O operador costuma conferir a peça?" — dá para ver no vídeo.
+  ✓ "Quando o operador fica parado de frente pro torno enquanto ele corta, isso é trabalho dele ou é espera?" — decide 18% do dia e só o cliente sabe.
+
 REGRAS DURAS:
 - Você está LIVRE para perguntar o que quiser. NÃO use um catálogo pré-fabricado. As perguntas têm que nascer de incertezas REAIS nos dados abaixo.
 - NÃO repita nenhuma pergunta que você já fez antes (lista mais abaixo) e NÃO crie variantes dela.
 - NÃO pergunte o que a "descrição do processo" e o "conhecimento já adquirido" já respondem.
 - Cada pergunta deve ser CURTA (1 frase), ESPECÍFICA e em linguagem de chão de fábrica. Nada de termos de IA, estatística ou Lean.
+- Toda pergunta DEVE citar em "comportamentos_relacionados" os rótulos que ela decide, usando EXATAMENTE os nomes da lista de comportamentos abaixo. Pergunta sem rótulo, ou com rótulo inventado, é DESCARTADA automaticamente — ela não tem como provar que decide alguma coisa.
 - Priorize perguntas que ajudam a:
-    (a) DESAMBIGUAR comportamentos parecidos (mesmo objeto/ação descritos de formas diferentes; ou labels distintos que talvez sejam o mesmo);
-    (b) NOMEAR corretamente ações que ficaram como "acao_indefinida" ou de baixa confiança;
-    (c) Entender ORDEM e OBRIGATORIEDADE de passos (ex.: "é obrigatório conferir antes de embalar?");
-    (d) Distinguir o que AGREGA VALOR do que NÃO agrega (preparação / verificação / espera / deslocamento).
-- Gere NO MÁXIMO {max_perguntas} perguntas. Se não há lacuna genuína, devolva uma lista VAZIA. NÃO invente perguntas para preencher cota.
+    (a) Distinguir o que AGREGA VALOR do que NÃO agrega (preparação / verificação / espera / deslocamento) — este é o que mais muda número;
+    (b) NOMEAR corretamente ações que ficaram sem nome ou de baixa confiança, quando elas ocupam tempo relevante;
+    (c) DESAMBIGUAR comportamentos parecidos que somados pesam muito (mesmo objeto/ação descritos de formas diferentes; ou labels distintos que talvez sejam o mesmo);
+    (d) Entender ORDEM e OBRIGATORIEDADE de passos, só quando isso muda a classificação.
+- Gere NO MÁXIMO {max_perguntas} perguntas — e é um TETO, não uma meta. Devolver UMA pergunta ótima é melhor que {max_perguntas} razoáveis. Se não há lacuna que passe nos três testes, devolva uma lista VAZIA. NÃO invente perguntas para preencher cota.
 - NÃO comente o desempenho de pessoas; foque no processo.
 
 PARA CADA PERGUNTA, gere também EXATAMENTE 3 "respostas_rapidas" — opções curtas (1 a 5 palavras) que o gestor da fábrica pode tocar para responder com 1 clique. Regras das respostas_rapidas:
@@ -10304,27 +10319,56 @@ def _montar_bloco_lacunas(
     contexto_agregado: dict | None,
     memoria: dict | None,
 ) -> str:
-    """Bloco em texto plano com os indícios mais úteis para a IA perguntar."""
+    """Bloco em texto plano com os indícios mais úteis para a IA perguntar.
+
+    ⭐ ORDENADO E CORTADO POR TEMPO. Antes este bloco despejava as 12 descrições
+    mais frequentes, os 12 comportamentos, 8 indefinidos, 8 transições e 8
+    entradas de vocabulário — uma superfície tão grande que convidava à
+    trivialidade: era daqui que saía "limpar cavaco acontece durante o ciclo?",
+    sobre um rótulo de 0,3% do dia. Frequência não é peso: uma descrição pode
+    aparecer muito e durar nada.
+
+    Agora o que vai para o prompt é o que OCUPA TEMPO, com o % ao lado de cada
+    linha, e o que está abaixo do corte de impacto nem é oferecido. A IA não
+    consegue perguntar o que não vê.
+    """
     linhas: list[str] = []
+    pct_label = pct_por_comportamento(contexto_agregado)
 
-    # Top descrições brutas (texto cru que o VLM gerou)
-    if observacoes_brutas:
-        contagem = Counter(o["descricao"] for o in observacoes_brutas if o.get("descricao"))
-        if contagem:
-            linhas.append("Descrições brutas mais frequentes vistas nas amostras (texto cru, antes da clusterização):")
-            for desc, n in contagem.most_common(12):
-                linhas.append(f"  - {n}× \"{desc}\"")
-            linhas.append("")
-
-    # Catálogo final de comportamentos detectados, com % do tempo agregado
+    # Catálogo de comportamentos — PRIMEIRO, porque é a lista de onde as
+    # perguntas têm de citar rótulo, e ordenada por tempo.
     if contexto_agregado and contexto_agregado.get("distribuicao_comportamentos"):
-        linhas.append("Comportamentos detectados (% do tempo observado · ocorrências):")
-        for c in contexto_agregado["distribuicao_comportamentos"][:12]:
+        relevantes = [c for c in contexto_agregado["distribuicao_comportamentos"]
+                      if float(c.get("pct_do_tempo_observado") or 0) >= PERG_IMPACTO_MIN]
+        # Se NADA passa do corte, o processo está pulverizado em rótulos
+        # pequenos: oferecemos os 5 maiores mesmo assim, senão a IA fica sem
+        # vocabulário e inventa nomes — que o filtro descarta depois.
+        if not relevantes:
+            relevantes = contexto_agregado["distribuicao_comportamentos"][:5]
+        linhas.append(
+            "Comportamentos que OCUPAM TEMPO (use EXATAMENTE estes nomes em "
+            "comportamentos_relacionados; os de baixo peso foram omitidos de "
+            "propósito, não pergunte sobre eles):")
+        for c in relevantes[:8]:
             linhas.append(
                 f"  - {c['comportamento']} ({c.get('descricao','')}) — "
-                f"{c.get('pct_do_tempo_observado', 0)}% · {c.get('ocorrencias_totais', 0)} ocorrências"
+                f"{c.get('pct_do_tempo_observado', 0)}% DO TEMPO · "
+                f"{c.get('ocorrencias_totais', 0)} ocorrências"
             )
         linhas.append("")
+
+    # Descrições brutas — só as ligadas a rótulo que pesa. O texto cru ajuda a
+    # IA a perceber ambiguidade, mas sem o vínculo com tempo ele é ruído.
+    if observacoes_brutas:
+        pesadas = [o for o in observacoes_brutas if o.get("descricao") and (
+            not pct_label
+            or _pct_do_label(str(o.get("label") or ""), pct_label) >= PERG_IMPACTO_MIN)]
+        contagem = Counter(o["descricao"] for o in pesadas)
+        if contagem:
+            linhas.append("Descrições brutas dos comportamentos que pesam (texto cru do VLM, antes da clusterização):")
+            for desc, n in contagem.most_common(8):
+                linhas.append(f"  - {n}× \"{desc}\"")
+            linhas.append("")
 
     # Ações que caíram em acao_indefinida e suas descrições brutas
     if observacoes_brutas:
@@ -10354,9 +10398,13 @@ def _montar_bloco_lacunas(
             v for v in memoria["vocabulario"]
             if v.get("n_confirmacoes", 0) < 2
         ]
+        em_formacao = [
+            v for v in em_formacao
+            if not pct_label or _pct_do_label(str(v.get("label") or ""), pct_label) >= PERG_IMPACTO_MIN
+        ]
         if em_formacao:
-            linhas.append("Comportamentos com poucas confirmações ainda (vocabulário em formação):")
-            for v in em_formacao[:8]:
+            linhas.append("Comportamentos com poucas confirmações ainda (vocabulário em formação) que OCUPAM TEMPO:")
+            for v in em_formacao[:5]:
                 linhas.append(f"  - {v['label']}: {v.get('descricao', '')} ({v.get('n_confirmacoes', 0)}× confirmado)")
             linhas.append("")
 
@@ -10483,6 +10531,271 @@ def gerar_pergunta_divergencia_camera(
         return 0
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# ⭐ O 80/20 DAS PERGUNTAS — poucas, e só as que valem a interrupção.
+#
+# A fila chegou a 200 perguntas abertas e nenhuma respondida. A causa não era
+# a IA perguntar mal: era ONDE e QUANTAS VEZES ela era chamada.
+# `gerar_perguntas_processo` roda a cada VÍDEO PROCESSADO, com teto de 4. O
+# runner da borda sobe dezenas de segmentos por dia — 4 × dezenas = centenas
+# por semana. E o único freio era o dedupe por Jaccard, que só barra o texto
+# quase igual: qualquer reformulação passava.
+#
+# Duas travas, nesta ordem:
+#
+#  1. ORÇAMENTO (determinístico, ANTES de gastar token). O teto que mais
+#     importa é o de perguntas ABERTAS: com a fila cheia, o orçamento é ZERO e
+#     nada novo nasce até o gestor trabalhar o que já está lá. Isso se
+#     autorregula sozinho — sem cron, sem limpeza, sem alguém lembrando.
+#     Os tetos por dia e por semana são o pedido literal ("não pode ultrapassar
+#     de 10 por dia ou semana").
+#
+#  2. IMPACTO MEDIDO, não suposto. Uma pergunta vale o quanto de TEMPO
+#     OBSERVADO ela decide. "Limpar cavaco acontece durante o ciclo?" sobre um
+#     rótulo que ocupa 0,3% do dia não muda número nenhum — é curiosidade. A
+#     mesma pergunta sobre um rótulo de 18% redesenha o Pareto.
+#
+#     ⚠️ E pergunta SEM comportamento relacionado, ou com comportamento que não
+#     aparece na distribuição, tem impacto ZERO — não impacto desconhecido
+#     promovido a alto. É o mesmo erro que já nos custou caro em outras quatro
+#     ocasiões (bbox 0,0,0,0; MAD=0; share=1.00; acao_indefinida): AUSÊNCIA DE
+#     MEDIDA VIRANDO MEDIDA. Aqui ela é barrada por desenho.
+#
+# As chaves existem para afrouxar em campo sem deploy, não para desligar a
+# ideia: `KV_PERGUNTAS_MAX_ABERTAS`, `_MAX_DIA`, `_MAX_SEMANA`,
+# `KV_PERGUNTA_IMPACTO_MIN`.
+# ═════════════════════════════════════════════════════════════════════════
+def _int_env(chave: str, padrao: int) -> int:
+    try:
+        return max(0, int(os.environ.get(chave, str(padrao)).strip()))
+    except Exception:
+        return padrao
+
+
+PERG_MAX_ABERTAS = _int_env("KV_PERGUNTAS_MAX_ABERTAS", 3)
+PERG_MAX_DIA = _int_env("KV_PERGUNTAS_MAX_DIA", 3)
+PERG_MAX_SEMANA = _int_env("KV_PERGUNTAS_MAX_SEMANA", 10)
+try:
+    PERG_IMPACTO_MIN = float(os.environ.get("KV_PERGUNTA_IMPACTO_MIN", "5").strip())
+except Exception:
+    PERG_IMPACTO_MIN = 5.0
+
+# Rótulos que significam "o sistema não soube nomear". Perguntar sobre eles é
+# de alto valor por definição — é a pergunta que transforma tempo cego em
+# tempo classificado —, então eles entram no cálculo de impacto pelo tempo que
+# ocupam, como qualquer outro.
+_RAIZES_SEM_NOME = ("indefinid", "nao_nomeado", "nao_identificad", "generic")
+
+
+def _pct_do_label(label: str, pct_por_label: dict[str, float]) -> float:
+    """% do tempo observado de um rótulo, tolerante à família.
+
+    O cluster cria variantes (`monitorar_maquina`, `monitorar_maquina_ciclo`) e
+    a pergunta costuma citar a raiz. Casar só exato jogaria para zero uma
+    pergunta que decide a família inteira.
+    """
+    lbl = (label or "").strip().lower()
+    if not lbl:
+        return 0.0
+    if lbl in pct_por_label:
+        return pct_por_label[lbl]
+    filhos = [p for k, p in pct_por_label.items() if k.startswith(lbl + "_")]
+    if filhos:
+        return sum(filhos)
+    # A pergunta cita a variante e a distribuição tem a raiz.
+    pais = [p for k, p in pct_por_label.items() if lbl.startswith(k + "_")]
+    return max(pais) if pais else 0.0
+
+
+def pct_por_comportamento(contexto_agregado: dict | None) -> dict[str, float]:
+    """{label: % do tempo observado} a partir do contexto agregado."""
+    saida: dict[str, float] = {}
+    for c in ((contexto_agregado or {}).get("distribuicao_comportamentos") or []):
+        lbl = str(c.get("comportamento") or "").strip().lower()
+        if not lbl:
+            continue
+        try:
+            saida[lbl] = max(saida.get(lbl, 0.0), float(c.get("pct_do_tempo_observado") or 0.0))
+        except Exception:
+            continue
+    return saida
+
+
+def impacto_da_pergunta(labels, pct_por_label: dict[str, float]) -> float:
+    """% do tempo observado que a pergunta decide. SEM rótulo = 0.0.
+
+    Soma (sem contar duas vezes) os rótulos citados. É o número que separa a
+    pergunta que redesenha o Pareto da que só satisfaz curiosidade.
+    """
+    if not labels or not pct_por_label:
+        return 0.0
+    vistos: set[str] = set()
+    total = 0.0
+    for l in labels:
+        lbl = str(l or "").strip().lower()
+        if not lbl or lbl in vistos:
+            continue
+        vistos.add(lbl)
+        total += _pct_do_label(lbl, pct_por_label)
+    return round(min(100.0, total), 1)
+
+
+def orcamento_de_perguntas(sb: Client, empresa: str, processo: str) -> dict:
+    """Quantas perguntas PODEM nascer agora. Determinístico, antes do token.
+
+    Devolve `{vagas, abertas, hoje, semana, motivo}`. `vagas == 0` é o caso
+    NORMAL e esperado — a conversa rápida só volta a falar quando o gestor
+    responde o que já está aberto.
+    """
+    try:
+        linhas = varrer(sb, "perguntas_processo", "id, status, criada_em",
+                        empresa=empresa, processo=processo)
+    except Exception as e:
+        # Sem conseguir contar, NÃO liberamos cota: um erro de leitura não pode
+        # virar licença para inundar a fila de novo.
+        log.warning(f"[perguntas] não deu para ler o orçamento ({e}) — cota zero.")
+        return {"vagas": 0, "abertas": None, "hoje": None, "semana": None,
+                "motivo": "não foi possível ler a fila de perguntas"}
+
+    agora = datetime.now(timezone.utc)
+    abertas = hoje = semana = 0
+    for l in linhas:
+        if (l.get("status") or "pendente") == "pendente":
+            abertas += 1
+        dt = _parse_iso_utc_pipe(l.get("criada_em"))
+        if dt is None:
+            continue
+        idade = (agora - dt).total_seconds()
+        if idade < 86400:
+            hoje += 1
+        if idade < 7 * 86400:
+            semana += 1
+
+    vagas = min(PERG_MAX_ABERTAS - abertas,
+                PERG_MAX_DIA - hoje,
+                PERG_MAX_SEMANA - semana)
+    vagas = max(0, vagas)
+    if vagas == 0:
+        if abertas >= PERG_MAX_ABERTAS:
+            motivo = (f"{abertas} pergunta(s) ainda sem resposta — o teto é "
+                      f"{PERG_MAX_ABERTAS} abertas")
+        elif hoje >= PERG_MAX_DIA:
+            motivo = f"o teto de {PERG_MAX_DIA} pergunta(s) por dia já foi usado"
+        else:
+            motivo = f"o teto de {PERG_MAX_SEMANA} pergunta(s) por semana já foi usado"
+    else:
+        motivo = f"{vagas} vaga(s) — abertas {abertas}, hoje {hoje}, semana {semana}"
+    return {"vagas": vagas, "abertas": abertas, "hoje": hoje, "semana": semana,
+            "motivo": motivo}
+
+
+def pct_por_label_do_processo(sb: Client, empresa: str, processo: str) -> dict[str, float]:
+    """{label: % do tempo observado}, lido do banco.
+
+    O mesmo número de `pct_por_comportamento`, mas sem depender do contexto
+    agregado que só existe durante o processamento de um vídeo. É o que permite
+    medir o impacto de perguntas que JÁ estão na fila — inclusive as 200 que
+    nasceram antes de existir filtro.
+    """
+    try:
+        evs = varrer(sb, "eventos",
+                     "comportamento_label, label_corrigido, tempo_inicio_s, "
+                     "tempo_fim_s, validacao_correto, principal",
+                     empresa=empresa, processo=processo)
+    except Exception as e:
+        log.warning(f"[perguntas] não deu para medir tempo por rótulo: {e}")
+        return {}
+    dur: dict[str, float] = {}
+    for e in evs:
+        if e.get("validacao_correto") is False or e.get("principal") is False:
+            continue
+        lbl = (_label_efetivo(e) or "").strip().lower()
+        if not lbl:
+            continue
+        d = (e.get("tempo_fim_s") or 0) - (e.get("tempo_inicio_s") or 0)
+        if d > 0:
+            dur[lbl] = dur.get(lbl, 0.0) + float(d)
+    total = sum(dur.values())
+    if total <= 0:
+        return {}
+    return {k: round(v / total * 100, 1) for k, v in dur.items()}
+
+
+def priorizar_perguntas_abertas(sb: Client, empresa: str, processo: str,
+                                *, topo: int | None = None) -> dict:
+    """As perguntas ABERTAS ordenadas pelo impacto MEDIDO agora.
+
+    A fila de 200 nasceu sem nenhuma noção de peso e é servida por ordem de
+    criação — por isso o topo dela é trivialidade. Aqui cada pergunta é
+    reavaliada contra o tempo que os rótulos dela ocupam HOJE, e o que fica
+    abaixo do corte é separado (não apagado: `abaixo_do_corte` só descreve).
+    """
+    try:
+        linhas = varrer(sb, "perguntas_processo",
+                        "id, pergunta, motivo, comportamentos_relacionados, "
+                        "respostas_rapidas, status, resposta, respondida_em, "
+                        "criada_em, impacto_pct",
+                        empresa=empresa, processo=processo)
+    except Exception:
+        # Banco ainda sem `impacto_pct`: lê sem ela e mede tudo agora.
+        linhas = varrer(sb, "perguntas_processo",
+                        "id, pergunta, motivo, comportamentos_relacionados, "
+                        "respostas_rapidas, status, resposta, respondida_em, "
+                        "criada_em",
+                        empresa=empresa, processo=processo)
+    abertas = [l for l in linhas if (l.get("status") or "pendente") == "pendente"]
+    pct = pct_por_label_do_processo(sb, empresa, processo)
+    for l in abertas:
+        rel = l.get("comportamentos_relacionados")
+        medido = impacto_da_pergunta(rel if isinstance(rel, list) else [], pct)
+        # O impacto gravado no nascimento e o medido agora podem divergir (o
+        # Pareto muda). Vale o MAIOR: uma pergunta que já foi importante não
+        # vira trivial só porque o rótulo dela encolheu esta semana.
+        gravado = l.get("impacto_pct")
+        try:
+            gravado = float(gravado) if gravado is not None else 0.0
+        except Exception:
+            gravado = 0.0
+        l["impacto_pct"] = round(max(medido, gravado), 1)
+    abertas.sort(key=lambda l: (-(l["impacto_pct"] or 0.0),
+                                str(l.get("criada_em") or "")))
+    vale = [l for l in abertas if (l["impacto_pct"] or 0.0) >= PERG_IMPACTO_MIN]
+    fraco = [l for l in abertas if (l["impacto_pct"] or 0.0) < PERG_IMPACTO_MIN]
+    if topo is not None:
+        vale = vale[:topo]
+    return {"abertas": len(abertas), "valem": vale, "abaixo_do_corte": fraco,
+            "corte_pct": PERG_IMPACTO_MIN, "medidas": len(pct)}
+
+
+def arquivar_perguntas_de_baixo_impacto(sb: Client, empresa: str, processo: str,
+                                        *, manter: int = PERG_MAX_ABERTAS) -> dict:
+    """Marca como `dispensada` toda pergunta aberta abaixo do corte de impacto,
+    guardando as `manter` de maior impacto.
+
+    NÃO APAGA NADA: `dispensada` é um estado, o texto e a resposta continuam no
+    banco e o gestor pode reabrir pelo SQL. É uma ação EXPLÍCITA — nada aqui
+    roda sozinho, porque limpar a fila de alguém sem pedir é decidir por ele.
+    """
+    r = priorizar_perguntas_abertas(sb, empresa, processo)
+    guardar = {l["id"] for l in r["valem"][:manter]}
+    alvo = [l for l in (r["valem"] + r["abaixo_do_corte"]) if l["id"] not in guardar]
+    ids = [l["id"] for l in alvo if l.get("id")]
+    n = 0
+    for i in range(0, len(ids), 100):
+        lote = ids[i: i + 100]
+        try:
+            sb.table("perguntas_processo").update({"status": "dispensada"}) \
+              .in_("id", lote).execute()
+            n += len(lote)
+        except Exception as e:
+            log.warning(f"[perguntas] falha ao arquivar lote: {e}")
+    log.info(f"[perguntas] {n} arquivada(s); {len(guardar)} mantida(s) em "
+             f"{empresa}/{processo}.")
+    return {"arquivadas": n, "mantidas": len(guardar),
+            "mantidas_texto": [l["pergunta"] for l in r["valem"][:manter]],
+            "corte_pct": PERG_IMPACTO_MIN}
+
+
 def gerar_perguntas_processo(
     sb: Client,
     groq_client: Groq,
@@ -10504,7 +10817,18 @@ def gerar_perguntas_processo(
     - Faz dedupe local por Jaccard (limiar 0.6) sobre tokens normalizados.
     - Persiste e retorna apenas o que foi efetivamente gravado.
     - Pode devolver lista vazia (e isso é OK).
+
+    ⭐ ORÇAMENTO PRIMEIRO. Esta função roda a cada vídeo processado, e o runner
+    da borda sobe dezenas por dia. Sem a trava de cota ela sozinha explica a
+    fila de 200 perguntas abertas. A cota é lida ANTES da chamada ao Groq — sem
+    vaga, nem o token é gasto.
     """
+    orc = orcamento_de_perguntas(sb, empresa, processo)
+    if orc["vagas"] <= 0:
+        log.info(f"[perguntas] nada perguntado: {orc['motivo']}.")
+        return []
+    max_perguntas = min(max_perguntas, orc["vagas"])
+
     # Perguntas já existentes neste contexto
     try:
         existentes = (
@@ -10566,7 +10890,12 @@ def gerar_perguntas_processo(
 
     novas_linhas: list[dict] = []
     tokens_acc = list(existentes_tokens)  # vai crescendo pra evitar duplicatas internas no batch
-    for p in cruas[:max_perguntas]:
+    pct_label = pct_por_comportamento(contexto_agregado)
+    # ⭐ Não cortamos em `max_perguntas` aqui: primeiro medimos TODAS as
+    # candidatas por impacto e ordenamos. Cortar antes de medir seria entregar
+    # as primeiras que a LLM escreveu, não as que mais decidem — que é
+    # exatamente o oposto do 80/20.
+    for p in cruas:
         if not isinstance(p, dict):
             continue
         texto = (p.get("pergunta") or "").strip()
@@ -10578,6 +10907,14 @@ def gerar_perguntas_processo(
         comp_rel = p.get("comportamentos_relacionados")
         if not isinstance(comp_rel, list):
             comp_rel = []
+        # ⭐ O 80/20: quanto do tempo observado esta pergunta decide.
+        # Sem rótulo relacionado o impacto é ZERO, não "desconhecido" —
+        # ausência de medida não vira medida.
+        impacto = impacto_da_pergunta(comp_rel, pct_label)
+        if impacto < PERG_IMPACTO_MIN:
+            log.info(f"[perguntas] descartada por baixo impacto "
+                     f"({impacto}% < {PERG_IMPACTO_MIN}%): {texto[:60]}…")
+            continue
         # Sanitiza as 3 respostas curtas geradas pela LLM (1-5 palavras, sem vazias,
         # sem duplicatas). Se a LLM mandou bobagem, deixamos null e o frontend cai
         # no fallback Sim/Não/Às vezes.
@@ -10607,20 +10944,45 @@ def gerar_perguntas_processo(
                 "comportamentos_relacionados": [str(c) for c in comp_rel][:8],
                 "respostas_rapidas": rapidas if len(rapidas) == 3 else None,
                 "status": "pendente",
+                # Fica GRAVADO: é o que ordena a fila na tela e o que permite
+                # conferir depois se o filtro está calibrado.
+                "impacto_pct": impacto,
             }
         )
         tokens_acc.append(_normalizar_pergunta(texto))
 
+    # Maior impacto primeiro, e só então o corte pela cota.
+    novas_linhas.sort(key=lambda x: -(x.get("impacto_pct") or 0.0))
+    if len(novas_linhas) > max_perguntas:
+        log.info(f"[perguntas] {len(novas_linhas)} candidatas passaram no filtro; "
+                 f"guardando as {max_perguntas} de maior impacto.")
+        novas_linhas = novas_linhas[:max_perguntas]
+
     if not novas_linhas:
-        log.info("Nenhuma pergunta nova após dedupe.")
+        log.info("Nenhuma pergunta nova após dedupe/impacto.")
         return []
 
     try:
         r = sb.table("perguntas_processo").insert(novas_linhas).execute()
         salvas = r.data or novas_linhas
-        log.info(f"{len(salvas)} pergunta(s) proativa(s) persistida(s) em {empresa}/{processo}.")
+        log.info(f"{len(salvas)} pergunta(s) proativa(s) persistida(s) em {empresa}/{processo} "
+                 f"(impacto {[l['impacto_pct'] for l in novas_linhas]}%).")
         return salvas
     except Exception as e:
+        # Banco ainda sem a coluna nova: a pergunta é mais importante que a
+        # anotação dela. Grava sem o impacto em vez de perder a rodada — e diz
+        # em voz alta qual SQL falta.
+        if "impacto_pct" in str(e):
+            log.warning("[perguntas] coluna `impacto_pct` não existe neste banco — "
+                        "rode sql/schema.sql. Gravando sem ela.")
+            try:
+                sem = [{k: v for k, v in l.items() if k != "impacto_pct"}
+                       for l in novas_linhas]
+                r = sb.table("perguntas_processo").insert(sem).execute()
+                return r.data or sem
+            except Exception as e2:
+                log.warning(f"Falha ao persistir perguntas: {e2}")
+                return []
         log.warning(f"Falha ao persistir perguntas: {e}")
         return []
 

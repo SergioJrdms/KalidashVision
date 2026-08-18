@@ -13,6 +13,9 @@ import type {
   PadraoGlobal,
   PadraoProcesso,
   PerguntaProcesso,
+  PerguntasPrioritarias,
+  ArquivamentoPerguntas,
+  ContagemPerguntas,
   SerieTemporal,
   PrismConversa,
   PrismConversaDetalhe,
@@ -242,8 +245,18 @@ export const api = {
   perguntas: {
     listar: (processoId: string, status: "pendente" | "respondida" | "dispensada" | "todas" = "pendente") =>
       req<PerguntaProcesso[]>(`/processos/${processoId}/perguntas?status=${status}`),
+    // ⭐ A fila que o gestor vê. `/perguntas` devolve tudo por ordem de
+    // criação — e é por isso que o topo de uma fila de 200 é trivialidade.
+    // Aqui vêm poucas, ordenadas pelo tempo que cada uma DECIDE.
+    prioritarias: (processoId: string, topo = 3) =>
+      req<PerguntasPrioritarias>(
+        `/processos/${processoId}/perguntas/prioritarias?topo=${topo}`),
+    arquivarFracas: (processoId: string, manter = 3) =>
+      req<ArquivamentoPerguntas>(
+        `/processos/${processoId}/perguntas/arquivar-baixo-impacto?manter=${manter}`,
+        { method: "POST" }),
     contagem: (processoId: string) =>
-      req<{ pendentes: number }>(`/processos/${processoId}/perguntas/contagem`),
+      req<ContagemPerguntas>(`/processos/${processoId}/perguntas/contagem`),
     responder: (id: string, resposta: string) =>
       req<{ ok: boolean }>(`/perguntas/${id}/responder`, {
         method: "POST",
