@@ -75,6 +75,8 @@ from .pipeline import (
     permanencia_do_dia,
     # Sugestões por regra, a partir dos números medidos.
     sugestoes_do_posto,
+    # "Por que esta coluna está vazia?" — responde sem adivinhação.
+    estado_dos_sinais,
     # Fase 102 — a precisão da descrição, medida.
     origens_sem_observacao,
     descricoes_que_afirmam_estado,
@@ -123,6 +125,22 @@ _HISTORICO_PRESENCA = os.environ.get("KV_HISTORICO_PRESENCA", "on").strip().lowe
     "off", "0", "false", "no", "")
 
 app = FastAPI(title="Kalidash Vision", version="0.1.0")
+
+# Na subida, diz em voz alta o que está DESLIGADO. Uma coluna vazia é sempre
+# descoberta tarde, olhando o banco; aqui ela é anunciada antes de alguém
+# perguntar.
+try:
+    _sinais_boot = estado_dos_sinais()
+    if _sinais_boot["desligados"]:
+        log.warning("[sinais] DESLIGADOS nesta subida: %s — as colunas "
+                    "correspondentes vão nascer vazias. GET /diagnostico/sinais "
+                    "diz qual chave liga cada uma.",
+                    ", ".join(_sinais_boot["desligados"]))
+    else:
+        log.info("[sinais] todos os sinais ligados (versao_instrumento=%s).",
+                 _sinais_boot["versao_instrumento"])
+except Exception as _e:  # noqa: BLE001
+    log.warning("[sinais] diagnóstico de subida indisponível (%s)", _e)
 
 
 @app.on_event("startup")
@@ -1450,6 +1468,19 @@ def amostragem_veredito(
         "veredito_em": datetime.now(timezone.utc).isoformat(),
     }).eq("id", item_id).execute()
     return {"ok": True}
+
+
+@app.get("/diagnostico/sinais")
+def diagnostico_sinais(user: CurrentUser = Depends(get_current_user)):
+    """POR QUE ESTA COLUNA ESTÁ VAZIA?
+
+    Três perguntas diferentes se parecem com um `NULL` no banco: a chave está
+    ligada? o deploy subiu? a coluna existe? Este endpoint responde as três de
+    uma vez, para cada coluna que costuma nascer vazia — e responde sobre o
+    processo que está ATENDENDO agora, que é o único jeito de saber se a
+    variável que você mexeu no Render de fato chegou.
+    """
+    return {"ok": True, **estado_dos_sinais()}
 
 
 @app.get("/movimento/limiares")

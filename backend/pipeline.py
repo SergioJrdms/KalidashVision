@@ -13452,6 +13452,118 @@ def montar_insights_quantitativos(
 
 
 
+
+# ═════════════════════════════════════════════════════════════════════════
+# POR QUE ESTA COLUNA ESTÁ VAZIA? — o diagnóstico que faltava.
+#
+# Já se perdeu tempo demais nesta conversa com "a flag está ligada?", "o deploy
+# subiu?", "a coluna existe?". São três perguntas diferentes com três consertos
+# diferentes, e olhar para um `NULL` no banco não distingue nenhuma delas.
+#
+# Esta função responde as três de uma vez, para cada coluna que costuma nascer
+# vazia: QUEM a preenche, QUAL chave a governa, se essa chave está ligada
+# AGORA neste processo, e o que fazer se não estiver.
+#
+# ⚠️ Lê só variáveis de ambiente já resolvidas. Zero API, zero banco.
+# ═════════════════════════════════════════════════════════════════════════
+def estado_dos_sinais() -> dict:
+    """O que preenche cada coluna e se está ligado NESTE processo agora."""
+    sinais = [
+        {
+            "coluna": "narrativa",
+            "o_que_e": "a narrativa do minuto, em três a cinco frases",
+            "chave": "KV_NARRATIVA",
+            "ligado": _NARRATIVA,
+            "escrita_em": "eventos principais",
+            "requer_coluna_no_banco": True,
+            "se_vazia": (
+                "só nasce em vídeo processado DEPOIS do deploy — histórico não "
+                "é reprocessado. Se vídeos novos seguem vazios, o modelo está "
+                "devolvendo resumo curto demais (o filtro corta abaixo de 120 "
+                "caracteres, para uma linha não passar por narrativa)."
+            ),
+        },
+        {
+            "coluna": "trabalho",
+            "o_que_e": "a decisão binária produtivo/improdutivo do VLM",
+            "chave": "KV_PRODUTIVIDADE_OPERADOR_V9",
+            "ligado": PRODUTIVIDADE_OPERADOR_V9,
+            "escrita_em": "principais e crus",
+            "requer_coluna_no_banco": True,
+            "se_vazia": (
+                "com a chave desligada o campo é forçado a NULL na gravação, "
+                "mesmo que o modelo tenha respondido."
+            ),
+        },
+        {
+            "coluna": "maos_maquina",
+            "o_que_e": "punho dentro da zona da máquina (sensor de pose)",
+            "chave": "KV_PRODUTIVIDADE_OPERADOR_V9",
+            "ligado": PRODUTIVIDADE_OPERADOR_V9,
+            "escrita_em": "principais SEMPRE; crus só com a chave ligada",
+            "requer_coluna_no_banco": True,
+            "se_vazia": (
+                "nos CRUS, a chave desligada zera. Nos PRINCIPAIS, vazio "
+                "significa que não há zona com papel 'maquina' desenhada — sem "
+                "ela o sensor não tem onde medir."
+            ),
+        },
+        {
+            "coluna": "orientacao",
+            "o_que_e": "frente/costas/perfil em relação à câmera (sensor de pose)",
+            "chave": "KV_PRODUTIVIDADE_OPERADOR_V9",
+            "ligado": PRODUTIVIDADE_OPERADOR_V9,
+            "escrita_em": "principais SEMPRE; crus só com a chave ligada",
+            "requer_coluna_no_banco": True,
+            "se_vazia": (
+                "nos PRINCIPAIS, vazio significa que a pose não teve ombros "
+                "visíveis no minuto. Note que ESCREVER a orientação independe "
+                "de KV_ORIENTACAO_VERIFICADA — essa chave só decide se ela "
+                "DECIDE produtividade."
+            ),
+        },
+        {
+            "coluna": "decidido_por",
+            "o_que_e": "qual nível da árvore decidiu o minuto",
+            "chave": None,
+            "ligado": True,
+            "escrita_em": "eventos principais",
+            "requer_coluna_no_banco": True,
+            "se_vazia": (
+                "não tem chave — se está vazio num evento PRINCIPAL, o evento "
+                "é anterior à Fase 95. Nos crus é vazio por desenho: eles não "
+                "passam pela consolidação do minuto."
+            ),
+        },
+        {
+            "coluna": "reavaliacao",
+            "o_que_e": "o diagnóstico de por que o sistema errou, quando você corrige",
+            "chave": "KV_REAVALIAR_CORRECAO",
+            "ligado": _REAVALIAR,
+            "escrita_em": "só no evento que VOCÊ corrigiu à mão",
+            "requer_coluna_no_banco": True,
+            "se_vazia": (
+                "é o normal: só existe em evento corrigido manualmente, com a "
+                "chave ligada. Nunca aparece em ingestão."
+            ),
+        },
+    ]
+    # ⚠️ A ARMADILHA MAIS COMUM, e ela não é flag: 3 de cada 4 linhas da tabela
+    # são CRUS de auditoria (`principal = false`). Eles não passam pela
+    # consolidação do minuto, então quase todas essas colunas são vazias neles
+    # POR DESENHO. Olhar a tabela sem filtrar `principal is true` faz tudo
+    # parecer quebrado.
+    return {
+        "versao_instrumento": VERSAO_INSTRUMENTO,
+        "sinais": sinais,
+        "aviso": (
+            "A maioria das linhas de `eventos` são CRUS de auditoria "
+            "(principal = false) e não recebem estas colunas por desenho. "
+            "Filtre por `principal is true` antes de concluir que algo falhou."
+        ),
+        "desligados": [s["coluna"] for s in sinais if not s["ligado"]],
+    }
+
 # ═════════════════════════════════════════════════════════════════════════
 # SUGESTÕES DO POSTO — sobre o PROCESSO e o OPERADOR, por regra.
 #

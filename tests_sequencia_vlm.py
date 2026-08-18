@@ -204,8 +204,15 @@ check("cada amostra do grupo ainda emite a sua observação",
 print("\n[10] versao_instrumento: a quebra da série fica DENTRO do dado")
 check("a constante existe e foi bumpada (a medição mudou de novo)",
       pl.VERSAO_INSTRUMENTO >= 4, pl.VERSAO_INSTRUMENTO)
-check("é carimbada nas linhas de evento",
-      src.count('"versao_instrumento": VERSAO_INSTRUMENTO') == 2)
+# Escopo na função de PERSISTÊNCIA: contar no arquivo inteiro dava falso
+# positivo assim que outra função passou a expor a versão (o diagnóstico de
+# sinais). O que importa é que os DOIS payloads de evento — principais e crus —
+# levem o carimbo, e nenhum deles fique para trás numa refatoração.
+_persist = src.split("def gravar_eventos")[1] if "def gravar_eventos" in src else src
+_persist = _persist[:_persist.index("CHUNK = 100")] if "CHUNK = 100" in _persist else _persist
+check("é carimbada nas DUAS linhas de evento (principais e crus)",
+      _persist.count('"versao_instrumento": VERSAO_INSTRUMENTO') == 2,
+      _persist.count('"versao_instrumento": VERSAO_INSTRUMENTO'))
 sql = open("sql/schema.sql").read()
 check("a coluna existe com default 1 (todo evento antigo foi medido com o "
       "instrumento antigo — essa é a afirmação verdadeira sobre eles)",
