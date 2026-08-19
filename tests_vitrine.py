@@ -146,9 +146,15 @@ print("\n[6] A tradução é SÓ exibição — a chave nunca muda")
 # A chave é o que vai para a API. Se alguém passar o nome humano numa chamada,
 # a série histórica quebra em silêncio.
 arv = ler("pages", "Arvore.tsx")
+# A folha agora é a FAMÍLIA, e ela carrega os rótulos CRUS que somou. A
+# classificação percorre essa lista — continua mandando identificador, e agora
+# aplica a decisão a TODAS as variantes em vez de deixar as outras do lado
+# errado sem o gestor saber que existem.
 check("a classificação manda o IDENTIFICADOR, não o nome humano",
-      "label: d.comportamento" in arv,
+      "d.labels.forEach(" in arv and "classificar.mutate({ label: l, cat })" in arv,
       "Arvore.tsx pode estar mandando nome traduzido para a API")
+check("⭐ e a decisão vale para TODAS as variantes da família",
+      "vale para todas as\n                // variantes dela" in arv)
 check("nenhuma chamada de API recebe nomeHumano(",
       not re.search(r"setCategoriaPorLabel\([^)]*nomeHumano", arv))
 ev = ler("pages", "Eventos.tsx")
@@ -239,8 +245,16 @@ check("e há espinha e cotovelo — é árvore, não lista",
 # ⭐ O PEDIDO EXPLÍCITO DO DONO: "tenho tags com 0%, isso não pode."
 check("⭐ folha sem tempo medido NÃO É GALHO",
       "if (!(d.tempo_total_s > 0)) continue;" in arv)
-check("e tempo real que arredonda para zero vira '<1%', nunca '0%'",
-      'if (pct >= 1) return `${Math.round(pct)}%`;' in arv and 'return "<1%";' in arv)
+# ⚠️ Fase 109 — "<1%" SAIU, e o motivo é o mesmo que o criou. Ele nasceu certo
+# (dizer "0%" para algo que aconteceu é errado), mas apagava a informação: sete
+# folhas com "<1%" empilhadas viram um muro em que 0,4% e 0,04% — coisas muito
+# diferentes — leem igual. O contrato que importa continua de pé: NUNCA "0%".
+check("⭐ tempo real pequeno mostra o valor, não um símbolo",
+      'return "<1%"' not in arv
+      and 'pct.toFixed(1).replace(".", ",")' in arv
+      and 'pct.toFixed(2).replace(".", ",")' in arv)
+check("e nenhuma folha chega com zero (o filtro é acima)",
+      "Nenhuma folha\n *  chega aqui com zero" in arv)
 check("com o motivo escrito: ausência de medida não é medida",
       "nunca foi observada" in arv)
 check("o mesmo corte existe na ORIGEM, para não vazar por outra tela",
@@ -249,7 +263,7 @@ check("o mesmo corte existe na ORIGEM, para não vazar por outra tela",
 check("mover uma folha continua classificando, por botão",
       "onMover(t.cat)" in arv and "destinos" in arv)
 check("'sem classificação' só vira opção quando tem tempo lá",
-      'porRamo.sem.length > 0 ? ["va", "desp", "sem"] : ["va", "desp"]' in arv,
+      'porRamo.g.sem.length > 0 ? ["va", "desp", "sem"] : ["va", "desp"]' in arv,
       "aba permanentemente vazia treina o olho a ignorá-la")
 check("não se pode DESPROMOVER para 'sem classificação'",
       '"sem"' not in arv.split("const destinos")[1].split("];")[0],
