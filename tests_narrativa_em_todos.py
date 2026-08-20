@@ -70,9 +70,11 @@ check("⭐ o V8 (caminho PADRÃO) agora pede `resumo`", '"resumo"' in V8)
 check("e o gabarito JSON dele tem o campo", '{{"resumo":' in V8)
 check("o V9 continua pedindo", '{{"resumo":' in V9)
 
-check("⭐ o bloco de instruções é UM só, compartilhado pelos dois",
+# Fase 110: são TRÊS agora — o terceiro é o prompt que descreve a atividade
+# FORA do posto. O contrato é o mesmo: nenhum deles tem cópia própria do bloco.
+check("⭐ o bloco de instruções é UM só, compartilhado por todos os prompts",
       "_BLOCO_RESUMO" in fonte
-      and fonte.count("_BLOCO_RESUMO + ") == 2)
+      and fonte.count("_BLOCO_RESUMO + ") == 3)
 check("⭐ e por isso eles não podem mais divergir",
       "O CAMPO MAIS IMPORTANTE DESTA RESPOSTA" in V8
       and "O CAMPO MAIS IMPORTANTE DESTA RESPOSTA" in V9)
@@ -217,9 +219,11 @@ check("⭐ a narrativa do grupo é calculada UMA vez, antes do laço",
       "narrativa_grupo = next(" in fonte
       and fonte.index("narrativa_grupo = next(")
       < fonte.index("# ── 4) Emite as observações"))
+# Fase 110: cinco tipos de observação (entrou `fora_posto`). A regra não muda —
+# TODA observação emitida carrega a narrativa do minuto.
 check("⭐ TODAS as observações emitidas carregam a chave",
-      _emissao.count("observacoes.append({") == 4
-      and _emissao.count('"narrativa"') == 4,
+      _emissao.count("observacoes.append({") == 5
+      and _emissao.count('"narrativa"') == 5,
       (_emissao.count("observacoes.append({"), _emissao.count('"narrativa"')))
 check("o posto vazio recebe — é o que o torna auditável",
       "O QUE TORNA O \"POSTO VAZIO\" AUDITÁVEL" in fonte)

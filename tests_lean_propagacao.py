@@ -62,9 +62,25 @@ class FakeQ:
         for c in self.isnull:
             if linha.get(c) is not None:
                 return False
-        if self.ors == "categoria_lean.is.null,categoria_lean_origem.eq.herdado":
-            if not (linha.get("categoria_lean") is None
-                    or linha.get("categoria_lean_origem") == "herdado"):
+        # ⚠️ O dublê INTERPRETA o `or_`, não compara a string dele.
+        # Antes ele casava por igualdade exata com a expressão esperada — então
+        # qualquer mudança na string (mesmo correta) fazia o filtro sumir
+        # silenciosamente e TODOS os eventos passarem. O teste acusava
+        # regressão onde não havia, e — pior — deixaria de acusar onde houvesse,
+        # porque um filtro ausente é permissivo. Agora ele parseia
+        # `col.is.null` / `col.eq.valor`, como o PostgREST.
+        if self.ors:
+            passou = False
+            for termo in self.ors.split(","):
+                partes = termo.strip().split(".", 2)
+                if len(partes) != 3:
+                    continue
+                col, op, val = partes
+                if op == "is" and val == "null":
+                    passou = passou or linha.get(col) is None
+                elif op == "eq":
+                    passou = passou or linha.get(col) == val
+            if not passou:
                 return False
         return True
 

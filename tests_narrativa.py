@@ -217,10 +217,19 @@ check("o teto cresceu e tem folga fixa para o resumo",
 check("com o motivo escrito", "narrativa cortada no meio é pior que uma curta" in fonte)
 
 print("\n[6] Coluna ausente não derruba vídeo da campanha")
+# Fase 110 — a rede virou GENÉRICA. Eram quatro `if "x" not in str(erro)`
+# esperando para se empilhar; agora uma tupla de colunas opcionais cobre todas.
+# O contrato que importa não mudou: `narrativa` continua entre elas, o lote é
+# regravado sem a coluna que faltou, e erro que NÃO é sobre coluna opcional
+# continua subindo.
 check("a gravação regrava o lote SEM o campo se a coluna não existir",
-      '_l.pop("narrativa", None)' in fonte and "resp = sb.table(\"eventos\").insert(lote).execute()" in fonte)
-check("mas só quando o erro É sobre a narrativa — o resto sobe",
-      'if "narrativa" not in str(erro):' in fonte and "raise" in fonte)
+      '_l.pop(_c, None)' in fonte
+      and "resp = sb.table(\"eventos\").insert(lote).execute()" in fonte)
+check("⭐ `narrativa` está entre as colunas opcionais",
+      '_COLUNAS_OPCIONAIS_EVENTO = ("narrativa"' in fonte)
+check("mas só quando o erro É sobre coluna opcional — o resto sobe",
+      "faltando = [c for c in _COLUNAS_OPCIONAIS_EVENTO if c in str(erro)]" in fonte
+      and "if not faltando:\n                raise" in fonte)
 check("com o porquê: o vídeo carrega presença e pose, que são o produto",
       "NÃO PODE DERRUBAR UM VÍDEO DA CAMPANHA" in fonte)
 check("a LEITURA da fila também tolera a coluna ausente",

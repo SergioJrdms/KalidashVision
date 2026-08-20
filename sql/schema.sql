@@ -1611,3 +1611,43 @@ grant select, insert, update, delete on amostragem_cega to anon, authenticated;
 -- sozinha assim que a coluna existir, sem redeploy.
 -- ════════════════════════════════════════════════════════════════════════
 alter table eventos add column if not exists narrativa text;
+
+-- ═════════════════════════════════════════════════════════════════════════
+-- Fase 110 — FORA DO POSTO ≠ POSTO VAZIO.
+--
+-- `posto_vazio` significava, literalmente, "nenhuma pessoa sobreviveu ao
+-- filtro de zona". Alguém 30 cm fora do polígono produzia o mesmo dado que um
+-- chão de fábrica deserto, e o gestor via "posto vazio" num minuto em que o
+-- operador estava ali, operando a ponte rolante.
+-- ═════════════════════════════════════════════════════════════════════════
+
+-- Por que este minuto NÃO é posto vazio:
+--   'operador'      → o teste de continuidade reconheceu o operador que saiu
+--   'indeciso'      → havia alguém, não deu para dizer quem (numérico = hoje)
+--   'passante'      → gente passando; ignorado, como sempre foi
+--   'teto_chamadas' → estourou o teto de chamadas de VLM do vídeo
+-- TEXT e não BOOLEAN de propósito: um booleano colapsaria "decidimos que é o
+-- operador" com "não conseguimos dizer", que é a distinção sobre a qual o
+-- recurso inteiro se apoia.
+alter table eventos add column if not exists fora_do_posto text;
+
+-- Quantas amostras DENTRO da zona sustentaram a decisão. Sem isto o teste do
+-- passante não é reconstituível depois que o vídeo é apagado.
+alter table eventos add column if not exists fora_amostras_zona int;
+
+-- Fase 91 terminou pela metade: a cam2 já contava a cena inteira
+-- (`n_cena_cam2`) e o número morria na fronteira do insert.
+-- ⚠️ É MÁXIMO SEM CASAMENTO ENTRE CÂMERAS. `pessoas_cena_cam2 -
+-- pessoas_posto_cam2` é um PISO de "gente na cena fora do posto", não uma
+-- contagem — e nunca pode virar teste de identidade: não sabe dizer QUEM.
+alter table eventos add column if not exists pessoas_cena_cam2 int;
+
+create index if not exists idx_eventos_fora_do_posto
+    on eventos (empresa, processo, fora_do_posto)
+    where fora_do_posto is not null;
+
+-- O rótulo que nasce de atividade FORA do posto espera um humano. O
+-- classificador Lean automático pula quem tem esta marca: "operando a ponte
+-- rolante" pode ser trabalho ou não, e só o gestor sabe. Ele chega à árvore em
+-- "Sem classificação" e vale a partir do clique dele.
+alter table comportamentos add column if not exists exige_decisao_humana boolean not null default false;

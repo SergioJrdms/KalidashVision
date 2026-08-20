@@ -3218,6 +3218,10 @@ def dashboard(
         # Caso de uso comercial: identidade/presença + decisão binária da
         # descrição. Cluster, vocabulário e categoria Lean não entram na conta.
         "papel_pessoa, maos_maquina, orientacao, trabalho, descricao_bruta, "
+        # Fase 110 — sem estas duas, `decidir_permanencia` não distingue a
+        # categoria que um HUMANO deu na árvore da que a IA carimbou, e a
+        # decisão dele continua não movendo a produtividade.
+        "categoria_lean, categoria_lean_origem, "
         "n_amostras, versao_instrumento",
         empresa=user.empresa, processo=nome,
     )
@@ -4849,15 +4853,25 @@ def _aplicar_categoria_lean(sb, empresa: str, comportamento_id: str, alvo: dict,
     #     justo os que ele mais espera ver classificados.
     #  3) PRECEDÊNCIA: elegível é só `categoria_lean IS NULL` ou origem
     #     'herdado'. Antes, `neq('humano')` também sobrescrevia 'aprendido'.
+    #  4) Fase 110 — QUEM DECIDIU. A propagação escrevia 'herdado' no evento,
+    #     a mesma string que o classificador de IA usa. Indistinguíveis — e é
+    #     por isso que classificar um rótulo aqui NÃO mexia na produtividade do
+    #     dashboard: `decidir_permanencia` ignora rótulo de propósito e nunca
+    #     tinha como saber que a categoria daquele evento veio de um humano.
+    #     `humano_rotulo` é a marca que só este clique produz.
     eventos_atualizados = 0
     if alvo.get("label") and cat:
         eventos_atualizados = propagar_categoria_para_eventos(
-            sb, empresa, alvo["processo"], alvo["label"], cat)
+            sb, empresa, alvo["processo"], alvo["label"], cat,
+            origem=pl.ORIGEM_HUMANO_ROTULO)
         # Os comportamentos irmãos (mesmo label, outros processos) recebem a
-        # categoria como 'aprendido' — os eventos deles também descem.
+        # categoria como 'aprendido' — os eventos deles também descem, e
+        # também como decisão humana: é a mesma pessoa decidindo sobre a mesma
+        # atividade, só que noutro posto.
         for proc_irmao in processos_irmaos:
             eventos_atualizados += propagar_categoria_para_eventos(
-                sb, empresa, proc_irmao, alvo["label"], cat)
+                sb, empresa, proc_irmao, alvo["label"], cat,
+                origem=pl.ORIGEM_HUMANO_ROTULO)
 
     return {
         "ok": True,

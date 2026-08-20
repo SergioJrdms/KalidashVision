@@ -117,8 +117,61 @@ fonte = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "backend", "pipeline.py"), encoding="utf-8").read()
 trecho = fonte[fonte.index("def decidir_permanencia"):
                fonte.index("def _montar_placar")]
-check("a função não consulta categoria de rótulo nenhuma",
-      "cat_por_label" not in trecho and "categoria_lean" not in trecho)
+# ⭐ Fase 110 — A GARANTIA CONTINUA, COM UMA EXCEÇÃO NOMEADA E ESTREITA.
+#
+# "Nenhum rótulo move número" nasceu para impedir que o NOME que o VLM dá à
+# ação decidisse produtividade — era o teto de 75-80%, porque quase todo nome
+# que ele dá é produtivo. Isso segue valendo integralmente.
+#
+# O que passou a existir é uma porta que SÓ UM HUMANO abre: quando o operador
+# está FORA do posto e o gestor classificou aquela atividade na árvore, a
+# decisão dele vale. Não é o rótulo decidindo — é a pessoa.
+#
+# Três travas, verificadas abaixo e nos casos de comportamento:
+#   · alcançável só com `papel_pessoa == "operador_fora"`;
+#   · exige origem `humano_rotulo`, string que nenhum VLM, cluster ou
+#     classificador de IA produz;
+#   · sem ela, cai em `CATEGORIA_SEM_EVIDENCIA` — numericamente igual a hoje.
+# Escopo exato da função — o `trecho` acima vai até `_montar_placar` e carrega
+# outras funções junto, o que tornaria a asserção frouxa.
+_fn = fonte[fonte.index("def decidir_permanencia"):]
+_fn = _fn[:_fn.index("\ndef ", 1)]
+check("a função não consulta o rótulo, nem o mapa de categoria por rótulo",
+      "cat_por_label" not in _fn
+      and "comportamento_label" not in _fn)
+check("⭐ a única categoria consultada exige a marca de decisão HUMANA",
+      _fn.count("categoria_lean") == 2
+      and "ORIGEM_HUMANO_ROTULO" in _fn)
+check("⭐ e só é alcançável para quem está fora do posto",
+      'e.get("papel_pessoa") == PAPEL_OPERADOR_FORA' in _fn)
+
+# Os casos que provam as travas, no comportamento e não no texto.
+def _fora(cat=None, origem=None):
+    return {"papel_pessoa": "operador_fora", "categoria_lean": cat,
+            "categoria_lean_origem": origem}
+
+check("fora do posto SEM decisão humana → improdutivo (igual a hoje)",
+      pl.decidir_permanencia(_fora(), OPOSTA)[0] == pl.CATEGORIA_SEM_EVIDENCIA)
+check("⭐ com decisão humana na árvore → vale a decisão dele",
+      pl.decidir_permanencia(
+          _fora("valor_agregado", pl.ORIGEM_HUMANO_ROTULO), OPOSTA)[0]
+      == "valor_agregado")
+check("⭐ com categoria de origem 'herdado' → NÃO vale (guarda do 41%→81%)",
+      pl.decidir_permanencia(_fora("valor_agregado", "herdado"), OPOSTA)[0]
+      == pl.CATEGORIA_SEM_EVIDENCIA)
+check("⭐ nem com origem 'ia'",
+      pl.decidir_permanencia(_fora("valor_agregado", "ia"), OPOSTA)[0]
+      == pl.CATEGORIA_SEM_EVIDENCIA)
+check("⭐ posto_vazio com a marca humana continua improdutivo (ramo inalcançável)",
+      pl.decidir_permanencia(
+          {"papel_pessoa": "posto_vazio", "categoria_lean": "valor_agregado",
+           "categoria_lean_origem": pl.ORIGEM_HUMANO_ROTULO}, OPOSTA)[0]
+      == "desperdicio")
+check("⭐ visitante também",
+      pl.decidir_permanencia(
+          {"papel_pessoa": "visitante", "categoria_lean": "valor_agregado",
+           "categoria_lean_origem": pl.ORIGEM_HUMANO_ROTULO}, OPOSTA)[0]
+      == "desperdicio")
 
 print("\n[4] Rótulo novo não move número nenhum")
 antes = pl.decidir_permanencia(ev(label="operar_torno", orient="costas"), OPOSTA)[0]
@@ -196,10 +249,22 @@ check("com as três respostas possíveis explicadas",
 check("e falha fechado quando não identifica", "evidência visual é insuficiente" in fonte)
 check("o parser aceita só booleano de verdade (string não vira True)",
       'isinstance(t.get("trabalho"), bool)' in fonte)
+# Fase 110: `_analisar_sequencia_fora` passou a viver entre as duas, então o
+# fim da fatia é ela — senão a chamada da função nova entraria nesta contagem.
 seq = fonte[fonte.index("def _analisar_sequencia_vlm"):
-            fonte.index("def _analisar_sequencia_cam2")]
+            fonte.index("def _analisar_sequencia_fora")]
 check("nenhuma chamada NOVA na sequência", seq.count("groq_vision_call") == 1,
       seq.count("groq_vision_call"))
+# Fase 110 — existe UMA chamada nova no arquivo, e ela é de outra função:
+# `_analisar_sequencia_fora`. Não entra na sequência da cam1 (por construção o
+# polígono está vazio nesses instantes, então não há chamada onde pegar
+# carona), e tem teto por vídeo.
+_fora_fn = fonte[fonte.index("def _analisar_sequencia_fora"):
+                 fonte.index("def _analisar_sequencia_cam2")]
+check("⭐ a descrição do fora-do-posto é UMA chamada, não uma por amostra",
+      _fora_fn.count("groq_vision_call") == 1)
+check("⭐ e tem teto por vídeo", "_FORA_MAX_CHAMADAS" in fonte
+      and "n_chamadas_fora[0] >= _FORA_MAX_CHAMADAS" in fonte)
 
 print("\n[9] O julgamento do minuto: maioria, e empate vira dúvida")
 def crus(*ts):

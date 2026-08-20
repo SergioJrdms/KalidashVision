@@ -192,10 +192,20 @@ src = open(os.path.join(AQUI, "backend", "pipeline.py"), encoding="utf-8").read(
 codigo = "\n".join(l for l in src.splitlines()
                    if not l.lstrip().startswith("#"))
 
+# Fase 110 — o ramo ganhou a retenção em lista PARALELA (`fora_frame`), mas o
+# contrato desta suíte não mudou nem um milímetro: quem está fora do polígono
+# NUNCA entra em `pessoas`. O `continue` continua fechando o ramo, e nada entre
+# o `if` e ele toca `pessoas`.
+_ramo = codigo.split('if papel_z != "posto_operador":')[1].split("pessoa[\"zona\"]")[0]
 check("o loop de detecção descarta quem não é do posto com `continue`",
       'if papel_z != "posto_operador":' in codigo
-      and codigo.split('if papel_z != "posto_operador":')[1]
-              .lstrip().startswith("continue"))
+      and _ramo.rstrip().endswith("continue"))
+check("⭐ e NADA no ramo do descarte encosta em `pessoas`",
+      "pessoas.append" not in _ramo and "pessoas[" not in _ramo, _ramo)
+check("⭐ o que ele guarda vai para uma lista SEPARADA",
+      "fora_frame.append(pessoa)" in _ramo)
+check("com o motivo escrito: guardar não é admitir",
+      "Guardar não\n                            # é admitir" in src)
 check("o descarte vem ANTES de gravar zona/orientação na pessoa",
       codigo.index('if papel_z != "posto_operador":')
       < codigo.index('pessoa["zona"] = nome_z'))
