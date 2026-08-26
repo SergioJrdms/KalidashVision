@@ -132,20 +132,45 @@ function LoginBrand() {
 }
 
 export default function Login() {
+  const [modo, setModo] = useState<"entrar" | "cadastro">(
+    window.location.hash === "#cadastro" ? "cadastro" : "entrar",
+  );
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
+  const [nome, setNome] = useState("");
+  const [empresa, setEmpresa] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
+  const [okCad, setOkCad] = useState(false);
+
+  function mudarModo(novoModo: "entrar" | "cadastro") {
+    setErro(null);
+    setOkCad(false);
+    setModo(novoModo);
+    window.history.replaceState(null, "", novoModo === "cadastro" ? "#cadastro" : window.location.pathname);
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setErro(null);
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password: senha });
+    if (modo === "entrar") {
+      const { error } = await supabase.auth.signInWithPassword({ email, password: senha });
+      setLoading(false);
+      if (error) return setErro(error.message);
+      toast("Bem-vindo de volta.", { icon: "check" });
+      return;
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password: senha,
+      options: { data: { nome: nome.trim(), empresa: empresa.trim() } },
+    });
     setLoading(false);
     if (error) return setErro(error.message);
-    toast("Bem-vindo de volta.", { icon: "check" });
+    if (!data.session) setOkCad(true);
   }
 
   return (
@@ -159,14 +184,35 @@ export default function Login() {
           <div className="col" style={{ alignItems: "flex-start", gap: 18, marginBottom: 26 }}>
             <Prism size={56} ring />
             <div>
-              <h2 className="font-display" style={{ fontSize: 26, fontWeight: 700 }}>Entrar na plataforma</h2>
+              <h2 className="font-display" style={{ fontSize: 26, fontWeight: 700 }}>
+                {modo === "entrar" ? "Entrar na plataforma" : "Criar sua conta"}
+              </h2>
               <p style={{ fontSize: 14, color: "var(--muted)", marginTop: 6 }}>
-                Acesse a visão dos postos monitorados.
+                {modo === "entrar" ? "Acesse a visão dos postos monitorados." : "Cadastre sua empresa para acessar a plataforma."}
               </p>
             </div>
           </div>
 
+          {okCad ? (
+            <div className="card" style={{ padding: 22, textAlign: "center" }}>
+              <h3 className="font-display" style={{ fontSize: 18, fontWeight: 700 }}>Conta criada</h3>
+              <p style={{ color: "var(--muted)", fontSize: 13.5, marginTop: 6 }}>Confirme seu e-mail, se solicitado, e faça login.</p>
+              <Btn style={{ marginTop: 16 }} onClick={() => mudarModo("entrar")}>Ir para o login</Btn>
+            </div>
+          ) : (
           <form onSubmit={submit} className="col" style={{ gap: 15 }}>
+              {modo === "cadastro" && (
+                <>
+                  <div>
+                    <label className="label" htmlFor="signup-name">Seu nome</label>
+                    <input id="signup-name" name="name" autoComplete="name" className="field" value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Como podemos te chamar" required />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="signup-company">Nome da empresa</label>
+                    <input id="signup-company" name="organization" autoComplete="organization" className="field" value={empresa} onChange={(e) => setEmpresa(e.target.value)} placeholder="Ex.: Metalúrgica Aurora" required />
+                  </div>
+                </>
+              )}
               <div>
                 <label className="label" htmlFor="login-email">E-mail corporativo</label>
                 <div style={{ position: "relative" }}>
@@ -180,7 +226,7 @@ export default function Login() {
                 </div>
                 <div style={{ position: "relative" }}>
                   <Icon name="lock" size={16} color="var(--faint)" style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)" }} />
-                  <input id="login-password" name="password" autoComplete="current-password" className="field" style={{ paddingLeft: 38, paddingRight: 40 }} type={showPw ? "text" : "password"} value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="sua senha" required />
+                  <input id="login-password" name="password" autoComplete={modo === "cadastro" ? "new-password" : "current-password"} className="field" style={{ paddingLeft: 38, paddingRight: 40 }} type={showPw ? "text" : "password"} value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="sua senha" required minLength={modo === "cadastro" ? 6 : undefined} />
                   <button type="button" onClick={() => setShowPw((v) => !v)} aria-label={showPw ? "Ocultar senha" : "Mostrar senha"} className="center" style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", width: 26, height: 26, border: "none", background: "none", color: "var(--faint)" }}>
                     <Icon name={showPw ? "eye-off" : "eye"} size={16} />
                   </button>
@@ -195,14 +241,21 @@ export default function Login() {
                 {loading ? (
                   <><span className="spin" style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,.4)", borderTopColor: "#fff", borderRadius: "50%" }} /> Aguarde…</>
                 ) : (
-                  <>Entrar <Icon name="arrow-right" size={16} strokeWidth={2.4} /></>
+                  <>{modo === "entrar" ? "Entrar" : "Criar conta"} <Icon name="arrow-right" size={16} strokeWidth={2.4} /></>
                 )}
               </Btn>
           </form>
+          )}
 
-          <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 22, textAlign: "center" }}>
-            O acesso é liberado pela equipe SpectraAI.
-          </p>
+          {!okCad && (
+            <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 22, textAlign: "center" }}>
+              {modo === "entrar" ? (
+                <>Ainda não tem acesso? <a href="#cadastro" onClick={(e) => { e.preventDefault(); mudarModo("cadastro"); }} style={{ color: "var(--accent)", fontWeight: 600 }}>Criar conta</a></>
+              ) : (
+                <>Já tem conta? <a href="/" onClick={(e) => { e.preventDefault(); mudarModo("entrar"); }} style={{ color: "var(--accent)", fontWeight: 600 }}>Entrar</a></>
+              )}
+            </p>
+          )}
           <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 26, textAlign: "center" }}>
             © 2026 SpectraAI · Prism™
           </p>
