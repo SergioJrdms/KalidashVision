@@ -11,7 +11,8 @@ import { leanCor, leanLabel, leanLong, leanShort, type LeanShort } from "../desi
 import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut, PanelHead, Empty, Ring, toast } from "../design/ui";
 import { leituraDoPosto, nomeHumano } from "../design/rotulos";
 import type { Go } from "../design/Shell";
-import type { AcaoSugestao, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso, SugestaoPratica } from "../lib/types";
+import { ArvoreProdutividade } from "./Arvore";
+import type { AcaoSugestao, DistribuicaoComportamento, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso, SugestaoPratica } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
@@ -172,7 +173,55 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
       <OQueFazerAgora itens={det.sugestoesPraticas} />
 
       <SerieComercial pontos={p.serie_diaria} />
+
+      <ArvoreNoDashboard
+        proc={proc}
+        distribuicao={q.data.snapshot.distribuicao_comportamentos}
+      />
     </div>
+  );
+}
+
+function ArvoreNoDashboard({
+  proc,
+  distribuicao,
+}: {
+  proc: ProcHeaderMock;
+  distribuicao: DistribuicaoComportamento[];
+}) {
+  const [aberta, setAberta] = useState(false);
+  return (
+    <Card style={{ padding: 0, overflow: "hidden" }}>
+      <button
+        type="button"
+        onClick={() => setAberta((v) => !v)}
+        aria-expanded={aberta}
+        className="row"
+        style={{
+          width: "100%", border: 0, background: "transparent", cursor: "pointer",
+          padding: "17px 20px", textAlign: "left", justifyContent: "space-between", gap: 16,
+        }}
+      >
+        <span className="col" style={{ gap: 3 }}>
+          <strong className="font-display" style={{ fontSize: 17, color: "var(--ink)" }}>
+            Produtivo × improdutivo
+          </strong>
+          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+            Veja quais atividades compõem cada lado da produtividade.
+          </span>
+        </span>
+        <span className="row gap1" style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>
+          {aberta ? "Fechar árvore" : "Ver árvore"}
+          <Icon name={aberta ? "chevron-down" : "chevron-right"} size={16} />
+        </span>
+      </button>
+      {aberta && (
+        <div style={{ padding: "0 20px 20px", borderTop: "1px solid var(--line-2)" }}>
+          <div style={{ height: 16 }} />
+          <ArvoreProdutividade proc={proc} distribuicao={distribuicao} />
+        </div>
+      )}
+    </Card>
   );
 }
 

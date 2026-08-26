@@ -713,7 +713,7 @@ export interface FrameReferencia {
 
 
 // ── Fase 58/59: fila da dúvida ───────────────────────────────────────────────
-export type TipoDuvida = "sem_evidencia" | "discordancia" | "camada" | "categoria_assumida";
+export type TipoDuvida = "sem_evidencia" | "discordancia" | "camada" | "categoria_assumida" | "operador_fora_indeciso";
 
 export interface ItemDuvida {
   id: string;

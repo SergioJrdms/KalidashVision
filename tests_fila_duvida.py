@@ -1,4 +1,5 @@
 import sys, types, os
+from datetime import datetime, timezone
 sys.path.insert(0, "/home/user/KalidashVision")
 for m in ["cv2","numpy","requests","ultralytics","supabase","groq","anthropic","openai","dotenv","httpx","PIL","PIL.Image"]:
     sys.modules.setdefault(m, types.ModuleType(m))
@@ -10,6 +11,7 @@ sys.modules["numpy"].ndarray=object; sys.modules["numpy"].array=lambda s,dtype=N
 sys.modules["cv2"].pointPolygonTest=lambda *a,**k:-1.0
 os.environ.setdefault("SUPABASE_URL","https://x.supabase.co"); os.environ.setdefault("SUPABASE_KEY","k")
 from backend import pipeline as pl
+from backend import productivity as prod
 ok=fail=0
 def ck(n,c,e=""):
     global ok,fail
@@ -116,6 +118,39 @@ f9 = pl.montar_fila_duvidas(SB([e1,e2]),"U","P",tipo_filtro="sem_evidencia")
 ck("filtro por tipo funciona",
    len(f9["itens"])==1 and f9["itens"][0]["id"]=="s1", f9["itens"])
 ck("agregado por tipo NÃO some ao filtrar", len(f9["por_tipo"])==2, f9["por_tipo"])
+
+print("\n[9b] Fase 110 — indeciso chega à mesma fila sem alterar o placar")
+indeciso = ev("fora","posto_vazio",0.99,120)
+indeciso["fora_do_posto"] = "indeciso"
+passante = ev("pass","posto_vazio",0.99,120); passante["fora_do_posto"] = "passante"
+confirmado = ev("op","posto_vazio",0.99,120); confirmado["fora_do_posto"] = "operador"
+falha = ev("falha","posto_vazio",0.99,120); falha["fora_do_posto"] = "falha_vlm"
+teto = ev("teto","posto_vazio",0.99,120); teto["fora_do_posto"] = "teto_chamadas"
+d, motivo, tp = pl.evento_em_duvida(indeciso, 0.65)
+ck("fora_do_posto=indeciso vira dúvida própria",
+   d and tp == "operador_fora_indeciso", (d, motivo, tp))
+ck("motivo explica a identidade não confirmada",
+   "não foi possível confirmar" in motivo.lower() and "operador" in motivo.lower(), motivo)
+ck("passante não vira dúvida de indeciso", not pl.evento_em_duvida(passante, 0.65)[0])
+ck("operador confirmado não vira dúvida de indeciso", not pl.evento_em_duvida(confirmado, 0.65)[0])
+ck("falha_vlm não vira indeciso", not pl.evento_em_duvida(falha, 0.65)[0])
+ck("teto_chamadas não vira indeciso", not pl.evento_em_duvida(teto, 0.65)[0])
+f_ind = pl.montar_fila_duvidas(SB([indeciso, passante, confirmado, falha, teto]), "U", "P",
+                                tipo_filtro="operador_fora_indeciso")
+ck("filtro por tipo devolve somente o indeciso",
+   [i["id"] for i in f_ind["itens"]] == ["fora"], f_ind["itens"])
+base_kpi = {
+    "video_id": "v", "papel_pessoa": "posto_vazio", "tempo_inicio_s": 0,
+    "tempo_fim_s": 60, "principal": True,
+    "_capturado_em": datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc),
+    "_dia": "2026-08-17", "_cam_id": "cam1",
+}
+kpi_sem = prod.agregar_produtividade([base_kpi], agora=datetime(2026, 8, 17, 12, 3, tzinfo=timezone.utc))
+kpi_ind = prod.agregar_produtividade([{**base_kpi, "fora_do_posto": "indeciso"}], agora=datetime(2026, 8, 17, 12, 3, tzinfo=timezone.utc))
+metricas = ("produtividade_pct", "improdutividade_pct", "presenca_pct", "posto_vazio_pct")
+ck("colocar indeciso na fila não altera KPI",
+   all(kpi_sem[k] == kpi_ind[k] for k in metricas),
+   {k: (kpi_sem[k], kpi_ind[k]) for k in metricas})
 
 print("\n[10] Fase 59 — leitura AUTO-CURATIVA (o incidente do 500)")
 class SBSemColuna:

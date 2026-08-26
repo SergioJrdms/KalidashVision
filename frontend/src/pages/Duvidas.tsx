@@ -72,6 +72,13 @@ const TIPO_ROTULO: Record<string, {
       "realidade. Responda aqui embaixo o que este comportamento é — vale " +
       "para todos os trechos com o mesmo nome.",
   },
+  operador_fora_indeciso: {
+    nome: "Pessoa fora do posto — identidade incerta", cor: "#c98a00",
+    dica: "O sistema viu alguém fora da área, mas não conseguiu confirmar se era o operador.",
+    comoResolver:
+      "Compare os ângulos e confirme somente o que se vê. Esta dúvida não muda " +
+      "presença nem produtividade até receber uma decisão humana.",
+  },
 };
 
 export default function Duvidas({ proc }: { proc: ProcHeaderMock; go: Go }) {

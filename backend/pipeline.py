@@ -8370,6 +8370,12 @@ def evento_em_duvida(e: dict, limiar: float,
         return False, "", ""
     if e.get("validado_humano") and not incluir_resolvidas:
         return False, "", ""
+    # Fase 110 já preserva este caso sem atribuí-lo ao operador. A fila só dá
+    # visibilidade para a revisão humana: não altera presença nem produtividade.
+    if e.get("fora_do_posto") == "indeciso":
+        return (True,
+                "Pessoa fora do posto — não foi possível confirmar se era o operador titular.",
+                "operador_fora_indeciso")
     # AUSÊNCIA DE EVIDÊNCIA vem primeiro e é EXCLUSIVA: com menos de duas
     # amostras não existe concordância a medir — falar em "amostras
     # discordantes" aqui seria mentira. São problemas diferentes: este se
@@ -8520,7 +8526,7 @@ def montar_fila_duvidas(sb: Client, empresa: str, processo: str,
             "descricao_bruta", "tempo_inicio_s", "tempo_fim_s", "confianca",
             "n_amostras", "validado_humano", "pessoa_track_id", "papel_pessoa",
             "principal", "em_duvida", "duvida_motivo", "camadas_disparadas",
-            "n_rotulos_no_minuto", "rotulos_competindo"]
+            "n_rotulos_no_minuto", "rotulos_competindo", "fora_do_posto"]
 
     _RE_COL = __import__("re").compile(r"column\s+\S*?eventos\.(\w+)\s+does not exist")
 

@@ -118,11 +118,27 @@ type Galho = {
 const CAUDA_PCT_RAMO = 3;
 
 export default function Arvore({ proc }: { proc: ProcHeaderMock }) {
-  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["dashboard", proc.id],
     queryFn: () => api.processos.dashboard(proc.id),
   });
+  if (q.isLoading) return <Empty icon="loader" title="Montando a árvore…" />;
+  if (!q.data) {
+    return <Empty icon="alert-triangle" title="Não foi possível carregar"
+                  desc={q.error ? String((q.error as Error).message || q.error) : undefined} />;
+  }
+  return <ArvoreProdutividade proc={proc} distribuicao={q.data.snapshot.distribuicao_comportamentos} />;
+}
+
+/** Árvore funcional, reutilizável com a distribuição já carregada pelo Dashboard. */
+export function ArvoreProdutividade({
+  proc,
+  distribuicao,
+}: {
+  proc: ProcHeaderMock;
+  distribuicao: DistribuicaoComportamento[];
+}) {
+  const qc = useQueryClient();
   const [salvando, setSalvando] = useState<string | null>(null);
   const [ramo, setRamo] = useState<Ramo>("va");
 
@@ -141,7 +157,7 @@ export default function Arvore({ proc }: { proc: ProcHeaderMock }) {
     onError: (e: unknown) => toast(`Não deu para classificar: ${String(e)}`),
   });
 
-  const dist = q.data?.snapshot.distribuicao_comportamentos || [];
+  const dist = distribuicao;
 
   const porRamo = useMemo(() => {
     // Agrupa por (ramo, FAMÍLIA). A chave inclui o ramo porque duas variantes
@@ -207,12 +223,6 @@ export default function Arvore({ proc }: { proc: ProcHeaderMock }) {
     const s = porRamo.g[r].reduce((t, d) => t + d.tempo_total_s, 0);
     return totalS > 0 ? (100 * s) / totalS : 0;
   };
-
-  if (q.isLoading) return <Empty icon="loader" title="Montando a árvore…" />;
-  if (!q.data) {
-    return <Empty icon="alert-triangle" title="Não foi possível carregar"
-                  desc={q.error ? String((q.error as Error).message || q.error) : undefined} />;
-  }
 
   const nGalhos = porRamo.g.va.length + porRamo.g.desp.length + porRamo.g.sem.length;
   if (nGalhos === 0) {
