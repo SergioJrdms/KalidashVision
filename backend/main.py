@@ -3218,6 +3218,9 @@ def dashboard(
         # Caso de uso comercial: identidade/presença + decisão binária da
         # descrição. Cluster, vocabulário e categoria Lean não entram na conta.
         "papel_pessoa, maos_maquina, orientacao, trabalho, descricao_bruta, "
+        # P1 conversa: o JSONB já existente carrega a evidência auditável do
+        # interlocutor; sem projetá-lo, o KPI perderia a regra após o reload.
+        "bbox_stats, "
         # Fase 110 — sem estas duas, `decidir_permanencia` não distingue a
         # categoria que um HUMANO deu na árvore da que a IA carimbou, e a
         # decisão dele continua não movendo a produtividade.

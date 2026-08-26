@@ -34,6 +34,76 @@ EST_OPERADOR_FORA_IMPRODUTIVO = "operador_fora_improdutivo"
 EST_SEM_LEITURA = "sem_leitura"
 EST_IGNORAR = "ignorar"
 
+# Regra comercial de conversa. Estes valores só têm efeito quando aparecem
+# juntos com a evidência visual estruturada gravada em
+# ``bbox_stats.interlocutor``; o texto e o rótulo, isoladamente, nunca votam.
+LABEL_CONVERSANDO_GESTOR = "conversando_gestor"
+LABEL_CONVERSANDO_COLEGA = "conversando_colega"
+LABEL_CONVERSANDO_INCERTO = "conversando_interlocutor_incerto"
+TIPO_INTERLOCUTOR_GESTOR = "gestor_cinza"
+TIPO_INTERLOCUTOR_COLEGA = "outra_pessoa"
+TIPO_INTERLOCUTOR_INCERTO = "incerto"
+CONFIANCA_COR_GESTOR_MIN = 0.72
+
+
+def decisao_conversa_evidenciada(e: dict) -> tuple[str, str] | None:
+    """Decisão estreita da conversa, ou ``None`` sem o contrato completo.
+
+    A regra exige quatro peças coerentes produzidas no mesmo frame: rótulo
+    canônico ORIGINAL, booleano ``trabalho``, associação estruturada ao
+    interlocutor e classificação objetiva da roupa superior. Assim, nem uma
+    correção textual para "gestor" nem um label inventado pelo cluster movem o
+    KPI. O recorte auditável viaja no JSONB ``bbox_stats``, já existente.
+    """
+    if _texto_normalizado(e.get("papel_pessoa")) != "operador":
+        return None
+    stats = e.get("bbox_stats")
+    evidencia = stats.get("interlocutor") if isinstance(stats, dict) else None
+    if not isinstance(evidencia, dict):
+        return None
+
+    label = _texto_normalizado(e.get("comportamento_label"))
+    tipo = _texto_normalizado(evidencia.get("tipo"))
+    cor = _texto_normalizado(evidencia.get("cor_superior"))
+    conversa_estado = _texto_normalizado(evidencia.get("conversa_estado"))
+    trabalho = e.get("trabalho")
+    try:
+        confianca = float(evidencia.get("confianca_cor"))
+    except (TypeError, ValueError):
+        confianca = 0.0
+
+    if (
+        label == LABEL_CONVERSANDO_GESTOR
+        and trabalho is True
+        and conversa_estado == "identificada"
+        and tipo == TIPO_INTERLOCUTOR_GESTOR
+        and cor == "cinza"
+        and confianca >= CONFIANCA_COR_GESTOR_MIN
+    ):
+        return EST_PRODUTIVO, "conversa_com_gestor_cinza"
+
+    if (
+        label == LABEL_CONVERSANDO_COLEGA
+        and trabalho is False
+        and conversa_estado == "identificada"
+        and tipo == TIPO_INTERLOCUTOR_COLEGA
+        and cor == "nao_cinza"
+        and confianca >= CONFIANCA_COR_GESTOR_MIN
+    ):
+        return EST_IMPRODUTIVO, "conversa_com_colega_nao_cinza"
+
+    # A conversa foi observada, mas a roupa/associação não autorizou afirmar
+    # gestor. Mantém a convenção conservadora anterior: não rende produtividade.
+    if (
+        label == LABEL_CONVERSANDO_INCERTO
+        and trabalho is False
+        and conversa_estado in {"identificada", "incerta"}
+        and tipo == TIPO_INTERLOCUTOR_INCERTO
+        and cor == "incerto"
+    ):
+        return EST_IMPRODUTIVO, "conversa_com_interlocutor_incerto"
+    return None
+
 
 def _numero(v: Any) -> float | None:
     if v is None or isinstance(v, bool):
@@ -150,6 +220,14 @@ def classificar_observacao(
         return EST_OPERADOR_AUSENTE, "outra_pessoa_no_posto"
     if papel != "operador":
         return EST_SEM_LEITURA, "papel_indefinido"
+
+    # Exceção comercial estreita, antes de mãos/orientação: conversar com o
+    # gestor continua produtivo mesmo de lado; conversar com colega continua
+    # improdutivo mesmo se a pose apontar para o torno. A evidência visual
+    # completa é obrigatória — label ou prosa sozinhos não entram aqui.
+    conversa = decisao_conversa_evidenciada(e)
+    if conversa is not None:
+        return conversa
 
     if e.get("maos_maquina") is True:
         return EST_PRODUTIVO, "maos_no_torno"

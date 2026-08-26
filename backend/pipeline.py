@@ -32,6 +32,17 @@ import cv2
 import numpy as np
 from groq import Groq
 from supabase import Client, create_client
+from .productivity import (
+    CONFIANCA_COR_GESTOR_MIN,
+    LABEL_CONVERSANDO_COLEGA,
+    LABEL_CONVERSANDO_GESTOR,
+    LABEL_CONVERSANDO_INCERTO,
+    TIPO_INTERLOCUTOR_COLEGA,
+    TIPO_INTERLOCUTOR_GESTOR,
+    TIPO_INTERLOCUTOR_INCERTO,
+    decisao_conversa_evidenciada,
+)
+from .roupa_superior import avaliar_roupa_superior
 # NOTA: `from ultralytics import YOLO` foi removido do topo de propósito.
 # torch + ultralytics pesam centenas de MB no boot do uvicorn. Como o módulo
 # usa `from __future__ import annotations`, as anotações de tipo `YOLO` são
@@ -2204,8 +2215,11 @@ Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índ
 - "operador" é obrigatório somente em "identificado" e deve ser um rótulo visível naquela imagem; nos outros estados deve ser null;
 - "trabalho" só pode ser true/false em "identificado"; nos outros estados deve ser null;
 - "motivo" deve ser um destes valores: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa_ou_celular", "sem_atividade", "sem_leitura".
+- "conversa_estado" deve ser "identificada" SOMENTE quando o operador está claramente conversando e há exatamente um interlocutor marcado; "incerta" quando a conversa é visível mas não dá para associar com segurança a uma única pessoa; "ausente" quando não há conversa;
+- "interlocutor" é obrigatório somente em conversa "identificada" e deve ser o rótulo da OUTRA pessoa, nunca o operador. Em conversa incerta/ausente deve ser null. Com duas pessoas possíveis, NÃO escolha arbitrariamente: use "incerta".
+- NÃO julgue cor de roupa nem diga quem é gestor. O sistema mede a roupa superior separadamente; você apenas associa a conversa à pessoa certa.
 
-{{"resumo": "TRÊS A CINCO FRASES contando a sequência em ordem, sem concluir uma ação. É o campo mais longo desta resposta.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "conversando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "ausente", "operador": null, "acoes": {{"P1": "passando ao lado do posto"}}, "imovel": false, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
+{{"resumo": "TRÊS A CINCO FRASES contando a sequência em ordem, sem concluir uma ação. É o campo mais longo desta resposta.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "observando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno", "conversa_estado": "ausente", "interlocutor": null}}, {{"i": 1, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "conversando ao lado do torno", "P2": "conversando com o operador"}}, "imovel": true, "trabalho": false, "motivo": "conversa_ou_celular", "conversa_estado": "identificada", "interlocutor": "P2"}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA_CAM2_V8 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
@@ -3053,6 +3067,9 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #   9 = caso de uso comercial do torno: P1/P2 são candidatos, o VLM escolhe o
 #       ocupante funcional por frame e decide `trabalho` diretamente. Sinais de
 #       visitante não entram no operador e identidade ambígua vira inconclusiva.
+#  10 = conversa associa um interlocutor estruturado e mede S+V somente no
+#       tronco superior dele; cinza seguro vira gestor, demais casos fecham para
+#       colega/incerto sem deixar label ou prosa promover produtividade.
 def _env_ligada(nome: str, padrao: str = "off") -> bool:
     """Flags críticas são fail-closed: só uma allowlist explícita liga."""
     return os.environ.get(nome, padrao).strip().lower() in {
@@ -3068,7 +3085,7 @@ except (TypeError, ValueError):
 # A flag é comportamental e o carimbo acompanha a flag. Assim uma env antiga
 # fixada em 8 nunca consegue gravar comportamento novo como se fosse V8, e a
 # V9 pode ser desligada sem apagar dado algum.
-VERSAO_INSTRUMENTO = 9 if PRODUTIVIDADE_OPERADOR_V9 else min(8, _VERSAO_LEGADA)
+VERSAO_INSTRUMENTO = 10 if PRODUTIVIDADE_OPERADOR_V9 else min(8, _VERSAO_LEGADA)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -3724,6 +3741,18 @@ def etapa_detectar_e_amostrar(
                             p.pop("_papel_zona", None)
                     for i, p in enumerate(pessoas):
                         p["rotulo"] = f"P{i + 1}"
+                        if modo_op and PRODUTIVIDADE_OPERADOR_V9:
+                            # A identidade ainda está em aberto, então a medida
+                            # é calculada para todos os candidatos enquanto o
+                            # frame existe. Só o track que o contrato estrutural
+                            # apontar como INTERLOCUTOR será consumido depois;
+                            # a roupa do operador nunca decide a regra.
+                            p["roupa_superior"] = avaliar_roupa_superior(
+                                frame,
+                                p.get("bbox"),
+                                kpts=p.get("kpts"),
+                                exigir_pose=True,
+                            )
                     # Fase 83: descritor por track, DEPOIS da eleição de papel
                     # (para o descritor saber se este track é o titular) e ainda
                     # com o frame vivo.
@@ -3980,6 +4009,7 @@ def _interpolar_sequencia(descricoes: dict, idx_cam1: list) -> set:
             "operador_track_id": None,
             "trabalho": None,
             "produtividade_motivo": "sem_leitura",
+            "interlocutor_evidencia": None,
         }
         interpolados.add(i)
     return interpolados
@@ -4259,6 +4289,123 @@ def _resumo_da_sequencia(bruto: dict) -> str | None:
     return montada
 
 
+def _evidencia_conversa_do_trecho(
+    trecho: dict,
+    amostra: Amostra,
+    mapa_rotulo_track: dict[str, int],
+    operador_tid: int | None,
+    motivo: str,
+) -> dict | None:
+    """Resolve conversa + interlocutor sem usar texto ou escolher pessoa.
+
+    O VLM associa a conversa a um rótulo visível; a CPU consulta a medida HSV
+    que já foi feita no tronco daquele track. Se a associação ou a cor não
+    fechar, o resultado é ``incerto``. Campo ausente/malformado não confirma
+    nem mesmo a conversa e preserva o fluxo anterior.
+    """
+    if operador_tid is None or motivo != "conversa_ou_celular":
+        return None
+    estado = str(trecho.get("conversa_estado") or "").strip().lower()
+    interlocutor_rotulo = trecho.get("interlocutor")
+    if estado == "ausente" and interlocutor_rotulo is None:
+        return None
+    if estado not in {"identificada", "incerta"}:
+        return None
+
+    base = {
+        "conversa_estado": estado,
+        "tipo": TIPO_INTERLOCUTOR_INCERTO,
+        "cor_superior": "incerto",
+        "confianca_cor": 0.0,
+        "origem": "vlm_interlocutor+roupa_superior_hsv",
+    }
+    if estado == "incerta":
+        return {**base, "motivo_cor": "interlocutor_ambiguo"}
+    if not isinstance(interlocutor_rotulo, str):
+        return {**base, "motivo_cor": "interlocutor_ausente"}
+
+    interlocutor_tid = mapa_rotulo_track.get(interlocutor_rotulo)
+    # A roupa do próprio operador é terminantemente inelegível. Rótulo
+    # inexistente, igual ao operador ou duplicado pelo modelo vira incerteza.
+    if interlocutor_tid is None or interlocutor_tid == operador_tid:
+        return {**base, "motivo_cor": "associacao_invalida"}
+    pessoa = next(
+        (p for p in amostra.pessoas if p.get("track_id") == interlocutor_tid),
+        None,
+    )
+    roupa = pessoa.get("roupa_superior") if isinstance(pessoa, dict) else None
+    if not isinstance(roupa, dict):
+        return {
+            **base,
+            "interlocutor_track_id": int(interlocutor_tid),
+            "motivo_cor": "medida_ausente",
+        }
+
+    evidencia = {
+        **base,
+        "interlocutor_track_id": int(interlocutor_tid),
+        **{
+            k: roupa.get(k)
+            for k in (
+                "cor_superior", "confianca_cor", "qualidade",
+                "pixels_utilizaveis", "saturacao_mediana", "brilho_mediano",
+                "brilho_p10", "brilho_p90", "fracao_neutra",
+                "fracao_cinza_compativel", "motivo_cor",
+            )
+            if roupa.get(k) is not None
+        },
+    }
+    cor = evidencia.get("cor_superior")
+    try:
+        confianca = float(evidencia.get("confianca_cor") or 0.0)
+    except (TypeError, ValueError):
+        confianca = 0.0
+    if cor == "cinza" and confianca >= CONFIANCA_COR_GESTOR_MIN:
+        evidencia["tipo"] = TIPO_INTERLOCUTOR_GESTOR
+    elif cor == "nao_cinza" and confianca >= CONFIANCA_COR_GESTOR_MIN:
+        evidencia["tipo"] = TIPO_INTERLOCUTOR_COLEGA
+    else:
+        evidencia.update({
+            "tipo": TIPO_INTERLOCUTOR_INCERTO,
+            "cor_superior": "incerto",
+        })
+    return evidencia
+
+
+def _aplicar_regra_conversa(
+    evidencia: dict | None,
+    trabalho,
+    motivo: str,
+) -> tuple[bool | None, str]:
+    """Aplica somente os três estados produzidos pelo contrato acima."""
+    tipo = (evidencia or {}).get("tipo")
+    if tipo == TIPO_INTERLOCUTOR_GESTOR:
+        return True, "conversa_gestor_cinza"
+    if tipo == TIPO_INTERLOCUTOR_COLEGA:
+        return False, "conversa_colega_nao_cinza"
+    if tipo == TIPO_INTERLOCUTOR_INCERTO:
+        return False, "conversa_interlocutor_incerto"
+    return trabalho, motivo
+
+
+_LABEL_POR_INTERLOCUTOR = {
+    TIPO_INTERLOCUTOR_GESTOR: LABEL_CONVERSANDO_GESTOR,
+    TIPO_INTERLOCUTOR_COLEGA: LABEL_CONVERSANDO_COLEGA,
+    TIPO_INTERLOCUTOR_INCERTO: LABEL_CONVERSANDO_INCERTO,
+}
+_DESCRICOES_CONVERSA_VISUAL = {
+    LABEL_CONVERSANDO_GESTOR: "conversando com gestor de roupa superior cinza",
+    LABEL_CONVERSANDO_COLEGA: "conversando com colega",
+    LABEL_CONVERSANDO_INCERTO: "conversando com interlocutor não determinado",
+}
+
+
+def _label_conversa_evidenciada(evidencia: dict | None) -> str | None:
+    if not isinstance(evidencia, dict):
+        return None
+    return _LABEL_POR_INTERLOCUTOR.get(evidencia.get("tipo"))
+
+
 def _analisar_sequencia_vlm(
     groq_client: Groq,
     grupo: list[Amostra],
@@ -4471,6 +4618,19 @@ def _analisar_sequencia_vlm(
             if estado == "identificado"
             else None
         )
+        evidencia_interlocutor = (
+            _evidencia_conversa_do_trecho(
+                t, am, mapa, operador_tid, motivo,
+            )
+            if estado == "identificado"
+            # Reaproveita a guarda do contrato V9 para exigir uma descrição
+            # observada, mas não deixa o booleano genérico decidir a nova regra.
+            and _trabalho_v9_validado(False, motivo, acao_operador) is False
+            else None
+        )
+        trabalho, motivo = _aplicar_regra_conversa(
+            evidencia_interlocutor, trabalho, motivo,
+        )
 
         destino = idx_no_grupo[id(am)]
         bloco = {
@@ -4482,6 +4642,7 @@ def _analisar_sequencia_vlm(
             "operador_track_id": operador_tid,
             "trabalho": trabalho,
             "produtividade_motivo": motivo,
+            "interlocutor_evidencia": evidencia_interlocutor,
             # A narrativa é do MINUTO, não do instante — por isso ela viaja
             # igual em todas as observações do grupo. Quem a grava é o evento,
             # uma vez só.
@@ -4496,6 +4657,7 @@ def _analisar_sequencia_vlm(
                 "operador_track_id": None,
                 "trabalho": None,
                 "produtividade_motivo": "sem_leitura",
+                "interlocutor_evidencia": None,
             })
             saida[destino] = anterior
             continue
@@ -5519,6 +5681,14 @@ def etapa_analise_vlm(
                     "produtividade_motivo": (
                         cena_motivo if papel_obs == "operador" else None
                     ),
+                    # Associação + S/V do recorte pertencem exclusivamente ao
+                    # operador escolhido neste instante. A observação do
+                    # visitante não herda a decisão da cena.
+                    "interlocutor_evidencia": (
+                        _bloco.get("interlocutor_evidencia")
+                        if papel_obs == "operador" and i not in interp
+                        else None
+                    ),
                     # A narrativa é do MINUTO inteiro, então é a MESMA em todas
                     # as observações do grupo — inclusive nas de visitante: ela
                     # conta a cena, não julga a pessoa.
@@ -5892,6 +6062,35 @@ def _bbox_jsonb(b) -> dict | None:
     return {"x1": int(b[0]), "y1": int(b[1]), "x2": int(b[2]), "y2": int(b[3])}
 
 
+def _melhor_evidencia_interlocutor(*evidencias) -> dict | None:
+    candidatas = [e for e in evidencias if isinstance(e, dict)]
+    if not candidatas:
+        return None
+    tipos = {e.get("tipo") for e in candidatas}
+    if len(tipos) > 1:
+        # A mesma fatia não pode alternar gestor/colega e continuar afirmando
+        # certeza. O label normalmente já quebra o evento antes; esta é defesa
+        # adicional para chamadas diretas/testes e futuras refatorações.
+        return {
+            "conversa_estado": "incerta",
+            "tipo": TIPO_INTERLOCUTOR_INCERTO,
+            "cor_superior": "incerto",
+            "confianca_cor": 0.0,
+            "motivo_cor": "evidencias_em_conflito",
+            "origem": "vlm_interlocutor+roupa_superior_hsv",
+        }
+
+    def _score(e):
+        try:
+            return float(e.get("confianca_cor") or 0.0) * float(
+                e.get("qualidade") or 1.0
+            )
+        except (TypeError, ValueError):
+            return 0.0
+
+    return dict(max(candidatas, key=_score))
+
+
 def _abrir_evento(tid: int, o: dict) -> dict:
     """Abre um evento a partir da 1ª observação dele. `bbox_inicio` fica NULO
     quando a observação não tem caixa (posto vazio, ponte temporal) — antes
@@ -5945,6 +6144,7 @@ def _abrir_evento(tid: int, o: dict) -> dict:
                      if o.get("produtividade_observada")
                      and isinstance(o.get("trabalho"), bool) else None),
         "produtividade_motivo": o.get("produtividade_motivo"),
+        "interlocutor_evidencia": o.get("interlocutor_evidencia"),
         # Votos separados do texto/label. O evento pode manter a mesma ação e
         # mudar de produtividade; guardar apenas o primeiro frame congelava o
         # julgamento até o fim do trecho.
@@ -5978,7 +6178,22 @@ def etapa_segmentar_eventos(
     intervalo_s: float,
 ) -> list[dict]:
     for o in observacoes_brutas:
-        lbl = label_de(o["descricao"], o.get("maquina"), o.get("imovel"))
+        lbl_forcado = _label_conversa_evidenciada(
+            o.get("interlocutor_evidencia")
+        )
+        lbl_cluster = label_de(
+            o["descricao"], o.get("maquina"), o.get("imovel")
+        )
+        if lbl_forcado:
+            # Única porta de entrada de ``conversando_gestor``: associação do
+            # VLM + classe objetiva do recorte superior. O cluster não decide.
+            lbl = lbl_forcado
+        elif familia_label(lbl_cluster) == LABEL_CONVERSANDO_GESTOR:
+            # Um nome plausível vindo só da prosa não pode afirmar gestor.
+            # Volta à taxonomia genérica histórica, sem backfill nem promoção.
+            lbl = LABEL_CONVERSANDO_COLEGA
+        else:
+            lbl = lbl_cluster
         # Fase 100: None = o cluster não nomeou. O evento continua existindo (a
         # pessoa estava lá, o minuto é real), mas nasce SEM NOME e marcado para
         # a fila. `nao_nomeado` é o carimbo do estado — a coluna é NOT NULL e a
@@ -6066,6 +6281,10 @@ def etapa_segmentar_eventos(
                 if (o.get("produtividade_observada")
                         and isinstance(o.get("trabalho"), bool)):
                     atual["_trabalho"][o["trabalho"]] += 1
+                atual["interlocutor_evidencia"] = _melhor_evidencia_interlocutor(
+                    atual.get("interlocutor_evidencia"),
+                    o.get("interlocutor_evidencia"),
+                )
             else:
                 eventos.append(atual)
                 atual = _abrir_evento(tid, o)
@@ -6092,6 +6311,10 @@ def etapa_segmentar_eventos(
         # Fase 82: fecha o resumo do corpo com as caixas acumuladas do evento.
         e["bbox_stats"] = _resumo_bbox(e.pop("_caixas", []), e.pop("_dim", None),
                                        e.get("bbox_cam"))
+        _ev_interlocutor = e.pop("interlocutor_evidencia", None)
+        if _ev_interlocutor:
+            e["bbox_stats"] = dict(e.get("bbox_stats") or {})
+            e["bbox_stats"]["interlocutor"] = _ev_interlocutor
 
     return eventos
 
@@ -6353,6 +6576,21 @@ def etapa_consolidar_principais(
         else:
             papel_minuto = rep.get("papel_pessoa")
             bucket_operador = no_bucket
+        _bbox_principal = _merge_bbox_stats(
+            [e for e, _ in bucket_papel
+             if e.get("pessoa_track_id") == rep.get("pessoa_track_id")]
+        )
+        # A evidência do interlocutor acompanha SOMENTE os crus do label
+        # vencedor. Misturar uma conversa curta com outra ação do mesmo track
+        # faria a aparência de P2 decidir um principal que não é conversa.
+        _interlocutor_principal = _melhor_evidencia_interlocutor(*[
+            (e.get("bbox_stats") or {}).get("interlocutor")
+            for e, _ov in reps
+            if isinstance(e.get("bbox_stats"), dict)
+        ])
+        if _interlocutor_principal:
+            _bbox_principal = dict(_bbox_principal or {})
+            _bbox_principal["interlocutor"] = _interlocutor_principal
         principais.append({
             "pessoa_track_id": rep["pessoa_track_id"],
             # A narrativa do minuto vem de qualquer observação do balde — é a
@@ -6374,9 +6612,7 @@ def etapa_consolidar_principais(
             "bbox_inicio": (list(rep["bbox_inicio"]) if rep.get("bbox_inicio")
                             else None),
             "bbox_cam": rep.get("bbox_cam"),
-            "bbox_stats": _merge_bbox_stats(
-                [e for e, _ in bucket_papel
-                 if e.get("pessoa_track_id") == rep.get("pessoa_track_id")]),
+            "bbox_stats": _bbox_principal,
             "maos_maquina": (True if any(e.get("maos_maquina")
                                          for e, _ in bucket_operador) else None),
             # Fase 97: a orientação DOMINANTE do minuto — é ela que decide o
@@ -8534,6 +8770,21 @@ def etapa_persistir(
     video_id = video_row.data[0]["id"]
 
     por_label = Counter(e["comportamento_label"] for e in eventos)
+    # A categoria da árvore nasce da MESMA evidência visual do KPI. Só eventos
+    # que fecham o contrato completo entram neste mapa; um label de cluster não
+    # consegue fabricar ``valor_agregado``.
+    _categoria_conversa_visual: dict[str, str] = {}
+    for _e in eventos:
+        _dec = decisao_conversa_evidenciada(_e)
+        if _dec is None:
+            continue
+        _categoria_conversa_visual[_e["comportamento_label"]] = (
+            "valor_agregado" if _dec[0] == "produtivo" else "desperdicio"
+        )
+    catalogo = dict(catalogo)
+    for _lbl in _categoria_conversa_visual:
+        if _lbl in _DESCRICOES_CONVERSA_VISUAL:
+            catalogo.setdefault(_lbl, _DESCRICOES_CONVERSA_VISUAL[_lbl])
     # ⭐ Fase 110 — QUAIS RÓTULOS NASCERAM FORA DO POSTO. Um rótulo que só
     # aparece em eventos `operador_fora` descreve atividade que o sistema não
     # tem como julgar: "operando a ponte rolante" pode ser trabalho ou não, e
@@ -8557,7 +8808,7 @@ def etapa_persistir(
         so_fora = bool(_por_fora.get(label))
         existente = (
             sb.table("comportamentos")
-            .select("id, total_ocorrencias")
+            .select("id, total_ocorrencias, categoria_lean, categoria_lean_origem")
             .eq("empresa", empresa)
             .eq("processo", processo)
             .eq("label", label)
@@ -8574,16 +8825,34 @@ def etapa_persistir(
             # de dentro do posto.
             if so_fora:
                 _upd["exige_decisao_humana"] = True
+            _cat_visual = _categoria_conversa_visual.get(label)
+            # O histórico ``conversando_colega`` não é reclassificado. Para a
+            # tag nova de gestor/incerto, preserva uma eventual decisão humana.
+            if (
+                _cat_visual
+                and label != LABEL_CONVERSANDO_COLEGA
+                and atual.get("categoria_lean_origem") != "humano"
+            ):
+                _upd.update({
+                    "categoria_lean": _cat_visual,
+                    "categoria_lean_origem": "ia",
+                })
             _upsert_comportamento(sb, atual["id"], _upd)
         else:
-            _inserir_comportamento(sb, {
+            _novo_comportamento = {
                 "empresa": empresa,
                 "processo": processo,
                 "label": label,
                 "descricao": descricao,
                 "total_ocorrencias": n_neste_video,
                 "exige_decisao_humana": so_fora,
-            })
+            }
+            if label in _categoria_conversa_visual:
+                _novo_comportamento.update({
+                    "categoria_lean": _categoria_conversa_visual[label],
+                    "categoria_lean_origem": "ia",
+                })
+            _inserir_comportamento(sb, _novo_comportamento)
 
     # Fase 55 — HERANÇA NA INGESTÃO: se o comportamento já tem categoria, o
     # evento NASCE com ela (origem 'herdado'). Sem isto, todo vídeo novo
@@ -8755,7 +9024,15 @@ def etapa_persistir(
         if e.get("camadas_avaliadas") is not None:
             row["camadas_avaliadas"] = e["camadas_avaliadas"]
         _cat_h = cat_ingestao.get(e["comportamento_label"])
-        if _cat_h:
+        _dec_visual = decisao_conversa_evidenciada(e)
+        _cat_visual_evento = (
+            "valor_agregado" if _dec_visual and _dec_visual[0] == "produtivo"
+            else "desperdicio" if _dec_visual else None
+        )
+        if _cat_visual_evento:
+            row["categoria_lean"] = _cat_visual_evento
+            row["categoria_lean_origem"] = "ia"
+        elif _cat_h:
             row["categoria_lean"] = _cat_h
             # Decisão humana do rótulo continua valendo nas ocorrências
             # futuras, mas a exceção P3 permanece estreita: só um
@@ -8775,6 +9052,12 @@ def etapa_persistir(
     # Fase 16: eventos crus só como AUDITORIA (principal=False) — não contam em
     # comportamentos/total_eventos nem viram sugestão de validação.
     for e in (eventos_auditoria or []):
+        _dec_visual_aud = decisao_conversa_evidenciada(e)
+        _cat_visual_aud = (
+            "valor_agregado"
+            if _dec_visual_aud and _dec_visual_aud[0] == "produtivo"
+            else "desperdicio" if _dec_visual_aud else None
+        )
         linhas_eventos.append({
             "video_id": video_id, "empresa": empresa, "processo": processo,
             "pessoa_track_id": e["pessoa_track_id"],
@@ -8816,6 +9099,9 @@ def etapa_persistir(
             "validado_humano": True,
             "principal": False,
             **({
+                "categoria_lean": _cat_visual_aud,
+                "categoria_lean_origem": "ia",
+            } if _cat_visual_aud else {
                 "categoria_lean": cat_ingestao[e["comportamento_label"]],
                 "categoria_lean_origem": (
                     ORIGEM_HUMANO_ROTULO
@@ -14075,6 +14361,19 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
         # 1c — posto vazio / visitante: inalterado.
         return ("desperdicio", NIVEL_PRESENCA,
                 "fora do posto — medido por zona e rastreamento", estado)
+
+    # Regra de conversa só depois de identidade e do ramo Fase 110, mas antes
+    # de orientação. Assim gestor/colega vencem a pose apenas quando o recorte
+    # auditável, o label canônico original e `trabalho` são coerentes.
+    conversa = decisao_conversa_evidenciada(e)
+    if conversa is not None:
+        _estado_conversa, _motivo_conversa = conversa
+        return (
+            "valor_agregado" if _estado_conversa == "produtivo" else "desperdicio",
+            "julgamento_visual_roupa",
+            _motivo_conversa.replace("_", " "),
+            estado,
+        )
 
     # ── 2 — no posto, voltado para o torno ──
     if estado == EST_NO_TORNO:
