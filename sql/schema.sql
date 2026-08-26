@@ -1626,6 +1626,7 @@ alter table eventos add column if not exists narrativa text;
 --   'indeciso'      → havia alguém, não deu para dizer quem (numérico = hoje)
 --   'passante'      → gente passando; ignorado, como sempre foi
 --   'teto_chamadas' → estourou o teto de chamadas de VLM do vídeo
+--   'falha_vlm'     → descrição falhou/veio sem ação (numérico = posto vazio)
 -- TEXT e não BOOLEAN de propósito: um booleano colapsaria "decidimos que é o
 -- operador" com "não conseguimos dizer", que é a distinção sobre a qual o
 -- recurso inteiro se apoia.

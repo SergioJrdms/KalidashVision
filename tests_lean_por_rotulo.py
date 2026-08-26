@@ -70,9 +70,18 @@ class FakeQ:
         for c in self.isnull:
             if linha.get(c) is not None:
                 return False
-        if self.ors == "categoria_lean.is.null,categoria_lean_origem.eq.herdado":
-            if not (linha.get("categoria_lean") is None
-                    or linha.get("categoria_lean_origem") == "herdado"):
+        if self.ors:
+            passou = False
+            for termo in self.ors.split(","):
+                partes = termo.strip().split(".", 2)
+                if len(partes) != 3:
+                    continue
+                coluna, op, valor = partes
+                if op == "is" and valor == "null":
+                    passou = passou or linha.get(coluna) is None
+                elif op == "eq":
+                    passou = passou or linha.get(coluna) == valor
+            if not passou:
                 return False
         return True
 

@@ -1290,8 +1290,10 @@ _ZONA_ESTRITA = os.environ.get("KV_ZONA_ESTRITA", "on").strip().lower() not in (
 # de identidade: a Fase 91 mediu que aparência separa operador × visitante por
 # +0,025 onde seria preciso ~+0,15. Aparência entra só como VETO.
 #
-# `sombra` mede sem emitir nada — é como se descobre quanto isto move ANTES de
-# ligar.
+# `sombra` observa sem emitir nada, mas hoje entrega somente contagens por
+# amostra nos logs. Elas servem para inspecionar candidatos prospectivamente;
+# não preservam intervalos nem autorizam estimar duração/delta multiplicando
+# contagens pela cadência.
 # ═════════════════════════════════════════════════════════════════════════
 _FORA_MODO = os.environ.get("KV_FORA_DO_POSTO", "off").strip().lower()
 if _FORA_MODO not in ("off", "sombra", "on"):
@@ -2955,6 +2957,12 @@ class Amostra:
     # Frame anotado só com essas pessoas, para a chamada de VLM que descreve o
     # que elas fazem. Nulo quando não há nenhuma (custo zero no caso comum).
     img_b64_fora: str | None = None
+    # Um candidato fora da zona que não passou pelo gate continua contando
+    # numericamente como posto vazio. O carimbo abaixo preserva a diferença
+    # entre "não havia ninguém" e "havia alguém, mas não deu para afirmar que
+    # era o operador" sem recolocar essa pessoa em `pessoas`.
+    fora_auditoria: str | None = None
+    fora_auditoria_amostras_zona: int | None = None
 
 
 def inspecionar_video(video_path: str) -> dict:
@@ -3542,8 +3550,9 @@ def etapa_detectar_e_amostrar(
     # aqui", este diz "há quanto tempo". Sem os dois, alguém que passou pelo
     # posto às 7h viraria "o operador que saiu" às 15h.
     ultimo_no_posto: dict[int, float] = {}
-    # Telemetria do recurso. Em `sombra` é a ÚNICA saída — é com estes números
-    # que se descobre quanto o recurso move antes de ligá-lo.
+    # Telemetria prospectiva do recurso. Em `sombra` é a ÚNICA saída, mas
+    # estes contadores são por amostra: não formam intervalos nem reproduzem a
+    # semântica temporal usada pelas métricas de produção.
     n_fora_visto = n_fora_operador = n_fora_indeciso = n_fora_passante = 0
     # Fase 83: acumulador do descritor por track. Vive só aqui, onde o frame
     # ainda está na mão — depois desta etapa não há mais imagem para tirar cor.
@@ -3730,6 +3739,7 @@ def etapa_detectar_e_amostrar(
                 # está dentro do posto. Com alguém dentro, o minuto é um `cam1`
                 # normal e quem está fora é irrelevante — exatamente como antes.
                 fora_ok: list = []
+                fora_indecisos: list = []
                 if fora_frame and not pessoas and _fora_ativo():
                     # Quantos ex-ocupantes recentes há neste instante decide a
                     # regra da unicidade — por isso é contado ANTES do laço.
@@ -3749,6 +3759,8 @@ def etapa_detectar_e_amostrar(
                         p["_fora_amostras_zona"] = presenca_zona.get(p.get("track_id"), 0)
                         if eh:
                             fora_ok.append(p)
+                        elif motivo == "indeciso":
+                            fora_indecisos.append(p)
                     n_fora_visto += len(fora_frame)
                     if fora_ok:
                         n_fora_operador += 1
@@ -3787,6 +3799,21 @@ def etapa_detectar_e_amostrar(
                     # lista PARALELA e um frame anotado só com ela. `pessoas`
                     # continua vazia — é isso que mantém todo o resto intacto.
                     am_fora = fora_ok if _FORA_MODO == "on" else []
+                    # Em sombra nada chega ao downstream. Em on, a indecisão
+                    # viaja só como auditoria da observação de posto vazio;
+                    # a pessoa continua fora de `pessoas` e não vira evento.
+                    fora_auditoria = (
+                        "indeciso"
+                        if _FORA_MODO == "on" and fora_indecisos and not am_fora
+                        else None
+                    )
+                    fora_auditoria_amostras = (
+                        max(
+                            int(p.get("_fora_amostras_zona") or 0)
+                            for p in fora_indecisos
+                        )
+                        if fora_auditoria else None
+                    )
                     for i_f, p_f in enumerate(am_fora):
                         p_f["rotulo"] = f"P{i_f + 1}"
                         p_f["frame_idx"] = frame_idx
@@ -3797,7 +3824,11 @@ def etapa_detectar_e_amostrar(
                                 img_b64_fora=(
                                     frame_para_base64(
                                         anotar_frame_com_ids(frame, am_fora))
-                                    if am_fora else None))
+                                    if am_fora else None),
+                                fora_auditoria=fora_auditoria,
+                                fora_auditoria_amostras_zona=(
+                                    fora_auditoria_amostras
+                                ))
                     )
         frame_idx += 1
         if frame_idx % 60 == 0:
@@ -3809,9 +3840,10 @@ def etapa_detectar_e_amostrar(
             )
 
     cap.release()
-    # ⭐ O relatório do recurso. Em `sombra` ele é a única saída — nenhuma
-    # observação foi emitida, nenhuma coluna escrita, nenhuma chamada de VLM
-    # feita. É assim que se mede quanto isto move ANTES de ligar.
+    # ⭐ Telemetria do recurso. Em `sombra` ela é a única saída: nenhuma
+    # observação é emitida, nenhuma coluna é escrita e nenhuma chamada de VLM
+    # é feita. As contagens abaixo NÃO são duração nem delta de produtividade;
+    # multiplicá-las pelo intervalo divergiria da segmentação/consolidação real.
     if _fora_ativo() and n_fora_visto:
         log.info("[fora-do-posto/%s] %d detecção(ões) fora do polígono · "
                  "%d amostra(s) com o operador reconhecido · %d indecisa(s) · "
@@ -4874,6 +4906,45 @@ def etapa_analise_vlm(
                 + (" · sequência ON" if _SEQ_ENABLE else "")
                 + (" · gate ON" if _GATE_ENABLE else ""))
     observacoes: list[dict] = []
+
+    def _emitir_posto_vazio(
+        am: Amostra,
+        narrativa: str | None,
+        *,
+        auditoria: str | None = None,
+        amostras_zona: int | None = None,
+    ) -> bool:
+        """Emite a única forma canônica de posto vazio desta etapa.
+
+        O retorno permite aos testes provar que um fallback não sumiu. Campos
+        de auditoria são opcionais: sem o SQL da Fase 110, a persistência os
+        remove e repete o insert sem derrubar a ingestão.
+        """
+        if not (_POSTO_VAZIO_ENABLE and zona_posto and not am.operador_presente):
+            return False
+        observacao = {
+            "tempo_s": am.tempo_s,
+            "frame_idx": am.frame_idx,
+            "track_id": POSTO_VAZIO_TID,
+            "descricao": POSTO_VAZIO_DESC,
+            # Não há pessoa — a caixa é NULA, não uma caixa sintética.
+            "bbox": None, "bbox_cam": None, "bbox_dim": None,
+            "zona": zona_posto,
+            "papel": "posto_vazio",
+            "origem_gate": "posto_vazio",
+            "mudanca_contexto": False,
+            "maquina": None, "imovel": None,
+            # O QUE TORNA O "POSTO VAZIO" AUDITÁVEL: quando houve narrativa
+            # do minuto, ela acompanha também a ausência determinística.
+            "narrativa": narrativa,
+        }
+        if auditoria:
+            observacao["fora_do_posto"] = auditoria
+        if amostras_zona is not None:
+            observacao["fora_amostras_zona"] = int(amostras_zona)
+        observacoes.append(observacao)
+        return True
+
     ancoras: dict[int, dict] = {}   # track_id → {kpts, crop, zona, descricao}
     # Fase 92: dimensões do quadro, para normalizar centro/altura da âncora.
     _dim0 = next((a.dim for a in amostras if getattr(a, "dim", None)), None)
@@ -5060,16 +5131,27 @@ def etapa_analise_vlm(
         # minutos que hoje são `posto_vazio`, e o Groq tem cota diária.
         idx_fora = [i for i, (tipo, _) in enumerate(plano) if tipo == "fora_posto"]
         desc_fora: dict[int, dict] = {}
+        auditoria_fora: dict[int, str] = {}
         if idx_fora:
             if n_chamadas_fora[0] >= _FORA_MAX_CHAMADAS:
                 log.info("[fora-do-posto] teto de %d chamadas atingido neste vídeo "
                          "— %d amostra(s) voltam a contar como posto vazio",
                          _FORA_MAX_CHAMADAS, len(idx_fora))
+                auditoria_fora.update({i: "teto_chamadas" for i in idx_fora})
             else:
-                bruto_f = _analisar_sequencia_fora(
-                    groq_client, [plano[i][1] for i in idx_fora], descricao_processo,
-                    memoria, intervalo_s, conhecimento_adquirido, zona_desc=zona_posto,
-                )
+                try:
+                    bruto_f = _analisar_sequencia_fora(
+                        groq_client, [plano[i][1] for i in idx_fora],
+                        descricao_processo, memoria, intervalo_s,
+                        conhecimento_adquirido, zona_desc=zona_posto,
+                    )
+                except Exception as e:   # noqa: BLE001
+                    # A função já trata falhas do provider, mas esta fronteira
+                    # também protege exceções de parser/subamostragem e dublês
+                    # de teste. Uma falha opcional nunca pode apagar o slot.
+                    log.warning("[fora-do-posto] análise falhou (%s) — "
+                                "volta a posto vazio", e)
+                    bruto_f = {}
                 desc_fora = {idx_fora[k]: v for k, v in bruto_f.items()
                              if 0 <= k < len(idx_fora)}
                 n_chamadas_fora[0] += 1
@@ -5223,13 +5305,23 @@ def etapa_analise_vlm(
                 # ⭐ O OPERADOR ESTÁ NO QUADRO, FORA DO POSTO. Uma observação
                 # por pessoa reconhecida pelo teste do passante.
                 _f = desc_fora.get(i) or {}
+                acao = (_f.get("acao") or "").strip()
+                if not acao:
+                    # Falha/JSON inválido/ação ausente/teto: restaura
+                    # EXATAMENTE o estado numérico anterior. A auditoria diz
+                    # por que o candidato reconhecido não virou atividade.
+                    _emitir_posto_vazio(
+                        am,
+                        _f.get("resumo") or narrativa_grupo,
+                        auditoria=auditoria_fora.get(i) or "falha_vlm",
+                        amostras_zona=max(
+                            (int(p.get("_fora_amostras_zona") or 0)
+                             for p in am.fora_posto),
+                            default=0,
+                        ),
+                    )
+                    continue
                 for pf in am.fora_posto:
-                    acao = (_f.get("acao") or "").strip()
-                    if not acao:
-                        # Sem descrição (falha do VLM ou teto de chamadas) o
-                        # minuto volta a ser posto vazio — o comportamento de
-                        # hoje. Nunca se inventa atividade para preencher.
-                        continue
                     observacoes.append({
                         "tempo_s": am.tempo_s,
                         "frame_idx": am.frame_idx,
@@ -5262,26 +5354,12 @@ def etapa_analise_vlm(
                 continue
 
             if tipo == "vazio":
-                if _POSTO_VAZIO_ENABLE and zona_posto and not am.operador_presente:
-                    observacoes.append({
-                        "tempo_s": am.tempo_s,
-                        "frame_idx": am.frame_idx,
-                        "track_id": POSTO_VAZIO_TID,
-                        "descricao": POSTO_VAZIO_DESC,
-                        # Fase 82: não há pessoa — a caixa é NULA, não zerada.
-                        "bbox": None, "bbox_cam": None, "bbox_dim": None,
-                        "zona": zona_posto,
-                        "papel": "posto_vazio",
-                        "origem_gate": "posto_vazio",
-                        "mudanca_contexto": False,
-                        "maquina": None, "imovel": None,
-                        # ⭐ O QUE TORNA O "POSTO VAZIO" AUDITÁVEL. A frase
-                        # `POSTO_VAZIO_DESC` diz o veredito e nada mais; a
-                        # narrativa do minuto conta o que se via em volta — e é
-                        # com ela que o gestor descobre se o posto esvaziou
-                        # mesmo ou se havia alguém que o sistema não contou.
-                        "narrativa": narrativa_grupo,
-                    })
+                _emitir_posto_vazio(
+                    am,
+                    narrativa_grupo,
+                    auditoria=am.fora_auditoria,
+                    amostras_zona=am.fora_auditoria_amostras_zona,
+                )
                 continue
 
             # tipo == "cam1"
@@ -5943,6 +6021,10 @@ def etapa_segmentar_eventos(
             if (
                 o["label"] == atual["comportamento_label"]
                 and o.get("papel") == atual.get("papel_pessoa")
+                # Auditorias diferentes não podem ser fundidas num evento só:
+                # isso faria um trecho realmente vazio herdar "indeciso" (ou
+                # esconder o teto/falha que ocorreu no trecho seguinte).
+                and o.get("fora_do_posto") == atual.get("fora_do_posto")
                 and gap <= janela_continuidade_s
                 and (
                     not PRODUTIVIDADE_OPERADOR_V9
@@ -5963,6 +6045,11 @@ def etapa_segmentar_eventos(
                     _v = o.get(_k)
                     if _v is not None:
                         atual[_k] = max(atual.get(_k) or 0, int(_v))
+                if o.get("fora_amostras_zona") is not None:
+                    atual["fora_amostras_zona"] = max(
+                        int(atual.get("fora_amostras_zona") or 0),
+                        int(o["fora_amostras_zona"]),
+                    )
                 # Fase 82: a caixa de CADA amostra do evento, não só a primeira.
                 if _bbox_valido(o.get("bbox")):
                     atual["_caixas"].append(list(o["bbox"]))
@@ -6241,6 +6328,22 @@ def etapa_consolidar_principais(
                 if e["comportamento_label"] == escolhido]
         rep = (max(reps, key=lambda x: x[1])
                if reps else max(bucket_papel, key=lambda x: x[1]))[0]
+        # Auditoria da Fase 110 também precisa atravessar o principal. Escolhe
+        # o estado auditável de maior sobreposição e conserva o maior piso de
+        # evidência do bucket; ambos são metadados, nunca alteram o papel nem
+        # a duração escolhidos acima.
+        _fora_partes = [
+            (e, ov) for e, ov in bucket_papel if e.get("fora_do_posto")
+        ]
+        _fora_rep = (
+            max(_fora_partes, key=lambda x: x[1])[0]
+            if _fora_partes else None
+        )
+        _fora_amostras = [
+            int(e.get("fora_amostras_zona") or 0)
+            for e, _ov in _fora_partes
+            if e.get("fora_amostras_zona") is not None
+        ]
         if PRODUTIVIDADE_OPERADOR_V9:
             bucket_operador = (
                 [(e, ov) for e, ov in bucket_papel
@@ -6286,6 +6389,12 @@ def etapa_consolidar_principais(
             "trabalho": _trabalho_do_minuto(bucket_operador),
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": papel_minuto,
+            "fora_do_posto": (
+                _fora_rep.get("fora_do_posto") if _fora_rep else None
+            ),
+            "fora_amostras_zona": (
+                max(_fora_amostras) if _fora_amostras else None
+            ),
             "n_amostras": _n_votos,
             # Cobertura e composição: é o par que permite dizer "este minuto
             # ficou sem evidência POR supressão do gate" em vez de o teto
@@ -8482,11 +8591,18 @@ def etapa_persistir(
     # Rótulo sem categoria (ex.: `acao_indefinida`, que fica sem categoria de
     # propósito desde a Fase 49) simplesmente não entra no mapa — nunca é chutado.
     cat_ingestao: dict[str, str] = {}
+    origem_cat_ingestao: dict[str, str | None] = {}
     try:
-        _cats = varrer(sb, "comportamentos", "label, categoria_lean",
+        _cats = varrer(
+            sb, "comportamentos",
+            "label, categoria_lean, categoria_lean_origem",
                        empresa=empresa, processo=processo)
         cat_ingestao = {c["label"]: c["categoria_lean"]
                         for c in _cats if c.get("categoria_lean")}
+        origem_cat_ingestao = {
+            c["label"]: c.get("categoria_lean_origem")
+            for c in _cats if c.get("categoria_lean")
+        }
     except Exception as e:
         log.warning(f"[lean] herança na ingestão indisponível (não-fatal): {e}")
 
@@ -8641,7 +8757,15 @@ def etapa_persistir(
         _cat_h = cat_ingestao.get(e["comportamento_label"])
         if _cat_h:
             row["categoria_lean"] = _cat_h
-            row["categoria_lean_origem"] = "herdado"
+            # Decisão humana do rótulo continua valendo nas ocorrências
+            # futuras, mas a exceção P3 permanece estreita: só um
+            # `operador_fora` recebe o carimbo que pode mover produtividade.
+            row["categoria_lean_origem"] = (
+                ORIGEM_HUMANO_ROTULO
+                if e.get("papel_pessoa") == PAPEL_OPERADOR_FORA
+                and origem_cat_ingestao.get(e["comportamento_label"]) == "humano"
+                else "herdado"
+            )
         if auto_validado:
             row["validacao_correto"] = True
             row["validado_em"] = datetime.utcnow().isoformat()
@@ -8676,6 +8800,10 @@ def etapa_persistir(
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
             "n_observacoes": e.get("n_observacoes"),
             "observacoes_origem": e.get("origens") or None,
+            **({"fora_do_posto": e["fora_do_posto"]}
+               if e.get("fora_do_posto") else {}),
+            **({"fora_amostras_zona": e["fora_amostras_zona"]}
+               if e.get("fora_amostras_zona") is not None else {}),
             "origem_validacao": "auditoria",
             # Mesmo lote dos principais: a coluna NOT NULL tem de vir explícita
             # aqui também, senão a unificação do PostgREST manda NULL.
@@ -8687,37 +8815,49 @@ def etapa_persistir(
             # filtro em memória `principal is not False`.
             "validado_humano": True,
             "principal": False,
-            **({"categoria_lean": cat_ingestao[e["comportamento_label"]],
-                "categoria_lean_origem": "herdado"}
-               if cat_ingestao.get(e["comportamento_label"]) else {}),
+            **({
+                "categoria_lean": cat_ingestao[e["comportamento_label"]],
+                "categoria_lean_origem": (
+                    ORIGEM_HUMANO_ROTULO
+                    if e.get("papel_pessoa") == PAPEL_OPERADOR_FORA
+                    and origem_cat_ingestao.get(e["comportamento_label"]) == "humano"
+                    else "herdado"
+                ),
+            } if cat_ingestao.get(e["comportamento_label"]) else {}),
         })
 
     CHUNK = 100
     inseridos: list[dict] = []
     for i in range(0, len(linhas_eventos), CHUNK):
         lote = linhas_eventos[i : i + CHUNK]
-        try:
-            resp = sb.table("eventos").insert(lote).execute()
-        except Exception as erro:   # noqa: BLE001
-            # ⚠️ ANOTAÇÃO NÃO PODE DERRUBAR UM VÍDEO DA CAMPANHA. Estas colunas
-            # carregam texto e auditoria para o humano ler; o vídeo carrega
-            # presença, pose e tempo, que são o produto. Se a coluna ainda não
-            # existe no banco (o SQL é rodado à mão), o lote é reenviado SEM ela
-            # e a ingestão segue — a coluna passa a ser preenchida sozinha no
-            # dia em que existir, sem redeploy.
-            #
-            # Fase 110: generalizado. Eram quatro `if "x" not in str(erro)`
-            # empilhados esperando para acontecer.
-            faltando = [c for c in _COLUNAS_OPCIONAIS_EVENTO if c in str(erro)]
-            if not faltando:
-                raise
-            log.warning("[eventos] coluna(s) %s não existe(m) neste banco — "
-                        "gravando sem ela(s) (rode o schema.sql para tê-la(s)).",
-                        ", ".join(faltando))
-            for _l in lote:
-                for _c in faltando:
-                    _l.pop(_c, None)
-            resp = sb.table("eventos").insert(lote).execute()
+        removidas: set[str] = set()
+        while True:
+            try:
+                resp = sb.table("eventos").insert(lote).execute()
+                break
+            except Exception as erro:   # noqa: BLE001
+                # ANOTAÇÃO NÃO PODE DERRUBAR UM VÍDEO DA CAMPANHA: o vídeo
+                # carrega presença e pose, que são o produto; estas colunas
+                # apenas enriquecem a auditoria enquanto o SQL não foi rodado.
+                # PostgREST pode revelar apenas UMA coluna desconhecida por
+                # tentativa. Remover e repetir uma única vez ainda derrubava a
+                # ingestão quando as três colunas da Fase 110 faltavam. O laço
+                # é limitado pela tupla de opcionais e nunca engole outro erro.
+                faltando = [
+                    c for c in _COLUNAS_OPCIONAIS_EVENTO
+                    if c not in removidas and c in str(erro)
+                ]
+                if not faltando:
+                    raise
+                removidas.update(faltando)
+                log.warning(
+                    "[eventos] coluna(s) %s não existe(m) neste banco — "
+                    "gravando sem ela(s) (rode o schema.sql para tê-la(s)).",
+                    ", ".join(faltando),
+                )
+                for _l in lote:
+                    for _c in faltando:
+                        _l.pop(_c, None)
         inseridos.extend(resp.data or [])
     # Fase 36: ids dos PRINCIPAIS (mesma ordem de `eventos` — os primeiros N
     # de linhas_eventos), p/ pré-extrair os frames enquanto o vídeo é local.

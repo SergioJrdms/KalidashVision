@@ -228,8 +228,8 @@ check("a gravação regrava o lote SEM o campo se a coluna não existir",
 check("⭐ `narrativa` está entre as colunas opcionais",
       '_COLUNAS_OPCIONAIS_EVENTO = ("narrativa"' in fonte)
 check("mas só quando o erro É sobre coluna opcional — o resto sobe",
-      "faltando = [c for c in _COLUNAS_OPCIONAIS_EVENTO if c in str(erro)]" in fonte
-      and "if not faltando:\n                raise" in fonte)
+      "c not in removidas and c in str(erro)" in fonte
+      and "if not faltando:\n                    raise" in fonte)
 check("com o porquê: o vídeo carrega presença e pose, que são o produto",
       "NÃO PODE DERRUBAR UM VÍDEO DA CAMPANHA" in fonte)
 check("a LEITURA da fila também tolera a coluna ausente",

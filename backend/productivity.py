@@ -6,12 +6,13 @@ usada internamente apenas como peso estatístico; nunca sai neste contrato.
 Há duas perguntas diferentes e elas não devem ser misturadas:
 
 * presença: o operador estava no posto ou o posto estava vazio?
-* produtividade: quando o operador estava no posto e havia evidência, a
-  leitura era produtiva ou improdutiva?
+* produtividade: quando havia evidência válida sobre a atividade do operador,
+  ela era produtiva ou improdutiva? Fora do posto, só a classificação explícita
+  do gestor constitui essa evidência.
 
 Separar os denominadores evita transformar falha de pose/VLM em acusação de
-improdutividade. ``cobertura_produtividade_pct`` explicita quanto da presença
-teve evidência suficiente para responder a segunda pergunta.
+improdutividade. ``cobertura_produtividade_pct`` explicita quanto do universo
+avaliável teve evidência suficiente para responder a segunda pergunta.
 """
 from __future__ import annotations
 
@@ -27,6 +28,9 @@ EST_IMPRODUTIVO = "improdutivo"
 EST_PRODUTIVIDADE_INCONCLUSIVA = "produtividade_inconclusiva"
 EST_POSTO_VAZIO = "posto_vazio"
 EST_OPERADOR_AUSENTE = "operador_ausente"
+EST_OPERADOR_FORA = "operador_fora"
+EST_OPERADOR_FORA_PRODUTIVO = "operador_fora_produtivo"
+EST_OPERADOR_FORA_IMPRODUTIVO = "operador_fora_improdutivo"
 EST_SEM_LEITURA = "sem_leitura"
 EST_IGNORAR = "ignorar"
 
@@ -131,6 +135,17 @@ def classificar_observacao(
         ):
             return EST_SEM_LEITURA, "vazio_com_sinal_de_pessoa"
         return EST_POSTO_VAZIO, "ausencia_detectada"
+    if papel == EST_OPERADOR_FORA:
+        # Fase 110: presença e produtividade são eixos independentes. O
+        # operador continua FORA do posto em todos os casos; somente a decisão
+        # explícita do gestor sobre a atividade pode votar em produtividade.
+        origem = _texto_normalizado(e.get("categoria_lean_origem"))
+        categoria = _texto_normalizado(e.get("categoria_lean"))
+        if origem == "humano_rotulo" and categoria == "valor_agregado":
+            return EST_OPERADOR_FORA_PRODUTIVO, "atividade_fora_classificada_produtiva"
+        if origem == "humano_rotulo" and categoria == "desperdicio":
+            return EST_OPERADOR_FORA_IMPRODUTIVO, "atividade_fora_classificada_improdutiva"
+        return EST_OPERADOR_FORA, "atividade_fora_sem_decisao_humana"
     if papel == "visitante":
         return EST_OPERADOR_AUSENTE, "outra_pessoa_no_posto"
     if papel != "operador":
@@ -173,6 +188,12 @@ def _resolver_sinais(
         EST_PRODUTIVIDADE_INCONCLUSIVA,
     }
     estados_operador = estados & operador
+    fora_operador = {
+        EST_OPERADOR_FORA,
+        EST_OPERADOR_FORA_PRODUTIVO,
+        EST_OPERADOR_FORA_IMPRODUTIVO,
+    }
+    estados_fora = estados & fora_operador
 
     def representante(estados_alvo: set[str]) -> dict:
         return next(
@@ -184,6 +205,20 @@ def _resolver_sinais(
     # oportunidade de escolher o lado mais conveniente.
     if EST_SEM_LEITURA in estados:
         return EST_SEM_LEITURA, "identidade_ou_sinal_contraditorio", representante({EST_SEM_LEITURA})
+    if estados_fora:
+        # `posto_vazio` simultâneo é compatível: ambos dizem que o polígono
+        # está vazio, mas o estado de fora traz mais informação. Conflito entre
+        # decisões de produtividade se abstém sem retirar a ausência do
+        # denominador de presença.
+        if estados_operador:
+            return EST_SEM_LEITURA, "operador_dentro_e_fora", representante(estados_fora)
+        if len(estados_fora) > 1:
+            return EST_OPERADOR_FORA, "decisoes_fora_em_conflito", representante(estados_fora)
+        estado = next(iter(estados_fora))
+        e, _estado, motivo = next(
+            item for item in classificados if item[1] == estado
+        )
+        return estado, motivo, e
     if estados_operador:
         if EST_POSTO_VAZIO in estados:
             return EST_SEM_LEITURA, "vazio_com_operador", representante(estados_operador)
@@ -257,6 +292,9 @@ def _metricas(eventos: list[dict], frentes_por_camera: dict[str, str]) -> dict:
         EST_PRODUTIVIDADE_INCONCLUSIVA: 0.0,
         EST_POSTO_VAZIO: 0.0,
         EST_OPERADOR_AUSENTE: 0.0,
+        EST_OPERADOR_FORA: 0.0,
+        EST_OPERADOR_FORA_PRODUTIVO: 0.0,
+        EST_OPERADOR_FORA_IMPRODUTIVO: 0.0,
         EST_SEM_LEITURA: 0.0,
     }
     evidencias_produtividade: dict[str, int] = {}
@@ -274,7 +312,12 @@ def _metricas(eventos: list[dict], frentes_por_camera: dict[str, str]) -> dict:
             evidencias_presenca[chave] = max(
                 evidencias_presenca.get(chave, 0), n
             )
-            if estado in {EST_PRODUTIVO, EST_IMPRODUTIVO}:
+            if estado in {
+                EST_PRODUTIVO,
+                EST_IMPRODUTIVO,
+                EST_OPERADOR_FORA_PRODUTIVO,
+                EST_OPERADOR_FORA_IMPRODUTIVO,
+            }:
                 evidencias_produtividade[chave] = max(
                     evidencias_produtividade.get(chave, 0), n
                 )
@@ -285,14 +328,30 @@ def _metricas(eventos: list[dict], frentes_por_camera: dict[str, str]) -> dict:
         + pesos[EST_PRODUTIVIDADE_INCONCLUSIVA]
     )
     posto_ocupado = operador_presente + pesos[EST_OPERADOR_AUSENTE]
-    observado = posto_ocupado + pesos[EST_POSTO_VAZIO]
+    operador_fora = (
+        pesos[EST_OPERADOR_FORA]
+        + pesos[EST_OPERADOR_FORA_PRODUTIVO]
+        + pesos[EST_OPERADOR_FORA_IMPRODUTIVO]
+    )
+    fora_observado = pesos[EST_POSTO_VAZIO] + operador_fora
+    observado = posto_ocupado + fora_observado
     total_bruto = observado + pesos[EST_SEM_LEITURA]
-    classificado = pesos[EST_PRODUTIVO] + pesos[EST_IMPRODUTIVO]
+    produtivo = pesos[EST_PRODUTIVO] + pesos[EST_OPERADOR_FORA_PRODUTIVO]
+    improdutivo = pesos[EST_IMPRODUTIVO] + pesos[EST_OPERADOR_FORA_IMPRODUTIVO]
+    classificado = produtivo + improdutivo
+    # Antes do clique, operador_fora é numericamente idêntico a posto_vazio e
+    # não entra neste universo. Depois, a decisão humana acrescenta aquele
+    # intervalo à pergunta de produtividade sem transformá-lo em presença.
+    universo_produtividade = (
+        operador_presente
+        + pesos[EST_OPERADOR_FORA_PRODUTIVO]
+        + pesos[EST_OPERADOR_FORA_IMPRODUTIVO]
+    )
 
     presenca = _percentual(operador_presente, observado)
-    vazio = _percentual(pesos[EST_POSTO_VAZIO], observado)
-    produtividade = _percentual(pesos[EST_PRODUTIVO], classificado)
-    cobertura = _percentual(classificado, operador_presente)
+    vazio = _percentual(fora_observado, observado)
+    produtividade = _percentual(produtivo, classificado)
+    cobertura = _percentual(classificado, universo_produtividade)
     cobertura_presenca = _percentual(observado, total_bruto)
     # Mede especificamente a capacidade de distinguir o operador funcional de
     # outra pessoa quando o posto está ocupado. Posto vazio não infla esta
@@ -392,6 +451,17 @@ def _estado_atual(
     elif estado == EST_OPERADOR_AUSENTE:
         presenca = "fora_do_posto"
         produtividade = None
+    elif estado in {
+        EST_OPERADOR_FORA,
+        EST_OPERADOR_FORA_PRODUTIVO,
+        EST_OPERADOR_FORA_IMPRODUTIVO,
+    }:
+        presenca = "fora_do_posto"
+        produtividade = (
+            EST_PRODUTIVO if estado == EST_OPERADOR_FORA_PRODUTIVO
+            else EST_IMPRODUTIVO if estado == EST_OPERADOR_FORA_IMPRODUTIVO
+            else None
+        )
     elif papel == "operador":
         presenca = "no_posto"
         produtividade = estado if estado in {EST_PRODUTIVO, EST_IMPRODUTIVO} else None
@@ -402,7 +472,12 @@ def _estado_atual(
         "presenca": presenca,
         "posto": (
             "indeterminado" if estado == EST_SEM_LEITURA
-            else "vazio" if estado == EST_POSTO_VAZIO
+            else "vazio" if estado in {
+                EST_POSTO_VAZIO,
+                EST_OPERADOR_FORA,
+                EST_OPERADOR_FORA_PRODUTIVO,
+                EST_OPERADOR_FORA_IMPRODUTIVO,
+            }
             else "ocupado" if estado == EST_OPERADOR_AUSENTE or papel == "operador"
             else "indeterminado"
         ),

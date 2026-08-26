@@ -215,6 +215,7 @@ print("\n[6] ⭐ Posto vazio, inconclusivo e cam2 também recebem a narrativa")
 # inconclusivo e cam2 (resgate/ponte) saíam sem ela — e são justamente as mais
 # numerosas quando o posto esvazia.
 _emissao = fonte.split("# ── 4) Emite as observações")[1].split("\ndef ")[0]
+_vazio_helper = fonte.split("def _emitir_posto_vazio")[1].split("    ancoras:")[0]
 check("⭐ a narrativa do grupo é calculada UMA vez, antes do laço",
       "narrativa_grupo = next(" in fonte
       and fonte.index("narrativa_grupo = next(")
@@ -222,8 +223,10 @@ check("⭐ a narrativa do grupo é calculada UMA vez, antes do laço",
 # Fase 110: cinco tipos de observação (entrou `fora_posto`). A regra não muda —
 # TODA observação emitida carrega a narrativa do minuto.
 check("⭐ TODAS as observações emitidas carregam a chave",
-      _emissao.count("observacoes.append({") == 5
-      and _emissao.count('"narrativa"') == 5,
+      _emissao.count("observacoes.append({") == 4
+      and _emissao.count('"narrativa"') == 4
+      and "observacoes.append(observacao)" in _vazio_helper
+      and '"narrativa": narrativa' in _vazio_helper,
       (_emissao.count("observacoes.append({"), _emissao.count('"narrativa"')))
 check("o posto vazio recebe — é o que o torna auditável",
       "O QUE TORNA O \"POSTO VAZIO\" AUDITÁVEL" in fonte)

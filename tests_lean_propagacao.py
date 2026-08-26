@@ -142,6 +142,18 @@ check("evento NULL recebeu a categoria",
 check("nenhuma escrita tocou e2/e4",
       not any(i in ("e2", "e4") for _, i, _ in sb.escritas), sb.escritas)
 
+dados_humano_rotulo = {"eventos": [ev("p3", "operando_ponte")]}
+sb_humano_rotulo = FakeSB(dados_humano_rotulo)
+pl.propagar_categoria_para_eventos(
+    sb_humano_rotulo, "U", "Torneamento", "operando_ponte",
+    "valor_agregado", origem=pl.ORIGEM_HUMANO_ROTULO,
+)
+check("Fase 110: clique do gestor carimba evento elegível como humano_rotulo",
+      dados_humano_rotulo["eventos"][0]["categoria_lean"] == "valor_agregado"
+      and dados_humano_rotulo["eventos"][0]["categoria_lean_origem"]
+      == pl.ORIGEM_HUMANO_ROTULO,
+      dados_humano_rotulo["eventos"][0])
+
 print("\n[2] Escopo multi-tenant — nunca vaza entre processos")
 dados = {"eventos": [
     ev("a", "operar_torno", processo="Torneamento"),
@@ -243,8 +255,9 @@ check("cinza_real ordenado por minutos (maior primeiro)",
 print("\n[9] Critério 6 — herança na ingestão (código)")
 src = open("backend/pipeline.py").read()
 check("etapa_persistir monta o mapa de herança", "cat_ingestao" in src)
-check("evento principal nasce com origem 'herdado'",
-      'row["categoria_lean_origem"] = "herdado"' in src)
+check("evento principal normal mantém origem 'herdado'",
+      'else "herdado"' in src
+      and 'e.get("papel_pessoa") == PAPEL_OPERADOR_FORA' in src)
 check("IA propaga após classificar",
       src.count("propagar_categoria_para_eventos(sb, empresa, processo") >= 2, )
 main_src = open("backend/main.py").read()

@@ -68,6 +68,20 @@ check("booleano estruturado é o fallback final",
 check("vazio contradito por sinal de pessoa é inconclusivo",
       prod.classificar_observacao(ev("posto_vazio", maos_maquina=True))[0]
       == prod.EST_SEM_LEITURA)
+check("operador fora sem decisão é ausência observada, não sem_leitura",
+      prod.classificar_observacao(ev("operador_fora"))[0]
+      == prod.EST_OPERADOR_FORA)
+check("somente humano_rotulo pode classificar atividade fora",
+      all(prod.classificar_observacao(ev(
+          "operador_fora", categoria_lean="valor_agregado",
+          categoria_lean_origem=origem,
+      ))[0] == prod.EST_OPERADOR_FORA
+          for origem in (None, "herdado", "ia", "aprendido", "fallback")))
+check("humano_rotulo produtivo é aceito sem virar presença",
+      prod.classificar_observacao(ev(
+          "operador_fora", categoria_lean="valor_agregado",
+          categoria_lean_origem="humano_rotulo",
+      ))[0] == prod.EST_OPERADOR_FORA_PRODUTIVO)
 
 print("\n[2] Denominadores separados")
 eventos = [
@@ -126,6 +140,37 @@ publicavel = prod.agregar_produtividade([
 ], agora=AGORA)
 check("boa cobertura libera a leitura", publicavel["publicavel"] is True, publicavel)
 
+base_fora = [
+    ev(trabalho=True),
+    ev(ini=60, fim=120, trabalho=False),
+    ev("posto_vazio", ini=120, fim=180),
+]
+substituido = [
+    *base_fora[:2], ev("operador_fora", ini=120, fim=180),
+]
+m_base = prod.agregar_produtividade(base_fora, agora=AGORA)
+m_sub = prod.agregar_produtividade(substituido, agora=AGORA)
+invariantes = (
+    "produtividade_pct", "improdutividade_pct", "presenca_pct",
+    "posto_vazio_pct", "cobertura_produtividade_pct",
+    "cobertura_presenca_pct", "cobertura_identificacao_pct", "inconclusivo_pct",
+)
+check("posto_vazio → operador_fora sem decisão preserva todos os percentuais",
+      all(m_base[k] == m_sub[k] for k in invariantes),
+      {k: (m_base[k], m_sub[k]) for k in invariantes})
+
+decidido_fora = prod.agregar_produtividade([
+    *base_fora[:2],
+    ev("operador_fora", ini=120, fim=180,
+       categoria_lean="valor_agregado",
+       categoria_lean_origem="humano_rotulo"),
+], agora=AGORA)
+check("decisão humana fora aumenta produtividade sem alterar presença",
+      decidido_fora["produtividade_pct"] > m_sub["produtividade_pct"]
+      and decidido_fora["presenca_pct"] == m_sub["presenca_pct"]
+      and decidido_fora["posto_vazio_pct"] == m_sub["posto_vazio_pct"],
+      decidido_fora)
+
 print("\n[3] Estado atual e contrato público")
 atual = prod.agregar_produtividade([
     ev(trabalho=True),
@@ -140,6 +185,15 @@ contraditorio = prod.agregar_produtividade([
 check("contradição atual nunca aparece como operador no posto",
       contraditorio["presenca"] == "sem_leitura"
       and contraditorio["posto"] == "indeterminado", contraditorio)
+
+fora_atual = prod.agregar_produtividade([
+    ev("operador_fora", categoria_lean="valor_agregado",
+       categoria_lean_origem="humano_rotulo"),
+], agora=AGORA)["estado_atual"]
+check("estado atual fora mantém posto vazio e decisão produtiva separada",
+      fora_atual["presenca"] == "fora_do_posto"
+      and fora_atual["posto"] == "vazio"
+      and fora_atual["produtividade"] == "produtivo", fora_atual)
 
 vazio = prod.agregar_produtividade([], agora=AGORA)
 check("sem denominador devolve null, não zero inventado",
