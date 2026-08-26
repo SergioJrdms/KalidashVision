@@ -837,6 +837,8 @@ def _anexar_segundo_angulo(
     rois_sec: dict | None = None,
     offset_s: float = 0.0,
     desc_acc: dict | None = None,
+    identidade_shadow: dict | None = None,
+    cam_id: str | None = None,
 ) -> int:
     """Fase 6: para cada Amostra (da cam1), pega o frame da cam2 no MESMO
     instante REAL e guarda em `img_b64_secundario`. Retorna quantas amostras
@@ -874,6 +876,17 @@ def _anexar_segundo_angulo(
         rois2 = None
         rois2_maq = None   # Fase 44: zonas 'maquina' da cam2 (mãos no torno)
         for idx, am in enumerate(amostras):
+            obs_identidade_cam2 = None
+            if identidade_shadow is not None:
+                obs_identidade_cam2 = {
+                    "cam_id": str(cam_id or "cam2"),
+                    "tempo_s": round(float(am.tempo_s), 3),
+                    "medido": False,
+                    "tracks": {},
+                }
+                identidade_shadow.setdefault("observacoes", []).append(
+                    obs_identidade_cam2
+                )
             alvo_ms = (am.tempo_s + offset_s) * 1000.0
             fora_da_cam2 = alvo_ms < 0 or (bool(dur_ms) and alvo_ms > dur_ms)
             if fora_da_cam2:  # instante não existe na cam2 — clampa (só imagem)
@@ -917,6 +930,8 @@ def _anexar_segundo_angulo(
                     frame, classes=[0], conf=_CAM2_CONF, imgsz=416,
                     persist=True, tracker=TRACKER_CONFIG, verbose=False,
                 )
+                if obs_identidade_cam2 is not None:
+                    obs_identidade_cam2["medido"] = True
                 achou = False
                 maos = False
                 n_posto2 = 0              # Fase 91: quantas pessoas no posto
@@ -962,6 +977,13 @@ def _anexar_segundo_angulo(
                             no_posto2 = any(
                                 _ponto_em_roi(px, py, i["polygon"])
                                 for i in rois2.values() for px, py in pontos2
+                            )
+                        if (
+                            obs_identidade_cam2 is not None
+                            and ids2 is not None and j < len(ids2)
+                        ):
+                            obs_identidade_cam2["tracks"][int(ids2[j])] = (
+                                "dentro" if no_posto2 else "fora"
                             )
                         n_cena2 += 1
                         if no_posto2:
@@ -3690,6 +3712,7 @@ def etapa_detectar_e_amostrar(
     progress_cb: ProgressCb,
     cam_id: str | None = None,
     mapa_movimento: dict | None = None,
+    identidade_shadow: dict | None = None,
 ) -> tuple[list[Amostra], dict, list[int], list[dict], dict, dict]:
     # Cada vídeo começa com o tracker limpo. Ver `resetar_tracker` para o
     # porquê — em resumo: `persist=True` é certo dentro do vídeo e errado
@@ -3727,6 +3750,12 @@ def etapa_detectar_e_amostrar(
     # Fase 83: acumulador do descritor por track. Vive só aqui, onde o frame
     # ainda está na mão — depois desta etapa não há mais imagem para tirar cor.
     desc_acc: dict[int, dict] = {}
+    # Fase 111C: coletor PARALELO, apenas quando a sombra foi explicitamente
+    # ligada. Inclui também detecções fora do posto para permitir a releitura
+    # lógica posterior, mas nunca entra em `descritores_track`/persistência.
+    desc_acc_identidade: dict[int, dict] | None = (
+        {} if identidade_shadow is not None and modo_op else None
+    )
     if modo_op:
         log.info("[operador] modo operador ATIVO — zonas: "
                  + ", ".join(f"{n}({i.get('papel')})" for n, i in rois.items()))
@@ -3785,6 +3814,7 @@ def etapa_detectar_e_amostrar(
             if tempo_s >= prox_amostra_s:
                 prox_amostra_s += intervalo_s   # consome este slot (~1 amostra / intervalo_s)
                 pessoas = []
+                observacoes_identidade: dict[int, str] = {}
                 # Fase 110: quem aparece no quadro mas fora do polígono. Vive
                 # separada de `pessoas` do começo ao fim.
                 fora_frame: list = []
@@ -3829,6 +3859,17 @@ def etapa_detectar_e_amostrar(
                             pontos = _pontos_da_pessoa(pessoa, w, h)
                             nome_z, papel_z, desc_z = _zona_da_pessoa(
                                 pontos, rois, ancora=_ponto_ancora(pessoa, w, h))
+                            if desc_acc_identidade is not None:
+                                estado_id = (
+                                    "dentro" if papel_z == "posto_operador" else "fora"
+                                )
+                                observacoes_identidade[int(tid)] = estado_id
+                                acumular_descritor(
+                                    desc_acc_identidade, int(tid), frame=frame,
+                                    pessoa={**pessoa, "frame_idx": frame_idx},
+                                    w=w, h=h, tempo_s=tempo_s,
+                                    no_posto=(estado_id == "dentro"), papel=None,
+                                )
                             # ⭐ Fora do posto = NÃO ENTRA em `pessoas`, antes de
                             # virar operador, visitante, evento ou métrica.
                             #
@@ -3917,6 +3958,13 @@ def etapa_detectar_e_amostrar(
                                       or p.get("zona") == zona_posto_nome),
                             papel=p.get("papel"),
                         )
+                if identidade_shadow is not None and modo_op:
+                    identidade_shadow.setdefault("observacoes", []).append({
+                        "cam_id": str(cam_id or "cam1"),
+                        "tempo_s": round(float(tempo_s), 3),
+                        "medido": True,
+                        "tracks": dict(observacoes_identidade),
+                    })
                 # ⭐ Fase 110 — O TESTE DO PASSANTE, aplicado só quando NINGUÉM
                 # está dentro do posto. Com alguém dentro, o minuto é um `cam1`
                 # normal e quem está fora é irrelevante — exatamente como antes.
@@ -4034,6 +4082,10 @@ def etapa_detectar_e_amostrar(
                  n_fora_passante)
     ids_unicos = sorted({p["track_id"] for a in amostras for p in a.pessoas})
     descritores = fechar_descritores(desc_acc, intervalo_s, cam_id, w, h)
+    if desc_acc_identidade is not None:
+        identidade_shadow.setdefault("descritores", []).extend(
+            fechar_descritores(desc_acc_identidade, intervalo_s, cam_id, w, h)
+        )
     progress_cb("deteccao", 100, f"{len(amostras)} amostras · {len(ids_unicos)} pessoas")
     # Fase 89: o veredito por MINUTO (mesma unidade do evento principal) e a
     # grade deste vídeo, que soma ao mapa do processo.
@@ -7971,6 +8023,25 @@ _COSTURA_ALTURA_TOL = float(os.environ.get("KV_COSTURA_ALTURA_TOL", "0.30"))
 # agrupamento em vez de poluir a cadeia com histograma de 1 amostra.
 _COSTURA_MIN_AMOSTRAS = int(os.environ.get("KV_COSTURA_MIN_AMOSTRAS", "5"))
 
+# Fase 111C: vetos auxiliares da costura RESIDUAL por segmento. Os gates
+# principais continuam sendo tempo + geometria; aparência nunca autoriza uma
+# união sozinha. Estes valores não reutilizam pisos do titular diário.
+_IDENTIDADE_SEG_COR_MIN_AMOSTRAS = int(_operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_COR_MIN_AMOSTRAS", 3.0, 1.0, 100.0,
+))
+_IDENTIDADE_SEG_COR_VETO = _operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_COR_VETO", 0.45, 0.0, 1.0,
+)
+_IDENTIDADE_SEG_COR_FAVORAVEL = _operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_COR_FAVORAVEL", 0.70, 0.0, 1.0,
+)
+_IDENTIDADE_SEG_RAZAO_TOL = _operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_RAZAO_TOL", 0.18, 0.01, 1.0,
+)
+_IDENTIDADE_SEG_ASPECTO_VETO = _operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_ASPECTO_VETO", 0.60, 0.05, 2.0,
+)
+
 
 def _ponta(d: dict, qual: str):
     v = d.get("bbox_fim" if qual == "fim" else "bbox_ini")
@@ -8094,6 +8165,462 @@ def _fundir_tracks(membros: list) -> dict:
         "razoes": razoes or None,
         "altura_rel": altura,
     }
+
+
+def _guardrails_identidade_segmento(a: dict, b: dict) -> dict:
+    """Compara apenas guardrails visuais; ausência de medida é neutra."""
+    evidencias: dict = {
+        "veto": False,
+        "motivo": None,
+        "auxiliar_disponivel": False,
+        "auxiliar_favoravel": False,
+        "cor_similaridade": None,
+        "razoes_comparadas": [],
+    }
+
+    sims_cor: list[float] = []
+    bins_a, bins_b = a.get("hist_bins") or {}, b.get("hist_bins") or {}
+    for parte, chave_n in (("sup", "n_sup"), ("inf", "n_inf")):
+        if (
+            int(_num(bins_a.get(chave_n)) or 0) < _IDENTIDADE_SEG_COR_MIN_AMOSTRAS
+            or int(_num(bins_b.get(chave_n)) or 0) < _IDENTIDADE_SEG_COR_MIN_AMOSTRAS
+        ):
+            continue
+        sim = _sim_hist(a.get(f"hist_{parte}"), b.get(f"hist_{parte}"))
+        if sim is not None:
+            sims_cor.append(sim)
+    if sims_cor:
+        evidencias["auxiliar_disponivel"] = True
+        evidencias["cor_similaridade"] = round(min(sims_cor), 4)
+        if min(sims_cor) < _IDENTIDADE_SEG_COR_VETO:
+            evidencias.update({
+                "veto": True,
+                "motivo": "cor_incompativel",
+            })
+            return evidencias
+        if min(sims_cor) >= _IDENTIDADE_SEG_COR_FAVORAVEL:
+            evidencias["auxiliar_favoravel"] = True
+
+    razoes_a, razoes_b = a.get("razoes") or {}, b.get("razoes") or {}
+    for nome in sorted(set(razoes_a) & set(razoes_b)):
+        ra, rb = razoes_a.get(nome), razoes_b.get(nome)
+        if not isinstance(ra, dict) or not isinstance(rb, dict):
+            continue
+        if (
+            int(_num(ra.get("n")) or 0) < _TIT_RAZAO_MIN_N
+            or int(_num(rb.get("n")) or 0) < _TIT_RAZAO_MIN_N
+        ):
+            continue
+        ma, mb = _num(ra.get("med")), _num(rb.get("med"))
+        mada, madb = _num(ra.get("mad")), _num(rb.get("mad"))
+        if None in (ma, mb, mada, madb) or max(abs(ma), abs(mb)) <= 0:
+            continue
+        evidencias["auxiliar_disponivel"] = True
+        diferenca = abs(ma - mb)
+        base = max(abs(ma), abs(mb))
+        limite_base = _IDENTIDADE_SEG_RAZAO_TOL * base
+        limite_veto = limite_base + 2.0 * (abs(mada) + abs(madb))
+        evidencias["razoes_comparadas"].append({
+            "nome": nome,
+            "diferenca": round(diferenca, 4),
+            "limite_veto": round(limite_veto, 4),
+        })
+        if diferenca > limite_veto:
+            evidencias.update({
+                "veto": True,
+                "motivo": f"razao_corporal_incompativel:{nome}",
+            })
+            return evidencias
+        if diferenca <= limite_base:
+            evidencias["auxiliar_favoravel"] = True
+
+    aspecto_a, aspecto_b = _num(a.get("aspecto")), _num(b.get("aspecto"))
+    if aspecto_a and aspecto_b:
+        delta_aspecto = abs(aspecto_a - aspecto_b) / max(aspecto_a, aspecto_b)
+        if delta_aspecto > _IDENTIDADE_SEG_ASPECTO_VETO:
+            evidencias.update({
+                "veto": True,
+                "motivo": "aspecto_incompativel",
+            })
+    return evidencias
+
+
+def _avaliar_costura_identidade_segmento(
+    grupo: list[dict], novo: dict,
+) -> tuple[bool, dict]:
+    """Aplica gates sem score: continuidade no último + vetos no grupo todo."""
+    ultimo = max(
+        grupo,
+        key=lambda d: (
+            _num(d.get("t_fim_s")) or float("-inf"),
+            int(_num(d.get("pessoa_track_id")) or -1),
+        ),
+    )
+    cam_novo = str(novo.get("cam_id") or "cam1")
+    if any(str(m.get("cam_id") or "cam1") != cam_novo for m in grupo):
+        return False, {"motivo": "camera_diferente"}
+
+    ini_novo, fim_novo = _num(novo.get("t_ini_s")), _num(novo.get("t_fim_s"))
+    fim_ultimo = _num(ultimo.get("t_fim_s"))
+    if None in (ini_novo, fim_novo, fim_ultimo) or fim_novo < ini_novo:
+        return False, {"motivo": "intervalo_invalido"}
+
+    for membro in grupo:
+        ini_m, fim_m = _num(membro.get("t_ini_s")), _num(membro.get("t_fim_s"))
+        if None in (ini_m, fim_m):
+            return False, {"motivo": "intervalo_invalido"}
+        if ini_novo < fim_m and fim_novo > ini_m:
+            return False, {"motivo": "sobreposicao_temporal"}
+
+    gap = ini_novo - fim_ultimo
+    if gap < 0:
+        return False, {"motivo": "sobreposicao_temporal", "gap_s": round(gap, 3)}
+    if gap > _COSTURA_GAP_S:
+        return False, {"motivo": "gap_excessivo", "gap_s": round(gap, 3)}
+
+    ponta_fim, ponta_ini = _ponta(ultimo, "fim"), _ponta(novo, "ini")
+    if ponta_fim is None or ponta_ini is None:
+        return False, {"motivo": "sem_geometria_pontas"}
+    altura_media = max(1e-6, (ponta_fim[2] + ponta_ini[2]) / 2.0)
+    distancia = (
+        (ponta_fim[0] - ponta_ini[0]) ** 2
+        + (ponta_fim[1] - ponta_ini[1]) ** 2
+    ) ** 0.5 / altura_media
+    if distancia > _COSTURA_DIST:
+        return False, {
+            "motivo": "geometria_incompativel",
+            "distancia_alturas": round(distancia, 4),
+        }
+    salto_altura = abs(ponta_fim[2] - ponta_ini[2]) / max(
+        1e-6, ponta_fim[2], ponta_ini[2]
+    )
+    if salto_altura > _COSTURA_ALTURA_TOL:
+        return False, {
+            "motivo": "altura_ponta_incompativel",
+            "salto_altura": round(salto_altura, 4),
+        }
+
+    guardrails = []
+    auxiliar_disponivel = auxiliar_favoravel = False
+    for membro in grupo:
+        g = _guardrails_identidade_segmento(membro, novo)
+        guardrails.append({
+            "track_id": int(_num(membro.get("pessoa_track_id")) or -1),
+            **g,
+        })
+        if g["veto"]:
+            return False, {"motivo": g["motivo"], "guardrails": guardrails}
+        auxiliar_disponivel = auxiliar_disponivel or g["auxiliar_disponivel"]
+        auxiliar_favoravel = auxiliar_favoravel or g["auxiliar_favoravel"]
+    if auxiliar_disponivel and not auxiliar_favoravel:
+        return False, {
+            "motivo": "sem_evidencia_auxiliar_favoravel",
+            "guardrails": guardrails,
+        }
+
+    return True, {
+        "de_track": int(_num(ultimo.get("pessoa_track_id")) or -1),
+        "para_track": int(_num(novo.get("pessoa_track_id")) or -1),
+        "gap_s": round(gap, 3),
+        "distancia_alturas": round(distancia, 4),
+        "salto_altura": round(salto_altura, 4),
+        "auxiliar_favoravel": auxiliar_favoravel,
+        "guardrails": guardrails,
+    }
+
+
+def _agregar_identidade_logica(
+    membros: list[dict], identidade: str, evidencias: list[dict],
+) -> dict:
+    membros_ord = sorted(membros, key=lambda d: (
+        _num(d.get("t_ini_s")) or 0.0,
+        int(_num(d.get("pessoa_track_id")) or -1),
+    ))
+    track_ids = sorted({
+        int(_num(d.get("pessoa_track_id")) or -1) for d in membros_ord
+    })
+    representante = min(track_ids)
+    referencia = max(
+        membros_ord,
+        key=lambda d: (
+            _num(d.get("n_amostras")) or 0.0,
+            -int(_num(d.get("pessoa_track_id")) or -1),
+        ),
+    )
+    inicios = [_num(d.get("t_ini_s")) for d in membros_ord]
+    fins = [_num(d.get("t_fim_s")) for d in membros_ord]
+    inicios = [v for v in inicios if v is not None]
+    fins = [v for v in fins if v is not None]
+    return {
+        "identidade_logica": identidade,
+        "cam_id": str(referencia.get("cam_id") or "cam1"),
+        "track_ids": track_ids,
+        "track_representante": representante,
+        # Compatibilidade direta com eleger_operador_segmento().
+        "pessoa_track_id": representante,
+        "tempo_posto_s": round(sum(
+            _num(d.get("tempo_posto_s")) or 0.0 for d in membros_ord
+        ), 1),
+        "tempo_visivel_s": round(sum(
+            _num(d.get("tempo_visivel_s")) or 0.0 for d in membros_ord
+        ), 1),
+        "n_amostras": sum(
+            int(_num(d.get("n_amostras")) or 0) for d in membros_ord
+        ),
+        "n_amostras_posto": sum(
+            int(_num(d.get("n_amostras_posto")) or 0) for d in membros_ord
+        ),
+        "t_ini_s": round(min(inicios), 3) if inicios else None,
+        "t_fim_s": round(max(fins), 3) if fins else None,
+        "bbox_ini": membros_ord[0].get("bbox_ini"),
+        "bbox_fim": membros_ord[-1].get("bbox_fim"),
+        "evidencias_costura": evidencias,
+        "confianca_costura": (
+            "nao_aplicavel" if len(membros_ord) == 1
+            else "alta" if evidencias and all(
+                bool(e.get("auxiliar_favoravel")) for e in evidencias
+            ) else "continuidade_forte"
+        ),
+        # Aparência segue apenas como referência diagnóstica, nunca como voto
+        # da 111B consolidada.
+        "hist_sup": referencia.get("hist_sup"),
+        "hist_inf": referencia.get("hist_inf"),
+        "hist_bins": referencia.get("hist_bins"),
+        "razoes": referencia.get("razoes"),
+        "altura_rel": referencia.get("altura_rel"),
+        "aspecto": referencia.get("aspecto"),
+    }
+
+
+def construir_identidades_logicas_segmento(descritores: list[dict]) -> list[dict]:
+    """Costura residual cronológica, determinística e estritamente local."""
+    por_camera: dict[str, list[dict]] = defaultdict(list)
+    for d in descritores or []:
+        if not isinstance(d, dict) or _num(d.get("pessoa_track_id")) is None:
+            continue
+        por_camera[str(d.get("cam_id") or "cam1")].append(d)
+
+    identidades: list[dict] = []
+    for camera in sorted(por_camera):
+        fragmentos = sorted(por_camera[camera], key=lambda d: (
+            _num(d.get("t_ini_s")) or 0.0,
+            _num(d.get("t_fim_s")) or 0.0,
+            int(_num(d.get("pessoa_track_id")) or -1),
+        ))
+        grupos: list[dict] = []
+        pos = 0
+        while pos < len(fragmentos):
+            # Sucessores simultâneos são decididos juntos. Assim a mesma
+            # identidade não pode escolher arbitrariamente o primeiro track
+            # quando dois candidatos coexistentes passam pelos mesmos gates.
+            primeiro = fragmentos[pos]
+            fim_lote = _num(primeiro.get("t_fim_s"))
+            lote = [primeiro]
+            pos += 1
+            if fim_lote is not None:
+                while pos < len(fragmentos):
+                    ini_proximo = _num(fragmentos[pos].get("t_ini_s"))
+                    if ini_proximo is None or ini_proximo >= fim_lote:
+                        break
+                    proximo = fragmentos[pos]
+                    lote.append(proximo)
+                    fim_proximo = _num(proximo.get("t_fim_s"))
+                    if fim_proximo is not None:
+                        fim_lote = max(fim_lote, fim_proximo)
+                    pos += 1
+
+            por_grupo: dict[int, list[tuple[int, dict]]] = defaultdict(list)
+            por_fragmento: dict[int, list[tuple[int, dict]]] = defaultdict(list)
+            for indice_grupo, grupo in enumerate(grupos):
+                for indice_fragmento, fragmento in enumerate(lote):
+                    combina, evidencia = _avaliar_costura_identidade_segmento(
+                        grupo["membros"], fragmento
+                    )
+                    if not combina:
+                        continue
+                    por_grupo[indice_grupo].append((indice_fragmento, evidencia))
+                    por_fragmento[indice_fragmento].append((indice_grupo, evidencia))
+
+            fundidos: set[int] = set()
+            for indice_grupo in sorted(por_grupo):
+                arestas = por_grupo[indice_grupo]
+                if len(arestas) != 1:
+                    continue
+                indice_fragmento, evidencia = arestas[0]
+                inversas = por_fragmento.get(indice_fragmento) or []
+                if len(inversas) != 1:
+                    continue
+                grupos[indice_grupo]["membros"].append(lote[indice_fragmento])
+                grupos[indice_grupo]["evidencias"].append(evidencia)
+                fundidos.add(indice_fragmento)
+
+            for indice_fragmento, fragmento in enumerate(lote):
+                if indice_fragmento not in fundidos:
+                    grupos.append({"membros": [fragmento], "evidencias": []})
+
+        grupos.sort(key=lambda g: (
+            min(_num(d.get("t_ini_s")) or 0.0 for d in g["membros"]),
+            min(int(_num(d.get("pessoa_track_id")) or -1) for d in g["membros"]),
+        ))
+        for indice, grupo in enumerate(grupos, start=1):
+            identidades.append(_agregar_identidade_logica(
+                grupo["membros"], f"R{indice}", grupo["evidencias"]
+            ))
+    return identidades
+
+
+def construir_timeline_identidade_segmento(
+    observacoes: list[dict], identidade: dict, duracao_s: float,
+) -> dict:
+    """Relê a grade amostral em memória para uma identidade já eleita."""
+    camera = str(identidade.get("cam_id") or "cam1")
+    tracks_alvo = {int(t) for t in identidade.get("track_ids") or []}
+    base = {
+        "status": "indisponivel",
+        "cam_id": camera,
+        "identidade_logica": identidade.get("identidade_logica"),
+        "track_ids": sorted(tracks_alvo),
+        "resolucao": "amostral",
+        "intervalos": [],
+    }
+    slots = sorted(
+        (o for o in (observacoes or []) if str(o.get("cam_id") or "cam1") == camera),
+        key=lambda o: _num(o.get("tempo_s")) or 0.0,
+    )
+    if not slots or not tracks_alvo:
+        return base
+
+    intervalos: list[dict] = []
+    for i, slot in enumerate(slots):
+        inicio = _num(slot.get("tempo_s")) or 0.0
+        proximo = (
+            _num(slots[i + 1].get("tempo_s"))
+            if i + 1 < len(slots) else None
+        )
+        fim = proximo if proximo is not None and proximo >= inicio else max(
+            inicio, float(duracao_s or 0.0)
+        )
+        tracks_slot = slot.get("tracks") or {}
+        estados = set()
+        observados = []
+        for tid_raw, estado in tracks_slot.items():
+            try:
+                tid = int(tid_raw)
+            except (TypeError, ValueError):
+                continue
+            if tid in tracks_alvo:
+                estados.add(str(estado))
+                observados.append(tid)
+
+        if "dentro" in estados and "fora" in estados:
+            estado, motivo, leitura = "nao_observado", "conflito_estado", "sem_inferencia"
+        elif "dentro" in estados:
+            estado, motivo, leitura = "no_posto", "identidade_observada", "seria_operador"
+        elif "fora" in estados:
+            estado = "fora_posto_candidato"
+            motivo, leitura = "identidade_observada", "seria_operador_fora"
+        else:
+            estado, leitura = "nao_observado", "sem_inferencia"
+            motivo = "identidade_nao_observada" if slot.get("medido") else "camera_nao_medida"
+
+        atual = {
+            "t_ini_s": round(inicio, 3),
+            "t_fim_s": round(float(fim), 3),
+            "estado": estado,
+            "motivo": motivo,
+            "leitura_shadow": leitura,
+            "n_observacoes": 1,
+            "track_ids_observados": sorted(set(observados)),
+        }
+        if (
+            intervalos
+            and intervalos[-1]["estado"] == atual["estado"]
+            and intervalos[-1]["motivo"] == atual["motivo"]
+            and abs(intervalos[-1]["t_fim_s"] - atual["t_ini_s"]) < 1e-6
+        ):
+            anterior = intervalos[-1]
+            anterior["t_fim_s"] = atual["t_fim_s"]
+            anterior["n_observacoes"] += 1
+            anterior["track_ids_observados"] = sorted(set(
+                anterior["track_ids_observados"] + atual["track_ids_observados"]
+            ))
+        else:
+            intervalos.append(atual)
+    return {**base, "status": "disponivel", "intervalos": intervalos}
+
+
+def _registrar_identidades_segmento_sombra(
+    dados_shadow: dict, cameras: list[str], *, duracao_s: float,
+) -> list[dict]:
+    """Executa 111C após a 111B RAW; resultado vive apenas em log/memória."""
+    if _OPERADOR_SEGMENTO_MODO != "sombra":
+        return []
+
+    por_camera: dict[str, list[dict]] = defaultdict(list)
+    for d in dados_shadow.get("descritores") or []:
+        por_camera[str(d.get("cam_id") or "cam1")].append(d)
+    saida: list[dict] = []
+    for camera in dict.fromkeys(str(c or "cam1") for c in cameras):
+        try:
+            identidades = construir_identidades_logicas_segmento(
+                por_camera.get(camera, [])
+            )
+            decisao = eleger_operador_segmento(identidades)
+            vencedora = next((i for i in identidades if (
+                decisao.get("status") == "confirmado"
+                and i.get("pessoa_track_id") == decisao.get("track_id")
+            )), None)
+            decisao_logica = {
+                "cam_id": camera,
+                **decisao,
+                "identidade_logica": (
+                    vencedora.get("identidade_logica") if vencedora else None
+                ),
+                "track_ids": vencedora.get("track_ids", []) if vencedora else [],
+            }
+            timeline = (
+                construir_timeline_identidade_segmento(
+                    dados_shadow.get("observacoes") or [], vencedora, duracao_s
+                )
+                if vencedora else {
+                    "status": "nao_gerada",
+                    "cam_id": camera,
+                    "motivo": "operador_logico_indefinido",
+                    "intervalos": [],
+                }
+            )
+            resumo_identidades = {
+                "cam_id": camera,
+                "identidades": [{
+                    "identidade_logica": i["identidade_logica"],
+                    "track_ids": i["track_ids"],
+                    "tempo_posto_s": i["tempo_posto_s"],
+                    "tempo_visivel_s": i["tempo_visivel_s"],
+                    "confianca_costura": i["confianca_costura"],
+                } for i in identidades],
+            }
+            log.info(
+                "[identidade-segmento] %s",
+                json.dumps(resumo_identidades, ensure_ascii=False, separators=(",", ":")),
+            )
+            log.info(
+                "[operador-segmento-logico] %s",
+                json.dumps(decisao_logica, ensure_ascii=False, separators=(",", ":")),
+            )
+            if vencedora:
+                log.info(
+                    "[timeline-operador-segmento] %s",
+                    json.dumps(timeline, ensure_ascii=False, separators=(",", ":")),
+                )
+            saida.append({
+                "cam_id": camera,
+                "identidades": identidades,
+                "decisao": decisao_logica,
+                "timeline": timeline,
+            })
+        except Exception as exc:  # noqa: BLE001 — sombra nunca derruba produção
+            log.warning("[identidade-segmento] cam=%s erro=%s", camera, exc)
+    return saida
 
 
 def agrupar_descritores(descritores: list) -> list[dict]:
@@ -16948,10 +17475,22 @@ def processar_video(
     # que se mexem sempre são as partes móveis. Só pesa depois de base; até lá
     # o agregado sem peso é mais honesto que um mapa de três vídeos.
     _mapa_mov = carregar_mapa_movimento(sb, empresa, processo, cam_id)
+    cam_primaria_efetiva = str(cam_id or "cam1")
+    cam_secundaria_efetiva = str(cam_id_secundario or "cam2")
+    identidade_shadow = (
+        {"observacoes": [], "descritores": []}
+        if _OPERADOR_SEGMENTO_MODO == "sombra" else None
+    )
     (amostras, info_video, ids_unicos, descritores_track,
      movimento_por_minuto, grade_movimento) = etapa_detectar_e_amostrar(
         yolo, video_path, intervalo_amostragem_s, rois_contexto, progress_cb,
         cam_id=cam_id, mapa_movimento=_mapa_mov,
+        identidade_shadow=identidade_shadow,
+    )
+    descritores_raw_shadow = (
+        [{**d, "cam_id": str(d.get("cam_id") or cam_primaria_efetiva)}
+         for d in descritores_track]
+        if identidade_shadow is not None else None
     )
 
     if not amostras:
@@ -16997,6 +17536,8 @@ def processar_video(
             rois_sec=rois_contexto_secundario,
             offset_s=offset_cam2,
             desc_acc=desc_acc_cam2,
+            identidade_shadow=identidade_shadow,
+            cam_id=cam_secundaria_efetiva,
         )
         # Fase 84 — o descritor da cam2. Antes disto, `descritores_track` só
         # tinha a câmera PRIMÁRIA: o pareamento elege sempre a de menor id
@@ -17011,13 +17552,21 @@ def processar_video(
                 _w2, _h2 = int(_info2["largura"]), int(_info2["altura"])
             except Exception:
                 _w2 = _h2 = 0
-            descritores_track = list(descritores_track) + fechar_descritores(
+            descritores_cam2 = fechar_descritores(
                 desc_acc_cam2, _int_cam2, cam_id_secundario, _w2, _h2,
             )
+            descritores_track = list(descritores_track) + descritores_cam2
+            if identidade_shadow is not None:
+                descritores_cam2_shadow = [
+                    {**d, "cam_id": cam_secundaria_efetiva}
+                    for d in descritores_cam2
+                ]
+                identidade_shadow["descritores"].extend(descritores_cam2_shadow)
+                descritores_raw_shadow.extend(descritores_cam2_shadow)
             log.info("[descritor] cam2 (%s): %d track(s) descritos.",
-                     cam_id_secundario or "cam2", len(desc_acc_cam2))
+                     cam_secundaria_efetiva, len(desc_acc_cam2))
         log.info(
-            f"[dual-angle] {cam_id or 'cam1'} + {cam_id_secundario or 'cam2'}: "
+            f"[dual-angle] {cam_primaria_efetiva} + {cam_secundaria_efetiva}: "
             f"2º ângulo em {n_sec}/{len(amostras)} amostras"
         )
 
@@ -17028,13 +17577,19 @@ def processar_video(
     if _OPERADOR_SEGMENTO_MODO == "sombra":
         cameras_posto: list[str] = []
         if zona_posto:
-            cameras_posto.append(str(cam_id or "cam1"))
+            cameras_posto.append(cam_primaria_efetiva)
         if video_path_secundario and any(
             i.get("papel") == "posto_operador"
             for i in (rois_contexto_secundario or {}).values()
         ):
-            cameras_posto.append(str(cam_id_secundario or "cam2"))
-        _registrar_operador_segmento_sombra(descritores_track, cameras_posto)
+            cameras_posto.append(cam_secundaria_efetiva)
+        _registrar_operador_segmento_sombra(
+            descritores_raw_shadow or descritores_track, cameras_posto
+        )
+        _registrar_identidades_segmento_sombra(
+            identidade_shadow or {}, cameras_posto,
+            duracao_s=float(info_video.get("duracao_s") or 0.0),
+        )
 
     # Fase 28: veredito por slot (dupla quando a cam2 tem zona de posto).
     if zona_posto:
