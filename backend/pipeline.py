@@ -3095,6 +3095,38 @@ except (TypeError, ValueError):
 VERSAO_INSTRUMENTO = 10 if PRODUTIVIDADE_OPERADOR_V9 else min(8, _VERSAO_LEGADA)
 
 
+# Fase 111B — eleição lógica do operador dentro de UM segmento. A decisão é
+# somente diagnóstica nesta fase: default OFF e nenhum modo "on" aceito.
+_OPERADOR_SEGMENTO_MODO = os.environ.get(
+    "KV_OPERADOR_SEGMENTO", "off"
+).strip().lower()
+if _OPERADOR_SEGMENTO_MODO not in ("off", "sombra"):
+    _OPERADOR_SEGMENTO_MODO = "off"
+
+
+def _operador_segmento_env_float(nome: str, padrao: float,
+                                  minimo: float, maximo: float) -> float:
+    try:
+        valor = float(os.environ.get(nome, str(padrao)))
+    except (TypeError, ValueError):
+        return padrao
+    return valor if minimo <= valor <= maximo else padrao
+
+
+_OPERADOR_SEG_MIN_TEMPO_POSTO_S = _operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_MIN_TEMPO_POSTO_S", 60.0, 0.1, 300.0,
+)
+_OPERADOR_SEG_MIN_OBS_POSTO = int(_operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_MIN_OBS_POSTO", 6.0, 1.0, 300.0,
+))
+_OPERADOR_SEG_MIN_SHARE = _operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_MIN_SHARE", 0.60, 0.0, 1.0,
+)
+_OPERADOR_SEG_MIN_GAP = _operador_segmento_env_float(
+    "KV_OPERADOR_SEGMENTO_MIN_GAP", 0.25, 0.0, 1.0,
+)
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # Fase 83 — DESCRITOR POR TRACK. Só o que a detecção JÁ calcula.
 #
@@ -3401,6 +3433,120 @@ def fechar_descritores(acc: dict, intervalo_s: float, cam_id: str | None,
             "frame_w": int(w), "frame_h": int(h),
         })
     return saida
+
+
+def eleger_operador_segmento(descritores: list[dict]) -> dict:
+    """Elege o operador lógico de uma câmera usando a janela completa.
+
+    A função é pura: não lê atividade/VLM, não usa aparência, não persiste e
+    não altera os descritores. Todos os gates precisam passar; na dúvida o
+    track fica nulo e o estado é ``indefinido``.
+    """
+    campos = {
+        "status": "indefinido",
+        "track_id": None,
+        "confianca": 0.0,
+        "tempo_posto_s": 0.0,
+        "tempo_visivel_s": 0.0,
+        "share_dominancia": 0.0,
+        "gap_segundo": 0.0,
+        "n_observacoes": 0,
+        "motivo": "sem_evidencia_posto",
+    }
+
+    candidatos: list[dict] = []
+    for d in descritores or []:
+        try:
+            track_id = int(d.get("pessoa_track_id"))
+            tempo_posto = max(0.0, float(d.get("tempo_posto_s") or 0.0))
+            tempo_visivel = max(0.0, float(d.get("tempo_visivel_s") or 0.0))
+            n_posto = max(0, int(d.get("n_amostras_posto") or 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (
+            tempo_posto != tempo_posto
+            or tempo_visivel != tempo_visivel
+            or tempo_posto in (float("inf"), float("-inf"))
+            or tempo_visivel in (float("inf"), float("-inf"))
+        ):
+            continue
+        if tempo_posto <= 0.0:
+            continue
+        candidatos.append({
+            "track_id": track_id,
+            "tempo_posto_s": tempo_posto,
+            "tempo_visivel_s": tempo_visivel,
+            "n_observacoes": n_posto,
+        })
+
+    if not candidatos:
+        return campos
+
+    candidatos.sort(key=lambda d: (-d["tempo_posto_s"], d["track_id"]))
+    lider = candidatos[0]
+    total_posto = sum(d["tempo_posto_s"] for d in candidatos)
+    share = lider["tempo_posto_s"] / total_posto if total_posto > 0.0 else 0.0
+    share_segundo = (
+        candidatos[1]["tempo_posto_s"] / total_posto
+        if len(candidatos) > 1 and total_posto > 0.0 else 0.0
+    )
+    gap = max(0.0, share - share_segundo)
+    campos.update({
+        "tempo_posto_s": round(lider["tempo_posto_s"], 1),
+        "tempo_visivel_s": round(lider["tempo_visivel_s"], 1),
+        "share_dominancia": round(share, 4),
+        "gap_segundo": round(gap, 4),
+        "n_observacoes": lider["n_observacoes"],
+    })
+
+    if (
+        lider["tempo_posto_s"] < _OPERADOR_SEG_MIN_TEMPO_POSTO_S
+        or lider["n_observacoes"] < _OPERADOR_SEG_MIN_OBS_POSTO
+    ):
+        campos["motivo"] = "evidencia_insuficiente"
+        return campos
+    if gap < _OPERADOR_SEG_MIN_GAP:
+        campos["motivo"] = "dominancia_ambigua"
+        return campos
+    if share < _OPERADOR_SEG_MIN_SHARE:
+        campos["motivo"] = "dominancia_insuficiente"
+        return campos
+
+    campos.update({
+        "status": "confirmado",
+        "track_id": lider["track_id"],
+        # Sem pesos arbitrários: a menor das duas margens relativas é a força
+        # diagnóstica da eleição. Os quatro gates acima continuam sendo a lei.
+        "confianca": round(min(share, gap), 4),
+        "motivo": "dominante_claro",
+    })
+    return campos
+
+
+def _registrar_operador_segmento_sombra(
+    descritores: list[dict], cameras: list[str],
+) -> list[dict]:
+    """Registra uma decisão por câmera; nunca alimenta eventos ou métricas."""
+    if _OPERADOR_SEGMENTO_MODO != "sombra":
+        return []
+
+    por_camera: dict[str, list[dict]] = defaultdict(list)
+    for d in descritores or []:
+        por_camera[str(d.get("cam_id") or "cam1")].append(d)
+
+    diagnosticos: list[dict] = []
+    for camera in dict.fromkeys(str(c or "cam1") for c in cameras):
+        try:
+            decisao = eleger_operador_segmento(por_camera.get(camera, []))
+            diagnostico = {"cam_id": camera, **decisao}
+            diagnosticos.append(diagnostico)
+            log.info(
+                "[operador-segmento] %s",
+                json.dumps(diagnostico, ensure_ascii=False, separators=(",", ":")),
+            )
+        except Exception as exc:  # noqa: BLE001 — sombra nunca derruba produção
+            log.warning("[operador-segmento] cam=%s erro=%s", camera, exc)
+    return diagnosticos
 
 
 def _crop_cinza_pequeno(frame, bbox, lado: int = 32):
@@ -16874,6 +17020,21 @@ def processar_video(
             f"[dual-angle] {cam_id or 'cam1'} + {cam_id_secundario or 'cam2'}: "
             f"2º ângulo em {n_sec}/{len(amostras)} amostras"
         )
+
+    # Fase 111B: a janela de cada câmera já está completamente fechada aqui.
+    # A decisão nasce e morre em memória/log; não toca amostras, papéis,
+    # observações, eventos nem persistência. Sem ROI de posto não há eleição,
+    # pois fora do modo operador `zona=None` não significa presença no posto.
+    if _OPERADOR_SEGMENTO_MODO == "sombra":
+        cameras_posto: list[str] = []
+        if zona_posto:
+            cameras_posto.append(str(cam_id or "cam1"))
+        if video_path_secundario and any(
+            i.get("papel") == "posto_operador"
+            for i in (rois_contexto_secundario or {}).values()
+        ):
+            cameras_posto.append(str(cam_id_secundario or "cam2"))
+        _registrar_operador_segmento_sombra(descritores_track, cameras_posto)
 
     # Fase 28: veredito por slot (dupla quando a cam2 tem zona de posto).
     if zona_posto:
