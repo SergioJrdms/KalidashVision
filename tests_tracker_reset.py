@@ -144,11 +144,14 @@ check("resetar_tracker é chamado ANTES de abrir o vídeo",
 
 print("\n[5] Perfil de câmera fixa — opt-in, e idêntico ao de fábrica")
 cfg = Path("backend/trackers/botsort_camera_fixa.yaml")
+cfg_reid = Path("backend/trackers/botsort_camera_fixa_reid.yaml")
 check("arquivo existe", cfg.is_file())
+check("perfil Re-ID existe", cfg_reid.is_file())
 
 import yaml  # noqa: E402
 
 perfil = yaml.safe_load(cfg.read_text())
+perfil_reid = yaml.safe_load(cfg_reid.read_text())
 # Cópia fiel do botsort.yaml de fábrica (ultralytics 8.4.x).
 FABRICA = {
     "tracker_type": "botsort", "track_high_thresh": 0.25, "track_low_thresh": 0.1,
@@ -161,6 +164,10 @@ check("mesmas chaves do de fábrica (nada some, nada aparece)",
 difs = {k for k in FABRICA if perfil[k] != FABRICA[k]}
 check("a ÚNICA diferença é gmc_method", difs == {"gmc_method"}, difs)
 check("gmc_method desligado", perfil["gmc_method"] == "none", perfil["gmc_method"])
+check("perfil antigo mantém Re-ID desligado", perfil["with_reid"] is False)
+check("perfil Re-ID preserva os parâmetros da câmera fixa",
+      {k: perfil_reid[k] for k in perfil} == {**perfil, "with_reid": True})
+check("perfil Re-ID ativa aparência nativa", perfil_reid["with_reid"] is True and perfil_reid["model"] == "auto")
 
 check("default NÃO é o perfil fixo (campanha não muda sozinha)",
       pl.TRACKER_CONFIG == "botsort.yaml", pl.TRACKER_CONFIG)
@@ -169,6 +176,14 @@ os.environ["KV_TRACKER"] = "fixa"
 import importlib  # noqa: E402
 pl2 = importlib.reload(pl)
 check("KV_TRACKER=fixa aponta para o perfil", pl2.TRACKER_CONFIG.endswith("botsort_camera_fixa.yaml"),
+      pl2.TRACKER_CONFIG)
+os.environ["KV_TRACKER"] = "reid"
+pl2 = importlib.reload(pl)
+check("KV_TRACKER=reid aponta para o perfil local", pl2.TRACKER_CONFIG.endswith("botsort_camera_fixa_reid.yaml"),
+      pl2.TRACKER_CONFIG)
+os.environ["KV_TRACKER"] = "fixa_reid"
+pl2 = importlib.reload(pl)
+check("alias fixa_reid aponta para o mesmo perfil", pl2.TRACKER_CONFIG.endswith("botsort_camera_fixa_reid.yaml"),
       pl2.TRACKER_CONFIG)
 os.environ["KV_TRACKER"] = "valor_invalido"
 pl2 = importlib.reload(pl)

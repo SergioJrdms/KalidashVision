@@ -68,17 +68,24 @@ GROQ_MODEL_RAPIDO = "llama-3.3-70b-versatile"
 
 YOLO_CONF_MIN = 0.45
 AREA_MIN_RATIO = 0.005
-# Fase 64: `KV_TRACKER=fixa` usa o perfil de CÂMERA FIXA (idêntico ao de
-# fábrica, só com gmc_method: none). Default = arquivo de fábrica: trocar o
-# tracker no meio da campanha de 30 dias é decisão do dono do dado, não efeito
-# colateral de deploy. Env desconhecido cai no de fábrica, nunca quebra.
+# Fase 64/111A: `KV_TRACKER=fixa` usa a câmera fixa; `reid` ativa aparência
+# apenas dentro do vídeo atual. Default e valor desconhecido usam o arquivo de
+# fábrica: trocar tracker no meio da campanha é decisão explícita, nunca efeito
+# colateral de deploy.
 _TRACKER_FIXA = str(Path(__file__).resolve().parent / "trackers" / "botsort_camera_fixa.yaml")
-TRACKER_CONFIG = (
-    _TRACKER_FIXA
-    if os.environ.get("KV_TRACKER", "").strip().lower() in ("fixa", "fixed", "camera_fixa")
-    and Path(_TRACKER_FIXA).is_file()
-    else "botsort.yaml"
-)
+_TRACKER_REID = str(Path(__file__).resolve().parent / "trackers" / "botsort_camera_fixa_reid.yaml")
+
+
+def selecionar_tracker_config(valor: str | None = None) -> str:
+    modo = (os.environ.get("KV_TRACKER", "") if valor is None else valor).strip().lower()
+    if modo in ("fixa", "fixed", "camera_fixa") and Path(_TRACKER_FIXA).is_file():
+        return _TRACKER_FIXA
+    if modo in ("reid", "fixa_reid") and Path(_TRACKER_REID).is_file():
+        return _TRACKER_REID
+    return "botsort.yaml"
+
+
+TRACKER_CONFIG = selecionar_tracker_config()
 
 # 5s (não 3s): ~40% menos chamadas ao VLM por vídeo → menos pressão de RPM/TPM
 # no Groq Free Tier e fila drena mais rápido. Configurável via env.
