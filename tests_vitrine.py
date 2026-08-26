@@ -164,33 +164,46 @@ check("o identificador continua visível onde tem valor técnico",
       'title={d.nome}' in ler("pages", "Dashboard.tsx")
       or 'title={e.label}' in ev)
 
-print("\n[7] Menu enxuto, agrupado e com estado persistido")
+print("\n[7] Menu com quatro caminhos principais e Ferramentas persistidas")
 shell = ler("design", "Shell.tsx")
-check("existe um grupo 'Avançado'", "procNavAvancado" in shell and "Avançado" in shell)
+check("existe um grupo 'Ferramentas'",
+      "procNavFerramentas" in shell and ">Ferramentas<" in shell)
 check("recolhido por padrão", 'localStorage.getItem("kv.nav.avancado") === "1"' in shell)
 check("e o estado é PERSISTIDO", 'localStorage.setItem("kv.nav.avancado"' in shell)
 visiveis = re.search(r"const procNav = \[(.*?)\n  \];", shell, re.S).group(1)
-n_vis = visiveis.count('{ tab:')
-check(f"menu visível focado no caso comercial ({n_vis} item)", n_vis == 1, n_vis)
-check("'dashboard' está no menu visível", 'tab: "dashboard"' in visiveis)
-avanc = re.search(r"const procNavAvancado = \[(.*?)\n  \];", shell, re.S).group(1)
-for t in ("diaadia", "validacao", "arvore", "auditoria", "duvidas",
-          "eventos", "padroes", "fila", "descricao"):
-    check(f"'{t}' foi agrupado (não removido)", f'tab: "{t}"' in avanc)
+tabs_visiveis = re.findall(r'tab: "([^"]+)"', visiveis)
+check("menu tem exatamente os quatro caminhos principais",
+      tabs_visiveis == ["dashboard", "diaadia", "arvore", "validacao"], tabs_visiveis)
+for tab, rotulo in (("dashboard", "Visão do posto"), ("diaadia", "Dia a dia"),
+                    ("arvore", "Produtivo × improdutivo"), ("validacao", "Validação")):
+    check(f"'{tab}' usa o rótulo correto", f'tab: "{tab}", label: "{rotulo}"' in visiveis)
+check("Validação mantém o badge", 'tab: "validacao"' in visiveis and 'badge: proc?.pendencias' in visiveis)
+ferramentas = re.search(r"const procNavFerramentas = \[(.*?)\n  \];", shell, re.S).group(1)
+tabs_ferramentas = re.findall(r'tab: "([^"]+)"', ferramentas)
+check("Ferramentas tem exatamente os seis itens definidos",
+      tabs_ferramentas == ["auditoria", "duvidas", "eventos", "padroes", "fila", "descricao"],
+      tabs_ferramentas)
+for t in ("auditoria", "duvidas", "eventos", "padroes", "fila", "descricao"):
+    check(f"'{t}' está em Ferramentas", f'tab: "{t}"' in ferramentas)
+check("não há duplicatas entre os caminhos primários e Ferramentas",
+      not (set(tabs_visiveis) & set(tabs_ferramentas)))
 # LIMPEZA DA VITRINE: quatro telas saíram do MENU. São ferramentas internas,
 # não etapas do percurso do cliente — e o menu é a vitrine.
 # `precisao` é a régua de acerto do time; `titular` é tela de sombra que já
 # mostrou a pessoa errada; `rotulos` nasceu quando o rótulo decidia o número
 # (desde a Fase 101 não decide); `upload` era muleta — a captura é automática.
 for t in ("precisao", "titular", "rotulos", "upload"):
-    check(f"'{t}' saiu do menu", f'tab: "{t}"' not in avanc and f'tab: "{t}"' not in visiveis)
+    check(f"'{t}' saiu do menu", f'tab: "{t}"' not in ferramentas and f'tab: "{t}"' not in visiveis)
     # ⚠️ SAIU DO MENU, NÃO DO PRODUTO: a rota continua de pé, para reativar
     # devolvendo uma linha — e para nenhum link salvo quebrar.
     check(f"mas a rota de '{t}' continua viva",
           f'route.tab === "{t}"' in ler("..", "src", "App.tsx"))
+app = ler("..", "src", "App.tsx")
+for t in tabs_visiveis + tabs_ferramentas:
+    check(f"a rota de '{t}' continua viva", f'route.tab === "{t}"' in app)
 check("Configurações fica no rodapé, fora do grupo",
       'tab: "configuracoes"' in shell
-      and 'tab: "configuracoes"' not in avanc and 'tab: "configuracoes"' not in visiveis)
+      and 'tab: "configuracoes"' not in ferramentas and 'tab: "configuracoes"' not in visiveis)
 
 print("\n[8] A conclusão em português — e ela degrada com honestidade")
 r = js_eval("leituraDoPosto({vaPct: 75, vazioPct: 25, limiarCoberturaMin: 520, "

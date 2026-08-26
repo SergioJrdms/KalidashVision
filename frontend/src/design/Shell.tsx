@@ -38,14 +38,14 @@ export function Sidebar({
 }) {
   const inProc = route.screen === "processo";
   // No mobile, a sidebar vira um drawer off-canvas; no desktop, coluna fixa.
-  // Fase 96: o estado do grupo "Avançado" mora no localStorage, por usuário
-  // do navegador. Recolhido por padrão; quem abre uma vez, encontra aberto.
-  const [avancado, setAvancado] = useState<boolean>(() => {
+  // Fase 96: o estado do grupo recolhível mora no localStorage, por usuário
+  // do navegador. A chave antiga é preservada para manter a preferência salva.
+  const [ferramentas, setFerramentas] = useState<boolean>(() => {
     try { return localStorage.getItem("kv.nav.avancado") === "1"; } catch { return false; }
   });
   useEffect(() => {
-    try { localStorage.setItem("kv.nav.avancado", avancado ? "1" : "0"); } catch { /* modo privado */ }
-  }, [avancado]);
+    try { localStorage.setItem("kv.nav.avancado", ferramentas ? "1" : "0"); } catch { /* modo privado */ }
+  }, [ferramentas]);
 
   const asideStyle: CSSProperties = isMobile
     ? {
@@ -79,6 +79,9 @@ export function Sidebar({
   // clique, agrupado.
   const procNav = [
     { tab: "dashboard", label: "Visão do posto", icon: "layout-dashboard" },
+    { tab: "diaadia", label: "Dia a dia", icon: "calendar-days" },
+    { tab: "arvore", label: "Produtivo × improdutivo", icon: "git-branch" },
+    { tab: "validacao", label: "Validação", icon: "git-pull-request-arrow", badge: proc?.pendencias },
   ];
   // ⚠️ LIMPEZA DA VITRINE. Quatro telas saíram do menu — e SÓ do menu: as
   // rotas e o código continuam de pé, porque nenhuma delas é lixo. São
@@ -96,10 +99,7 @@ export function Sidebar({
   //   · "Novo vídeo" (upload) — a captura é automática pela borda. Upload
   //     manual era muleta de desenvolvimento.
   // Para reativar qualquer uma, basta devolver a linha aqui.
-  const procNavAvancado = [
-    { tab: "diaadia", label: "Dia a dia", icon: "calendar-days" },
-    { tab: "arvore", label: "O que é trabalho", icon: "git-branch" },
-    { tab: "validacao", label: "Validação", icon: "git-pull-request-arrow", badge: proc?.pendencias },
+  const procNavFerramentas = [
     // Fase 80: auditar é olhar um dia por amostragem, sem julgar nada.
     { tab: "auditoria", label: "Auditoria do dia", icon: "search" },
     // Fase 59: a fila da dúvida é o trabalho de maior alavancagem.
@@ -151,24 +151,24 @@ export function Sidebar({
             {/* Fase 96: recolhido por padrão e com o estado PERSISTIDO —
                 ninguém deve ter que reabrir a cada visita. */}
             <button
-              onClick={() => setAvancado((v: boolean) => !v)}
+              onClick={() => setFerramentas((v: boolean) => !v)}
               className="row gap2"
-              aria-expanded={avancado}
+              aria-expanded={ferramentas}
               style={{ width: "100%", textAlign: "left", border: "none", borderRadius: 10,
                        padding: "9px 11px", background: "transparent", color: "var(--muted)",
                        fontWeight: 600, fontSize: 13, marginTop: 6 }}
               onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "var(--line-2)"; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
             >
-              <Icon name={avancado ? "chevron-down" : "chevron-right"} size={16} color="var(--muted)" />
-              <span className="grow">Avançado</span>
-              {!avancado && (
+              <Icon name={ferramentas ? "chevron-down" : "chevron-right"} size={16} color="var(--muted)" />
+              <span className="grow">Ferramentas</span>
+              {!ferramentas && (
                 <span className="tnum" style={{ fontSize: 11, color: "var(--faint)" }}>
-                  {procNavAvancado.length}
+                  {procNavFerramentas.length}
                 </span>
               )}
             </button>
-            {avancado && procNavAvancado.map((it) => (
+            {ferramentas && procNavFerramentas.map((it) => (
               <ItemNav key={it.tab} it={it} inProc={inProc} route={route} go={go} recuado />
             ))}
             <div style={{ height: 1, background: "var(--line)", margin: "8px 4px" }} />
@@ -247,7 +247,7 @@ export function Sidebar({
 
 export function Topbar({ route, proc, go, onOpenPrism, action, isMobile = false, onMenu }: { route: Route; proc?: ProcHeaderMock | null; go: Go; onOpenPrism: () => void; action?: ReactNode; isMobile?: boolean; onMenu?: () => void }) {
   const inProc = route.screen === "processo";
-  const tabLabels: Record<string, string> = { dashboard: "Visão do posto", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", rotulos: "Classificar rótulos", titular: "Quem dominou o posto", arvore: "O que é trabalho", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
+  const tabLabels: Record<string, string> = { dashboard: "Visão do posto", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", rotulos: "Classificar rótulos", titular: "Quem dominou o posto", arvore: "Produtivo × improdutivo", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
   return (
     <header className="row" style={{ height: isMobile ? 54 : 60, padding: isMobile ? "0 12px" : "0 26px", borderBottom: "1px solid var(--line)", background: "rgba(255,255,255,.82)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 30, justifyContent: "space-between", gap: isMobile ? 8 : 16 }}>
       <div className="row gap2" style={{ fontSize: 13.5, color: "var(--muted)", minWidth: 0 }}>
@@ -289,7 +289,7 @@ export function Topbar({ route, proc, go, onOpenPrism, action, isMobile = false,
 
 
 // Fase 96: o botão do menu virou componente porque agora ele é usado em três
-// lugares — visível, dentro do grupo Avançado, e no rodapé.
+// lugares — visível, dentro do grupo Ferramentas, e no rodapé.
 function ItemNav({ it, inProc, route, go, recuado }: {
   it: { tab: string; label: string; icon: string; badge?: number; onClick?: () => void };
   inProc: boolean; route: any; go: Go; recuado?: boolean;
