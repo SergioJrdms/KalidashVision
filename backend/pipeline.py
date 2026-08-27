@@ -1010,11 +1010,11 @@ def _anexar_segundo_angulo(
                                 no_posto=no_posto2,
                                 papel=(
                                     None
-                                    if PRODUTIVIDADE_OPERADOR_V9
+                                    if PRODUTIVIDADE_OPERADOR_ESTRUTURADA
                                     else ("operador" if no_posto2 else "visitante")
                                 ),
                             )
-                    if PRODUTIVIDADE_OPERADOR_V9:
+                    if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                         # A lateral só confirma identidade geométrica com um
                         # único ocupante. Duas pessoas não viram "a maior bbox"
                         # e mãos pertencem exclusivamente ao candidato único.
@@ -1076,7 +1076,7 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
     n_op_cam1 = n_rebaixaria = 0
     for am in amostras:
         op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
-        if PRODUTIVIDADE_OPERADOR_V9:
+        if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
             # A frontal produz candidatos, não identidade. A lateral só abre
             # resgate quando a frontal realmente não viu pessoa; havendo
             # candidato, os dois ângulos alimentam a mesma decisão visual.
@@ -1114,7 +1114,7 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
             am.pessoas = [p for p in am.pessoas if p.get("papel") != "operador"]
             stats["rebaixados"] += 1
             op_cam1 = False
-        if PRODUTIVIDADE_OPERADOR_V9:
+        if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
             if am.pessoas:
                 # A identidade será decidida pelo contrato visual estruturado.
                 presente = None
@@ -2218,6 +2218,8 @@ Você recebe uma SEQUÊNCIA de {n_frames} imagens da câmera principal, EM ORDEM
 
 P1, P2, P3... são CANDIDATOS. NÃO presuma que P1 é o operador. A eleição automática pode ter confundido um colega ou visitante. Em CADA imagem, escolha como "operador" a pessoa que ocupa funcionalmente o posto do torno.
 
+EXCEÇÃO AUTORITATIVA: quando o CONTEXTO de uma imagem disser explicitamente que um rótulo é "o OPERADOR", a identidade já foi fixada pela janela completa. Nesse caso, devolva exatamente esse mesmo rótulo em "operador", não reeleja por atividade, postura ou posição e julgue "trabalho" somente para essa pessoa. Só faça a eleição visual quando o CONTEXTO disser que a identidade está em aberto.
+
 IDENTIDADE E PRODUTIVIDADE SÃO PERGUNTAS SEPARADAS. Conversar, virar de costas, usar celular ou ficar improdutivo NÃO transforma o operador em visitante. Use continuidade, roupa, posição habitual e relação funcional com o torno para decidir quem é o ocupante do posto. Só marque visitante quando estiver claro que a pessoa apenas passa, entrega algo ou interage com o ocupante sem assumir o posto. Se isso não estiver claro, use "incerto".
 
 ATENÇÃO: os rótulos são desenhados em CADA imagem separadamente — sempre se refira à pessoa pelo rótulo que aparece NAQUELA imagem. O mesmo rótulo pode representar outra pessoa no quadro seguinte; use posição, roupa, continuidade e relação com o torno, nunca o número P1 por hábito.
@@ -3006,6 +3008,12 @@ class Amostra:
     # era o operador" sem recolocar essa pessoa em `pessoas`.
     fora_auditoria: str | None = None
     fora_auditoria_amostras_zona: int | None = None
+    # Fase 111D — autoridade LOCAL do segmento, resolvida somente depois de a
+    # janela inteira ser fechada. Estes campos morrem com a Amostra: não são
+    # schema, não são persistidos e nunca atravessam vídeos/câmeras.
+    identidade_autoritativa: bool = False
+    identidade_estado: str | None = None       # dentro | fora | ausente
+    identidade_track_id: int | None = None     # track físico deste slot
 
 
 def inspecionar_video(video_path: str) -> dict:
@@ -3099,6 +3107,8 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #  10 = conversa associa um interlocutor estruturado e mede S+V somente no
 #       tronco superior dele; cinza seguro vira gestor, demais casos fecham para
 #       colega/incerto sem deixar label ou prosa promover produtividade.
+#  11 = a identidade lógica local do segmento (111A/B/C) assume autoridade
+#       sobre operador/operador_fora antes do VLM, com fallback legado por slot.
 def _env_ligada(nome: str, padrao: str = "off") -> bool:
     """Flags críticas são fail-closed: só uma allowlist explícita liga."""
     return os.environ.get(nome, padrao).strip().lower() in {
@@ -3111,19 +3121,58 @@ try:
     _VERSAO_LEGADA = int(os.environ.get("KV_VERSAO_INSTRUMENTO", "8"))
 except (TypeError, ValueError):
     _VERSAO_LEGADA = 8
-# A flag é comportamental e o carimbo acompanha a flag. Assim uma env antiga
-# fixada em 8 nunca consegue gravar comportamento novo como se fosse V8, e a
-# V9 pode ser desligada sem apagar dado algum.
-VERSAO_INSTRUMENTO = 10 if PRODUTIVIDADE_OPERADOR_V9 else min(8, _VERSAO_LEGADA)
 
 
-# Fase 111B — eleição lógica do operador dentro de UM segmento. A decisão é
-# somente diagnóstica nesta fase: default OFF e nenhum modo "on" aceito.
+# Fase 111B–D — identidade lógica do operador dentro de UM segmento.
 _OPERADOR_SEGMENTO_MODO = os.environ.get(
     "KV_OPERADOR_SEGMENTO", "off"
 ).strip().lower()
-if _OPERADOR_SEGMENTO_MODO not in ("off", "sombra"):
+if _OPERADOR_SEGMENTO_MODO not in ("off", "sombra", "on"):
     _OPERADOR_SEGMENTO_MODO = "off"
+
+
+def operador_segmento_autoridade_configurada(
+    modo: str | None = None,
+    tracker: str | None = None,
+    fora: str | None = None,
+    tracker_config: str | None = None,
+) -> bool:
+    """As três chaves da 111D, fail-closed e verificando o YAML real."""
+    modo_n = (_OPERADOR_SEGMENTO_MODO if modo is None else modo).strip().lower()
+    tracker_n = (
+        os.environ.get("KV_TRACKER", "") if tracker is None else tracker
+    ).strip().lower()
+    fora_n = (_FORA_MODO if fora is None else fora).strip().lower()
+    config_n = (
+        selecionar_tracker_config(tracker_n)
+        if tracker_config is None else str(tracker_config)
+    )
+    try:
+        reid_real = Path(config_n).resolve() == Path(_TRACKER_REID).resolve()
+    except (OSError, ValueError, TypeError):
+        reid_real = False
+    return (
+        modo_n == "on"
+        and tracker_n in {"reid", "fixa_reid"}
+        and reid_real
+        and fora_n == "on"
+    )
+
+
+AUTORIDADE_111D_CONFIGURADA = operador_segmento_autoridade_configurada()
+# A tríade da 111D é autossuficiente: ela não cria uma quarta chave implícita.
+# Sob autoridade, o caminho estruturado anterior também é parte do V11.
+PRODUTIVIDADE_OPERADOR_ESTRUTURADA = (
+    PRODUTIVIDADE_OPERADOR_V9 or AUTORIDADE_111D_CONFIGURADA
+)
+# O carimbo acompanha a semântica configurada. Um segmento V11 que caiu em
+# fallback continua V11: ele foi medido sob o instrumento novo e a abstenção é
+# parte auditável desse instrumento. Histórico nunca é reescrito.
+VERSAO_INSTRUMENTO = (
+    11 if AUTORIDADE_111D_CONFIGURADA
+    else 10 if PRODUTIVIDADE_OPERADOR_V9
+    else min(8, _VERSAO_LEGADA)
+)
 
 
 def _operador_segmento_env_float(nome: str, padrao: float,
@@ -3815,6 +3864,9 @@ def etapa_detectar_e_amostrar(
                 prox_amostra_s += intervalo_s   # consome este slot (~1 amostra / intervalo_s)
                 pessoas = []
                 observacoes_identidade: dict[int, str] = {}
+                detalhes_identidade: dict[int, dict] = {}
+                obs_identidade = None
+                precisa_frame_identidade = False
                 # Fase 110: quem aparece no quadro mas fora do polígono. Vive
                 # separada de `pessoas` do começo ao fim.
                 fora_frame: list = []
@@ -3864,6 +3916,17 @@ def etapa_detectar_e_amostrar(
                                     "dentro" if papel_z == "posto_operador" else "fora"
                                 )
                                 observacoes_identidade[int(tid)] = estado_id
+                                kpts_memoria = pessoa.get("kpts")
+                                try:
+                                    kpts_memoria = kpts_memoria.tolist()
+                                except AttributeError:
+                                    pass
+                                detalhes_identidade[int(tid)] = {
+                                    "track_id": int(tid),
+                                    "bbox": tuple(int(v) for v in pessoa["bbox"]),
+                                    "kpts": kpts_memoria,
+                                    "estado": estado_id,
+                                }
                                 acumular_descritor(
                                     desc_acc_identidade, int(tid), frame=frame,
                                     pessoa={**pessoa, "frame_idx": frame_idx},
@@ -3904,7 +3967,7 @@ def etapa_detectar_e_amostrar(
                         for p in no_posto:
                             presenca_zona[p["track_id"]] = presenca_zona.get(p["track_id"], 0) + 1
                             ultimo_no_posto[p["track_id"]] = tempo_s
-                        if PRODUTIVIDADE_OPERADOR_V9:
+                        if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                             # Na V9 esta etapa só produz CANDIDATOS. Nenhum
                             # track recebe identidade por tempo de zona ou bbox;
                             # a decisão funcional pertence ao contrato visual.
@@ -3935,7 +3998,7 @@ def etapa_detectar_e_amostrar(
                             p.pop("_papel_zona", None)
                     for i, p in enumerate(pessoas):
                         p["rotulo"] = f"P{i + 1}"
-                        if modo_op and PRODUTIVIDADE_OPERADOR_V9:
+                        if modo_op and PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                             # A identidade ainda está em aberto, então a medida
                             # é calculada para todos os candidatos enquanto o
                             # frame existe. Só o track que o contrato estrutural
@@ -3959,12 +4022,35 @@ def etapa_detectar_e_amostrar(
                             papel=p.get("papel"),
                         )
                 if identidade_shadow is not None and modo_op:
-                    identidade_shadow.setdefault("observacoes", []).append({
+                    obs_identidade = {
                         "cam_id": str(cam_id or "cam1"),
                         "tempo_s": round(float(tempo_s), 3),
                         "medido": True,
                         "tracks": dict(observacoes_identidade),
-                    })
+                    }
+                    if identidade_shadow.get("guardar_frames"):
+                        obs_identidade["pessoas"] = detalhes_identidade
+                        obs_identidade["dim"] = (w, h)
+                        # Só há reconstrução quando alguém foi visto fora.
+                        # O JPEG será a MESMA string já usada pela Amostra
+                        # sempre que ela existir; não uma segunda codificação.
+                        precisa_frame_identidade = any(
+                            d.get("estado") == "fora"
+                            for d in detalhes_identidade.values()
+                        )
+                        obs_identidade["frame_b64"] = None
+                        if precisa_frame_identidade:
+                            try:
+                                obs_identidade["frame_b64"] = frame_para_base64(
+                                    frame, qualidade=70
+                                )
+                            except Exception:  # noqa: BLE001 — fallback legado
+                                identidade_shadow["frames_falhos"] = (
+                                    int(identidade_shadow.get("frames_falhos") or 0) + 1
+                                )
+                    identidade_shadow.setdefault("observacoes", []).append(
+                        obs_identidade
+                    )
                 # ⭐ Fase 110 — O TESTE DO PASSANTE, aplicado só quando NINGUÉM
                 # está dentro do posto. Com alguém dentro, o minuto é um `cam1`
                 # normal e quem está fora é irrelevante — exatamente como antes.
@@ -4006,9 +4092,18 @@ def etapa_detectar_e_amostrar(
                     # o numpy do frame, evitando reter ~1–2 GB de RAM em
                     # vídeos longos até a etapa VLM. anotar_frame_com_ids
                     # já copia internamente, então não precisa frame.copy().
-                    img_b64 = frame_para_base64(
-                        anotar_frame_com_ids(frame, pessoas)
-                    )
+                    if (
+                        obs_identidade is not None
+                        and precisa_frame_identidade
+                        and obs_identidade.get("frame_b64")
+                    ):
+                        # JPEG cru único e compartilhado. A anotação é adiada
+                        # até a decisão da janela completa saber quem é R1.
+                        img_b64 = obs_identidade["frame_b64"]
+                    else:
+                        img_b64 = frame_para_base64(
+                            anotar_frame_com_ids(frame, pessoas)
+                        )
                     amostras.append(
                         Amostra(
                             frame_idx=frame_idx,
@@ -4047,14 +4142,20 @@ def etapa_detectar_e_amostrar(
                     for i_f, p_f in enumerate(am_fora):
                         p_f["rotulo"] = f"P{i_f + 1}"
                         p_f["frame_idx"] = frame_idx
+                    img_fora_legado = (
+                        obs_identidade["frame_b64"]
+                        if am_fora and obs_identidade is not None
+                        and precisa_frame_identidade
+                        and obs_identidade.get("frame_b64")
+                        else frame_para_base64(
+                            anotar_frame_com_ids(frame, am_fora)
+                        ) if am_fora else None
+                    )
                     amostras.append(
                         Amostra(frame_idx=frame_idx, tempo_s=tempo_s,
                                 img_b64="", pessoas=[], dim=(w, h),
                                 fora_posto=am_fora,
-                                img_b64_fora=(
-                                    frame_para_base64(
-                                        anotar_frame_com_ids(frame, am_fora))
-                                    if am_fora else None),
+                                img_b64_fora=img_fora_legado,
                                 fora_auditoria=fora_auditoria,
                                 fora_auditoria_amostras_zona=(
                                     fora_auditoria_amostras
@@ -4198,7 +4299,7 @@ def _interpolar_sequencia(descricoes: dict, idx_cam1: list) -> set:
         if descricoes.get(i):
             continue
         j = min(com_desc, key=lambda k: (abs(k - i), k))
-        if not PRODUTIVIDADE_OPERADOR_V9:
+        if not PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
             descricoes[i] = descricoes[j]
             interpolados.add(i)
             continue
@@ -4230,7 +4331,7 @@ def _cam2_ajuda(grupo: list) -> bool:
     """
     for am in grupo or []:
         if (
-            PRODUTIVIDADE_OPERADOR_V9
+            PRODUTIVIDADE_OPERADOR_ESTRUTURADA
             and isinstance(getattr(am, "op_cam2", None), bool)
         ):
             # Tanto a confirmação quanto a negação medida desambiguam quem a
@@ -4295,7 +4396,7 @@ def _contexto_zonas(amostra: Amostra, modo_op: bool,
         orientacao_liberada = _env_ligada("KV_ORIENTACAO_VERIFICADA")
         orient = (
             p.get("orientacao")
-            if not PRODUTIVIDADE_OPERADOR_V9 or orientacao_liberada
+            if not PRODUTIVIDADE_OPERADOR_ESTRUTURADA or orientacao_liberada
             else None
         )
         if orient:
@@ -4669,16 +4770,18 @@ def _analisar_sequencia_vlm(
         "\n".join(
             f"IMAGEM {i}: " + _contexto_zonas(
                 am, modo_op, frente_maquina, movimento,
-                identidade_em_aberto=True,
+                identidade_em_aberto=not bool(
+                    getattr(am, "identidade_autoritativa", False)
+                ),
             )
             for i, am in enumerate(usados)
         )
-        if PRODUTIVIDADE_OPERADOR_V9
+        if PRODUTIVIDADE_OPERADOR_ESTRUTURADA
         else _contexto_zonas(meio, modo_op, frente_maquina, movimento)
     )
     template_sequencia = (
         PROMPT_VLM_SEQUENCIA
-        if PRODUTIVIDADE_OPERADOR_V9
+        if PRODUTIVIDADE_OPERADOR_ESTRUTURADA
         else PROMPT_VLM_SEQUENCIA_V8
     )
     prompt = template_sequencia.format(
@@ -4690,7 +4793,7 @@ def _analisar_sequencia_vlm(
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
         regras=(
             _REGRAS_DESCRICAO_V9
-            if PRODUTIVIDADE_OPERADOR_V9
+            if PRODUTIVIDADE_OPERADOR_ESTRUTURADA
             else _REGRAS_DESCRICAO_V8
         ),
         exemplos=_BLOCO_EXEMPLOS_DESCRICAO,
@@ -4734,7 +4837,7 @@ def _analisar_sequencia_vlm(
     # separadamente, então a tradução rótulo→track usa o mapa DAQUELA amostra.
     idx_no_grupo = {id(a): i for i, a in enumerate(grupo)}
     saida: dict[int, dict] = {}
-    if not PRODUTIVIDADE_OPERADOR_V9:
+    if not PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
         for t in trechos if isinstance(trechos, list) else []:
             if not isinstance(t, dict):
                 continue
@@ -4977,7 +5080,7 @@ def _analisar_sequencia_cam2(
     usados = [a for a in usados if a.img_b64_secundario]
 
     contexto = zona_desc or "área de trabalho do operador, atrás da máquina"
-    if PRODUTIVIDADE_OPERADOR_V9:
+    if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
         fatos_maos = [
             f"IMAGEM {i}: o sensor detectou mãos na zona do torno"
             for i, a in enumerate(usados)
@@ -4992,7 +5095,7 @@ def _analisar_sequencia_cam2(
     dur = round((n - 1) * float(intervalo_s), 1) if n > 1 else float(intervalo_s)
     template_cam2 = (
         PROMPT_VLM_SEQUENCIA_CAM2
-        if PRODUTIVIDADE_OPERADOR_V9
+        if PRODUTIVIDADE_OPERADOR_ESTRUTURADA
         else PROMPT_VLM_SEQUENCIA_CAM2_V8
     )
     prompt = template_cam2.format(
@@ -5003,7 +5106,7 @@ def _analisar_sequencia_cam2(
         bloco_vocabulario=construir_bloco_vocabulario(memoria),
         regras=(
             _REGRAS_DESCRICAO_V9
-            if PRODUTIVIDADE_OPERADOR_V9
+            if PRODUTIVIDADE_OPERADOR_ESTRUTURADA
             else _REGRAS_DESCRICAO_V8
         ),
         exemplos=_BLOCO_EXEMPLOS_DESCRICAO,
@@ -5051,7 +5154,7 @@ def _analisar_sequencia_cam2(
         acao = (t.get("acao") or "").strip().lower()
         if acao:
             estado = str(t.get("operador_estado") or "").strip().lower()
-            if PRODUTIVIDADE_OPERADOR_V9:
+            if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                 if estado not in {"identificado", "ausente", "incerto"}:
                     estado = "incerto"
             else:
@@ -5061,10 +5164,10 @@ def _analisar_sequencia_cam2(
                 motivo = "sem_leitura"
             trabalho = (
                 _trabalho_v9_validado(t.get("trabalho"), motivo, acao)
-                if PRODUTIVIDADE_OPERADOR_V9 and estado == "identificado"
+                if PRODUTIVIDADE_OPERADOR_ESTRUTURADA and estado == "identificado"
                 else (
                     t.get("trabalho")
-                    if not PRODUTIVIDADE_OPERADOR_V9
+                    if not PRODUTIVIDADE_OPERADOR_ESTRUTURADA
                     and estado == "identificado"
                     and isinstance(t.get("trabalho"), bool)
                     else None
@@ -5344,6 +5447,17 @@ def etapa_analise_vlm(
         # ── 1) Classifica cada amostra do grupo, sem chamar nada ainda ──
         plano: list[tuple[str, Amostra]] = []
         for am in grupo:
+            if getattr(am, "identidade_autoritativa", False):
+                # Fase 111D: cam1 já conhece a identidade física deste slot.
+                # A cam2 continua evidência de atividade, mas não pode resgatar
+                # outra pessoa nem esconder o operador visto fora da ROI.
+                if am.identidade_estado == "fora" and am.fora_posto:
+                    plano.append(("fora_posto", am))
+                elif am.pessoas:
+                    plano.append(("cam1", am))
+                else:
+                    plano.append(("vazio", am))
+                continue
             tem_op_cam1 = any(p.get("papel") == "operador" for p in am.pessoas)
             if (
                 zona_posto
@@ -5351,7 +5465,7 @@ def etapa_analise_vlm(
                 and (
                     am.operador_presente
                     or (
-                        PRODUTIVIDADE_OPERADOR_V9
+                        PRODUTIVIDADE_OPERADOR_ESTRUTURADA
                         and int(getattr(am, "n_posto_cam2", 0) or 0) > 0
                     )
                 )
@@ -5360,7 +5474,7 @@ def etapa_analise_vlm(
                 # (oclusão total) e a cam2 vê.
                 plano.append(("ponte" if am.operador_ponte else "resgate", am))
             elif (
-                PRODUTIVIDADE_OPERADOR_V9
+                PRODUTIVIDADE_OPERADOR_ESTRUTURADA
                 and not am.pessoas
                 and am.operador_presente is None
             ):
@@ -5445,7 +5559,7 @@ def etapa_analise_vlm(
                         precisa_vlm = True
             decisoes[i] = d_am
 
-        if idx_cam1 and zona_posto and PRODUTIVIDADE_OPERADOR_V9:
+        if idx_cam1 and zona_posto and PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
             # O gate continua economizando DESCRIÇÃO repetida por track, mas
             # não pode suprimir a pergunta comercial do minuto. Uma sequência
             # ocupada sempre passa pelo contrato estruturado de identidade e
@@ -5588,12 +5702,12 @@ def etapa_analise_vlm(
                         n_herdadas += 1
                 elif desc_cam2 and not _eh_indefinida(desc_cam2):
                     heranca_seguidas = 0
-                if PRODUTIVIDADE_OPERADOR_V9 and not desc_cam2:
+                if PRODUTIVIDADE_OPERADOR_ESTRUTURADA and not desc_cam2:
                     desc_cam2 = "ação não identificada"
                     origem_resgate = "falha_descricao_vlm"
                     estado_cam2 = "incerto"
                 if desc_cam2:
-                    if not PRODUTIVIDADE_OPERADOR_V9:
+                    if not PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                         papel_cam2 = "operador"
                     elif tipo == "ponte":
                         papel_cam2 = None
@@ -5718,6 +5832,33 @@ def etapa_analise_vlm(
                         "fora_do_posto": pf.get("_fora_motivo") or "operador",
                         "fora_amostras_zona": pf.get("_fora_amostras_zona"),
                     })
+                if getattr(am, "identidade_autoritativa", False):
+                    # R1 fora não apaga quem está fisicamente dentro. Esses
+                    # tracks já foram travados como visitantes pela 111D; a
+                    # observação é determinística e não custa outra chamada VLM.
+                    for visitante in am.pessoas:
+                        observacoes.append({
+                            "tempo_s": am.tempo_s,
+                            "frame_idx": am.frame_idx,
+                            "track_id": visitante.get("track_id"),
+                            "descricao": "outra pessoa visível no posto",
+                            "bbox": list(visitante.get("bbox") or []),
+                            "bbox_cam": "cam1",
+                            "bbox_dim": am.dim,
+                            "zona": visitante.get("zona") or zona_posto,
+                            "papel": "visitante",
+                            "origem_gate": "identidade_autoritativa_visitante",
+                            "mudanca_contexto": True,
+                            "maquina": None,
+                            "imovel": None,
+                            "maos_maquina": None,
+                            "orientacao": None,
+                            "trabalho": None,
+                            "produtividade_motivo": "sem_leitura",
+                            "produtividade_observada": False,
+                            "interlocutor_evidencia": None,
+                            "narrativa": _f.get("resumo") or narrativa_grupo,
+                        })
                 continue
 
             if tipo == "vazio":
@@ -5739,9 +5880,10 @@ def etapa_analise_vlm(
             # é não perder a narrativa nos instantes interpolados.
             cena_narrativa = _bloco.get("resumo") or narrativa_grupo
             cena_motivo = _bloco.get("produtividade_motivo")
+            cena_interlocutor = _bloco.get("interlocutor_evidencia")
             operador_estado = _bloco.get("operador_estado")
             operador_tid = _bloco.get("operador_track_id")
-            if PRODUTIVIDADE_OPERADOR_V9:
+            if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                 # Falha, ausência de campo e `incerto` permanecem abstenção.
                 # Nem candidato único autoriza ressuscitar a eleição por bbox.
                 if operador_estado not in {"identificado", "ausente", "incerto"}:
@@ -5761,10 +5903,35 @@ def etapa_analise_vlm(
                     elif len(am.pessoas) > 1:
                         operador_estado = "incerto"
                         operador_tid = None
+            autoridade_slot = bool(getattr(am, "identidade_autoritativa", False))
+            if autoridade_slot:
+                if am.identidade_estado == "dentro":
+                    tid_autoritativo = am.identidade_track_id
+                    # A decisão `trabalho` pertence ao operador que o VLM
+                    # afirmou analisar. Se ele escolheu outro track, identidade
+                    # continua autoritativa mas produtividade se abstém.
+                    vlm_coincide = (
+                        operador_estado == "identificado"
+                        and _num(operador_tid) == _num(tid_autoritativo)
+                    )
+                    if not vlm_coincide:
+                        cena_trabalho = None
+                        cena_motivo = "sem_leitura"
+                        cena_interlocutor = None
+                    operador_estado = "identificado"
+                    operador_tid = tid_autoritativo
+                else:
+                    operador_estado = "ausente"
+                    operador_tid = None
+                    cena_trabalho = None
+                    cena_motivo = "sem_leitura"
+                    cena_interlocutor = None
             d_am = decisoes.get(i, {})
             for p in am.pessoas:
                 tid = p["track_id"]
-                if not PRODUTIVIDADE_OPERADOR_V9:
+                if autoridade_slot:
+                    papel_obs = p.get("papel")
+                elif not PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                     papel_obs = p.get("papel")
                 elif operador_estado == "identificado":
                     papel_obs = "operador" if tid == operador_tid else "visitante"
@@ -5774,7 +5941,7 @@ def etapa_analise_vlm(
                     papel_obs = None
                 else:
                     papel_obs = p.get("papel")
-                if PRODUTIVIDADE_OPERADOR_V9:
+                if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                     # A chamada V9 já observou este instante para decidir
                     # identidade/produtividade. Usar a âncora antiga só no
                     # texto criava contradição (ex.: descrição "operando" com
@@ -5804,7 +5971,7 @@ def etapa_analise_vlm(
                         n_repeticao += 1
                         repeticoes_seguidas[tid] = repeticoes_seguidas.get(tid, 0) + 1
                 if not desc:
-                    if not PRODUTIVIDADE_OPERADOR_V9:
+                    if not PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
                         continue
                     # Detecção/posição continuam sendo uma observação mesmo
                     # quando o VLM falha ou omite uma pessoa. Apagar a linha
@@ -5874,11 +6041,12 @@ def etapa_analise_vlm(
                     # inteira. Visitante nunca herda o mesmo booleano.
                     "trabalho": (
                         cena_trabalho
-                        if not PRODUTIVIDADE_OPERADOR_V9 or papel_obs == "operador"
+                        if papel_obs == "operador"
+                        or (not PRODUTIVIDADE_OPERADOR_ESTRUTURADA and not autoridade_slot)
                         else None
                     ),
                     "produtividade_observada": (
-                        PRODUTIVIDADE_OPERADOR_V9
+                        PRODUTIVIDADE_OPERADOR_ESTRUTURADA
                         and papel_obs == "operador"
                         and i not in interp
                         and isinstance(cena_trabalho, bool)
@@ -5890,7 +6058,7 @@ def etapa_analise_vlm(
                     # operador escolhido neste instante. A observação do
                     # visitante não herda a decisão da cena.
                     "interlocutor_evidencia": (
-                        _bloco.get("interlocutor_evidencia")
+                        cena_interlocutor
                         if papel_obs == "operador" and i not in interp
                         else None
                     ),
@@ -6447,7 +6615,7 @@ def etapa_segmentar_eventos(
                 and o.get("fora_do_posto") == atual.get("fora_do_posto")
                 and gap <= janela_continuidade_s
                 and (
-                    not PRODUTIVIDADE_OPERADOR_V9
+                    not PRODUTIVIDADE_OPERADOR_ESTRUTURADA
                     or estado_comercial_igual
                 )
             ):
@@ -6586,13 +6754,13 @@ def _papel_do_minuto(
             papel = None
         elif "operador" in papeis:
             papel = "operador"
-        elif "visitante" in papeis:
-            papel = "visitante"
         elif PAPEL_OPERADOR_FORA in papeis:
             # Ganha de `posto_vazio`: saber ONDE ele está é mais informativo
-            # que saber apenas que o posto está vazio, e as duas afirmações
-            # concordam.
+            # que saber apenas que o posto está vazio. Na 111D também ganha de
+            # visitante: outra pessoa no posto não esconde o titular visto fora.
             papel = PAPEL_OPERADOR_FORA
+        elif "visitante" in papeis:
+            papel = "visitante"
         elif "posto_vazio" in papeis:
             papel = "posto_vazio"
         else:
@@ -6713,7 +6881,7 @@ def etapa_consolidar_principais(
         # Identidade/presença é resolvida ANTES do rótulo. O desenho anterior
         # escolhia a ação dominante e copiava o papel do representante dessa
         # ação; assim um visitante podia virar o "operador" do minuto.
-        if PRODUTIVIDADE_OPERADOR_V9:
+        if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
             papel_minuto = _papel_do_minuto(no_bucket, ws, we)
             bucket_papel = [
                 (e, ov) for e, ov in no_bucket
@@ -6772,7 +6940,7 @@ def etapa_consolidar_principais(
             for e, _ov in _fora_partes
             if e.get("fora_amostras_zona") is not None
         ]
-        if PRODUTIVIDADE_OPERADOR_V9:
+        if PRODUTIVIDADE_OPERADOR_ESTRUTURADA:
             bucket_operador = (
                 [(e, ov) for e, ov in bucket_papel
                  if e.get("papel_pessoa") == "operador"]
@@ -8549,11 +8717,362 @@ def construir_timeline_identidade_segmento(
     return {**base, "status": "disponivel", "intervalos": intervalos}
 
 
+def _frame_b64_para_bgr(frame_b64: str | None):
+    """Decodifica somente o JPEG temporário em memória; nunca abre o vídeo."""
+    if not frame_b64:
+        return None
+    try:
+        bruto = base64.b64decode(frame_b64, validate=True)
+        vetor = np.frombuffer(bruto, dtype=np.uint8)
+        return cv2.imdecode(vetor, cv2.IMREAD_COLOR)
+    except Exception:  # noqa: BLE001 — o slot deve cair no legado
+        return None
+
+
+def _imagem_pessoas_identidade(
+    frame, pessoas: list[dict], dim_original, *, rotulo_unico: str | None = None,
+) -> str | None:
+    """Anota bboxes já medidos no JPEG cru; não abre vídeo nem infere nada."""
+    if frame is None:
+        return None
+    try:
+        h_jpeg, w_jpeg = frame.shape[:2]
+        w_orig, h_orig = dim_original or (w_jpeg, h_jpeg)
+        sx = w_jpeg / max(1.0, float(w_orig))
+        sy = h_jpeg / max(1.0, float(h_orig))
+        anotadas = []
+        for pessoa in pessoas or []:
+            if not _bbox_valido(pessoa.get("bbox")):
+                continue
+            x1, y1, x2, y2 = pessoa["bbox"]
+            anotadas.append({
+                "bbox": (
+                    int(round(float(x1) * sx)), int(round(float(y1) * sy)),
+                    int(round(float(x2) * sx)), int(round(float(y2) * sy)),
+                ),
+                "rotulo": rotulo_unico or pessoa.get("rotulo") or "P?",
+            })
+        if not anotadas:
+            return None
+        return frame_para_base64(
+            anotar_frame_com_ids(frame, anotadas), qualidade=70
+        )
+    except Exception:  # noqa: BLE001 — slot deve permanecer legado
+        return None
+
+
+def _imagem_fora_identidade(frame, detalhe: dict, dim_original) -> str | None:
+    """Anota somente R1 no frame cru já decodificado em memória."""
+    return _imagem_pessoas_identidade(
+        frame, [detalhe], dim_original, rotulo_unico="OP"
+    )
+
+
+def _materializar_imagens_legadas_identidade(
+    amostras: list[Amostra], dados_temporarios: dict, camera: str,
+) -> None:
+    """Converte JPEGs crus adiados antes de qualquer retorno pelo legado."""
+    por_tempo = {
+        round(float(t), 3): obs
+        for obs in (dados_temporarios.get("observacoes") or [])
+        if str(obs.get("cam_id") or "cam1") == camera
+        and (t := _num(obs.get("tempo_s"))) is not None
+    }
+    for am in amostras or []:
+        obs = por_tempo.get(round(float(am.tempo_s), 3))
+        bruto = obs.get("frame_b64") if isinstance(obs, dict) else None
+        if not bruto:
+            continue
+        # Testes/caminhos antigos podem já ter uma imagem anotada diferente.
+        # Nesse caso basta soltar a cópia auxiliar; não há o que reconstruir.
+        compartilhado_img = am.img_b64 == bruto
+        compartilhado_fora = am.img_b64_fora == bruto
+        if not compartilhado_img and not compartilhado_fora:
+            obs["frame_b64"] = None
+            continue
+        frame = _frame_b64_para_bgr(bruto)
+        if frame is None:
+            # Mantém uma única representação na Amostra como fallback não-fatal.
+            obs["frame_b64"] = None
+            continue
+        alvos = am.pessoas if am.pessoas else am.fora_posto
+        destino_fora = not am.pessoas and bool(am.fora_posto)
+        # Remove TODAS as referências comprimidas antes de criar a definitiva.
+        obs["frame_b64"] = None
+        am.img_b64 = ""
+        am.img_b64_fora = None
+        del bruto
+        imagem = _imagem_pessoas_identidade(frame, alvos, am.dim) if alvos else None
+        if destino_fora:
+            am.img_b64_fora = imagem
+        elif alvos:
+            am.img_b64 = imagem or ""
+
+
+def aplicar_identidade_logica_segmento(
+    amostras: list[Amostra],
+    resultados_identidade: list[dict],
+    dados_temporarios: dict,
+    cam_id_primaria: str,
+) -> dict:
+    """Aplica a 111D somente às Amostras seguras da câmera primária.
+
+    Mapping e decodificação são validados antes da primeira mutação; a imagem
+    final substitui a única string comprimida slot a slot. Slots ambíguos
+    permanecem no caminho legado; R1 nunca chega a evento ou persistência.
+    """
+    base = {
+        "status": "fallback_legado",
+        "cam_id": str(cam_id_primaria or "cam1"),
+        "identidade_logica": None,
+        "track_ids": [],
+        "reatribuicoes_dentro": 0,
+        "reatribuicoes_fora": 0,
+        "reatribuicoes_ausente": 0,
+        "slots_fallback": len(amostras or []),
+        "motivo": "configuracao_incompleta",
+    }
+    if not AUTORIDADE_111D_CONFIGURADA:
+        return base
+
+    camera = base["cam_id"]
+    observacoes = {}
+    for obs in dados_temporarios.get("observacoes") or []:
+        if str(obs.get("cam_id") or "cam1") != camera:
+            continue
+        tempo = _num(obs.get("tempo_s"))
+        if tempo is not None:
+            observacoes[round(tempo, 3)] = obs
+
+    def _fallback(motivo: str, **extras) -> dict:
+        # Nenhum retorno da autoridade pode deixar o JPEG cru chegar ao VLM.
+        _materializar_imagens_legadas_identidade(
+            amostras, dados_temporarios, camera
+        )
+        return {**base, **extras, "motivo": motivo}
+
+    resultado = next(
+        (r for r in (resultados_identidade or [])
+         if str(r.get("cam_id") or "cam1") == camera),
+        None,
+    )
+    if not isinstance(resultado, dict):
+        return _fallback("resultado_primario_ausente")
+    decisao = resultado.get("decisao") or {}
+    if decisao.get("status") != "confirmado":
+        return _fallback(decisao.get("motivo") or "identidade_indefinida")
+    timeline = resultado.get("timeline") or {}
+    if timeline.get("status") != "disponivel":
+        return _fallback("timeline_indisponivel")
+
+    track_ids = {
+        int(t) for t in (decisao.get("track_ids") or [])
+        if _num(t) is not None
+    }
+    identidade_nome = decisao.get("identidade_logica")
+    vencedora = next((i for i in (resultado.get("identidades") or []) if (
+        i.get("identidade_logica") == identidade_nome
+        and set(int(t) for t in (i.get("track_ids") or [])) == track_ids
+    )), None)
+    if not track_ids or not isinstance(vencedora, dict):
+        return _fallback("mapping_vencedor_ausente")
+    amostras_zona = int(_num(vencedora.get("n_amostras_posto")) or 0)
+
+    # Planos prontos primeiro: se qualquer helper interno quebrar, nenhuma
+    # Amostra terá sido parcialmente reatribuída.
+    planos: list[tuple[Amostra, dict] | None] = []
+    try:
+        for am in amostras or []:
+            obs = observacoes.get(round(float(am.tempo_s), 3))
+            if not isinstance(obs, dict) or obs.get("medido") is not True:
+                planos.append(None)
+                continue
+            tracks_slot = obs.get("tracks") or {}
+            vistos: list[tuple[int, str]] = []
+            for tid_raw, estado in tracks_slot.items():
+                try:
+                    tid = int(tid_raw)
+                except (TypeError, ValueError):
+                    continue
+                if tid in track_ids and estado in {"dentro", "fora"}:
+                    vistos.append((tid, str(estado)))
+            # Dois fragmentos do mesmo R simultâneos ou estados divergentes
+            # são conflito de mapping: fallback somente neste slot.
+            if len(vistos) > 1:
+                planos.append(None)
+                continue
+
+            if not vistos:
+                planos.append((am, {
+                    "estado": "ausente", "track_id": None, "obs": obs,
+                }))
+                continue
+
+            tid, estado = vistos[0]
+            if estado == "dentro":
+                candidatos = [
+                    p for p in am.pessoas if int(p.get("track_id")) == tid
+                ]
+                if len(candidatos) != 1:
+                    planos.append(None)
+                    continue
+                planos.append((am, {
+                    "estado": "dentro", "track_id": tid,
+                    "pessoa": candidatos[0], "obs": obs,
+                }))
+                continue
+
+            detalhes = obs.get("pessoas") or {}
+            detalhe = detalhes.get(tid) or detalhes.get(str(tid))
+            if (
+                not isinstance(detalhe, dict)
+                or not obs.get("frame_b64")
+            ):
+                planos.append(None)
+                continue
+            planos.append((am, {
+                "estado": "fora", "track_id": tid,
+                "detalhe": detalhe, "obs": obs,
+            }))
+
+        # Valida todos os JPEGs crus antes da primeira mutação. A segunda
+        # decodificação, abaixo, continua sendo só de memória; nunca do vídeo.
+        for item in planos:
+            if item is None:
+                continue
+            am, plano = item
+            bruto = plano["obs"].get("frame_b64")
+            if bruto and _frame_b64_para_bgr(bruto) is None:
+                raise ValueError(f"jpeg_temporario_invalido:{am.tempo_s}")
+    except Exception:  # noqa: BLE001 — fallback transacional do segmento
+        return _fallback(
+            "erro_preparacao",
+            identidade_logica=identidade_nome,
+            track_ids=sorted(track_ids),
+        )
+
+    # Slots sem mapping voltam ao JPEG legado antes de qualquer reatribuição.
+    _materializar_imagens_legadas_identidade(
+        [am for am, item in zip(amostras or [], planos) if item is None],
+        dados_temporarios,
+        camera,
+    )
+
+    dentro = fora = ausente = fallback = 0
+    for item in planos:
+        if item is None:
+            fallback += 1
+            continue
+        am, plano = item
+        estado, tid = plano["estado"], plano.get("track_id")
+        obs = plano["obs"]
+        bruto = obs.get("frame_b64")
+        teve_bruto = bool(bruto)
+        imagem_final = None
+        if teve_bruto:
+            # A validação transacional acima já decodificou com sucesso. Agora
+            # retiramos a ÚNICA string comprimida antes de criar a definitiva.
+            frame = _frame_b64_para_bgr(bruto)
+            legado_pessoas = list(am.pessoas)
+            legado_fora = list(am.fora_posto)
+            obs["frame_b64"] = None
+            am.img_b64 = ""
+            am.img_b64_fora = None
+            del bruto
+            try:
+                if estado == "fora":
+                    imagem_final = _imagem_fora_identidade(
+                        frame, plano["detalhe"], obs.get("dim") or am.dim
+                    )
+                elif am.pessoas:
+                    imagem_final = _imagem_pessoas_identidade(
+                        frame, am.pessoas, obs.get("dim") or am.dim
+                    )
+            except Exception:  # noqa: BLE001 — fallback por slot
+                imagem_final = None
+
+            precisa_imagem = estado == "fora" or bool(am.pessoas)
+            if precisa_imagem and not imagem_final:
+                # O mesmo numpy já decodificado tenta restaurar o legado; não
+                # reabre vídeo e não deixa mutação parcial de papel neste slot.
+                alvos_legado = legado_pessoas or legado_fora
+                imagem_legada = _imagem_pessoas_identidade(
+                    frame, alvos_legado, obs.get("dim") or am.dim
+                ) if alvos_legado else None
+                if legado_pessoas:
+                    am.img_b64 = imagem_legada or ""
+                elif legado_fora:
+                    am.img_b64_fora = imagem_legada
+                fallback += 1
+                continue
+
+        # Limpa a decisão causal antiga somente nos slots realmente assumidos.
+        am.fora_posto = []
+        am.img_b64_fora = None
+        am.fora_auditoria = None
+        am.fora_auditoria_amostras_zona = None
+        am.operador_ponte = False
+        for pessoa in am.pessoas:
+            pessoa["papel"] = (
+                "operador"
+                if estado == "dentro" and int(pessoa.get("track_id")) == tid
+                else "visitante"
+            )
+        if estado == "dentro":
+            if teve_bruto:
+                am.img_b64 = imagem_final or ""
+            am.operador_presente = True
+            dentro += 1
+        elif estado == "fora":
+            detalhe = plano["detalhe"]
+            pessoa_fora = {
+                "track_id": int(tid),
+                "bbox": tuple(int(v) for v in detalhe["bbox"]),
+                "kpts": detalhe.get("kpts"),
+                "rotulo": "OP",
+                "frame_idx": am.frame_idx,
+                "_fora_do_posto": True,
+                "_fora_motivo": "operador",
+                "_fora_amostras_zona": amostras_zona,
+            }
+            am.fora_posto = [pessoa_fora]
+            am.img_b64_fora = imagem_final
+            am.img_b64 = ""
+            am.operador_presente = False
+            fora += 1
+        else:
+            if teve_bruto and am.pessoas:
+                am.img_b64 = imagem_final or ""
+            am.operador_presente = False
+            ausente += 1
+        am.identidade_autoritativa = True
+        am.identidade_estado = estado
+        am.identidade_track_id = int(tid) if tid is not None else None
+
+    # Defesa final: nenhum JPEG cru do coletor pode chegar ao VLM.
+    for obs in dados_temporarios.get("observacoes") or []:
+        if str(obs.get("cam_id") or "cam1") == camera:
+            obs["frame_b64"] = None
+
+    aplicados = dentro + fora + ausente
+    return {
+        **base,
+        "status": "aplicado" if aplicados else "fallback_legado",
+        "identidade_logica": identidade_nome,
+        "track_ids": sorted(track_ids),
+        "reatribuicoes_dentro": dentro,
+        "reatribuicoes_fora": fora,
+        "reatribuicoes_ausente": ausente,
+        "slots_fallback": fallback,
+        "motivo": "identidade_confirmada" if aplicados else "slots_sem_mapping",
+    }
+
+
 def _registrar_identidades_segmento_sombra(
     dados_shadow: dict, cameras: list[str], *, duracao_s: float,
 ) -> list[dict]:
     """Executa 111C após a 111B RAW; resultado vive apenas em log/memória."""
-    if _OPERADOR_SEGMENTO_MODO != "sombra":
+    if _OPERADOR_SEGMENTO_MODO not in {"sombra", "on"}:
         return []
 
     por_camera: dict[str, list[dict]] = defaultdict(list)
@@ -8599,19 +9118,20 @@ def _registrar_identidades_segmento_sombra(
                     "confianca_costura": i["confianca_costura"],
                 } for i in identidades],
             }
-            log.info(
-                "[identidade-segmento] %s",
-                json.dumps(resumo_identidades, ensure_ascii=False, separators=(",", ":")),
-            )
-            log.info(
-                "[operador-segmento-logico] %s",
-                json.dumps(decisao_logica, ensure_ascii=False, separators=(",", ":")),
-            )
-            if vencedora:
+            if _OPERADOR_SEGMENTO_MODO == "sombra":
                 log.info(
-                    "[timeline-operador-segmento] %s",
-                    json.dumps(timeline, ensure_ascii=False, separators=(",", ":")),
+                    "[identidade-segmento] %s",
+                    json.dumps(resumo_identidades, ensure_ascii=False, separators=(",", ":")),
                 )
+                log.info(
+                    "[operador-segmento-logico] %s",
+                    json.dumps(decisao_logica, ensure_ascii=False, separators=(",", ":")),
+                )
+                if vencedora:
+                    log.info(
+                        "[timeline-operador-segmento] %s",
+                        json.dumps(timeline, ensure_ascii=False, separators=(",", ":")),
+                    )
             saida.append({
                 "cam_id": camera,
                 "identidades": identidades,
@@ -9646,7 +10166,7 @@ def etapa_persistir(
             # Sem persistência, todo reload apagava a produtividade direta e
             # forçava o dashboard a voltar para rótulo/Lean.
             "trabalho": (
-                e.get("trabalho") if PRODUTIVIDADE_OPERADOR_V9 else None
+                e.get("trabalho") if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else None
             ),
             "decidido_por": e.get("decidido_por"),
             # Fase 90: cobertura e composição, ao lado da evidência.
@@ -9757,13 +10277,13 @@ def etapa_persistir(
             "zona_contexto": e["zona_contexto"],
             "papel_pessoa": e.get("papel_pessoa"),
             "maos_maquina": (
-                e.get("maos_maquina") if PRODUTIVIDADE_OPERADOR_V9 else None
+                e.get("maos_maquina") if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else None
             ),
             "orientacao": (
-                e.get("orientacao") if PRODUTIVIDADE_OPERADOR_V9 else None
+                e.get("orientacao") if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else None
             ),
             "trabalho": (
-                e.get("trabalho") if PRODUTIVIDADE_OPERADOR_V9 else None
+                e.get("trabalho") if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else None
             ),
             "versao_instrumento": VERSAO_INSTRUMENTO,
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
@@ -14923,9 +15443,9 @@ def _trabalho_do_minuto(no_bucket: list):
     for e, ov in no_bucket:
         t = e.get("trabalho")
         if t is True:
-            sim += float(ov or 0.0) if PRODUTIVIDADE_OPERADOR_V9 else 1.0
+            sim += float(ov or 0.0) if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else 1.0
         elif t is False:
-            nao += float(ov or 0.0) if PRODUTIVIDADE_OPERADOR_V9 else 1.0
+            nao += float(ov or 0.0) if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else 1.0
     if abs(sim - nao) < 1e-9:
         return None
     return sim > nao
@@ -17478,8 +17998,15 @@ def processar_video(
     cam_primaria_efetiva = str(cam_id or "cam1")
     cam_secundaria_efetiva = str(cam_id_secundario or "cam2")
     identidade_shadow = (
-        {"observacoes": [], "descritores": []}
-        if _OPERADOR_SEGMENTO_MODO == "sombra" else None
+        {
+            "observacoes": [], "descritores": [],
+            # JPEG por slot existe exclusivamente no on com as três chaves.
+            "guardar_frames": bool(AUTORIDADE_111D_CONFIGURADA),
+        }
+        if (
+            _OPERADOR_SEGMENTO_MODO == "sombra"
+            or AUTORIDADE_111D_CONFIGURADA
+        ) else None
     )
     (amostras, info_video, ids_unicos, descritores_track,
      movimento_por_minuto, grade_movimento) = etapa_detectar_e_amostrar(
@@ -17494,6 +18021,17 @@ def processar_video(
     )
 
     if not amostras:
+        if _OPERADOR_SEGMENTO_MODO == "on":
+            log.info(
+                "[operador-segmento/on] %s",
+                json.dumps({
+                    "status": "fallback_legado",
+                    "motivo": (
+                        "sem_amostras" if AUTORIDADE_111D_CONFIGURADA
+                        else "configuracao_incompleta"
+                    ),
+                }, ensure_ascii=False, separators=(",", ":")),
+            )
         progress_cb("concluido", 100, "Nenhuma pessoa detectada no vídeo")
         return {
             "video_id": None,
@@ -17570,11 +18108,12 @@ def processar_video(
             f"2º ângulo em {n_sec}/{len(amostras)} amostras"
         )
 
-    # Fase 111B: a janela de cada câmera já está completamente fechada aqui.
+    # Fase 111B/C: a janela de cada câmera já está completamente fechada aqui.
     # A decisão nasce e morre em memória/log; não toca amostras, papéis,
     # observações, eventos nem persistência. Sem ROI de posto não há eleição,
     # pois fora do modo operador `zona=None` não significa presença no posto.
-    if _OPERADOR_SEGMENTO_MODO == "sombra":
+    resultados_identidade: list[dict] = []
+    if _OPERADOR_SEGMENTO_MODO == "sombra" or AUTORIDADE_111D_CONFIGURADA:
         cameras_posto: list[str] = []
         if zona_posto:
             cameras_posto.append(cam_primaria_efetiva)
@@ -17583,12 +18122,23 @@ def processar_video(
             for i in (rois_contexto_secundario or {}).values()
         ):
             cameras_posto.append(cam_secundaria_efetiva)
-        _registrar_operador_segmento_sombra(
-            descritores_raw_shadow or descritores_track, cameras_posto
-        )
-        _registrar_identidades_segmento_sombra(
+        if _OPERADOR_SEGMENTO_MODO == "sombra":
+            _registrar_operador_segmento_sombra(
+                descritores_raw_shadow or descritores_track, cameras_posto
+            )
+        resultados_identidade = _registrar_identidades_segmento_sombra(
             identidade_shadow or {}, cameras_posto,
             duracao_s=float(info_video.get("duracao_s") or 0.0),
+        )
+    elif _OPERADOR_SEGMENTO_MODO == "on":
+        log.info(
+            "[operador-segmento/on] %s",
+            json.dumps({
+                "status": "fallback_legado",
+                "motivo": "configuracao_incompleta",
+                "tracker": os.environ.get("KV_TRACKER", "").strip().lower(),
+                "fora": _FORA_MODO,
+            }, ensure_ascii=False, separators=(",", ":")),
         )
 
     # Fase 28: veredito por slot (dupla quando a cam2 tem zona de posto).
@@ -17607,6 +18157,21 @@ def processar_video(
             stats_op["resgatados_cam2"], stats_op["pontes"],
             stats_op["vazios"], stats_op["inconclusivos"],
             stats_op["rebaixados"],
+        )
+
+    # Fase 111D: confirmação causal legada já terminou. Só agora a decisão da
+    # janela completa pode assumir slots seguros; em falha, os objetos legados
+    # permanecem intactos e o VLM recebe exatamente o caminho anterior.
+    if AUTORIDADE_111D_CONFIGURADA:
+        resumo_111d = aplicar_identidade_logica_segmento(
+            amostras,
+            resultados_identidade,
+            identidade_shadow or {},
+            cam_primaria_efetiva,
+        )
+        log.info(
+            "[operador-segmento/on] %s",
+            json.dumps(resumo_111d, ensure_ascii=False, separators=(",", ":")),
         )
 
     observacoes = etapa_analise_vlm(

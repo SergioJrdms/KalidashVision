@@ -1,0 +1,660 @@
+"""Fase 111D — autoridade local da identidade lógica sobre a Fase 110.
+
+Teste comportamental sem vídeo/modelo reais: imagem, VLM e configuração são
+substituídos apenas nas fronteiras; a reatribuição e o downstream executados
+são os de produção.
+"""
+from copy import deepcopy
+import importlib
+import os
+from pathlib import Path
+import sys
+import types
+
+
+RAIZ = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, RAIZ)
+for nome in [
+    "cv2", "numpy", "requests", "ultralytics", "supabase", "groq",
+    "anthropic", "openai", "dotenv", "httpx", "PIL", "PIL.Image",
+]:
+    sys.modules.setdefault(nome, types.ModuleType(nome))
+sys.modules["dotenv"].load_dotenv = lambda *a, **k: None
+sys.modules["ultralytics"].YOLO = object
+sys.modules["supabase"].create_client = lambda *a, **k: None
+sys.modules["supabase"].Client = object
+sys.modules["groq"].Groq = object
+sys.modules["anthropic"].Anthropic = object
+sys.modules["openai"].OpenAI = object
+sys.modules["numpy"].ndarray = object
+os.environ.setdefault("SUPABASE_URL", "https://x.supabase.co")
+os.environ.setdefault("SUPABASE_KEY", "k")
+
+from backend import pipeline as pl  # noqa: E402
+from backend import productivity as prod  # noqa: E402
+
+
+ok = fail = 0
+
+
+def check(nome, cond, extra=""):
+    global ok, fail
+    if cond:
+        ok += 1
+        print(f"  ok   {nome}")
+    else:
+        fail += 1
+        print(f"  FAIL {nome} {extra}")
+
+
+def pessoa(tid, papel=None, *, bbox=(10, 10, 110, 310), rotulo=None):
+    return {
+        "track_id": int(tid),
+        "bbox": tuple(bbox),
+        "centro": ((bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2),
+        "kpts": None,
+        "papel": papel,
+        "rotulo": rotulo or f"P{tid}",
+        "zona": "posto",
+        "zona_desc": "posto do torno",
+        "maos_maquina": False,
+        "orientacao": None,
+    }
+
+
+def amostra(tempo, pessoas=(), *, presente=None):
+    return pl.Amostra(
+        frame_idx=int(float(tempo) * 10),
+        tempo_s=float(tempo),
+        img_b64="IMG-CAM1" if pessoas else "",
+        pessoas=list(pessoas),
+        dim=(640, 480),
+        operador_presente=presente,
+    )
+
+
+def detalhe(tid, estado, *, bbox=(10, 10, 110, 310)):
+    return {
+        "track_id": int(tid), "bbox": tuple(bbox), "kpts": None,
+        "estado": estado,
+    }
+
+
+def observacao(tempo, tracks, *, cam="cam1", detalhes=None,
+               medido=True, frame=None):
+    if frame is None and any(estado == "fora" for estado in tracks.values()):
+        frame = "JPEG-SLOT"
+    return {
+        "cam_id": cam,
+        "tempo_s": float(tempo),
+        "medido": medido,
+        "tracks": dict(tracks),
+        "pessoas": detalhes or {},
+        "dim": (640, 480),
+        "frame_b64": frame,
+    }
+
+
+def resultado_confirmado(tracks=(4, 9), *, cam="cam1", n_posto=23):
+    identidade = {
+        "identidade_logica": "R1",
+        "cam_id": cam,
+        "track_ids": list(tracks),
+        "pessoa_track_id": min(tracks),
+        "n_amostras_posto": n_posto,
+        "tempo_posto_s": float(n_posto * 5),
+    }
+    return {
+        "cam_id": cam,
+        "identidades": [identidade],
+        "decisao": {
+            "status": "confirmado", "motivo": "dominante_claro",
+            "identidade_logica": "R1", "track_ids": list(tracks),
+            "track_id": min(tracks),
+        },
+        "timeline": {"status": "disponivel", "cam_id": cam},
+    }
+
+
+def resultado_indefinido(*, cam="cam1", motivo="dominancia_ambigua"):
+    return {
+        "cam_id": cam,
+        "identidades": [],
+        "decisao": {"status": "indefinido", "motivo": motivo,
+                    "identidade_logica": None, "track_ids": []},
+        "timeline": {"status": "nao_gerada", "cam_id": cam},
+    }
+
+
+def aplicar(amostras, resultados, observacoes):
+    return pl.aplicar_identidade_logica_segmento(
+        amostras, resultados, {"observacoes": observacoes}, "cam1"
+    )
+
+
+def analisar(amostras, *, seq=None, fora=None):
+    antigos = {
+        "_analisar_sequencia_vlm": pl._analisar_sequencia_vlm,
+        "_analisar_sequencia_fora": pl._analisar_sequencia_fora,
+        "_FORA_MODO": pl._FORA_MODO,
+        "_POSTO_VAZIO_ENABLE": pl._POSTO_VAZIO_ENABLE,
+        "PRODUTIVIDADE_OPERADOR_V9": pl.PRODUTIVIDADE_OPERADOR_V9,
+        "PRODUTIVIDADE_OPERADOR_ESTRUTURADA": (
+            pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA
+        ),
+    }
+    try:
+        pl._FORA_MODO = "on"
+        pl._POSTO_VAZIO_ENABLE = True
+        pl.PRODUTIVIDADE_OPERADOR_V9 = True
+        pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA = True
+        if seq is not None:
+            pl._analisar_sequencia_vlm = seq
+        if fora is not None:
+            pl._analisar_sequencia_fora = fora
+        return pl.etapa_analise_vlm(
+            object(), amostras, "torneamento", {}, lambda *_a, **_k: None,
+            zona_posto="posto", intervalo_s=5.0,
+        )
+    finally:
+        for nome, valor in antigos.items():
+            setattr(pl, nome, valor)
+
+
+def seq_adversarial(track_errado=12, trabalho=True):
+    def _fake(_cli, grupo, *_a, **_k):
+        return {
+            i: {
+                "acoes": {
+                    p["track_id"]: f"pessoa {p['track_id']} em atividade"
+                    for p in am.pessoas
+                },
+                "operador_estado": "identificado",
+                "operador_track_id": track_errado,
+                "trabalho": trabalho,
+                "produtividade_motivo": "maos_no_torno",
+                "interlocutor_evidencia": None,
+                "maquina": None, "imovel": None,
+            }
+            for i, am in enumerate(grupo)
+        }
+    return _fake
+
+
+autoridade_original = pl.AUTORIDADE_111D_CONFIGURADA
+imagem_original = pl._imagem_fora_identidade
+decode_original = pl._frame_b64_para_bgr
+
+
+class FrameIdentidadeFake:
+    shape = (240, 320, 3)
+
+
+try:
+    print("[1-5] Modos e três chaves")
+    reid = pl._TRACKER_REID
+    fixa = pl._TRACKER_FIXA
+    check("C1 off nunca satisfaz a autoridade",
+          not pl.operador_segmento_autoridade_configurada(
+              "off", "reid", "on", reid))
+    check("C2 sombra continua somente diagnóstica",
+          not pl.operador_segmento_autoridade_configurada(
+              "sombra", "reid", "on", reid))
+    check("C3 on sem Re-ID cai no legado",
+          not pl.operador_segmento_autoridade_configurada(
+              "on", "fixa", "on", fixa))
+    check("C4 on sem Fase 110 cai no legado",
+          not pl.operador_segmento_autoridade_configurada(
+              "on", "reid", "off", reid))
+    check("C5 somente as três chaves completas ativam 111D",
+          pl.operador_segmento_autoridade_configurada(
+              "on", "reid", "on", reid)
+          and pl.operador_segmento_autoridade_configurada(
+              "on", "fixa_reid", "on", reid))
+    check("valor inválido permanece fail-closed",
+          not pl.operador_segmento_autoridade_configurada(
+              "talvez", "reid", "on", reid))
+
+    legado = amostra(0, [pessoa(12, "operador")], presente=True)
+    legado_antes = deepcopy(legado)
+    pl.AUTORIDADE_111D_CONFIGURADA = False
+    r_off = aplicar(
+        [legado], [resultado_confirmado((9,))],
+        [observacao(0, {9: "dentro"})],
+    )
+    check("off/sombra/incompleto não mutam sequer a Amostra",
+          legado == legado_antes and r_off["status"] == "fallback_legado",
+          (legado, r_off))
+
+    pl.AUTORIDADE_111D_CONFIGURADA = True
+    pl._imagem_fora_identidade = lambda *_a, **_k: "IMG-FORA"
+    pl._frame_b64_para_bgr = lambda *_a, **_k: FrameIdentidadeFake()
+
+    print("\n[5] Operador dentro e VLM adversarial")
+    a5 = amostra(0, [
+        pessoa(9, "visitante", rotulo="P1"),
+        pessoa(12, "operador", bbox=(200, 10, 300, 310), rotulo="P2"),
+    ], presente=True)
+    r5 = aplicar(
+        [a5], [resultado_confirmado((4, 9))],
+        [observacao(0, {9: "dentro", 12: "dentro"})],
+    )
+    papeis5 = {p["track_id"]: p["papel"] for p in a5.pessoas}
+    check("C5 R1 dentro substitui a escolha causal antiga",
+          r5["status"] == "aplicado" and papeis5 == {9: "operador", 12: "visitante"}
+          and a5.operador_presente is True and a5.identidade_autoritativa,
+          (r5, papeis5))
+    obs5 = analisar([a5], seq=seq_adversarial(12, True))
+    por_tid5 = {o["track_id"]: o for o in obs5}
+    check("VLM não promove o não vencedor nem transfere seu trabalho",
+          por_tid5[9]["papel"] == "operador"
+          and por_tid5[9].get("trabalho") is None
+          and por_tid5[12]["papel"] == "visitante"
+          and por_tid5[12].get("trabalho") is None,
+          obs5)
+    obs5_correta = analisar([a5], seq=seq_adversarial(9, True))
+    por_tid5_correta = {o["track_id"]: o for o in obs5_correta}
+    check("VLM que respeita a identidade fixa mede o trabalho de R1",
+          por_tid5_correta[9]["papel"] == "operador"
+          and por_tid5_correta[9].get("trabalho") is True
+          and por_tid5_correta[12]["papel"] == "visitante"
+          and por_tid5_correta[12].get("trabalho") is None,
+          obs5_correta)
+
+    print("\n[6-7] Janela completa vence a causalidade do track físico")
+    a6_fora = amostra(0, [], presente=False)
+    a6_dentro = amostra(5, [pessoa(9, "operador")], presente=True)
+    r6 = aplicar(
+        [a6_fora, a6_dentro], [resultado_confirmado((4, 9), n_posto=17)],
+        [
+            observacao(0, {4: "fora"}, detalhes={4: detalhe(4, "fora")}),
+            observacao(5, {9: "dentro"}),
+        ],
+    )
+    check("C6 fora antes de entrar é reatribuído retroativamente",
+          r6["reatribuicoes_fora"] == 1
+          and a6_fora.identidade_estado == "fora"
+          and a6_fora.fora_posto[0]["track_id"] == 4
+          and a6_dentro.pessoas[0]["papel"] == "operador",
+          (r6, a6_fora, a6_dentro))
+    check("fora_amostras_zona usa a evidência agregada de R1",
+          a6_fora.fora_posto[0]["_fora_amostras_zona"] == 17,
+          a6_fora.fora_posto)
+
+    a7_dentro = amostra(0, [pessoa(4, "operador")], presente=True)
+    a7_fora = amostra(5, [], presente=False)
+    r7 = aplicar(
+        [a7_dentro, a7_fora], [resultado_confirmado((4, 9), n_posto=19)],
+        [
+            observacao(0, {4: "dentro"}),
+            observacao(5, {9: "fora"}, detalhes={9: detalhe(9, "fora")}),
+        ],
+    )
+    check("C7 troca de ID permite track novo fora sem presença física própria",
+          r7["status"] == "aplicado"
+          and a7_fora.fora_posto[0]["track_id"] == 9
+          and a7_fora.fora_posto[0]["_fora_amostras_zona"] == 19,
+          (r7, a7_fora.fora_posto))
+
+    print("\n[8-9] Outro ocupante não toma o posto")
+    a8 = amostra(0, [pessoa(12, "operador")], presente=True)
+    r8 = aplicar(
+        [a8], [resultado_confirmado((4, 9))],
+        [observacao(
+            0, {9: "fora", 12: "dentro"},
+            detalhes={9: detalhe(9, "fora"), 12: detalhe(12, "dentro")},
+        )],
+    )
+    check("C8 operador fora tem precedência sobre outro dentro",
+          r8["reatribuicoes_fora"] == 1
+          and a8.fora_posto[0]["track_id"] == 9
+          and a8.pessoas[0]["papel"] == "visitante"
+          and a8.operador_presente is False,
+          (r8, a8))
+    obs8 = analisar(
+        [a8], fora=lambda _cli, grupo, *_a, **_k: {
+            i: {"acao": "conversando fora", "resumo": "fora do posto"}
+            for i, _am in enumerate(grupo)
+        },
+    )
+    por_tid8 = {o["track_id"]: o for o in obs8}
+    check("C8/C14 downstream preserva operador_fora e visitante",
+          len(obs8) == 2
+          and por_tid8[9]["papel"] == pl.PAPEL_OPERADOR_FORA
+          and por_tid8[12]["papel"] == "visitante"
+          and por_tid8[12].get("trabalho") is None
+          and not any(o.get("papel") == "posto_vazio" for o in obs8)
+          and not any(o.get("track_id") == 12 and o.get("papel") == "operador"
+                      for o in obs8),
+          obs8)
+
+    a9 = amostra(0, [pessoa(12, "operador")], presente=True)
+    r9 = aplicar(
+        [a9], [resultado_confirmado((4, 9))],
+        [observacao(0, {12: "dentro"}, detalhes={12: detalhe(12, "dentro")})],
+    )
+    obs9 = analisar([a9], seq=seq_adversarial(12, True))
+    check("C9 operador ausente mantém o ocupante como visitante",
+          r9["reatribuicoes_ausente"] == 1
+          and a9.pessoas[0]["papel"] == "visitante"
+          and len(obs9) == 1 and obs9[0]["papel"] == "visitante"
+          and obs9[0].get("trabalho") is None,
+          (r9, obs9))
+    check("visitante representa operator_absent no contrato existente",
+          prod.classificar_observacao({"papel_pessoa": "visitante"})[0]
+          == prod.EST_OPERADOR_AUSENTE)
+
+    print("\n[10-11] Fallback integral e por slot")
+    a10 = amostra(0, [pessoa(12, "operador")], presente=True)
+    antes10 = deepcopy(a10)
+    r10 = aplicar(
+        [a10], [resultado_indefinido()],
+        [observacao(0, {12: "dentro"})],
+    )
+    check("C10 identidade indefinida preserva o legado",
+          r10["status"] == "fallback_legado" and a10 == antes10,
+          (r10, a10))
+    sem_timeline = resultado_confirmado((9,))
+    sem_timeline["timeline"] = {"status": "indisponivel"}
+    a10b = amostra(0, [pessoa(12, "operador")], presente=True)
+    antes10b = deepcopy(a10b)
+    r10b = aplicar([a10b], [sem_timeline], [observacao(0, {9: "dentro"})])
+    check("timeline indisponível também é fallback sem mutação",
+          r10b["motivo"] == "timeline_indisponivel" and a10b == antes10b,
+          (r10b, a10b))
+
+    a10c1 = amostra(0, [pessoa(4, "visitante")], presente=False)
+    a10c2 = amostra(5, [], presente=False)
+    antes10c = deepcopy([a10c1, a10c2])
+    pl._frame_b64_para_bgr = lambda *_a, **_k: None
+    r10c = aplicar(
+        [a10c1, a10c2], [resultado_confirmado((4, 9))],
+        [
+            observacao(0, {4: "dentro"}),
+            observacao(5, {9: "fora"}, detalhes={9: detalhe(9, "fora")}),
+        ],
+    )
+    check("erro interno prepara tudo antes e não deixa mutação parcial",
+          r10c["motivo"] == "erro_preparacao"
+          and [a10c1, a10c2] == antes10c,
+          (r10c, a10c1, a10c2))
+    pl._frame_b64_para_bgr = lambda *_a, **_k: FrameIdentidadeFake()
+
+    a11_conflito = amostra(0, [pessoa(4, "operador"), pessoa(9, "visitante")], presente=True)
+    a11_valida = amostra(5, [pessoa(9, "visitante")], presente=False)
+    conflito_antes = deepcopy(a11_conflito)
+    r11 = aplicar(
+        [a11_conflito, a11_valida], [resultado_confirmado((4, 9))],
+        [
+            observacao(0, {4: "dentro", 9: "fora"}),
+            observacao(5, {9: "dentro"}),
+        ],
+    )
+    check("C11 conflito faz fallback só no slot ambíguo",
+          r11["slots_fallback"] == 1
+          and a11_conflito == conflito_antes
+          and a11_valida.pessoas[0]["papel"] == "operador",
+          (r11, a11_conflito, a11_valida))
+
+    print("\n[12-14] Não vencedor, vazio e fora visível")
+    a12 = [
+        amostra(t, [pessoa(12, "operador")], presente=True)
+        for t in (0, 5, 10)
+    ]
+    r12 = aplicar(
+        a12, [resultado_confirmado((4, 9))],
+        [observacao(t, {12: "dentro"}) for t in (0, 5, 10)],
+    )
+    check("C12 não vencedor nunca é promovido em vários slots",
+          r12["reatribuicoes_ausente"] == 3
+          and all(am.pessoas[0]["papel"] == "visitante" for am in a12),
+          (r12, a12))
+
+    a13 = amostra(0, [], presente=True)
+    a13.operador_ponte = True
+    r13 = aplicar(
+        [a13], [resultado_confirmado((4, 9))],
+        [observacao(0, {})],
+    )
+    obs13 = analisar([a13])
+    check("C13 R1 invisível e ninguém relevante preserva posto_vazio",
+          r13["reatribuicoes_ausente"] == 1
+          and a13.operador_ponte is False
+          and len(obs13) == 1 and obs13[0]["papel"] == "posto_vazio",
+          (r13, obs13))
+    check("C14 operador visível fora nunca vira vazio quando VLM responde",
+          obs8[0]["papel"] == pl.PAPEL_OPERADOR_FORA
+          and obs8[0]["track_id"] == 9,
+          obs8)
+
+    print("\n[15] Imagem somente em memória; zero segunda inferência")
+    chamadas15 = {"decode": 0, "anotar": 0, "encode": 0,
+                  "video": 0, "yolo": 0, "vlm": 0}
+    class FrameFake:
+        shape = (240, 320, 3)
+    antigos15 = {
+        "_frame_b64_para_bgr": pl._frame_b64_para_bgr,
+        "anotar_frame_com_ids": pl.anotar_frame_com_ids,
+        "frame_para_base64": pl.frame_para_base64,
+        "_analisar_sequencia_vlm": pl._analisar_sequencia_vlm,
+        "_analisar_sequencia_fora": pl._analisar_sequencia_fora,
+    }
+    video_capture_antigo = getattr(pl.cv2, "VideoCapture", None)
+    yolo_antigo = getattr(pl, "YOLO", None)
+    try:
+        def decode15(valor):
+            chamadas15["decode"] += 1
+            check("JPEG temporário correto chega ao decode em memória",
+                  valor == "JPEG-SLOT", valor)
+            return FrameFake()
+        def anotar15(frame, pessoas):
+            chamadas15["anotar"] += 1
+            check("imagem é anotada uma vez e somente com o vencedor",
+                  len(pessoas) == 1 and pessoas[0]["rotulo"] == "OP", pessoas)
+            return frame
+        def encode15(*_a, **_k):
+            chamadas15["encode"] += 1
+            return "IMG-FORA-MEMORIA"
+        def proibido15(tipo):
+            def _f(*_a, **_k):
+                chamadas15[tipo] += 1
+                raise AssertionError(f"chamada proibida: {tipo}")
+            return _f
+        pl._frame_b64_para_bgr = decode15
+        pl.anotar_frame_com_ids = anotar15
+        pl.frame_para_base64 = encode15
+        pl.cv2.VideoCapture = proibido15("video")
+        pl.YOLO = proibido15("yolo")
+        pl._analisar_sequencia_vlm = proibido15("vlm")
+        pl._analisar_sequencia_fora = proibido15("vlm")
+        pl._imagem_fora_identidade = imagem_original
+        a15 = amostra(0, [], presente=False)
+        slot15 = observacao(
+            0, {9: "fora", 12: "dentro"},
+            detalhes={9: detalhe(9, "fora"), 12: detalhe(12, "dentro")},
+        )
+        r15 = aplicar([a15], [resultado_confirmado((9,))], [slot15])
+        imagens_no_slot = [
+            valor for valor in (
+                slot15.get("frame_b64"), a15.img_b64, a15.img_b64_fora,
+            ) if valor
+        ]
+        check("C15 retém uma única imagem comprimida por slot",
+              imagens_no_slot == ["IMG-FORA-MEMORIA"], imagens_no_slot)
+        check("C15 reconstrói em memória sem vídeo, YOLO, Re-ID ou VLM",
+              r15["reatribuicoes_fora"] == 1
+              and a15.img_b64_fora == "IMG-FORA-MEMORIA"
+              and chamadas15 == {"decode": 2, "anotar": 1, "encode": 1,
+                                 "video": 0, "yolo": 0, "vlm": 0},
+              (r15, chamadas15))
+    finally:
+        for nome, valor in antigos15.items():
+            setattr(pl, nome, valor)
+        if video_capture_antigo is None:
+            try:
+                delattr(pl.cv2, "VideoCapture")
+            except AttributeError:
+                pass
+        else:
+            pl.cv2.VideoCapture = video_capture_antigo
+        if yolo_antigo is None:
+            try:
+                delattr(pl, "YOLO")
+            except AttributeError:
+                pass
+        else:
+            pl.YOLO = yolo_antigo
+        pl._imagem_fora_identidade = lambda *_a, **_k: "IMG-FORA"
+
+    print("\n[16-17] Falha do VLM e contrato Lean/humano")
+    a16 = amostra(0, [], presente=False)
+    aplicar(
+        [a16], [resultado_confirmado((9,), n_posto=14)],
+        [observacao(0, {9: "fora"}, detalhes={9: detalhe(9, "fora")})],
+    )
+    obs16 = analisar([a16], fora=lambda *_a, **_k: {})
+    check("C16 falha VLM preserva fallback canônico e auditoria",
+          len(obs16) == 1 and obs16[0]["papel"] == "posto_vazio"
+          and obs16[0].get("fora_do_posto") == "falha_vlm"
+          and obs16[0].get("fora_amostras_zona") == 14,
+          obs16)
+    check("C17 operador_fora automático não recebe produtividade",
+          obs8[0].get("trabalho") is None
+          and all(prod.classificar_observacao({
+              "papel_pessoa": "operador_fora",
+              "categoria_lean": "valor_agregado",
+              "categoria_lean_origem": origem,
+          })[0] == prod.EST_OPERADOR_FORA
+                  for origem in (None, "ia", "herdado", "aprendido")))
+    check("C17 somente humano_rotulo mantém a decisão humana existente",
+          prod.classificar_observacao({
+              "papel_pessoa": "operador_fora",
+              "categoria_lean": "valor_agregado",
+              "categoria_lean_origem": "humano_rotulo",
+          })[0] == prod.EST_OPERADOR_FORA_PRODUTIVO)
+
+    print("\n[19] Cam2 é somente evidência secundária")
+    a19 = amostra(0, [
+        pessoa(4, "visitante"),
+        pessoa(12, "operador", bbox=(200, 10, 300, 310)),
+    ], presente=True)
+    antes19 = deepcopy(a19)
+    r19 = aplicar(
+        [a19], [resultado_confirmado((4,), cam="cam2"), resultado_indefinido(cam="cam1")],
+        [
+            observacao(0, {4: "dentro"}, cam="cam2"),
+            observacao(0, {12: "dentro"}, cam="cam1"),
+        ],
+    )
+    check("C19 confirmação cam2 com mesmo track numérico não ganha autoridade",
+          r19["status"] == "fallback_legado" and a19 == antes19,
+          (r19, a19))
+    a19b = amostra(0, [pessoa(4, "operador"), pessoa(9, "visitante")], presente=True)
+    r19b = aplicar(
+        [a19b], [resultado_confirmado((4,), cam="cam2"),
+                 resultado_confirmado((9,), cam="cam1")],
+        [
+            observacao(0, {4: "dentro"}, cam="cam2"),
+            observacao(0, {9: "dentro"}, cam="cam1"),
+        ],
+    )
+    check("cam1 primária vence independentemente da ordem dos resultados",
+          r19b["status"] == "aplicado"
+          and {p["track_id"]: p["papel"] for p in a19b.pessoas}
+          == {4: "visitante", 9: "operador"},
+          (r19b, a19b))
+
+finally:
+    pl.AUTORIDADE_111D_CONFIGURADA = autoridade_original
+    pl._imagem_fora_identidade = imagem_original
+    pl._frame_b64_para_bgr = decode_original
+
+
+print("\n[18] Versão do instrumento por configuração de processo")
+nomes_env = (
+    "KV_OPERADOR_SEGMENTO", "KV_TRACKER", "KV_FORA_DO_POSTO",
+    "KV_PRODUTIVIDADE_OPERADOR_V9",
+)
+env_original = {n: os.environ.get(n) for n in nomes_env}
+try:
+    os.environ["KV_PRODUTIVIDADE_OPERADOR_V9"] = "on"
+    os.environ["KV_TRACKER"] = "reid"
+    os.environ["KV_FORA_DO_POSTO"] = "on"
+    os.environ["KV_OPERADOR_SEGMENTO"] = "off"
+    versao_anterior = importlib.reload(pl).VERSAO_INSTRUMENTO
+
+    os.environ["KV_OPERADOR_SEGMENTO"] = "on"
+    versao_on = importlib.reload(pl).VERSAO_INSTRUMENTO
+
+    os.environ["KV_PRODUTIVIDADE_OPERADOR_V9"] = "off"
+    modulo_on_sem_v9 = importlib.reload(pl)
+    versao_on_sem_v9 = modulo_on_sem_v9.VERSAO_INSTRUMENTO
+    estruturada_on_sem_v9 = modulo_on_sem_v9.PRODUTIVIDADE_OPERADOR_ESTRUTURADA
+    os.environ["KV_PRODUTIVIDADE_OPERADOR_V9"] = "on"
+
+    os.environ["KV_OPERADOR_SEGMENTO"] = "sombra"
+    versao_sombra = importlib.reload(pl).VERSAO_INSTRUMENTO
+
+    os.environ["KV_OPERADOR_SEGMENTO"] = "on"
+    os.environ["KV_TRACKER"] = "fixa"
+    versao_sem_reid = importlib.reload(pl).VERSAO_INSTRUMENTO
+
+    os.environ["KV_TRACKER"] = "reid"
+    os.environ["KV_FORA_DO_POSTO"] = "off"
+    versao_sem_110 = importlib.reload(pl).VERSAO_INSTRUMENTO
+
+    check("C18 tríade autoritativa carimba V11",
+          versao_on == 11, versao_on)
+    check("C18 tríade não depende de quarta chave V9",
+          versao_on_sem_v9 == 11 and estruturada_on_sem_v9 is True,
+          (versao_on_sem_v9, estruturada_on_sem_v9))
+    check("C18 off/sombra/config incompleta preservam a versão anterior",
+          versao_anterior == 10
+          and versao_sombra == versao_anterior
+          and versao_sem_reid == versao_anterior
+          and versao_sem_110 == versao_anterior,
+          (versao_anterior, versao_sombra, versao_sem_reid, versao_sem_110))
+finally:
+    for nome, valor in env_original.items():
+        if valor is None:
+            os.environ.pop(nome, None)
+        else:
+            os.environ[nome] = valor
+    importlib.reload(pl)
+
+
+print("\n[20] Orquestração e zero persistência lógica")
+fonte = Path("backend/pipeline.py").read_text(encoding="utf-8")
+i_proc = fonte.index("def processar_video(")
+i_registrar = fonte.index("resultados_identidade = _registrar_identidades_segmento_sombra(", i_proc)
+i_confirmar = fonte.index("stats_op = etapa_confirmar_operador(", i_registrar)
+i_aplicar = fonte.index("resumo_111d = aplicar_identidade_logica_segmento(", i_confirmar)
+i_vlm = fonte.index("observacoes = etapa_analise_vlm(", i_aplicar)
+check("ordem oficial é 111C → legado → 111D → VLM",
+      i_registrar < i_confirmar < i_aplicar < i_vlm,
+      (i_registrar, i_confirmar, i_aplicar, i_vlm))
+trecho_deteccao = fonte[
+    fonte.index("def etapa_detectar_e_amostrar("):
+    fonte.index("def _analisar_amostra_vlm(")
+]
+check("coletor on guarda detalhes e no máximo um JPEG quando há pessoa fora",
+      'obs_identidade["pessoas"] = detalhes_identidade' in trecho_deteccao
+      and 'precisa_frame_identidade = any(' in trecho_deteccao
+      and 'obs_identidade["frame_b64"] = frame_para_base64(' in trecho_deteccao
+      and 'identidade_shadow["frames_falhos"]' in trecho_deteccao
+      and 'img_b64 = obs_identidade["frame_b64"]' in trecho_deteccao
+      and 'obs["frame_b64"] = None' in fonte)
+check("prompt autoritativo fixa R1 em vez de pedir nova eleição",
+      'a identidade já foi fixada pela janela completa' in fonte
+      and 'devolva exatamente esse mesmo rótulo em "operador"' in fonte)
+trecho_persistir = fonte[
+    fonte.index("def etapa_persistir("):
+    fonte.index("\ndef ", fonte.index("def etapa_persistir(") + 5)
+]
+check("R1 e identidade_logica não entram na persistência",
+      '"identidade_logica"' not in trecho_persistir
+      and '"track_ids"' not in trecho_persistir)
+
+
+print(f"\n{'=' * 68}\n  {ok} ok · {fail} falha(s)\n{'=' * 68}")
+sys.exit(1 if fail else 0)

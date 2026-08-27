@@ -362,9 +362,9 @@ check("papel desconhecido permanece inconclusivo", incerto["papel_pessoa"] is No
 print("\n[5] Persistência e versão do instrumento")
 fonte = open(os.path.join(os.path.dirname(__file__), "backend", "pipeline.py"), encoding="utf-8").read()
 persistir = fonte.split("def etapa_persistir(", 1)[1].split("def ", 1)[0]
-check("trabalho entra no payload V9 principal",
+check("trabalho entra no payload estruturado V9/V11 principal",
       '"trabalho": (' in persistir
-      and 'if PRODUTIVIDADE_OPERADOR_V9 else None' in persistir)
+      and 'if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else None' in persistir)
 check("instrumento foi versionado", pl.VERSAO_INSTRUMENTO >= 9, pl.VERSAO_INSTRUMENTO)
 check("V9 tem kill switch desligado por padrão no código",
       'PRODUTIVIDADE_OPERADOR_V9 = _env_ligada("KV_PRODUTIVIDADE_OPERADOR_V9")' in fonte

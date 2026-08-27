@@ -220,11 +220,12 @@ check("⭐ a narrativa do grupo é calculada UMA vez, antes do laço",
       "narrativa_grupo = next(" in fonte
       and fonte.index("narrativa_grupo = next(")
       < fonte.index("# ── 4) Emite as observações"))
-# Fase 110: cinco tipos de observação (entrou `fora_posto`). A regra não muda —
+# Fases 110/111D: a observação determinística de visitante é o quinto append;
+# a regra não muda —
 # TODA observação emitida carrega a narrativa do minuto.
 check("⭐ TODAS as observações emitidas carregam a chave",
-      _emissao.count("observacoes.append({") == 4
-      and _emissao.count('"narrativa"') == 4
+      _emissao.count("observacoes.append({") == 5
+      and _emissao.count('"narrativa"') == 5
       and "observacoes.append(observacao)" in _vazio_helper
       and '"narrativa": narrativa' in _vazio_helper,
       (_emissao.count("observacoes.append({"), _emissao.count('"narrativa"')))

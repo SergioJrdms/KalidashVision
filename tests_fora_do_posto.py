@@ -691,12 +691,14 @@ check("⭐ exige a zona ESTRITA ligada", "if not _ZONA_ESTRITA:" in
 check("com o motivo: presenca_zona contou outra noção de 'dentro'",
       "contou outra noção de \"dentro\"" in FONTE)
 check("⭐ em `sombra` nenhuma observação é emitida",
-      '_FORA_MODO == "on"' in FONTE.split("plano.append((\"fora_posto\"")[0][-900:])
+      '_FORA_MODO == "on"' in FONTE.split("def etapa_analise_vlm", 1)[1])
 check("a amostra só recebe gente de fora no modo `on`",
       'am_fora = fora_ok if _FORA_MODO == "on" else []' in FONTE)
-check("⭐ resgate/ponte GANHAM do fora-do-posto (cam2 no polígono vence)",
-      FONTE.index('plano.append(("ponte" if am.operador_ponte')
-      < FONTE.index('plano.append(("fora_posto", am))'))
+_i_ponte = FONTE.index('plano.append(("ponte" if am.operador_ponte')
+_i_fora_autoritativo = FONTE.index('plano.append(("fora_posto", am))')
+_i_fora_legado = FONTE.index('plano.append(("fora_posto", am))', _i_ponte)
+check("⭐ no legado resgate/ponte ganha; 111D autoritativa ganha quando R1 está fora",
+      _i_fora_autoritativo < _i_ponte < _i_fora_legado)
 check("e o fora-do-posto vem ANTES de vazio",
       FONTE.index('plano.append(("fora_posto", am))')
       < FONTE.index('plano.append(("vazio", am))'))
