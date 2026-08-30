@@ -927,5 +927,213 @@ check("CAM1 permanece sem Boundary Safety",
       r_cam1)
 
 
+print("\n[12] C3 — captura low-confidence somente pela âncora da CAM1")
+C3_BBOX = (150.0, 100.0, 210.0, 300.0)
+C3_FORA_BBOX = (320.0, 100.0, 400.0, 300.0)
+
+
+def _resultado_c3(confidence, bbox=C3_BBOX, kpts=None):
+    return _Resultado(
+        [bbox], [confidence], ids=None,
+        kpts=[kpts] if kpts is not None else None,
+    )
+
+
+def _rodar_probe_c3(resultado):
+    yolo = _YoloFake(VAZIO, resultado)
+    retorno = pl._presenca_safety_gate(
+        yolo, _Frame(), rois_reais, CAM2_W, CAM2_H,
+        conf_min=pl._OPERADOR_CONF, imgsz=416,
+        capturar_c3=True,
+    )
+    return retorno, yolo
+
+
+r_c3_fraco, y_c3_fraco = _rodar_probe_c3(_resultado_c3(0.088118829))
+am_c3_fraco = pl.Amostra(
+    frame_idx=720, tempo_s=72.0, img_b64="", pessoas=[], dim=(CAM2_W, CAM2_H)
+)
+pl._guardar_candidato_c3(am_c3_fraco, r_c3_fraco)
+check("C3 usa um único predict sem tracker com conf=0.08 e imgsz atual",
+      len(y_c3_fraco.predict_calls) == 1
+      and y_c3_fraco.predict_calls[0].get("conf") == 0.08
+      and y_c3_fraco.predict_calls[0].get("imgsz") == 416,
+      y_c3_fraco.predict_calls)
+check("0.088 dentro vira somente telemetria transitória C3",
+      r_c3_fraco.get("status") == "livre"
+      and am_c3_fraco.presenca_c3_confidence == 0.088118829
+      and _bbox_proxima(am_c3_fraco.presenca_c3_bbox, C3_BBOX)
+      and am_c3_fraco.presenca_c3_ancora is not None
+      and not am_c3_fraco.pessoas,
+      (r_c3_fraco, am_c3_fraco))
+
+r_c3_varias, _y_c3_varias = _rodar_probe_c3(_Resultado(
+    [C3_BBOX, (160.0, 110.0, 230.0, 310.0)],
+    [0.088, 0.189], ids=None,
+))
+check("várias detecções válidas escolhem a maior confidence",
+      r_c3_varias.get("c3_candidate", {}).get("confidence") == 0.189,
+      r_c3_varias)
+
+r_c3_alto, _y_c3_alto = _rodar_probe_c3(_resultado_c3(0.30))
+check("confidence >= 0.30 não é candidato C3",
+      "c3_candidate" not in r_c3_alto
+      and r_c3_alto.get("motivo") == "veto_posto_vazio_por_deteccao_independente",
+      r_c3_alto)
+r_c3_baixo, _y_c3_baixo = _rodar_probe_c3(_resultado_c3(0.079999))
+check("confidence < 0.08 não é candidato C3",
+      "c3_candidate" not in r_c3_baixo
+      and r_c3_baixo.get("status") == "livre",
+      r_c3_baixo)
+r_c3_fora, _y_c3_fora = _rodar_probe_c3(_resultado_c3(0.15, C3_FORA_BBOX))
+check("âncora fora do posto não é candidato C3",
+      "c3_candidate" not in r_c3_fora,
+      r_c3_fora)
+r_c3_braco, _y_c3_braco = _rodar_probe_c3(_resultado_c3(
+    0.15, C3_FORA_BBOX,
+    _kpts_com_ombros((350.0, 160.0), (350.0, 160.0), extras={9: (160.0, 200.0)}),
+))
+check("braço/punho dentro com âncora fora não é candidato C3",
+      "c3_candidate" not in r_c3_braco,
+      r_c3_braco)
+r_c3_bbox, _y_c3_bbox = _rodar_probe_c3(
+    _resultado_c3(0.15, (240.0, 100.0, 400.0, 300.0))
+)
+check("bbox que invade o posto com âncora fora não é candidato C3",
+      "c3_candidate" not in r_c3_bbox,
+      r_c3_bbox)
+
+
+def _amostra_c3(confidence):
+    am = pl.Amostra(
+        frame_idx=0, tempo_s=0.0, img_b64="", pessoas=[], dim=(CAM2_W, CAM2_H)
+    )
+    am.presenca_c3_confidence = confidence
+    am.presenca_c3_bbox = C3_BBOX
+    am.presenca_c3_ancora = (180.0, 160.0)
+    return am
+
+
+def _amostra_forte(tempo_s=0.0):
+    return pl.Amostra(
+        frame_idx=int(tempo_s * 10), tempo_s=tempo_s, img_b64="IMG",
+        pessoas=[{"track_id": 1, "papel": "operador"}], dim=(CAM2_W, CAM2_H),
+    )
+
+
+def _confirmar_c3(amostras):
+    estruturada_antiga = pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA
+    gap_antigo = pl._OPERADOR_GAP_SLOTS
+    try:
+        pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA = False
+        pl._OPERADOR_GAP_SLOTS = 3
+        return pl.etapa_confirmar_operador(amostras, "dupla")
+    finally:
+        pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA = estruturada_antiga
+        pl._OPERADOR_GAP_SLOTS = gap_antigo
+
+
+print("\n[13] C3 — regra temporal exata e isolamento da presença física")
+am_72 = [_amostra_forte(64.0), _amostra_c3(0.088118829), _amostra_forte(80.0)]
+stats_72 = _confirmar_c3(am_72)
+check("72s: 0.088 + dois vizinhos fortes gera veto C3 fraco",
+      am_72[1].presenca_safety_gate
+      and am_72[1].presenca_safety_motivo
+      == "veto_posto_vazio_por_confianca_temporal"
+      and am_72[1].operador_presente is None
+      and not am_72[1].operador_ponte
+      and stats_72["c3_vetos"] == 1,
+      (stats_72, am_72[1]))
+check("C3 fraco registra confidence e câmera CAM1",
+      am_72[1].presenca_safety_confidence == 0.088118829
+      and am_72[1].presenca_safety_camera == "cam1",
+      am_72[1])
+
+am_fraco_um = [_amostra_c3(0.088), _amostra_forte(80.0)]
+stats_fraco_um = _confirmar_c3(am_fraco_um)
+check("0.088 com somente um vizinho forte não veta",
+      not am_fraco_um[0].presenca_safety_gate
+      and am_fraco_um[0].operador_presente is False
+      and stats_fraco_um["c3_vetos"] == 0,
+      (stats_fraco_um, am_fraco_um))
+am_fraco_zero = [_amostra_c3(0.088)]
+stats_fraco_zero = _confirmar_c3(am_fraco_zero)
+check("0.088 sem vizinhos não veta",
+      not am_fraco_zero[0].presenca_safety_gate
+      and am_fraco_zero[0].operador_presente is False
+      and stats_fraco_zero["c3_vetos"] == 0,
+      (stats_fraco_zero, am_fraco_zero))
+
+am_112 = [_amostra_c3(0.289957821), _amostra_forte(120.0)]
+stats_112 = _confirmar_c3(am_112)
+check("112s: 0.289 + um vizinho forte gera veto C3 moderado",
+      am_112[0].presenca_safety_gate
+      and am_112[0].presenca_safety_motivo
+      == "veto_posto_vazio_por_confianca_temporal"
+      and am_112[0].operador_presente is None
+      and stats_112["c3_vetos"] == 1,
+      (stats_112, am_112[0]))
+am_moderado_zero = [_amostra_c3(0.289)]
+stats_moderado_zero = _confirmar_c3(am_moderado_zero)
+check("0.289 sem vizinho forte não veta",
+      not am_moderado_zero[0].presenca_safety_gate
+      and am_moderado_zero[0].operador_presente is False
+      and stats_moderado_zero["c3_vetos"] == 0,
+      (stats_moderado_zero, am_moderado_zero))
+
+am_cam2_forte = [_amostra_c3(0.088), _amostra_forte(80.0)]
+am_cam2_forte[0].op_cam2 = True
+stats_cam2_forte = _confirmar_c3(am_cam2_forte)
+check("slot já presente pela CAM2 não recebe veto C3",
+      not am_cam2_forte[0].presenca_safety_gate
+      and am_cam2_forte[0].operador_presente is True
+      and stats_cam2_forte["c3_vetos"] == 0,
+      (stats_cam2_forte, am_cam2_forte[0]))
+
+am_cam1_normal = [_amostra_c3(0.088), _amostra_forte(80.0)]
+am_cam1_normal[0].pessoas = [{"track_id": 7, "papel": "operador"}]
+stats_cam1_normal = _confirmar_c3(am_cam1_normal)
+check("slot já presente pela CAM1 normal não recebe veto C3",
+      not am_cam1_normal[0].presenca_safety_gate
+      and am_cam1_normal[0].operador_presente is True
+      and stats_cam1_normal["c3_vetos"] == 0,
+      (stats_cam1_normal, am_cam1_normal[0]))
+
+am_c3_c3 = [_amostra_c3(0.088), _amostra_c3(0.15), _amostra_c3(0.289)]
+stats_c3_c3 = _confirmar_c3(am_c3_c3)
+check("candidatos C3 nunca validam outros candidatos C3",
+      stats_c3_c3["c3_vetos"] == 0
+      and all(not am.presenca_safety_gate for am in am_c3_c3),
+      (stats_c3_c3, am_c3_c3))
+
+am_ponte_c3 = [_amostra_forte(64.0), _amostra_c3(0.088), _amostra_forte(80.0)]
+stats_ponte_c3 = _confirmar_c3(am_ponte_c3)
+check("ponte temporal não promove slot vetado pela C3",
+      am_ponte_c3[1].operador_presente is None
+      and not am_ponte_c3[1].operador_ponte
+      and stats_ponte_c3["pontes"] == 0,
+      (stats_ponte_c3, am_ponte_c3[1]))
+
+obs_c3 = _analisar_sem_reconfirmar(am_ponte_c3[1], estruturada=False)
+check("veto C3 não cria pessoa, track, identidade ou atividade",
+      am_ponte_c3[1].pessoas == []
+      and am_ponte_c3[1].fora_posto == []
+      and am_ponte_c3[1].identidade_track_id is None
+      and isinstance(obs_c3, list)
+      and len(obs_c3) == 1
+      and obs_c3[0].get("papel") is None
+      and obs_c3[0].get("track_id") == pl.POSTO_INCONCLUSIVO_TID
+      and obs_c3[0].get("trabalho") is None,
+      (am_ponte_c3[1], obs_c3))
+
+am_hard_miss = [_amostra_c3(0.079999)]
+stats_hard_miss = _confirmar_c3(am_hard_miss)
+check("104s hard miss sem candidato C3 permanece ausência normal",
+      not am_hard_miss[0].presenca_safety_gate
+      and am_hard_miss[0].operador_presente is False
+      and stats_hard_miss["c3_vetos"] == 0,
+      (stats_hard_miss, am_hard_miss[0]))
+
+
 print(f"\n{'=' * 68}\n  {ok} ok - {fail} falha(s)\n{'=' * 68}")
 raise SystemExit(1 if fail else 0)
