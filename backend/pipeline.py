@@ -1089,6 +1089,7 @@ def _anexar_segundo_angulo(
                         h2,
                         conf_min=_CAM2_CONF,
                         imgsz=416,
+                        boundary_safety=_CAM2_BOUNDARY_SAFETY,
                     )
                     _marcar_presenca_safety(
                         am, resultado_safety, str(cam_id or "cam2")
@@ -1275,6 +1276,10 @@ _OPERADOR_CONF = float(os.environ.get("KV_OPERADOR_CONF", "0.30"))            # 
 _OPERADOR_AREA_MIN_RATIO = float(os.environ.get("KV_OPERADOR_AREA_MIN_RATIO", "0.0015"))  # < AREA_MIN_RATIO (0.005)
 _CAM2_CONF = float(os.environ.get("KV_CAM2_CONF", "0.35"))
 _CAM2_CONFIRM_STRIDE = max(1, int(os.environ.get("KV_CAM2_CONFIRM_STRIDE", "1")))
+# C2 — extensão geométrica conservadora da C1, exclusiva da CAM2. A margem é
+# deliberadamente fixa até haver evidência suficiente para configuração.
+_CAM2_BOUNDARY_SAFETY = True
+_CAM2_BOUNDARY_MARGIN_RATIO = 0.05
 # Fase 30: guardrail — se a cam2 negar mais que esta fração dos slots em que a
 # cam1 viu o operador, algo está errado (desalinhamento/zona) → ignora a cam2
 # no vídeo inteiro em vez de zerar tudo como posto_vazio.
@@ -1555,8 +1560,15 @@ def _presenca_safety_gate(
     conf_min: float,
     imgsz: int,
     area_min_px: float = 0.0,
+    boundary_safety: bool = False,
 ) -> dict:
-    """Nega `posto_vazio` se o detector bruto vê âncora forte no posto."""
+    """Nega `posto_vazio` se o detector bruto vê âncora forte no posto.
+
+    `boundary_safety` é um opt-in da C2: preserva a âncora como referência,
+    mas aceita um caso limítrofe somente com os dois ombros válidos e pelo
+    menos um deles dentro da ROI. O retorno continua sendo apenas veto de
+    segurança, nunca uma presença positiva.
+    """
     try:
         resultados = _predict_sem_tracker(
             yolo,
@@ -1608,6 +1620,56 @@ def _presenca_safety_gate(
                     "bbox": (x1, y1, x2, y2),
                     "ancora": (float(ancora[0]), float(ancora[1])),
                 }
+            if not boundary_safety:
+                continue
+
+            kpts = pessoa.get("kpts")
+            if kpts is None or len(kpts) < 7:
+                continue
+            ombros = (kpts[5], kpts[6])
+            ombros_validos = all(
+                len(ombro) >= 2
+                and float(ombro[0]) > 0
+                and float(ombro[1]) > 0
+                for ombro in ombros
+            )
+            if not ombros_validos:
+                continue
+            ombros_px = tuple(
+                (float(ombro[0]) * int(w), float(ombro[1]) * int(h))
+                for ombro in ombros
+            )
+            ombros_dentro = tuple(
+                any(
+                    info.get("papel") == "posto_operador"
+                    and _ponto_em_roi(ombro[0], ombro[1], info["polygon"])
+                    for info in (rois_posto or {}).values()
+                )
+                for ombro in ombros_px
+            )
+            if not any(ombros_dentro):
+                continue
+
+            margem_px = _CAM2_BOUNDARY_MARGIN_RATIO * min(int(w), int(h))
+            for info in (rois_posto or {}).values():
+                if info.get("papel") != "posto_operador":
+                    continue
+                distancia_px = float(cv2.pointPolygonTest(
+                    info["polygon"],
+                    (float(ancora[0]), float(ancora[1])),
+                    True,
+                ))
+                if -margem_px <= distancia_px < 0:
+                    return {
+                        "status": "veto",
+                        "motivo": "veto_posto_vazio_por_limite_geometrico",
+                        "confidence": confidence,
+                        "bbox": (x1, y1, x2, y2),
+                        "ancora": (float(ancora[0]), float(ancora[1])),
+                        "distancia_borda_px": distancia_px,
+                        "margem_borda_px": margem_px,
+                        "ombros_dentro": ombros_dentro,
+                    }
         return {"status": "livre", "motivo": "sem_ancora_forte_no_posto"}
     except Exception as e:  # noqa: BLE001 — erro também deve falhar seguro
         return {
@@ -1640,6 +1702,9 @@ def _marcar_presenca_safety(am: "Amostra", resultado: dict, camera: str) -> None
         "motivo": am.presenca_safety_motivo,
         "confidence": am.presenca_safety_confidence,
     }
+    for campo in ("distancia_borda_px", "margem_borda_px", "ombros_dentro"):
+        if campo in (resultado or {}):
+            campos[campo] = (resultado or {}).get(campo)
     if status == "erro":
         campos["erro"] = (resultado or {}).get("erro")
         log.warning("[presenca-safety] %s", json.dumps(

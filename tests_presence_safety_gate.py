@@ -1,4 +1,4 @@
-"""C1 - Presence Safety Gate.
+"""C1/C2 - Presence Safety Gate.
 
 Regressao comportamental do FP2/88. O teste usa o fluxo real da cam2 e da
 confirmacao de presenca, substituindo somente video/YOLO por dubles. A C1 pode
@@ -126,17 +126,32 @@ np_fake.array = lambda valor, **_k: [list(item) for item in valor]
 
 
 def _point_polygon_test(poligono, ponto, _medida):
-    """Ray casting suficiente para exercitar a geometria real do pipeline."""
+    """Ray casting + distância ao segmento para exercitar a geometria real."""
     x, y = ponto
     dentro = False
+    distancia = float("inf")
     for i in range(len(poligono)):
         x1, y1 = poligono[i]
         x2, y2 = poligono[(i + 1) % len(poligono)]
+        dx = x2 - x1
+        dy = y2 - y1
+        comprimento2 = dx * dx + dy * dy
+        if comprimento2:
+            t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / comprimento2))
+            px = x1 + t * dx
+            py = y1 + t * dy
+        else:
+            px, py = x1, y1
+        distancia = min(distancia, ((x - px) ** 2 + (y - py) ** 2) ** 0.5)
         if (y1 > y) != (y2 > y):
             x_cruza = (x2 - x1) * (y - y1) / (y2 - y1) + x1
             if x < x_cruza:
                 dentro = not dentro
-    return 1.0 if dentro else -1.0
+    if not _medida:
+        return 1.0 if dentro else -1.0
+    if distancia == 0:
+        return 0.0
+    return distancia if dentro else -distancia
 
 
 cv2_fake = sys.modules["cv2"]
@@ -302,6 +317,10 @@ CAM2_W, CAM2_H = 510, 546
 FP2_BBOX = (114.834, 30.540, 182.405, 230.846)
 FP2_CONF = 0.818198681
 FP2_ANCORA = (159.602, 71.098)
+FP1_BBOX = (185.549, 57.798, 310.86, 216.365)
+FP1_CONF = 0.435480863
+FP1_ANCORA = (271.921, 93.321)
+FP1_OMBROS = ((292.138, 96.720), (251.705, 89.922))
 OUTRA_BBOX = (372.0, 83.0, 438.0, 244.0)
 OUTRA_CONF = 0.634880841
 POSTO_CAM2 = {
@@ -323,8 +342,19 @@ def _kpts_na_ancora(x, y):
     return pontos
 
 
+def _kpts_com_ombros(esquerdo, direito, extras=None):
+    pontos = [[0.0, 0.0] for _ in range(17)]
+    pontos[5] = [esquerdo[0] / CAM2_W, esquerdo[1] / CAM2_H]
+    pontos[6] = [direito[0] / CAM2_W, direito[1] / CAM2_H]
+    for indice, ponto in (extras or {}).items():
+        pontos[indice] = [ponto[0] / CAM2_W, ponto[1] / CAM2_H]
+    return pontos
+
+
 KPTS_FP2 = _kpts_na_ancora(*FP2_ANCORA)
+KPTS_FP1 = _kpts_com_ombros(*FP1_OMBROS)
 RESULTADO_FP2 = _Resultado([FP2_BBOX], [FP2_CONF], ids=None, kpts=[KPTS_FP2])
+RESULTADO_FP1 = _Resultado([FP1_BBOX], [FP1_CONF], ids=None, kpts=[KPTS_FP1])
 RESULTADO_FORA = _Resultado([OUTRA_BBOX], [OUTRA_CONF], ids=None)
 TRACK_FORA = _Resultado([OUTRA_BBOX], [OUTRA_CONF], ids=[8])
 TRACK_DENTRO = _Resultado([FP2_BBOX], [FP2_CONF], ids=[1], kpts=[KPTS_FP2])
@@ -456,6 +486,23 @@ def _analisar_sem_reconfirmar(am, *, estruturada):
     finally:
         for nome, valor in antigos.items():
             setattr(pl, nome, valor)
+
+
+def _resultado_geometrico(ombro_esq, ombro_dir, *, extras=None,
+                          bbox=FP1_BBOX, confidence=FP1_CONF):
+    return _Resultado(
+        [bbox], [confidence], ids=None,
+        kpts=[_kpts_com_ombros(ombro_esq, ombro_dir, extras=extras)],
+    )
+
+
+def _rodar_gate_geometrico(resultado, *, boundary_safety=True):
+    yolo = _YoloFake(VAZIO, resultado)
+    return pl._presenca_safety_gate(
+        yolo, _Frame(), rois_reais, CAM2_W, CAM2_H,
+        conf_min=pl._CAM2_CONF, imgsz=416,
+        boundary_safety=boundary_safety,
+    )
 
 
 print("\n[1] Detector independente e callbacks do tracker")
@@ -806,6 +853,78 @@ check("gate converte callback parcial em erro fail-safe, nunca livre",
       in r_parcial_gate.get("erro", "")
       and y_parcial_gate.predict_calls == [],
       r_parcial_gate)
+
+
+print("\n[11] C2 Boundary Safety exclusiva da cam2")
+r_fp1 = _rodar_gate_geometrico(RESULTADO_FP1)
+check("FP1: ancora ~15 px fora e um ombro dentro gera veto C2",
+      r_fp1.get("status") == "veto"
+      and r_fp1.get("motivo") == "veto_posto_vazio_por_limite_geometrico"
+      and -25.5 <= r_fp1.get("distancia_borda_px", 0) < 0
+      and r_fp1.get("ombros_dentro") == (False, True),
+      r_fp1)
+
+r_ancora_dentro = _rodar_gate_geometrico(RESULTADO_FP2)
+check("ancora dentro preserva o veto normal da C1",
+      r_ancora_dentro.get("status") == "veto"
+      and r_ancora_dentro.get("motivo")
+      == "veto_posto_vazio_por_deteccao_independente",
+      r_ancora_dentro)
+
+r_longe = _rodar_gate_geometrico(
+    _resultado_geometrico((250.0, 100.0), (350.0, 100.0))
+)
+check("ancora fora além da margem nao veta",
+      r_longe.get("status") == "livre", r_longe)
+
+r_ombros_fora = _rodar_gate_geometrico(
+    _resultado_geometrico((292.0, 96.0), (292.0, 96.0))
+)
+check("ancora perto da borda com ambos ombros fora nao veta",
+      r_ombros_fora.get("status") == "livre", r_ombros_fora)
+
+r_punho_dentro = _rodar_gate_geometrico(
+    _resultado_geometrico(
+        (292.0, 96.0), (292.0, 96.0), extras={9: (150.0, 200.0)}
+    )
+)
+check("somente braço/punho dentro nao veta",
+      r_punho_dentro.get("status") == "livre", r_punho_dentro)
+
+r_bbox_invade = _rodar_gate_geometrico(
+    _resultado_geometrico(
+        (300.0, 100.0), (300.0, 100.0),
+        bbox=(100.0, 20.0, 300.0, 250.0),
+    )
+)
+check("bbox invade ROI mas ombros fora nao veta",
+      r_bbox_invade.get("status") == "livre", r_bbox_invade)
+
+kpts_um_ombro = _kpts_com_ombros((292.0, 96.0), (0.0, 0.0))
+r_um_ombro = _rodar_gate_geometrico(
+    _Resultado([FP1_BBOX], [FP1_CONF], ids=None, kpts=[kpts_um_ombro])
+)
+check("apenas um ombro valido nao veta",
+      r_um_ombro.get("status") == "livre", r_um_ombro)
+
+am_fp1, y_fp1, _cap_fp1 = _rodar_cam2(TRACK_FORA, RESULTADO_FP1)
+stats_fp1, obs_fp1 = _confirmar_e_analisar(am_fp1, estruturada=True)
+check("C2 integrado mantem inconclusivo e zero posto_vazio",
+      am_fp1.presenca_safety_gate
+      and am_fp1.presenca_safety_motivo
+      == "veto_posto_vazio_por_limite_geometrico"
+      and am_fp1.operador_presente is None
+      and stats_fp1["vazios"] == 0
+      and len(obs_fp1) == 1
+      and obs_fp1[0].get("papel") is None
+      and not any(o.get("papel") == "posto_vazio" for o in obs_fp1),
+      (am_fp1, stats_fp1, obs_fp1))
+
+r_cam1 = _rodar_gate_geometrico(RESULTADO_FP1, boundary_safety=False)
+check("CAM1 permanece sem Boundary Safety",
+      r_cam1.get("status") == "livre"
+      and r_cam1.get("motivo") == "sem_ancora_forte_no_posto",
+      r_cam1)
 
 
 print(f"\n{'=' * 68}\n  {ok} ok - {fail} falha(s)\n{'=' * 68}")
