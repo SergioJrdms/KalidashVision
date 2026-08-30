@@ -865,10 +865,29 @@ def _anexar_segundo_angulo(
     if yolo is not None and rois_sec:
         _tem_posto = any(i.get("papel") == "posto_operador" for i in rois_sec.values())
         posto_sec = rois_sec if (_OPERADOR_FILTRO_ENABLE and _tem_posto) else None
+
+    def _marcar_falha_safety_pendente(erro: str) -> None:
+        """Falha fechado quando a cam2 assumiu o safety e não conseguiu medir."""
+        if posto_sec is None:
+            return
+        for am in amostras:
+            if (
+                not am.pessoas
+                and not am.fora_posto
+                and am.op_cam2 is None
+                and not am.presenca_safety_gate
+            ):
+                _marcar_presenca_safety(am, {
+                    "status": "erro",
+                    "motivo": "falha_presence_safety_gate",
+                    "erro": erro,
+                }, str(cam_id or "cam2"))
+
     try:
         cap = cv2.VideoCapture(video_path_secundario)
         if not cap.isOpened():
             log.warning(f"2º ângulo: não abriu {video_path_secundario}")
+            _marcar_falha_safety_pendente("cam2_nao_abriu")
             return 0
         dur_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / (cap.get(cv2.CAP_PROP_FPS) or 30.0) * 1000.0
         if abs(offset_s) > 0.5:
@@ -894,6 +913,12 @@ def _anexar_segundo_angulo(
             cap.set(cv2.CAP_PROP_POS_MSEC, alvo_ms)
             ok, frame = cap.read()
             if not ok or frame is None:
+                if posto_sec is not None and not am.pessoas and not am.fora_posto:
+                    _marcar_presenca_safety(am, {
+                        "status": "erro",
+                        "motivo": "falha_presence_safety_gate",
+                        "erro": "frame_cam2_indisponivel",
+                    }, str(cam_id or "cam2"))
                 continue
             # Fase 33: anexa SEMPRE — amostras vazias na cam1 usam esta imagem
             # p/ o RESGATE pela lateral (a cam2 vê o operador que a cam1 não vê).
@@ -901,7 +926,18 @@ def _anexar_segundo_angulo(
             n += 1
             # Confirmação do operador pela cam2 (Fase 28) — barata: predict
             # (sem tracker/estado) só nos slots de amostra, imgsz pequeno.
-            if posto_sec is None or fora_da_cam2 or (idx % _CAM2_CONFIRM_STRIDE) != 0:
+            if posto_sec is None:
+                continue
+            if fora_da_cam2 or (idx % _CAM2_CONFIRM_STRIDE) != 0:
+                if not am.pessoas and not am.fora_posto:
+                    _marcar_presenca_safety(am, {
+                        "status": "erro",
+                        "motivo": "falha_presence_safety_gate",
+                        "erro": (
+                            "instante_fora_da_cam2" if fora_da_cam2
+                            else "slot_cam2_nao_medido_por_stride"
+                        ),
+                    }, str(cam_id or "cam2"))
                 continue
             try:
                 if rois2 is None:
@@ -1036,6 +1072,27 @@ def _anexar_segundo_angulo(
                     if bbox_no_posto is not None:
                         am.bbox_cam2 = bbox_no_posto[0]
                         am.dim_cam2 = (w2, h2)
+                # C1: cam1 já não viu ninguém e o track da lateral não devolveu
+                # pessoa dentro. Só agora o detector bruto independente roda no
+                # mesmo frame. O resultado não altera op_cam2/contagens/bbox.
+                if (
+                    not am.pessoas
+                    and not am.fora_posto
+                    and n_posto2 == 0
+                    and not am.presenca_safety_gate
+                ):
+                    resultado_safety = _presenca_safety_gate(
+                        yolo,
+                        frame,
+                        rois2,
+                        w2,
+                        h2,
+                        conf_min=_CAM2_CONF,
+                        imgsz=416,
+                    )
+                    _marcar_presenca_safety(
+                        am, resultado_safety, str(cam_id or "cam2")
+                    )
                 am.op_cam2 = achou
                 am.maos_cam2 = maos
                 am.n_posto_cam2 = n_posto2
@@ -1043,9 +1100,18 @@ def _anexar_segundo_angulo(
             except Exception as e:
                 log.warning(f"[operador] confirmação cam2 falhou no slot {am.tempo_s:.0f}s ({e})")
                 am.op_cam2 = None
+                if not am.pessoas and not am.fora_posto:
+                    _marcar_presenca_safety(am, {
+                        "status": "erro",
+                        "motivo": "falha_presence_safety_gate",
+                        "erro": f"confirmacao_cam2: {type(e).__name__}: {e}"[:240],
+                    }, str(cam_id or "cam2"))
         cap.release()
     except Exception as e:
         log.warning(f"2º ângulo falhou ({e}) — segue só com a cam1")
+        _marcar_falha_safety_pendente(
+            f"cam2_abortou: {type(e).__name__}: {e}"[:240]
+        )
     return n
 
 
@@ -1108,7 +1174,8 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
     # Fase 2: aplicar.
     stats = {"slots": len(amostras), "presentes": 0, "vazios": 0,
              "inconclusivos": 0, "rebaixados": 0,
-             "resgatados_cam2": 0, "pontes": 0}
+             "resgatados_cam2": 0, "pontes": 0,
+             "safety_vetos": 0, "safety_erros": 0}
     for am, op_cam1, rebaixaria, resgataria in decisoes:
         if aplicar_negacao and rebaixaria:
             am.pessoas = [p for p in am.pessoas if p.get("papel") != "operador"]
@@ -1127,6 +1194,15 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
                 presente = False
         else:
             presente = op_cam1 or resgataria
+        # C1 não estabelece presença/identidade. Se nenhuma câmera trouxe uma
+        # presença normal, o detector bruto (ou sua falha técnica) transforma a
+        # afirmação de ausência em abstenção, nunca em `True`.
+        if getattr(am, "presenca_safety_gate", False) and presente is not True:
+            presente = None
+            if am.presenca_safety_motivo == "falha_presence_safety_gate":
+                stats["safety_erros"] += 1
+            else:
+                stats["safety_vetos"] += 1
         if resgataria and not op_cam1:
             stats["resgatados_cam2"] += 1
         am.operador_presente = presente
@@ -1138,7 +1214,9 @@ def etapa_confirmar_operador(amostras: list, politica: str) -> dict:
     if _OPERADOR_GAP_SLOTS > 0 and len(amostras) > 2:
         pres = [bool(a.operador_presente) for a in amostras]
         for i, a in enumerate(amostras):
-            if pres[i]:
+            # C1 é uma abstenção deliberada, não um buraco de tracking. A ponte
+            # não pode convertê-la em presença e, por consequência, atividade.
+            if pres[i] or getattr(a, "presenca_safety_gate", False):
                 continue
             antes = any(pres[j] for j in range(max(0, i - _OPERADOR_GAP_SLOTS), i))
             depois = any(
@@ -1406,6 +1484,171 @@ def _zona_da_pessoa(pontos: list[tuple[float, float]], rois: dict,
                 return (nome, papel, info.get("descricao_contexto"))
             achado = (nome, papel, info.get("descricao_contexto"))
     return achado
+
+
+# C1 — PRESENCE SAFETY GATE. O resultado de `YOLO.track()` já passou pelo
+# estado temporal do BoT-SORT e, portanto, não é prova suficiente de AUSÊNCIA.
+# A checagem abaixo usa o detector bruto somente no slot que seria candidato a
+# vazio. Ela não cria pessoa, track, papel, identidade ou atividade.
+def _callback_eh_tracker(callback) -> bool:
+    """Reconhece somente callbacks instalados pelo tracker do Ultralytics."""
+    alvo = getattr(callback, "func", callback)  # functools.partial nas versões atuais
+    modulo = str(getattr(alvo, "__module__", "") or "")
+    return modulo.startswith("ultralytics.") and ".trackers" in modulo
+
+
+def _predict_sem_tracker(yolo, frame, **kwargs):
+    """Executa detector bruto no mesmo modelo sem deixar o tracker filtrar.
+
+    `Model.track()` registra callbacks persistentes no objeto YOLO; chamar
+    `predict()` ingenuamente no mesmo objeto continuaria passando pelo tracker.
+    Suspendemos SOMENTE esses callbacks e restauramos as listas exatas em
+    `finally`. O worker processa um job por vez, então não há inferências
+    concorrentes sobre este singleton.
+    """
+    predictor = getattr(yolo, "predictor", None)
+    mapas = []
+    vistos = set()
+    for dono in (yolo, predictor):
+        callbacks = getattr(dono, "callbacks", None)
+        if isinstance(callbacks, dict) and id(callbacks) not in vistos:
+            vistos.add(id(callbacks))
+            mapas.append(callbacks)
+
+    eventos = ("on_predict_start", "on_predict_postprocess_end")
+    originais: list[tuple[dict, str, list]] = []
+    removidos = 0
+    removidos_por_evento = {evento: 0 for evento in eventos}
+    tracker_inicializado = predictor is not None and hasattr(predictor, "trackers")
+    try:
+        for callbacks in mapas:
+            for evento in eventos:
+                lista = list(callbacks.get(evento) or [])
+                filtrada = [cb for cb in lista if not _callback_eh_tracker(cb)]
+                n_removidos = len(lista) - len(filtrada)
+                removidos += n_removidos
+                removidos_por_evento[evento] += n_removidos
+                originais.append((callbacks, evento, lista))
+                callbacks[evento] = filtrada
+        if tracker_inicializado or removidos:
+            faltantes = [
+                evento for evento, total in removidos_por_evento.items()
+                if total == 0
+            ]
+            if faltantes:
+                raise RuntimeError(
+                    "callbacks_do_tracker_incompletos:" + ",".join(faltantes)
+                )
+        return yolo.predict(frame, **kwargs)
+    finally:
+        for callbacks, evento, lista in reversed(originais):
+            callbacks[evento] = lista
+
+
+def _presenca_safety_gate(
+    yolo,
+    frame,
+    rois_posto: dict,
+    w: int,
+    h: int,
+    *,
+    conf_min: float,
+    imgsz: int,
+    area_min_px: float = 0.0,
+) -> dict:
+    """Nega `posto_vazio` se o detector bruto vê âncora forte no posto."""
+    try:
+        resultados = _predict_sem_tracker(
+            yolo,
+            frame,
+            classes=[0],
+            conf=float(conf_min),
+            imgsz=int(imgsz),
+            verbose=False,
+            save=False,
+        )
+        resultado = resultados[0] if resultados else None
+        boxes_obj = getattr(resultado, "boxes", None)
+        if boxes_obj is None or len(boxes_obj) == 0:
+            return {"status": "livre", "motivo": "detector_sem_pessoas"}
+
+        conf_obj = getattr(boxes_obj, "conf", None)
+        if conf_obj is None:
+            raise RuntimeError("detector_sem_confidence")
+        boxes = boxes_obj.xyxy.cpu().numpy()
+        confs = conf_obj.cpu().numpy()
+        kpts_all = None
+        keypoints = getattr(resultado, "keypoints", None)
+        if keypoints is not None and getattr(keypoints, "xyn", None) is not None:
+            kpts_all = keypoints.xyn.cpu().numpy()
+
+        for i, box in enumerate(boxes):
+            if i >= len(confs):
+                raise RuntimeError("confidence_desalinhada")
+            confidence = float(confs[i])
+            if confidence < float(conf_min):
+                continue
+            x1, y1, x2, y2 = (float(v) for v in box[:4])
+            if max(0.0, x2 - x1) * max(0.0, y2 - y1) < float(area_min_px):
+                continue
+            pessoa = {"bbox": (x1, y1, x2, y2)}
+            if kpts_all is not None and i < len(kpts_all):
+                pessoa["kpts"] = kpts_all[i]
+            ancora = _ponto_ancora(pessoa, int(w), int(h))
+            dentro = any(
+                info.get("papel") == "posto_operador"
+                and _ponto_em_roi(ancora[0], ancora[1], info["polygon"])
+                for info in (rois_posto or {}).values()
+            )
+            if dentro:
+                return {
+                    "status": "veto",
+                    "motivo": "veto_posto_vazio_por_deteccao_independente",
+                    "confidence": confidence,
+                    "bbox": (x1, y1, x2, y2),
+                    "ancora": (float(ancora[0]), float(ancora[1])),
+                }
+        return {"status": "livre", "motivo": "sem_ancora_forte_no_posto"}
+    except Exception as e:  # noqa: BLE001 — erro também deve falhar seguro
+        return {
+            "status": "erro",
+            "motivo": "falha_presence_safety_gate",
+            "erro": f"{type(e).__name__}: {e}"[:240],
+        }
+
+
+def _marcar_presenca_safety(am: "Amostra", resultado: dict, camera: str) -> None:
+    """Materializa somente o veto transitório e sua telemetria auditável."""
+    status = str((resultado or {}).get("status") or "erro")
+    if status not in {"veto", "erro"} or am.presenca_safety_gate:
+        return
+    am.presenca_safety_gate = True
+    am.presenca_safety_motivo = str(
+        (resultado or {}).get("motivo") or "falha_presence_safety_gate"
+    )
+    am.presenca_safety_camera = str(camera or "cam1")
+    confidence = (resultado or {}).get("confidence")
+    am.presenca_safety_confidence = (
+        float(confidence) if confidence is not None else None
+    )
+    bbox = (resultado or {}).get("bbox")
+    am.presenca_safety_bbox = tuple(float(v) for v in bbox) if bbox else None
+    campos = {
+        "presenca_safety_gate": True,
+        "cam": am.presenca_safety_camera,
+        "tempo_s": round(float(am.tempo_s), 3),
+        "motivo": am.presenca_safety_motivo,
+        "confidence": am.presenca_safety_confidence,
+    }
+    if status == "erro":
+        campos["erro"] = (resultado or {}).get("erro")
+        log.warning("[presenca-safety] %s", json.dumps(
+            campos, ensure_ascii=False, separators=(",", ":")
+        ))
+    else:
+        log.info("[presenca-safety] %s", json.dumps(
+            campos, ensure_ascii=False, separators=(",", ":")
+        ))
 
 
 # Fase 44 — MÃOS NA MÁQUINA: a zona 'maquina' (torno) desenhada em cima do
@@ -3014,6 +3257,14 @@ class Amostra:
     identidade_autoritativa: bool = False
     identidade_estado: str | None = None       # dentro | fora | ausente
     identidade_track_id: int | None = None     # track físico deste slot
+    # C1 — Presence Safety Gate. Estes campos são somente telemetria transitória:
+    # não criam pessoa/track/papel e não entram em evento ou persistência. True
+    # significa apenas que NÃO é seguro afirmar `posto_vazio` neste slot.
+    presenca_safety_gate: bool = False
+    presenca_safety_motivo: str | None = None
+    presenca_safety_camera: str | None = None
+    presenca_safety_confidence: float | None = None
+    presenca_safety_bbox: tuple | None = None
 
 
 def inspecionar_video(video_path: str) -> dict:
@@ -3762,6 +4013,7 @@ def etapa_detectar_e_amostrar(
     cam_id: str | None = None,
     mapa_movimento: dict | None = None,
     identidade_shadow: dict | None = None,
+    presenca_safety_cam1: bool = True,
 ) -> tuple[list[Amostra], dict, list[int], list[dict], dict, dict]:
     # Cada vídeo começa com o tracker limpo. Ver `resetar_tracker` para o
     # porquê — em resumo: `persist=True` é certo dentro do vídeo e errado
@@ -3867,6 +4119,7 @@ def etapa_detectar_e_amostrar(
                 detalhes_identidade: dict[int, dict] = {}
                 obs_identidade = None
                 precisa_frame_identidade = False
+                resultado_safety_cam1 = None
                 # Fase 110: quem aparece no quadro mas fora do polígono. Vive
                 # separada de `pessoas` do começo ao fim.
                 fora_frame: list = []
@@ -4085,6 +4338,25 @@ def etapa_detectar_e_amostrar(
                     else:
                         n_fora_passante += 1
 
+                # C1: em fluxo sem cam2 de posto, este é o último ponto em que
+                # o frame da cam1 ainda existe antes de uma Amostra vazia. O
+                # predict independente só roda se o tracker não devolveu pessoa
+                # no posto; o retorno jamais entra em `pessoas`.
+                if modo_op and presenca_safety_cam1 and not pessoas and not fora_ok:
+                    resultado_safety_cam1 = _presenca_safety_gate(
+                        yolo,
+                        frame,
+                        {
+                            nome: info_roi for nome, info_roi in rois.items()
+                            if info_roi.get("papel") == "posto_operador"
+                        },
+                        w,
+                        h,
+                        conf_min=conf_deteccao,
+                        imgsz=imgsz,
+                        area_min_px=area_min_px,
+                    )
+
                 if pessoas:
                     # Codifica imediatamente em base64 (mesma pipeline:
                     # anotar→resize→JPEG, com defaults max_lado=1024 e
@@ -4151,16 +4423,19 @@ def etapa_detectar_e_amostrar(
                             anotar_frame_com_ids(frame, am_fora)
                         ) if am_fora else None
                     )
-                    amostras.append(
-                        Amostra(frame_idx=frame_idx, tempo_s=tempo_s,
-                                img_b64="", pessoas=[], dim=(w, h),
-                                fora_posto=am_fora,
-                                img_b64_fora=img_fora_legado,
-                                fora_auditoria=fora_auditoria,
-                                fora_auditoria_amostras_zona=(
-                                    fora_auditoria_amostras
-                                ))
+                    am_nova = Amostra(
+                        frame_idx=frame_idx, tempo_s=tempo_s,
+                        img_b64="", pessoas=[], dim=(w, h),
+                        fora_posto=am_fora,
+                        img_b64_fora=img_fora_legado,
+                        fora_auditoria=fora_auditoria,
+                        fora_auditoria_amostras_zona=fora_auditoria_amostras,
                     )
+                    if resultado_safety_cam1 is not None:
+                        _marcar_presenca_safety(
+                            am_nova, resultado_safety_cam1, str(cam_id or "cam1")
+                        )
+                    amostras.append(am_nova)
         frame_idx += 1
         if frame_idx % 60 == 0:
             pct = int(frame_idx / max(1, total_frames) * 100)
@@ -5390,7 +5665,10 @@ def etapa_analise_vlm(
         de auditoria são opcionais: sem o SQL da Fase 110, a persistência os
         remove e repete o insert sem derrubar a ingestão.
         """
-        if not (_POSTO_VAZIO_ENABLE and zona_posto and not am.operador_presente):
+        if (
+            getattr(am, "presenca_safety_gate", False)
+            or not (_POSTO_VAZIO_ENABLE and zona_posto and not am.operador_presente)
+        ):
             return False
         observacao = {
             "tempo_s": am.tempo_s,
@@ -5455,6 +5733,11 @@ def etapa_analise_vlm(
                     plano.append(("fora_posto", am))
                 elif am.pessoas:
                     plano.append(("cam1", am))
+                elif getattr(am, "presenca_safety_gate", False):
+                    # C1 tem autoridade apenas para negar o vazio. Não desfaz
+                    # identidade positiva, mas veta a ausência autoritativa se
+                    # o detector bruto viu alguém (ou falhou tecnicamente).
+                    plano.append(("inconclusivo", am))
                 else:
                     plano.append(("vazio", am))
                 continue
@@ -5473,6 +5756,13 @@ def etapa_analise_vlm(
                 # Fase 33: RESGATE pela lateral — a cam1 não vê o operador
                 # (oclusão total) e a cam2 vê.
                 plano.append(("ponte" if am.operador_ponte else "resgate", am))
+            elif (
+                not am.pessoas
+                and getattr(am, "presenca_safety_gate", False)
+            ):
+                # Estado interno já existente: há evidência suficiente para
+                # proibir vazio, mas insuficiente para atribuir operador.
+                plano.append(("inconclusivo", am))
             elif (
                 PRODUTIVIDADE_OPERADOR_ESTRUTURADA
                 and not am.pessoas
@@ -17997,6 +18287,16 @@ def processar_video(
     _mapa_mov = carregar_mapa_movimento(sb, empresa, processo, cam_id)
     cam_primaria_efetiva = str(cam_id or "cam1")
     cam_secundaria_efetiva = str(cam_id_secundario or "cam2")
+    # C1: com uma lateral válida, o safety roda só depois de cam1 E cam2
+    # falharem em estabelecer presença. Sem lateral, roda no frame da cam1.
+    tem_posto_secundario_safety = bool(
+        video_path_secundario
+        and _OPERADOR_FILTRO_ENABLE
+        and any(
+            info_roi.get("papel") == "posto_operador"
+            for info_roi in (rois_contexto_secundario or {}).values()
+        )
+    )
     identidade_shadow = (
         {
             "observacoes": [], "descritores": [],
@@ -18013,6 +18313,7 @@ def processar_video(
         yolo, video_path, intervalo_amostragem_s, rois_contexto, progress_cb,
         cam_id=cam_id, mapa_movimento=_mapa_mov,
         identidade_shadow=identidade_shadow,
+        presenca_safety_cam1=not tem_posto_secundario_safety,
     )
     descritores_raw_shadow = (
         [{**d, "cam_id": str(d.get("cam_id") or cam_primaria_efetiva)}
@@ -18152,11 +18453,12 @@ def processar_video(
         log.info(
             "[operador] política=%s · %d slots: %d com operador (%d resgatados "
             "pela cam2, %d por ponte temporal), %d vazios, %d inconclusivos, "
-            "%d rebaixados pela cam2",
+            "%d rebaixados pela cam2, %d vetos C1 (%d erros)",
             politica, stats_op["slots"], stats_op["presentes"],
             stats_op["resgatados_cam2"], stats_op["pontes"],
             stats_op["vazios"], stats_op["inconclusivos"],
             stats_op["rebaixados"],
+            stats_op["safety_vetos"], stats_op["safety_erros"],
         )
 
     # Fase 111D: confirmação causal legada já terminou. Só agora a decisão da
