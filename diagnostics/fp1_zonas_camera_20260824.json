@@ -1,0 +1,66 @@
+{
+  "caso": "FP #1",
+  "origem": "export read-only de zonas_camera fornecido na conversa",
+  "observacao": "postos atualizados em 2026-08-18, antes dos vídeos de 2026-08-24",
+  "zonas_camera": [
+    {
+      "cam_id": "cam1",
+      "nome": "torno",
+      "papel": "maquina",
+      "ativo": true,
+      "pts_rel": [[0.9609, 0.5886], [0.9586, 0.5475], [0.0894, 0.4507], [0.0894, 0.7047], [0.9334, 0.9465]],
+      "frame_ref_w": 806,
+      "frame_ref_h": 304,
+      "frente_maquina": "camera",
+      "descricao_contexto": "Máquina · Um torno mecânico, uma máquina que gira a peça para usiná-la, e o torneiro usa essa máquina para cortar, perfurar e moldar o material até obter a forma e as medidas desejadas."
+    },
+    {
+      "cam_id": "cam1",
+      "nome": "Posto do Torneiro",
+      "papel": "posto_operador",
+      "ativo": true,
+      "pts_rel": [[0.1741, 0.5082], [0.9632, 0.562], [0.9163, 0.2506], [0.1649, 0.2688]],
+      "frame_ref_w": 806,
+      "frame_ref_h": 304,
+      "frente_maquina": null,
+      "descricao_contexto": "Posto do operador · Área atrás do torno onde o operador fica para analisar a peça sendo feita, fazer ajustes, etc. Quem fica aqui é o operador, ele fica atrás do torno.",
+      "criado_em": "2026-07-21 00:08:51.833603+00",
+      "atualizado_em": "2026-08-18 18:01:47.437256+00"
+    },
+    {
+      "cam_id": "cam2",
+      "nome": "Fabrica",
+      "papel": "interacao",
+      "ativo": true,
+      "pts_rel": [[0.675, 0.2371], [0.9254, 0.3001], [0.8991, 0.9198], [0.4966, 0.8749]],
+      "frame_ref_w": 510,
+      "frame_ref_h": 546,
+      "frente_maquina": null,
+      "descricao_contexto": "Interação · Resto da fabrica onde pessoas passam, podem interagir com o operador, conversar com o operador, fazer outros trabalhos não relacionados com o operador, etc."
+    },
+    {
+      "cam_id": "cam2",
+      "nome": "torno",
+      "papel": "maquina",
+      "ativo": true,
+      "pts_rel": [[0.5515, 0.0841], [0.667, 0.1054], [0.4909, 0.6354], [0.3113, 0.614]],
+      "frame_ref_w": 510,
+      "frame_ref_h": 546,
+      "frente_maquina": "perfil",
+      "descricao_contexto": "Máquina · Um torno mecânico, uma máquina que gira a peça para usiná-la, e o torneiro usa essa máquina para cortar, perfurar e moldar o material até obter a forma e as medidas desejadas. Operador manipula com as mãos"
+    },
+    {
+      "cam_id": "cam2",
+      "nome": "Posto do Torneiro",
+      "papel": "posto_operador",
+      "ativo": true,
+      "pts_rel": [[0.1981, 0.0484], [0.5412, 0.0783], [0.2358, 0.7978], [0.0048, 0.6663]],
+      "frame_ref_w": 510,
+      "frame_ref_h": 546,
+      "frente_maquina": null,
+      "descricao_contexto": "Posto do operador · Área atrás do torno onde o operador fica para analisar a peça sendo feita, fazer ajustes, etc. Fica a esquerda do torno, aqui é onde o operador deve ficar por todo o tempo",
+      "criado_em": "2026-07-21 00:41:27.003404+00",
+      "atualizado_em": "2026-08-18 18:04:17.52384+00"
+    }
+  ]
+}

@@ -839,6 +839,7 @@ def _anexar_segundo_angulo(
     desc_acc: dict | None = None,
     identidade_shadow: dict | None = None,
     cam_id: str | None = None,
+    diagnostico_presenca: list[dict] | None = None,
 ) -> int:
     """Fase 6: para cada Amostra (da cam1), pega o frame da cam2 no MESMO
     instante REAL e guarda em `img_b64_secundario`. Retorna quantas amostras
@@ -865,17 +866,62 @@ def _anexar_segundo_angulo(
     if yolo is not None and rois_sec:
         _tem_posto = any(i.get("papel") == "posto_operador" for i in rois_sec.values())
         posto_sec = rois_sec if (_OPERADOR_FILTRO_ENABLE and _tem_posto) else None
+    def _estado_slot_cam2(idx: int, am, dur_ms: float) -> tuple[float, bool, bool, str | None]:
+        alvo_ms = (am.tempo_s + offset_s) * 1000.0
+        fora_da_cam2 = alvo_ms < 0 or (bool(dur_ms) and alvo_ms > dur_ms)
+        medicao_esperada = not (
+            posto_sec is None
+            or fora_da_cam2
+            or (idx % _CAM2_CONFIRM_STRIDE) != 0
+        )
+        if posto_sec is None:
+            motivo = "sem_zona_posto_cam2"
+        elif fora_da_cam2:
+            motivo = "fora_janela_cam2"
+        elif (idx % _CAM2_CONFIRM_STRIDE) != 0:
+            motivo = "stride"
+        else:
+            motivo = "medicao_nao_realizada"
+        return alvo_ms, fora_da_cam2, medicao_esperada, motivo
+
+    def _preparar_diagnostico_cam2(dur_ms: float) -> list[dict] | None:
+        if diagnostico_presenca is None:
+            return None
+        slots = []
+        for idx, am in enumerate(amostras):
+            _, _, esperada, motivo = _estado_slot_cam2(idx, am, dur_ms)
+            slots.append({
+                "tempo_s": round(float(am.tempo_s), 3),
+                "medido": False,
+                "medicao_esperada": esperada,
+                "motivo_sem_medicao": motivo,
+                "n_detectadas_yolo": 0,
+                "pessoas": [],
+            })
+        diagnostico_presenca.extend(slots)
+        return slots
+
+    diagnostico_slots = None
     try:
         cap = cv2.VideoCapture(video_path_secundario)
         if not cap.isOpened():
             log.warning(f"2º ângulo: não abriu {video_path_secundario}")
+            diagnostico_slots = _preparar_diagnostico_cam2(0.0)
+            for diag_cam2 in diagnostico_slots or []:
+                if diag_cam2["medicao_esperada"]:
+                    diag_cam2["motivo_sem_medicao"] = "video_nao_aberto"
             return 0
         dur_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / (cap.get(cv2.CAP_PROP_FPS) or 30.0) * 1000.0
+        # Observacional: registra de antemão o calendário que este mesmo passe
+        # realmente medirá. Assim, até uma falha defensiva no meio do laço
+        # distingue slots obrigatórios dos pulados por stride/janela.
+        diagnostico_slots = _preparar_diagnostico_cam2(dur_ms)
         if abs(offset_s) > 0.5:
             log.info(f"[dual-angle] offset de relógio cam1→cam2 = {offset_s:+.0f}s (alinhado pelo nome)")
         rois2 = None
         rois2_maq = None   # Fase 44: zonas 'maquina' da cam2 (mãos no torno)
         for idx, am in enumerate(amostras):
+            diag_cam2 = diagnostico_slots[idx] if diagnostico_slots is not None else None
             obs_identidade_cam2 = None
             if identidade_shadow is not None:
                 obs_identidade_cam2 = {
@@ -887,13 +933,17 @@ def _anexar_segundo_angulo(
                 identidade_shadow.setdefault("observacoes", []).append(
                     obs_identidade_cam2
                 )
-            alvo_ms = (am.tempo_s + offset_s) * 1000.0
-            fora_da_cam2 = alvo_ms < 0 or (bool(dur_ms) and alvo_ms > dur_ms)
+            alvo_ms, fora_da_cam2, medicao_esperada_cam2, _ = _estado_slot_cam2(
+                idx, am, dur_ms
+            )
             if fora_da_cam2:  # instante não existe na cam2 — clampa (só imagem)
                 alvo_ms = min(max(0.0, alvo_ms), max(0.0, dur_ms - 1.0))
             cap.set(cv2.CAP_PROP_POS_MSEC, alvo_ms)
             ok, frame = cap.read()
             if not ok or frame is None:
+                if diag_cam2 is not None:
+                    if medicao_esperada_cam2:
+                        diag_cam2["motivo_sem_medicao"] = "frame_nao_lido"
                 continue
             # Fase 33: anexa SEMPRE — amostras vazias na cam1 usam esta imagem
             # p/ o RESGATE pela lateral (a cam2 vê o operador que a cam1 não vê).
@@ -930,6 +980,9 @@ def _anexar_segundo_angulo(
                     frame, classes=[0], conf=_CAM2_CONF, imgsz=416,
                     persist=True, tracker=TRACKER_CONFIG, verbose=False,
                 )
+                if diag_cam2 is not None:
+                    diag_cam2["medido"] = True
+                    diag_cam2["motivo_sem_medicao"] = None
                 if obs_identidade_cam2 is not None:
                     obs_identidade_cam2["medido"] = True
                 achou = False
@@ -940,6 +993,8 @@ def _anexar_segundo_angulo(
                 candidatos_posto2: list[tuple[dict, int, bool]] = []
                 if res and res[0].boxes is not None and len(res[0].boxes) > 0:
                     boxes2 = res[0].boxes.xyxy.cpu().numpy()
+                    if diag_cam2 is not None:
+                        diag_cam2["n_detectadas_yolo"] = int(len(boxes2))
                     ids2 = None
                     if res[0].boxes.id is not None:
                         try:
@@ -978,6 +1033,19 @@ def _anexar_segundo_angulo(
                                 _ponto_em_roi(px, py, i["polygon"])
                                 for i in rois2.values() for px, py in pontos2
                             )
+                            if diag_cam2 is not None:
+                                ax2, ay2 = _ponto_ancora(pessoa2, w2, h2)
+                        if diag_cam2 is not None:
+                            diag_cam2["pessoas"].append({
+                                "track_id": (
+                                    int(ids2[j])
+                                    if ids2 is not None and j < len(ids2)
+                                    else None
+                                ),
+                                "bbox": [int(v) for v in pessoa2["bbox"]],
+                                "ancora": [round(float(ax2), 3), round(float(ay2), 3)],
+                                "dentro_posto": bool(no_posto2),
+                            })
                         if (
                             obs_identidade_cam2 is not None
                             and ids2 is not None and j < len(ids2)
@@ -1043,9 +1111,20 @@ def _anexar_segundo_angulo(
             except Exception as e:
                 log.warning(f"[operador] confirmação cam2 falhou no slot {am.tempo_s:.0f}s ({e})")
                 am.op_cam2 = None
+                if diag_cam2 is not None:
+                    diag_cam2["erro"] = str(e)
+                    diag_cam2["motivo_sem_medicao"] = "falha_inferencia"
+            if diag_cam2 is not None:
+                diag_cam2["n_posto_cam2"] = am.n_posto_cam2
+                diag_cam2["op_cam2"] = am.op_cam2
         cap.release()
     except Exception as e:
         log.warning(f"2º ângulo falhou ({e}) — segue só com a cam1")
+        if diagnostico_slots is None:
+            diagnostico_slots = _preparar_diagnostico_cam2(0.0)
+            for diag_cam2 in diagnostico_slots or []:
+                if diag_cam2["medicao_esperada"]:
+                    diag_cam2["motivo_sem_medicao"] = "falha_inicializacao"
     return n
 
 
@@ -3762,6 +3841,7 @@ def etapa_detectar_e_amostrar(
     cam_id: str | None = None,
     mapa_movimento: dict | None = None,
     identidade_shadow: dict | None = None,
+    fim_s: float | None = None,
 ) -> tuple[list[Amostra], dict, list[int], list[dict], dict, dict]:
     # Cada vídeo começa com o tracker limpo. Ver `resetar_tracker` para o
     # porquê — em resumo: `persist=True` é certo dentro do vídeo e errado
@@ -3833,6 +3913,11 @@ def etapa_detectar_e_amostrar(
     progress_cb("deteccao", 0, f"Detectando pessoas · {total_frames} frames")
 
     while cap.isOpened():
+        # Diagnóstico local pode encerrar cedo sem mudar a cadência nem o
+        # histórico do tracker: o passe continua começando no frame zero.
+        # `None` preserva byte por byte o caminho normal de produção.
+        if fim_s is not None and (frame_idx / fps) > (float(fim_s) + 1e-9):
+            break
         if not cap.grab():                 # avança sem decodificar (barato)
             break
         if frame_idx % track_stride == 0:
@@ -3865,6 +3950,11 @@ def etapa_detectar_e_amostrar(
                 pessoas = []
                 observacoes_identidade: dict[int, str] = {}
                 detalhes_identidade: dict[int, dict] = {}
+                n_deteccoes_yolo = (
+                    int(len(results[0].boxes))
+                    if results[0].boxes is not None else 0
+                )
+                n_elegiveis_pipeline = 0
                 obs_identidade = None
                 precisa_frame_identidade = False
                 # Fase 110: quem aparece no quadro mas fora do polígono. Vive
@@ -3890,6 +3980,7 @@ def etapa_detectar_e_amostrar(
                     areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
                     mask = areas >= area_min_px
                     idx_validos = [j for j, m in enumerate(mask) if m]
+                    n_elegiveis_pipeline = len(idx_validos)
                     for j in idx_validos:
                         box, tid = boxes[j], ids[j]
                         x1, y1, x2, y2 = box.astype(int)
@@ -3910,8 +4001,10 @@ def etapa_detectar_e_amostrar(
                             # `posto_operador` classifica.
                             pontos = _pontos_da_pessoa(pessoa, w, h)
                             nome_z, papel_z, desc_z = _zona_da_pessoa(
-                                pontos, rois, ancora=_ponto_ancora(pessoa, w, h))
+                                pontos, rois,
+                                ancora=_ponto_ancora(pessoa, w, h))
                             if desc_acc_identidade is not None:
+                                ancora_pessoa = _ponto_ancora(pessoa, w, h)
                                 estado_id = (
                                     "dentro" if papel_z == "posto_operador" else "fora"
                                 )
@@ -3925,6 +4018,9 @@ def etapa_detectar_e_amostrar(
                                     "track_id": int(tid),
                                     "bbox": tuple(int(v) for v in pessoa["bbox"]),
                                     "kpts": kpts_memoria,
+                                    "ancora": tuple(
+                                        round(float(v), 3) for v in ancora_pessoa
+                                    ),
                                     "estado": estado_id,
                                 }
                                 acumular_descritor(
@@ -4027,9 +4123,15 @@ def etapa_detectar_e_amostrar(
                         "tempo_s": round(float(tempo_s), 3),
                         "medido": True,
                         "tracks": dict(observacoes_identidade),
+                        "n_deteccoes_yolo": n_deteccoes_yolo,
+                        "n_elegiveis_pipeline": n_elegiveis_pipeline,
                     }
-                    if identidade_shadow.get("guardar_frames"):
+                    if (
+                        identidade_shadow.get("guardar_detalhes")
+                        or identidade_shadow.get("guardar_frames")
+                    ):
                         obs_identidade["pessoas"] = detalhes_identidade
+                    if identidade_shadow.get("guardar_frames"):
                         obs_identidade["dim"] = (w, h)
                         # Só há reconstrução quando alguém foi visto fora.
                         # O JPEG será a MESMA string já usada pela Amostra
