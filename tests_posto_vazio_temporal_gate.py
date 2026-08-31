@@ -67,6 +67,30 @@ print("[gate temporal posto_vazio]")
 a = evento("posto_vazio", 0, 5, n_observacoes=1)
 check("A · um slot vazio de 5 s vira abstenção", papel(a) is None, papel(a))
 
+# Fronteira: o evento agrega três observações, mas só [60, 68) sobrepõe o
+# segundo minuto. As duas observações anteriores não podem satisfazer >= 2.
+def observacao_vazia(tempo_s):
+    return {
+        "tempo_s": float(tempo_s), "frame_idx": int(tempo_s),
+        "track_id": pl.POSTO_VAZIO_TID, "descricao": pl.POSTO_VAZIO_DESC,
+        "bbox": None, "zona": "posto", "papel": "posto_vazio",
+        "origem_gate": "posto_vazio",
+    }
+
+
+fronteira_eventos = pl.etapa_segmentar_eventos(
+    [observacao_vazia(t) for t in (44, 52, 60)],
+    lambda *_a: pl.POSTO_VAZIO_LABEL,
+    8.0,
+)
+fronteira_bucket = [(fronteira_eventos[0], 8.0)]
+fronteira_obs = pl._n_observacoes_reais_posto_vazio(
+    fronteira_bucket, 60.0, 120.0)
+check("A · fronteira conta somente o único slot que sobrepõe o novo minuto",
+      len(fronteira_eventos) == 1 and fronteira_obs == 1
+      and pl._papel_do_minuto(fronteira_bucket, 60.0, 120.0) is None,
+      (fronteira_eventos, fronteira_obs))
+
 # B) Três medições existem, mas a fatia inconclusiva deixa margem em 7 s.
 b_vazio = evento("posto_vazio", 0, 15, origens={"posto_vazio": 3})
 b_contra = evento(None, 11, 15, origens={"resgate_cam2": 1})
@@ -120,6 +144,14 @@ h_fora_depois = evento(pl.PAPEL_OPERADOR_FORA, 32, 60,
 check("H · operador_fora não conta como anti_empty",
       papel(h_vazio, h_fora_depois) == "posto_vazio",
       papel(h_vazio, h_fora_depois))
+
+# Visitante é presença de terceiro, não evidência física do operador.
+visitante_vazio = evento("posto_vazio", 0, 32, origens={"posto_vazio": 4})
+visitante = evento("visitante", 32, 60, n_observacoes=4,
+                   origens={"analisado": 4})
+check("visitante é neutro para anti_empty",
+      papel(visitante_vazio, visitante) == "posto_vazio",
+      papel(visitante_vazio, visitante))
 
 
 print(f"\n{ok} ok · {fail} falha(s)")

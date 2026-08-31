@@ -7180,7 +7180,7 @@ def _melhor_evidencia_interlocutor(*evidencias) -> dict | None:
     return dict(max(candidatas, key=_score))
 
 
-def _abrir_evento(tid: int, o: dict) -> dict:
+def _abrir_evento(tid: int, o: dict, intervalo_s: float) -> dict:
     """Abre um evento a partir da 1ª observação dele. `bbox_inicio` fica NULO
     quando a observação não tem caixa (posto vazio, ponte temporal) — antes
     virava (0,0,0,0), que é uma medida falsa, não uma ausência."""
@@ -7258,6 +7258,12 @@ def _abrir_evento(tid: int, o: dict) -> dict:
         "n_observacoes": 1,
         "n_amostras": 1 if origem_foi_observada(o.get("origem_gate")) else 0,
         "origens": {(o.get("origem_gate") or "analisado"): 1},
+        # O contador agregado não localiza a observação quando este evento
+        # atravessa minutos. O slot real fica interno até a consolidação.
+        "_slots_posto_vazio": ([
+            (float(o["tempo_s"]), float(o["tempo_s"]) + float(intervalo_s))
+        ] if o.get("papel") == "posto_vazio"
+             and o.get("origem_gate") == "posto_vazio" else []),
     }
 
 
@@ -7304,7 +7310,7 @@ def etapa_segmentar_eventos(
     for tid, obs_lista in por_pessoa.items():
         if not obs_lista:
             continue
-        atual = _abrir_evento(tid, obs_lista[0])
+        atual = _abrir_evento(tid, obs_lista[0], intervalo_s)
         for o in obs_lista[1:]:
             gap = o["tempo_s"] - atual["tempo_fim_s"]
             # Fase 28: mudança de PAPEL (operador↔visitante) quebra o evento —
@@ -7342,6 +7348,12 @@ def etapa_segmentar_eventos(
                     atual["n_amostras"] += 1
                 _og = o.get("origem_gate") or "analisado"
                 atual["origens"][_og] = atual["origens"].get(_og, 0) + 1
+                if (o.get("papel") == "posto_vazio"
+                        and o.get("origem_gate") == "posto_vazio"):
+                    atual["_slots_posto_vazio"].append((
+                        float(o["tempo_s"]),
+                        float(o["tempo_s"]) + float(intervalo_s),
+                    ))
                 # Fase 101: acumula a orientação de cada amostra do cru.
                 if o.get("orientacao"):
                     atual["_orient"][o["orientacao"]] += 1
@@ -7376,7 +7388,7 @@ def etapa_segmentar_eventos(
                 )
             else:
                 eventos.append(atual)
-                atual = _abrir_evento(tid, o)
+                atual = _abrir_evento(tid, o, intervalo_s)
         eventos.append(atual)
 
     for e in eventos:
@@ -7429,11 +7441,26 @@ _POSTO_VAZIO_MIN_OBSERVACOES = 2
 _POSTO_VAZIO_MARGEM_MIN_S = 8.0
 
 
-def _n_observacoes_reais_posto_vazio(no_bucket: list) -> int:
-    """Conta medições independentes de vazio sem inferi-las da duração."""
+def _n_observacoes_reais_posto_vazio(
+    no_bucket: list, inicio_bucket: float, fim_bucket: float
+) -> int:
+    """Conta slots reais de vazio que sobrepõem o bucket, nunca a duração."""
     total = 0
     for e, _ov in no_bucket:
         if e.get("papel_pessoa") != "posto_vazio":
+            continue
+        slots = e.get("_slots_posto_vazio")
+        if isinstance(slots, list):
+            for inicio_slot, fim_slot in slots:
+                if float(inicio_slot) < fim_bucket and float(fim_slot) > inicio_bucket:
+                    total += 1
+            continue
+        # Sem os slots não é possível repartir com segurança um contador
+        # agregado entre minutos. O fallback só vale se o evento inteiro está
+        # contido neste bucket; duração nunca vira contagem.
+        inicio_evento = float(e.get("tempo_inicio_s") or 0)
+        fim_evento = float(e.get("tempo_fim_s") or 0)
+        if inicio_evento < inicio_bucket or fim_evento > fim_bucket:
             continue
         origens = e.get("origens") or e.get("observacoes_origem")
         if isinstance(origens, dict):
@@ -7516,8 +7543,9 @@ def _papel_do_minuto(
         duracao = fim - inicio
         peso[papel] += duracao
         # Gate temporal congelado: uma fatia contraditória conta uma vez só,
-        # mesmo com várias pessoas simultâneas. `operador_fora` é neutro.
-        if None in papeis or "operador" in papeis or "visitante" in papeis:
+        # mesmo com várias pessoas simultâneas. `visitante` e `operador_fora`
+        # são neutros porque a pergunta é presença física do operador.
+        if None in papeis or "operador" in papeis:
             anti_empty_s += duracao
         elif "posto_vazio" in papeis:
             empty_s += duracao
@@ -7534,7 +7562,7 @@ def _papel_do_minuto(
     if papel_minuto != "posto_vazio":
         return papel_minuto
     if (
-        _n_observacoes_reais_posto_vazio(no_bucket)
+        _n_observacoes_reais_posto_vazio(no_bucket, inicio_bucket, fim_bucket)
         < _POSTO_VAZIO_MIN_OBSERVACOES
         or empty_s - anti_empty_s < _POSTO_VAZIO_MARGEM_MIN_S
     ):
