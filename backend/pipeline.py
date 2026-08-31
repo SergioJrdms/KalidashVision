@@ -1282,6 +1282,9 @@ _OPERADOR_CONF = float(os.environ.get("KV_OPERADOR_CONF", "0.30"))            # 
 _OPERADOR_AREA_MIN_RATIO = float(os.environ.get("KV_OPERADOR_AREA_MIN_RATIO", "0.0015"))  # < AREA_MIN_RATIO (0.005)
 _CAM2_CONF = float(os.environ.get("KV_CAM2_CONF", "0.35"))
 _CAM2_CONFIRM_STRIDE = max(1, int(os.environ.get("KV_CAM2_CONFIRM_STRIDE", "1")))
+# C4.2 — segunda opinião opcional, somente para candidatos reais a posto vazio.
+_C42_IMGSZ = 640
+_C42_DELTA_MAX_S = 8.01
 # C2 — extensão geométrica conservadora da C1, exclusiva da CAM2. A margem é
 # deliberadamente fixa até haver evidência suficiente para configuração.
 _CAM2_BOUNDARY_SAFETY = True
@@ -1771,6 +1774,221 @@ def _marcar_presenca_safety(am: "Amostra", resultado: dict, camera: str) -> None
         log.info("[presenca-safety] %s", json.dumps(
             campos, ensure_ascii=False, separators=(",", ":")
         ))
+
+
+def etapa_consenso_multicamera_640(
+    amostras: list,
+    video_path_cam1: str,
+    video_path_cam2: str | None,
+    yolo,
+    rois_cam1: dict | None,
+    rois_cam2: dict | None,
+    offset_s: float = 0.0,
+) -> int:
+    """C4.2 — segunda opinião temporal antes de afirmar ``posto_vazio``.
+
+    Só observa slots que, após C1+C2+C3 e a confirmação normal, continuam
+    com ``operador_presente is False``. Uma detecção 640 em cada câmera é
+    obrigatória; os tempos são comparados na timeline da cam1 e o offset já
+    calculado só é usado para localizar a imagem correspondente na cam2.
+    Nenhuma detecção desta etapa entra em pessoas, tracks ou identidade.
+    Falhas são fail-open para C4.2: o resultado C1/C2/C3 permanece intacto.
+    """
+    candidatos = [
+        (i, am) for i, am in enumerate(amostras or [])
+        if not am.pessoas
+        and not am.fora_posto
+        and am.operador_presente is False
+        and not getattr(am, "presenca_safety_gate", False)
+    ]
+    if not candidatos or not video_path_cam2:
+        return 0
+
+    def _tem_posto(rois: dict | None) -> bool:
+        return any(
+            info.get("papel") == "posto_operador"
+            for info in (rois or {}).values()
+        )
+
+    # Sem zona de posto não existe evidência C4.2 válida. A checagem também
+    # evita pagar inferência 640 quando o par não tem configuração geométrica.
+    if not _tem_posto(rois_cam1) or not _tem_posto(rois_cam2):
+        return 0
+
+    cap1 = cap2 = None
+    cache_cam1: dict[float, dict] = {}
+    cache_cam2: dict[float, dict] = {}
+
+    def _ler_e_medir(
+        cap,
+        tempo_s: float,
+        cache: dict[float, dict],
+        rois_base: dict,
+        camera: str,
+        conf_min: float,
+        boundary_safety: bool,
+    ) -> dict:
+        """Lê e mede um instante uma única vez por vídeo/tempo."""
+        chave = round(float(tempo_s), 6)
+        if chave in cache:
+            return cache[chave]
+        try:
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(tempo_s)) * 1000.0)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                resultado = {
+                    "status": "erro",
+                    "motivo": "falha_presence_safety_gate",
+                    "erro": f"frame_{camera}_indisponivel",
+                }
+            else:
+                altura, largura = frame.shape[:2]
+                rois = _build_rois(rois_base, int(largura), int(altura))
+                resultado = _presenca_safety_gate(
+                    yolo,
+                    frame,
+                    rois,
+                    int(largura),
+                    int(altura),
+                    conf_min=conf_min,
+                    imgsz=_C42_IMGSZ,
+                    boundary_safety=boundary_safety,
+                )
+        except Exception as e:  # noqa: BLE001 — C4.2 é opcional
+            resultado = {
+                "status": "erro",
+                "motivo": "falha_presence_safety_gate",
+                "erro": f"{type(e).__name__}: {e}"[:240],
+            }
+        cache[chave] = resultado
+        if resultado.get("status") == "erro":
+            log.warning(
+                "[presenca-safety/c4.2] inferência 640 falhou na %s em %.3fs: %s",
+                camera, float(tempo_s), resultado.get("erro"),
+            )
+        return resultado
+
+    try:
+        cap1 = cv2.VideoCapture(video_path_cam1)
+        if not cap1.isOpened():
+            log.warning("[presenca-safety/c4.2] não abriu CAM1 %s", video_path_cam1)
+            return 0
+
+        # Primeiro passe: CAM1 640 apenas nos candidatos a posto vazio.
+        hits_cam1: list[tuple[int, float, dict]] = []
+        for indice, am in candidatos:
+            resultado = _ler_e_medir(
+                cap1, am.tempo_s, cache_cam1, rois_cam1, "cam1",
+                _OPERADOR_CONF, False,
+            )
+            if resultado.get("status") == "veto":
+                hits_cam1.append((indice, float(am.tempo_s), resultado))
+
+        # Um único veto 640 não vale nada e, sem hit CAM1, nem abrimos CAM2.
+        if not hits_cam1:
+            return 0
+
+        cap2 = cv2.VideoCapture(video_path_cam2)
+        if not cap2.isOpened():
+            log.warning("[presenca-safety/c4.2] não abriu CAM2 %s", video_path_cam2)
+            return 0
+
+        fps2 = cap2.get(cv2.CAP_PROP_FPS) or 30.0
+        n_frames2 = cap2.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+        duracao_cam2 = float(n_frames2) / float(fps2) if n_frames2 else None
+
+        # Segundo passe: CAM2 só nos slots cuja timeline CAM1 fica a <=8.01s
+        # de algum hit CAM1. O seek usa exatamente tempo_cam1 + offset_s.
+        hits_cam2: list[tuple[int, float, float, dict]] = []
+        for indice, am in candidatos:
+            tempo_cam1 = float(am.tempo_s)
+            if not any(
+                abs(tempo_cam1 - tempo_hit_cam1) <= _C42_DELTA_MAX_S
+                for _, tempo_hit_cam1, _ in hits_cam1
+            ):
+                continue
+            tempo_cam2 = tempo_cam1 + float(offset_s)
+            if tempo_cam2 < 0 or (
+                duracao_cam2 is not None and tempo_cam2 > duracao_cam2
+            ):
+                continue
+            resultado = _ler_e_medir(
+                cap2, tempo_cam2, cache_cam2, rois_cam2, "cam2",
+                _CAM2_CONF, True,
+            )
+            if resultado.get("status") == "veto":
+                # `tempo_cam1` é a posição da evidência na timeline de
+                # comparação; `tempo_cam2` é o relógio relativo do vídeo CAM2.
+                hits_cam2.append((indice, tempo_cam1, tempo_cam2, resultado))
+
+        pares: list[
+            tuple[tuple[int, float, dict], tuple[int, float, float, dict], float]
+        ] = []
+        for hit1 in hits_cam1:
+            for hit2 in hits_cam2:
+                delta_s = abs(hit1[1] - hit2[1])
+                if delta_s <= _C42_DELTA_MAX_S:
+                    pares.append((hit1, hit2, delta_s))
+        if not pares:
+            return 0
+
+        vetados: set[int] = set()
+        for hit1, hit2, delta_s in pares:
+            indice1, tempo1, resultado1 = hit1
+            indice2, _tempo1_cam2, tempo2, resultado2 = hit2
+            for indice in (indice1, indice2):
+                if indice in vetados:
+                    continue
+                am = amostras[indice]
+                # Revalidação defensiva: nada que deixou de ser candidato pode
+                # receber o veto, mesmo se a lista for modificada futuramente.
+                if (
+                    am.pessoas
+                    or am.fora_posto
+                    or am.operador_presente is not False
+                    or getattr(am, "presenca_safety_gate", False)
+                ):
+                    continue
+                _marcar_presenca_safety(am, {
+                    "status": "veto",
+                    "motivo": "veto_posto_vazio_por_consenso_multicamera_640",
+                    "confidence": resultado1.get("confidence"),
+                    "bbox": resultado1.get("bbox"),
+                    "ancora": resultado1.get("ancora"),
+                }, "cam1+cam2")
+                am.operador_presente = None
+                am.operador_ponte = False
+                am.presenca_safety_tempo_cam1 = round(float(tempo1), 3)
+                am.presenca_safety_tempo_cam2 = round(float(tempo2), 3)
+                am.presenca_safety_delta_s = round(float(delta_s), 3)
+                am.presenca_safety_confidence_cam1 = resultado1.get("confidence")
+                am.presenca_safety_confidence_cam2 = resultado2.get("confidence")
+                am.presenca_safety_bbox_cam1 = resultado1.get("bbox")
+                am.presenca_safety_bbox_cam2 = resultado2.get("bbox")
+                log.info("[presenca-safety/c4.2] %s", json.dumps({
+                    "presenca_safety_gate": True,
+                    "motivo": am.presenca_safety_motivo,
+                    "tempo_cam1_s": am.presenca_safety_tempo_cam1,
+                    "tempo_cam2_s": am.presenca_safety_tempo_cam2,
+                    "delta_s": am.presenca_safety_delta_s,
+                    "confidence_cam1": am.presenca_safety_confidence_cam1,
+                    "confidence_cam2": am.presenca_safety_confidence_cam2,
+                }, ensure_ascii=False, separators=(",", ":")))
+                vetados.add(indice)
+        return len(vetados)
+    except Exception as e:  # noqa: BLE001 — segunda opinião não derruba o fluxo
+        log.warning(
+            "[presenca-safety/c4.2] etapa falhou (%s: %s); sem veto C4.2",
+            type(e).__name__, e,
+        )
+        return 0
+    finally:
+        for cap in (cap2, cap1):
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
 
 
 def _guardar_candidato_c3(am: "Amostra", resultado: dict | None) -> None:
@@ -3445,6 +3663,14 @@ class Amostra:
     presenca_safety_camera: str | None = None
     presenca_safety_confidence: float | None = None
     presenca_safety_bbox: tuple | None = None
+    # C4.2 — telemetria transitória do par 640 confirmado na timeline da cam1.
+    presenca_safety_tempo_cam1: float | None = None
+    presenca_safety_tempo_cam2: float | None = None
+    presenca_safety_delta_s: float | None = None
+    presenca_safety_confidence_cam1: float | None = None
+    presenca_safety_confidence_cam2: float | None = None
+    presenca_safety_bbox_cam1: tuple | None = None
+    presenca_safety_bbox_cam2: tuple | None = None
     # C3 — candidato CAM1 de baixa confiança, sem pessoa/track/papel.
     presenca_c3_confidence: float | None = None
     presenca_c3_bbox: tuple | None = None
@@ -18670,6 +18896,23 @@ def processar_video(
             stats_op["safety_vetos"], stats_op["c3_vetos"],
             stats_op["safety_erros"],
         )
+        # C4.2: segunda opinião opcional somente depois da confirmação normal.
+        # A ausência de CAM2 mantém exatamente o fluxo anterior.
+        if video_path_secundario and tem_posto_sec:
+            n_c42 = etapa_consenso_multicamera_640(
+                amostras,
+                video_path,
+                video_path_secundario,
+                yolo,
+                rois_contexto,
+                rois_contexto_secundario,
+                offset_s=offset_cam2,
+            )
+            if n_c42:
+                log.info(
+                    "[presenca-safety/c4.2] %d slot(s) vetado(s) por consenso 640",
+                    n_c42,
+                )
 
     # Fase 111D: confirmação causal legada já terminou. Só agora a decisão da
     # janela completa pode assumir slots seguros; em falha, os objetos legados

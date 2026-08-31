@@ -1135,5 +1135,215 @@ check("104s hard miss sem candidato C3 permanece ausência normal",
       (stats_hard_miss, am_hard_miss[0]))
 
 
+print("\n[14] C4.2 — consenso multicâmera temporal em 640")
+
+
+class _YoloC42(_YoloFake):
+    def __init__(self, resultados=(), erro=None):
+        super().__init__(VAZIO)
+        self.resultados_c42 = list(resultados)
+        self.erro_c42 = erro
+
+    def predict(self, _frame, **kwargs):
+        self.predict_calls.append(dict(kwargs))
+        if kwargs.get("imgsz") != 640:
+            raise AssertionError(kwargs)
+        snapshot = {nome: list(cbs) for nome, cbs in self.callbacks.items()}
+        self.callbacks_durante_predict.append(snapshot)
+        if any(
+            _eh_callback_tracker(cb)
+            for nome in ("on_predict_start", "on_predict_postprocess_end")
+            for cb in snapshot.get(nome, [])
+        ):
+            raise AssertionError("callback temporal do tracker ficou ativo")
+        if self.erro_c42 is not None:
+            raise self.erro_c42
+        if not self.resultados_c42:
+            raise AssertionError("resultado 640 inesperado")
+        return [self.resultados_c42.pop(0)]
+
+
+def _amostra_c42(tempo_s, *, pessoas=None, operador_presente=False):
+    return pl.Amostra(
+        frame_idx=int(tempo_s * 10), tempo_s=float(tempo_s), img_b64="",
+        pessoas=list(pessoas or []), dim=(CAM2_W, CAM2_H),
+        operador_presente=operador_presente,
+    )
+
+
+def _rodar_c42(amostras, resultados=(), *, offset_s=0.0, erro=None,
+               video_path_cam2="cam2.mp4"):
+    cap = _CapFake()
+    yolo = _YoloC42(resultados, erro=erro)
+    video_capture_antigo = getattr(pl.cv2, "VideoCapture", None)
+    pl.cv2.VideoCapture = lambda _p: cap
+    try:
+        n = pl.etapa_consenso_multicamera_640(
+            amostras, "cam1.mp4", video_path_cam2, yolo,
+            POSTO_CAM2, POSTO_CAM2, offset_s=offset_s,
+        )
+        return n, yolo, cap
+    finally:
+        if video_capture_antigo is None:
+            delattr(pl.cv2, "VideoCapture")
+        else:
+            pl.cv2.VideoCapture = video_capture_antigo
+
+
+def _c42_check(nome, condicao, extra=""):
+    check(nome, condicao, extra)
+
+
+am_mesmo = [_amostra_c42(10.0)]
+n_mesmo, y_mesmo, _ = _rodar_c42(
+    am_mesmo, [RESULTADO_FP2, RESULTADO_FP2],
+)
+_c42_check("CAM1 + CAM2 no mesmo instante dispara C4.2",
+           n_mesmo == 1
+           and am_mesmo[0].presenca_safety_gate
+           and am_mesmo[0].presenca_safety_motivo
+           == "veto_posto_vazio_por_consenso_multicamera_640"
+           and am_mesmo[0].operador_presente is None
+           and am_mesmo[0].pessoas == []
+           and am_mesmo[0].identidade_track_id is None
+           and am_mesmo[0].presenca_safety_delta_s == 0.0,
+           (n_mesmo, am_mesmo[0]))
+_c42_check("C4.2 usa imgsz 640 e thresholds atuais CAM1/CAM2",
+           [c.get("imgsz") for c in y_mesmo.predict_calls] == [640, 640]
+           and [c.get("conf") for c in y_mesmo.predict_calls]
+           == [pl._OPERADOR_CONF, pl._CAM2_CONF],
+           y_mesmo.predict_calls)
+
+_gate_original = pl._presenca_safety_gate
+_gate_chamadas = []
+
+
+def _gate_capture(*args, **kwargs):
+    _gate_chamadas.append(dict(kwargs))
+    return _gate_original(*args, **kwargs)
+
+
+pl._presenca_safety_gate = _gate_capture
+try:
+    am_offset = [_amostra_c42(10.0)]
+    n_offset, _, cap_offset = _rodar_c42(
+        am_offset, [RESULTADO_FP2, RESULTADO_FP2], offset_s=-10.0,
+    )
+finally:
+    pl._presenca_safety_gate = _gate_original
+_c42_check("C4.2 respeita o offset existente no seek da CAM2",
+           n_offset == 1 and cap_offset.seeks == [10000.0, 0.0]
+           and _gate_chamadas[0].get("boundary_safety") is False
+           and _gate_chamadas[1].get("boundary_safety") is True,
+           (n_offset, cap_offset.seeks, _gate_chamadas))
+
+am_oito = [_amostra_c42(0.0), _amostra_c42(8.0)]
+n_oito, _, _ = _rodar_c42(
+    am_oito, [RESULTADO_FP2, VAZIO, VAZIO, RESULTADO_FP2],
+)
+_c42_check("CAM1 + CAM2 com delta de 8s dispara",
+           n_oito == 2
+           and all(am.presenca_safety_gate for am in am_oito)
+           and all(am.presenca_safety_delta_s == 8.0 for am in am_oito),
+           (n_oito, am_oito))
+
+am_longe = [_amostra_c42(0.0), _amostra_c42(8.02)]
+n_longe, y_longe, _ = _rodar_c42(
+    am_longe, [RESULTADO_FP2, VAZIO, VAZIO],
+)
+_c42_check("delta acima de 8.01s não dispara",
+           n_longe == 0
+           and not any(am.presenca_safety_gate for am in am_longe)
+           and len(y_longe.predict_calls) == 3,
+           (n_longe, y_longe.predict_calls))
+
+am_so_cam1 = [_amostra_c42(0.0)]
+n_so_cam1, _, _ = _rodar_c42(am_so_cam1, [RESULTADO_FP2, VAZIO])
+_c42_check("somente hit CAM1 não dispara",
+           n_so_cam1 == 0 and not am_so_cam1[0].presenca_safety_gate
+           and am_so_cam1[0].operador_presente is False,
+           am_so_cam1[0])
+
+am_so_cam2 = [_amostra_c42(0.0)]
+n_so_cam2, y_so_cam2, _ = _rodar_c42(am_so_cam2, [VAZIO, RESULTADO_FP2])
+_c42_check("somente hit CAM2 não dispara",
+           n_so_cam2 == 0 and not am_so_cam2[0].presenca_safety_gate
+           and len(y_so_cam2.predict_calls) == 1,
+           (n_so_cam2, y_so_cam2.predict_calls))
+
+am_multiplos = [
+    _amostra_c42(0.0), _amostra_c42(4.0),
+    _amostra_c42(20.0), _amostra_c42(30.0),
+]
+n_multiplos, _, _ = _rodar_c42(
+    am_multiplos,
+    [RESULTADO_FP2, VAZIO, RESULTADO_FP2, VAZIO,
+     VAZIO, RESULTADO_FP2, RESULTADO_FP2],
+)
+_c42_check("múltiplos hits vetam somente slots participantes dos pares",
+           n_multiplos == 3
+           and [am.presenca_safety_gate for am in am_multiplos]
+           == [True, True, True, False],
+           (n_multiplos, am_multiplos))
+
+am_pessoa = [_amostra_c42(
+    0.0, pessoas=[{"track_id": 4, "papel": "operador"}],
+    operador_presente=True,
+)]
+n_pessoa, y_pessoa, _ = _rodar_c42(am_pessoa, [RESULTADO_FP2, RESULTADO_FP2])
+_c42_check("pessoa normal presente não sofre interferência",
+           n_pessoa == 0 and y_pessoa.predict_calls == []
+           and not am_pessoa[0].presenca_safety_gate,
+           am_pessoa[0])
+
+am_true = [_amostra_c42(0.0, operador_presente=True)]
+n_true, y_true, _ = _rodar_c42(am_true, [RESULTADO_FP2, RESULTADO_FP2])
+_c42_check("operador_presente=True não sofre interferência",
+           n_true == 0 and y_true.predict_calls == []
+           and am_true[0].operador_presente is True,
+           am_true[0])
+
+am_gate = [_amostra_c42(0.0)]
+pl._marcar_presenca_safety(am_gate[0], {
+    "status": "veto", "motivo": "veto_posto_vazio_por_deteccao_independente",
+    "confidence": FP2_CONF, "bbox": FP2_BBOX,
+}, "cam1")
+am_gate[0].operador_presente = None
+n_gate, y_gate, _ = _rodar_c42(am_gate, [RESULTADO_FP2, RESULTADO_FP2])
+_c42_check("safety C1/C2/C3 ativo preserva o motivo original",
+           n_gate == 0 and y_gate.predict_calls == []
+           and am_gate[0].presenca_safety_motivo
+           == "veto_posto_vazio_por_deteccao_independente",
+           am_gate[0])
+
+am_erro = [_amostra_c42(0.0)]
+n_erro, y_erro, _ = _rodar_c42(
+    am_erro, erro=RuntimeError("falha simulada 640"),
+)
+_c42_check("erro na inferência 640 é fail-open para C4.2",
+           n_erro == 0 and not am_erro[0].presenca_safety_gate
+           and am_erro[0].operador_presente is False
+           and len(y_erro.predict_calls) == 1,
+           (n_erro, am_erro[0]))
+
+am_sem_cam2 = [_amostra_c42(0.0)]
+n_sem_cam2, y_sem_cam2, _ = _rodar_c42(
+    am_sem_cam2, [RESULTADO_FP2], video_path_cam2=None,
+)
+_c42_check("fluxo sem CAM2 mantém comportamento antigo",
+           n_sem_cam2 == 0 and y_sem_cam2.predict_calls == []
+           and not am_sem_cam2[0].presenca_safety_gate
+           and am_sem_cam2[0].operador_presente is False,
+           am_sem_cam2[0])
+
+am_nunca_true = [_amostra_c42(0.0)]
+n_nunca_true, _, _ = _rodar_c42(
+    am_nunca_true, [RESULTADO_FP2, RESULTADO_FP2],
+)
+_c42_check("C4.2 nunca define operador_presente=True",
+           n_nunca_true == 1 and am_nunca_true[0].operador_presente is None,
+           am_nunca_true[0])
+
+
 print(f"\n{'=' * 68}\n  {ok} ok - {fail} falha(s)\n{'=' * 68}")
 raise SystemExit(1 if fail else 0)
