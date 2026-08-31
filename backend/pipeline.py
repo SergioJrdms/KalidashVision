@@ -7425,6 +7425,36 @@ def _orientacao_do_minuto(no_bucket: list) -> str | None:
     return max(peso, key=peso.get) if peso else None
 
 
+_POSTO_VAZIO_MIN_OBSERVACOES = 2
+_POSTO_VAZIO_MARGEM_MIN_S = 8.0
+
+
+def _n_observacoes_reais_posto_vazio(no_bucket: list) -> int:
+    """Conta medições independentes de vazio sem inferi-las da duração."""
+    total = 0
+    for e, _ov in no_bucket:
+        if e.get("papel_pessoa") != "posto_vazio":
+            continue
+        origens = e.get("origens") or e.get("observacoes_origem")
+        if isinstance(origens, dict):
+            try:
+                total += max(0, int(origens.get("posto_vazio") or 0))
+            except (TypeError, ValueError):
+                pass
+            continue
+        for campo in ("n_observacoes", "n_amostras"):
+            if e.get(campo) is None:
+                continue
+            try:
+                total += max(0, int(e[campo]))
+            except (TypeError, ValueError):
+                pass
+            break
+        # Sem metadado não há como provar observação independente. Fail-closed:
+        # a duração do evento não vira um contador implícito.
+    return total
+
+
 def _papel_do_minuto(
     no_bucket: list, inicio_bucket: float, fim_bucket: float
 ) -> str | None:
@@ -7435,6 +7465,8 @@ def _papel_do_minuto(
     pessoa tornam somente aquela fatia inconclusiva.
     """
     peso: dict[str | None, float] = defaultdict(float)
+    empty_s = 0.0
+    anti_empty_s = 0.0
     limites = {float(inicio_bucket), float(fim_bucket)}
     for e, _ov in no_bucket:
         limites.add(max(float(inicio_bucket), float(e.get("tempo_inicio_s") or 0)))
@@ -7481,16 +7513,33 @@ def _papel_do_minuto(
             papel = "posto_vazio"
         else:
             papel = None
-        peso[papel] += fim - inicio
+        duracao = fim - inicio
+        peso[papel] += duracao
+        # Gate temporal congelado: uma fatia contraditória conta uma vez só,
+        # mesmo com várias pessoas simultâneas. `operador_fora` é neutro.
+        if None in papeis or "operador" in papeis or "visitante" in papeis:
+            anti_empty_s += duracao
+        elif "posto_vazio" in papeis:
+            empty_s += duracao
     if not peso:
         return None
     maior = max(peso.values())
     empatados = {papel for papel, valor in peso.items() if abs(valor - maior) < 1e-9}
     if len(empatados) == 1:
-        return next(iter(empatados))
-    if empatados == {"operador", "visitante"}:
-        return "operador"
-    return None
+        papel_minuto = next(iter(empatados))
+    elif empatados == {"operador", "visitante"}:
+        papel_minuto = "operador"
+    else:
+        papel_minuto = None
+    if papel_minuto != "posto_vazio":
+        return papel_minuto
+    if (
+        _n_observacoes_reais_posto_vazio(no_bucket)
+        < _POSTO_VAZIO_MIN_OBSERVACOES
+        or empty_s - anti_empty_s < _POSTO_VAZIO_MARGEM_MIN_S
+    ):
+        return None
+    return papel_minuto
 
 
 def _merge_bbox_stats(eventos: list[dict]) -> dict | None:
