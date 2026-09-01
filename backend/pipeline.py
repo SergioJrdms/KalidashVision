@@ -3904,6 +3904,34 @@ def _c6_hist_sup(pessoa: dict):
     return legado.get("sup") if isinstance(legado, dict) else None
 
 
+def _reconciliar_operador_fora_c6_apos_111d(
+    am: Amostra,
+    estado_111d: str,
+    track_id_111d: int | None,
+) -> None:
+    """Remove decisão C6 obsoleta somente quando 111D assumiu o slot.
+
+    Um `fora` autoritativo preserva a identidade externa já aberta pelo C6,
+    mas substitui track/proveniência pelos da 111D. `dentro` e `ausente`
+    invalidam integralmente o estado C6. Fallbacks não chamam este helper.
+    """
+    tinha_estado_c6 = bool(getattr(am, "operador_fora_estado", False))
+    am.fora_candidatos = []
+    am.img_b64_fora_candidato = None
+    am.operador_fora_migracao = None
+    am.operador_fora_episodio = None
+    if estado_111d == "fora" and tinha_estado_c6:
+        am.operador_fora_estado = True
+        am.operador_fora_proveniencia = "identidade_autoritativa_111d"
+        am.operador_fora_track_id = (
+            int(track_id_111d) if track_id_111d is not None else None
+        )
+        return
+    am.operador_fora_estado = False
+    am.operador_fora_proveniencia = None
+    am.operador_fora_track_id = None
+
+
 def etapa_resolver_operador_fora_c6(
     amostras: list[Amostra],
     duracao_s: float | None = None,
@@ -10479,6 +10507,7 @@ def aplicar_identidade_logica_segmento(
                 am.img_b64 = imagem_final or ""
             am.operador_presente = False
             ausente += 1
+        _reconciliar_operador_fora_c6_apos_111d(am, estado, tid)
         am.identidade_autoritativa = True
         am.identidade_estado = estado
         am.identidade_track_id = int(tid) if tid is not None else None

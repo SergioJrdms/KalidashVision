@@ -73,6 +73,39 @@ def amostra(tempo, pessoas=(), *, presente=None):
     )
 
 
+def marcar_estado_c6(am, tid=9):
+    pessoa_fora = {
+        "track_id": int(tid),
+        "bbox": (10, 10, 110, 310),
+        "kpts": None,
+        "rotulo": "P1",
+        "_fora_motivo": "operador",
+        "_fora_amostras_zona": 7,
+    }
+    am.fora_posto = [pessoa_fora]
+    am.img_b64_fora = "IMG-C6"
+    am.fora_candidatos = [pessoa_fora]
+    am.img_b64_fora_candidato = "JPEG-C6"
+    am.operador_fora_estado = True
+    am.operador_fora_proveniencia = "continuidade_track"
+    am.operador_fora_track_id = int(tid)
+    am.operador_fora_episodio = 3
+    am.operador_fora_migracao = (4, int(tid))
+    return am
+
+
+def c6_limpo(am):
+    return (
+        am.operador_fora_estado is False
+        and am.operador_fora_proveniencia is None
+        and am.operador_fora_track_id is None
+        and am.operador_fora_episodio is None
+        and am.operador_fora_migracao is None
+        and am.fora_candidatos == []
+        and am.img_b64_fora_candidato is None
+    )
+
+
 def detalhe(tid, estado, *, bbox=(10, 10, 110, 310)):
     return {
         "track_id": int(tid), "bbox": tuple(bbox), "kpts": None,
@@ -532,6 +565,72 @@ try:
               "categoria_lean": "valor_agregado",
               "categoria_lean_origem": "humano_rotulo",
           })[0] == prod.EST_OPERADOR_FORA_PRODUTIVO)
+
+    print("\n[C6→111D] Reconciliação antes do VLM")
+    c6_dentro = marcar_estado_c6(
+        amostra(21, [pessoa(9, "visitante")], presente=False), 9,
+    )
+    r_c6_dentro = aplicar(
+        [c6_dentro], [resultado_confirmado((9,))],
+        [observacao(21, {9: "dentro"})],
+    )
+    obs_c6_dentro = analisar([c6_dentro], seq=seq_adversarial(9, False))
+    check("C6 fora → 111D dentro limpa C6 e chega ao VLM como operador",
+          r_c6_dentro["reatribuicoes_dentro"] == 1
+          and c6_limpo(c6_dentro)
+          and c6_dentro.fora_posto == []
+          and len(obs_c6_dentro) == 1
+          and obs_c6_dentro[0]["papel"] == "operador",
+          (r_c6_dentro, c6_dentro, obs_c6_dentro))
+
+    c6_ausente = marcar_estado_c6(amostra(22, [], presente=False), 9)
+    r_c6_ausente = aplicar(
+        [c6_ausente], [resultado_confirmado((9,))],
+        [observacao(22, {})],
+    )
+    obs_c6_ausente = analisar([c6_ausente])
+    check("C6 fora → 111D ausente limpa C6 e não vaza operador_fora",
+          r_c6_ausente["reatribuicoes_ausente"] == 1
+          and c6_limpo(c6_ausente)
+          and c6_ausente.fora_posto == []
+          and len(obs_c6_ausente) == 1
+          and obs_c6_ausente[0]["papel"] == "posto_vazio",
+          (r_c6_ausente, c6_ausente, obs_c6_ausente))
+
+    c6_fora = marcar_estado_c6(amostra(23, [], presente=False), 4)
+    r_c6_fora = aplicar(
+        [c6_fora], [resultado_confirmado((9,))],
+        [observacao(
+            23, {9: "fora"}, detalhes={9: detalhe(9, "fora")},
+        )],
+    )
+    obs_c6_fora = analisar([c6_fora], fora=lambda *_a, **_k: {})
+    check("C6 fora → 111D fora reconcilia track/proveniência e permanece fora",
+          r_c6_fora["reatribuicoes_fora"] == 1
+          and c6_fora.operador_fora_estado is True
+          and c6_fora.operador_fora_track_id == 9
+          and c6_fora.operador_fora_proveniencia == "identidade_autoritativa_111d"
+          and c6_fora.operador_fora_episodio is None
+          and c6_fora.operador_fora_migracao is None
+          and c6_fora.fora_candidatos == []
+          and c6_fora.fora_posto[0]["track_id"] == 9
+          and len(obs_c6_fora) == 1
+          and obs_c6_fora[0]["papel"] == pl.PAPEL_OPERADOR_FORA,
+          (r_c6_fora, c6_fora, obs_c6_fora))
+
+    c6_fallback = marcar_estado_c6(amostra(24, [], presente=False), 9)
+    c6_fallback_antes = deepcopy(c6_fallback)
+    r_c6_fallback = aplicar(
+        [c6_fallback], [resultado_indefinido()],
+        [observacao(24, {9: "fora"}, detalhes={9: detalhe(9, "fora")})],
+    )
+    obs_c6_fallback = analisar([c6_fallback], fora=lambda *_a, **_k: {})
+    check("C6 fora → fallback 111D preserva integralmente o resultado C6",
+          r_c6_fallback["status"] == "fallback_legado"
+          and c6_fallback == c6_fallback_antes
+          and len(obs_c6_fallback) == 1
+          and obs_c6_fallback[0]["papel"] == pl.PAPEL_OPERADOR_FORA,
+          (r_c6_fallback, c6_fallback, obs_c6_fallback))
 
     print("\n[19] Cam2 é somente evidência secundária")
     a19 = amostra(0, [
