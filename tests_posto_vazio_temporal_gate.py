@@ -154,5 +154,71 @@ check("visitante é neutro para anti_empty",
       papel(visitante_vazio, visitante))
 
 
+def evento_cru(papel_pessoa, inicio, fim, label, origens, tid):
+    return {
+        "pessoa_track_id": tid,
+        "comportamento_label": label,
+        "descricao_bruta": label,
+        "tempo_inicio_s": float(inicio),
+        "tempo_fim_s": float(fim),
+        "frame_inicio": int(inicio),
+        "frame_fim": int(fim),
+        "bbox_inicio": None,
+        "bbox_cam": None,
+        "bbox_stats": None,
+        "maos_maquina": None,
+        "orientacao": None,
+        "maquina": None,
+        "imovel": None,
+        "trabalho": None,
+        "zona_contexto": "posto",
+        "papel_pessoa": papel_pessoa,
+        "n_amostras": sum(origens.values()),
+        "n_observacoes": sum(origens.values()),
+        "origens": dict(origens),
+    }
+
+
+# I) Integração C5 no rollback V8: a ação/rótulo continua no caminho antigo,
+# mas o papel físico usa o mesmo gate congelado apenas no minuto com C5.
+i_vazio = evento_cru(
+    "posto_vazio", 0, 20, pl.POSTO_VAZIO_LABEL,
+    {"posto_vazio": 3}, pl.POSTO_VAZIO_TID,
+)
+i_c5 = evento_cru(
+    "operador", 20, 36, pl.LABEL_NAO_NOMEADO,
+    {"resgate_cam1_640": 2}, pl.OPERADOR_CAM1_640_TID,
+)
+estruturada_antiga = pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA
+try:
+    pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA = False
+    i_principais = pl.etapa_consolidar_principais(
+        [i_vazio, i_c5], {}, 60.0,
+    )
+finally:
+    pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA = estruturada_antiga
+check("I · C5 usa gate temporal de papel mesmo com V9/V11 desligado",
+      len(i_principais) == 1
+      and i_principais[0]["comportamento_label"] == pl.POSTO_VAZIO_LABEL
+      and i_principais[0]["papel_pessoa"] is None
+      and i_principais[0].get("trabalho") is None,
+      i_principais)
+
+# Sem a origem C5, a compatibilidade V8 continua copiando o representante.
+i_legado = dict(i_c5)
+i_legado["origens"] = {"analisado": 2}
+try:
+    pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA = False
+    i_legado_principais = pl.etapa_consolidar_principais(
+        [i_vazio, i_legado], {}, 60.0,
+    )
+finally:
+    pl.PRODUTIVIDADE_OPERADOR_ESTRUTURADA = estruturada_antiga
+check("I · minuto sem C5 preserva integralmente o rollback V8",
+      len(i_legado_principais) == 1
+      and i_legado_principais[0]["papel_pessoa"] == "posto_vazio",
+      i_legado_principais)
+
+
 print(f"\n{ok} ok · {fail} falha(s)")
 raise SystemExit(1 if fail else 0)
