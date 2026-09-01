@@ -288,7 +288,7 @@ def persistir_episodios_ponte(
             "tempo_inicio_s": float(episodio["inicio_s"]),
             "tempo_fim_s": float(episodio["fim_s"]),
             "n_amostras": int(episodio.get("n_janelas") or 1),
-            "papel_pessoa": "ponte_rolante",
+            "papel_pessoa": None,
             "origem_validacao": "ponte_rolante",
             # O mesmo mecanismo oficial dos eventos crus de auditoria:
             # não disputa o minuto, não entra em métrica, memória ou fila.

@@ -1,4 +1,4 @@
-"""Compatibilidade do adapter Claude com runtimes que rejeitam temperature.
+"""Compatibilidade cirúrgica de ``temperature`` no adapter Claude.
 
 Executar: python -X utf8 tests_ai_provider_claude_compat.py
 """
@@ -22,95 +22,149 @@ def check(nome, cond, extra=""):
         print(f"  FAIL {nome} {extra}")
 
 
+def _resposta_claude():
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text='{"ok": true}')],
+        usage=SimpleNamespace(input_tokens=11, output_tokens=5),
+    )
+
+
 class _ClaudeMessages:
-    def __init__(self):
-        self.kwargs = None
+    def __init__(self, modo="aceita"):
+        self.modo = modo
+        self.chamadas = []
 
     def create(self, **kwargs):
-        self.kwargs = kwargs
-        if "temperature" in kwargs:
-            raise TypeError("Messages.create() got an unexpected keyword argument 'temperature'")
-        return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text='{"ok": true}')],
-            usage=SimpleNamespace(input_tokens=11, output_tokens=5),
-        )
+        self.chamadas.append(dict(kwargs))
+        if self.modo == "rejeita_temperature" and "temperature" in kwargs:
+            raise TypeError(
+                "Messages.create() got an unexpected keyword argument 'temperature'"
+            )
+        if self.modo == "outro_typeerror":
+            raise TypeError("temperature must be a number")
+        if self.modo == "erro_rede":
+            raise RuntimeError("network unavailable")
+        return _resposta_claude()
 
 
 class _ClaudeClient:
-    def __init__(self):
-        self.messages = _ClaudeMessages()
+    def __init__(self, modo="aceita"):
+        self.messages = _ClaudeMessages(modo)
 
 
-class _Completions:
-    def __init__(self):
-        self.kwargs = None
-
-    def create(self, **kwargs):
-        self.kwargs = kwargs
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
-            usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3),
-        )
-
-
-class _OpenAIClient:
-    def __init__(self):
-        self.chat = SimpleNamespace(completions=_Completions())
-
-
-cliente_claude = _ClaudeClient()
-cliente_gpt = _OpenAIClient()
 cliente_real = ai._client
 retry_real = ai._retry
 tem_chave_real = ai._tem_chave
+disponiveis_real = ai.provedores_disponiveis
 acima_limite_real = ai._acima_do_limite
 registrar_real = ai.registrar
 adapter_claude_real = ai._ADAPTERS["claude"]
 adapter_gpt_real = ai._ADAPTERS["gpt"]
 
 try:
-    ai._client = lambda prov: cliente_claude if prov == "claude" else cliente_gpt
     ai._retry = lambda fn, rotulo, tentativas=None: fn()
 
-    print("[1] Claude não recebe temperature")
+    print("[1] Runtime compatível recebe temperature normalmente")
+    cliente = _ClaudeClient()
+    ai._client = lambda _prov: cliente
     texto, uso = ai._adapter_claude(
         "claude-haiku-4-5",
         [{"role": "user", "content": "retorne JSON"}],
         True,
         200,
-        0.0,
+        0.35,
     )
-    check("runtime incompatível não quebra a chamada", texto == '{"ok": true}', texto)
-    check("temperature não foi enviado", "temperature" not in cliente_claude.messages.kwargs,
-          cliente_claude.messages.kwargs)
-    check("uso continua contabilizável", uso == {"in": 11, "out": 5}, uso)
+    check("Haiku recebe temperature", cliente.messages.chamadas[0]["temperature"] == 0.35,
+          cliente.messages.chamadas)
+    check("chamada compatível não é repetida", len(cliente.messages.chamadas) == 1,
+          cliente.messages.chamadas)
+    check("resposta e uso são preservados",
+          texto == '{"ok": true}' and uso == {"in": 11, "out": 5}, (texto, uso))
 
-    print("\n[2] Outros providers preservam o contrato")
-    texto_gpt, _ = ai._adapter_gpt(
-        "gpt-4o-mini",
+    print("\n[2] Só a rejeição específica repete sem temperature")
+    cliente = _ClaudeClient("rejeita_temperature")
+    ai._client = lambda _prov: cliente
+    texto, _ = ai._adapter_claude(
+        "claude-haiku-4-5",
         [{"role": "user", "content": "ok"}],
         False,
         100,
-        0.4,
+        0.2,
     )
-    check("GPT continua funcional", texto_gpt == "ok", texto_gpt)
-    check("GPT continua recebendo temperature", cliente_gpt.chat.completions.kwargs["temperature"] == 0.4,
-          cliente_gpt.chat.completions.kwargs)
+    check("fallback compatível conclui a chamada", texto == '{"ok": true}', texto)
+    check("primeira tentativa contém temperature e a segunda não",
+          len(cliente.messages.chamadas) == 2
+          and "temperature" in cliente.messages.chamadas[0]
+          and "temperature" not in cliente.messages.chamadas[1],
+          cliente.messages.chamadas)
 
-    print("\n[3] Uma chamada pode exigir Claude sem alterar o ambiente global")
+    print("\n[3] Erros alheios não acionam o fallback especial")
+    cliente = _ClaudeClient("outro_typeerror")
+    ai._client = lambda _prov: cliente
+    try:
+        ai._adapter_claude(
+            "claude-haiku-4-5", [{"role": "user", "content": "ok"}],
+            False, 100, 0.2,
+        )
+        typeerror_propagou = False
+    except TypeError as exc:
+        typeerror_propagou = str(exc) == "temperature must be a number"
+    check("outro TypeError segue o fluxo normal", typeerror_propagou, cliente.messages.chamadas)
+    check("outro TypeError fez uma única chamada", len(cliente.messages.chamadas) == 1,
+          cliente.messages.chamadas)
+
+    cliente = _ClaudeClient("erro_rede")
+    ai._client = lambda _prov: cliente
+    try:
+        ai._adapter_claude(
+            "claude-haiku-4-5", [{"role": "user", "content": "ok"}],
+            False, 100, 0.2,
+        )
+        erro_rede_propagou = False
+    except RuntimeError as exc:
+        erro_rede_propagou = str(exc) == "network unavailable"
+    check("exceção não relacionada segue o fluxo normal", erro_rede_propagou,
+          cliente.messages.chamadas)
+    check("exceção não relacionada fez uma única chamada", len(cliente.messages.chamadas) == 1,
+          cliente.messages.chamadas)
+
+    print("\n[4] Sonnet/Opus preservam a regra sem temperature")
+    cliente = _ClaudeClient()
+    ai._client = lambda _prov: cliente
+    ai._adapter_claude(
+        "claude-sonnet-4-5", [{"role": "user", "content": "ok"}],
+        False, 100, 0.7,
+    )
+    check("Sonnet continua sem temperature", "temperature" not in cliente.messages.chamadas[0],
+          cliente.messages.chamadas)
+    check("configuração de thinking continua presente", "thinking" in cliente.messages.chamadas[0],
+          cliente.messages.chamadas)
+
+    print("\n[5] Fallback global antigo e seleção Claude por chamada")
     chamados = []
 
-    def adapter_alvo(prov):
-        def _adapter(modelo, mensagens, json_mode, max_tokens, temperatura):
+    def falha_claude(*_args, **_kwargs):
+        chamados.append("claude")
+        raise RuntimeError("claude indisponível")
+
+    def sucesso(prov):
+        def _adapter(*_args, **_kwargs):
             chamados.append(prov)
             return '{"provedor": "' + prov + '"}', {"in": 0, "out": 0}
         return _adapter
 
-    ai._tem_chave = lambda prov: True
-    ai._acima_do_limite = lambda prov: False
+    ai.provedores_disponiveis = lambda: ["claude", "gpt"]
+    ai._tem_chave = lambda _prov: True
+    ai._acima_do_limite = lambda _prov: False
     ai.registrar = lambda *args, **kwargs: None
-    ai._ADAPTERS["claude"] = adapter_alvo("claude")
-    ai._ADAPTERS["gpt"] = adapter_alvo("gpt")
+    ai._ADAPTERS["claude"] = falha_claude
+    ai._ADAPTERS["gpt"] = sucesso("gpt")
+    resposta = ai.vision_call("IMG", "prompt")
+    check("chamada antiga mantém fallback Claude → GPT", chamados == ["claude", "gpt"], chamados)
+    check("fallback devolve a resposta seguinte", resposta == '{"provedor": "gpt"}', resposta)
+
+    chamados.clear()
+    ai._ADAPTERS["claude"] = sucesso("claude")
     resposta = ai.vision_call("IMG", "prompt", provedor="claude")
     check("seleção por chamada usa somente Claude", chamados == ["claude"], chamados)
     check("resposta do Claude é preservada", resposta == '{"provedor": "claude"}', resposta)
@@ -118,6 +172,7 @@ finally:
     ai._client = cliente_real
     ai._retry = retry_real
     ai._tem_chave = tem_chave_real
+    ai.provedores_disponiveis = disponiveis_real
     ai._acima_do_limite = acima_limite_real
     ai.registrar = registrar_real
     ai._ADAPTERS["claude"] = adapter_claude_real

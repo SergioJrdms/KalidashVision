@@ -537,6 +537,12 @@ def resumo_uso(periodo: str | None = None) -> dict:
 # Adapters (um por provedor) — consomem mensagens no formato OpenAI
 # Retornam (texto, uso) onde uso = {"in": tokens_entrada, "out": tokens_saida}.
 # ═════════════════════════════════════════════════════════════════════════
+def _erro_temperature_incompativel(exc: TypeError) -> bool:
+    """Reconhece somente a incompatibilidade de assinatura observada no SDK."""
+    msg = str(exc).lower()
+    return "temperature" in msg and "unexpected keyword argument" in msg
+
+
 def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
     cli = _client("claude")
     system, msgs = _para_claude(mensagens)
@@ -545,10 +551,9 @@ def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
     kwargs: dict[str, Any] = dict(model=modelo, max_tokens=max_tokens, messages=msgs)
     if system:
         kwargs["system"] = system
-    # Compatibilidade conservadora: alguns runtimes/SDKs Anthropic rejeitam
-    # `temperature` nesta chamada. O laboratório da ponte rolante confirmou
-    # que omitir somente esse argumento preserva a resposta do Claude.
-    if "haiku" not in modelo.lower():
+    if "haiku" in modelo.lower():
+        kwargs["temperature"] = temperatura
+    else:
         # Sonnet 5 / Opus rejeitam `temperature` (400). O thinking é OPT-IN
         # (KV_CLAUDE_THINKING=1) e DESLIGADO por padrão: com adaptive, os tokens
         # de "pensamento" saem do MESMO orçamento de max_tokens; nas etapas de
@@ -565,7 +570,22 @@ def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
             kwargs["max_tokens"] = max_tokens + max(0, folga)
         else:
             kwargs["thinking"] = {"type": "disabled"}
-    r = _retry(lambda: cli.messages.create(**kwargs), rotulo=f"claude:{modelo}")
+    kwargs_sem_temperature = dict(kwargs)
+    kwargs_sem_temperature.pop("temperature", None)
+    usar_temperature = "temperature" in kwargs
+
+    def _criar_mensagem():
+        nonlocal usar_temperature
+        try:
+            chamada = kwargs if usar_temperature else kwargs_sem_temperature
+            return cli.messages.create(**chamada)
+        except TypeError as exc:
+            if not usar_temperature or not _erro_temperature_incompativel(exc):
+                raise
+            usar_temperature = False
+            return cli.messages.create(**kwargs_sem_temperature)
+
+    r = _retry(_criar_mensagem, rotulo=f"claude:{modelo}")
     texto = ""
     for b in getattr(r, "content", []) or []:
         if getattr(b, "type", None) == "text":

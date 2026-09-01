@@ -174,7 +174,7 @@ check("reutiliza somente a tabela eventos", [nome for nome, _ in banco.inserts] 
       banco.inserts)
 linhas = banco.inserts[0][1]
 check("track sintético -6 identifica o sistema, não uma pessoa",
-      all(l["pessoa_track_id"] == -6 and l["papel_pessoa"] == "ponte_rolante" for l in linhas),
+      all(l["pessoa_track_id"] == -6 and l["papel_pessoa"] is None for l in linhas),
       linhas)
 check("episódio não disputa principal nem entra na fila",
       all(l["principal"] is False and l["validado_humano"] is True for l in linhas), linhas)

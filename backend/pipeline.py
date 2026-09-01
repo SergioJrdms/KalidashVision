@@ -97,7 +97,13 @@ DEFAULT_LIMIAR_AUTO_VALIDACAO = 2
 # `validado_humano`/`validacao_correto`, que são a verdade de referência do
 # dataset e do placar das camadas.
 ORIGENS_MAQUINA = frozenset(
-    {"correcao_aprendida", "vocabulario_canonico", "posto_vazio", "auditoria"}
+    {
+        "correcao_aprendida",
+        "vocabulario_canonico",
+        "posto_vazio",
+        "auditoria",
+        "ponte_rolante",
+    }
 )
 
 # Fase 62 — GENERALIZAÇÃO AUTOMÁTICA, chave de liga/desliga por processo.
@@ -11004,7 +11010,7 @@ def limiar_duvida(sb: Client, empresa: str, processo: str) -> float:
 # Origens em que `validado_humano=True` NÃO significa "alguém julgou": é o
 # mecanismo que mantém o registro fora da fila. Nunca foram dúvida e não podem
 # entrar na curva histórica como dúvida resolvida.
-_ORIGENS_MECANICAS = frozenset({"posto_vazio", "auditoria"})
+_ORIGENS_MECANICAS = frozenset({"posto_vazio", "auditoria", "ponte_rolante"})
 # Fase 90 — observação que COBRE o tempo sem ter olhado quadro novo. Ela é
 # legítima (sem ela o minuto se parte e o denominador despenca) e não é
 # evidência. A distinção entre "não olhei" e "olhei e não sei" mora aqui.
@@ -16977,10 +16983,11 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     """
     # ── 0 — correção humana, inviolável ──
     # ⚠️ `validado_humano=True` NÃO É DECISÃO HUMANA quando veio de MECANISMO.
-    # `posto_vazio` e `auditoria` usam a flag só para ficar fora da fila (Fase
-    # 62), e no dia 10/08 isso é 255 de 255 eventos — tratá-los como decisão
-    # humana faria a arquitetura nova nunca rodar. A Fase 88 já tinha
-    # documentado esta armadilha; aqui ela voltaria pela porta da precedência.
+    # `posto_vazio`, `auditoria` e `ponte_rolante` usam a flag só para ficar
+    # fora da fila (Fase 62), e no dia 10/08 isso é 255 de 255 eventos —
+    # tratá-los como decisão humana faria a arquitetura nova nunca rodar. A
+    # Fase 88 já tinha documentado esta armadilha; aqui ela voltaria pela porta
+    # da precedência.
     _mecanico = (e.get("origem_validacao") or "") in _ORIGENS_MECANICAS
     if (not _mecanico) and e.get("validado_humano") and (
             e.get("label_corrigido") or e.get("validacao_correto") is True):
