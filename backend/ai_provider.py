@@ -545,10 +545,10 @@ def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
     kwargs: dict[str, Any] = dict(model=modelo, max_tokens=max_tokens, messages=msgs)
     if system:
         kwargs["system"] = system
-    if "haiku" in modelo.lower():
-        # Haiku aceita `temperature` e não liga thinking por padrão.
-        kwargs["temperature"] = temperatura
-    else:
+    # Compatibilidade conservadora: alguns runtimes/SDKs Anthropic rejeitam
+    # `temperature` nesta chamada. O laboratório da ponte rolante confirmou
+    # que omitir somente esse argumento preserva a resposta do Claude.
+    if "haiku" not in modelo.lower():
         # Sonnet 5 / Opus rejeitam `temperature` (400). O thinking é OPT-IN
         # (KV_CLAUDE_THINKING=1) e DESLIGADO por padrão: com adaptive, os tokens
         # de "pensamento" saem do MESMO orçamento de max_tokens; nas etapas de
