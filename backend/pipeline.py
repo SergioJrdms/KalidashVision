@@ -1444,6 +1444,16 @@ _FORA_GAP_S = float(os.environ.get("KV_FORA_GAP_S", "30"))
 # Veto de aparência. DELIBERADAMENTE abaixo de `_TIT_SIM_COR` (0,62): aqui a
 # cor não identifica ninguém, só recusa o absurdo.
 _FORA_SIM_VETO = float(os.environ.get("KV_FORA_SIM_VETO", "0.45"))
+# C6 — depois que a regra acima abriu a identidade, o relógio passa a medir a
+# última observação física dessa identidade FORA. Todos os limites são segundos:
+# a máquina de estado não conhece nem supõe a cadência de amostragem.
+_FORA_ESTADO_GAP_S = float(os.environ.get("KV_FORA_ESTADO_GAP_S", "32"))
+_FORA_TROCA_TRACK_GAP_S = float(
+    os.environ.get("KV_FORA_TROCA_TRACK_GAP_S", "16")
+)
+_FORA_TROCA_TRACK_IOU_MIN = float(
+    os.environ.get("KV_FORA_TROCA_TRACK_IOU_MIN", "0.25")
+)
 # Teto de chamadas de VLM por vídeo para descrever atividade fora do posto.
 _FORA_MAX_CHAMADAS = int(os.environ.get("KV_FORA_MAX_CHAMADAS", "40"))
 
@@ -1453,6 +1463,9 @@ _FORA_MAX_CHAMADAS = int(os.environ.get("KV_FORA_MAX_CHAMADAS", "40"))
 PAPEL_OPERADOR_FORA = "operador_fora"
 FORA_POSTO_TID = -4          # sentinela de último recurso; o caminho normal
                              # usa o track id REAL (ver a emissão da observação)
+OPERADOR_FORA_ESTADO_DESC = (
+    "operador fora do posto; atividade não observada neste instante"
+)
 
 
 def _fora_ativo() -> bool:
@@ -1782,11 +1795,15 @@ def _marcar_presenca_safety(am: "Amostra", resultado: dict, camera: str) -> None
 
 
 def _candidatos_reais_posto_vazio(amostras: list) -> list[tuple[int, "Amostra"]]:
-    """Slots ainda elegíveis a vazio depois de confirmação/C3/ponte."""
+    """Slots ainda elegíveis a vazio ou aguardando a decisão temporal C6."""
     return [
         (i, am) for i, am in enumerate(amostras or [])
         if not am.pessoas
-        and not am.fora_posto
+        # A autorização pontual legada ainda viaja em `fora_posto` até C6,
+        # mas C5/C4.2 precisam ter a oportunidade de provar presença DENTRO
+        # antes da resolução temporal. Fora legado sem matéria-prima C6 segue
+        # excluído exatamente como antes.
+        and (not am.fora_posto or bool(getattr(am, "fora_candidatos", None)))
         and am.operador_presente is False
         and not getattr(am, "presenca_safety_gate", False)
     ]
@@ -1927,7 +1944,7 @@ def etapa_resgate_cam1_640(
         # receber presença; fora_posto/safety/inconclusivo nunca são promovidos.
         if (
             am.pessoas
-            or am.fora_posto
+            or (am.fora_posto and not getattr(am, "fora_candidatos", None))
             or am.operador_presente is not False
             or getattr(am, "presenca_safety_gate", False)
         ):
@@ -2084,7 +2101,10 @@ def etapa_consenso_multicamera_640(
                 # receber o veto, mesmo se a lista for modificada futuramente.
                 if (
                     am.pessoas
-                    or am.fora_posto
+                    or (
+                        am.fora_posto
+                        and not getattr(am, "fora_candidatos", None)
+                    )
                     or am.operador_presente is not False
                     or getattr(am, "presenca_safety_gate", False)
                 ):
@@ -2320,7 +2340,9 @@ def _e_o_operador_que_saiu(pessoa: dict, *, tempo_s: float, presenca_zona: dict,
     # 4 — veto de aparência. Se qualquer um dos lados for incomputável, NÃO
     # veta: ausência de medida não é medida, nem a favor nem contra.
     try:
-        agora = histograma_cor(frame, pessoa.get("bbox"))
+        agora = pessoa.get("_fora_hist")
+        if not isinstance(agora, dict):
+            agora = histograma_cor(frame, pessoa.get("bbox"))
         ref = _media_hist((desc_acc.get(tid) or {}).get("hist_sup") or [])
         sim = _sim_hist((agora or {}).get("sup"), ref)
         if sim is not None and sim < _FORA_SIM_VETO:
@@ -3790,6 +3812,17 @@ class Amostra:
     # era o operador" sem recolocar essa pessoa em `pessoas`.
     fora_auditoria: str | None = None
     fora_auditoria_amostras_zona: int | None = None
+    # C6 — matéria-prima e resultado da identidade temporal FORA. Os candidatos
+    # continuam numa lista paralela e nunca entram em `pessoas`. O JPEG cru só
+    # existe durante este vídeo e permite anotar retroativamente um backfill sem
+    # reler o arquivo ou executar YOLO outra vez.
+    fora_candidatos: list = field(default_factory=list)
+    img_b64_fora_candidato: str | None = None
+    operador_fora_estado: bool = False
+    operador_fora_proveniencia: str | None = None
+    operador_fora_track_id: int | None = None
+    operador_fora_episodio: int | None = None
+    operador_fora_migracao: tuple | None = None
     # Fase 111D — autoridade LOCAL do segmento, resolvida somente depois de a
     # janela inteira ser fechada. Estes campos morrem com a Amostra: não são
     # schema, não são persistidos e nunca atravessam vídeos/câmeras.
@@ -3823,6 +3856,344 @@ class Amostra:
     presenca_c3_confidence: float | None = None
     presenca_c3_bbox: tuple | None = None
     presenca_c3_ancora: tuple | None = None
+
+
+def _c6_iou_bbox(a, b) -> float:
+    """IoU espacial puro entre duas bboxes já medidas pela CAM1."""
+    if not _bbox_valido(a) or not _bbox_valido(b):
+        return 0.0
+    ax1, ay1, ax2, ay2 = (float(v) for v in a)
+    bx1, by1, bx2, by2 = (float(v) for v in b)
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    uniao = area_a + area_b - inter
+    return inter / uniao if uniao > 0.0 else 0.0
+
+
+def _c6_barreira_presenca(am: Amostra) -> bool:
+    """Autoridade interna ou safety sempre vence a hipótese de operador fora."""
+    return bool(
+        am.pessoas
+        or am.operador_presente is True
+        or am.operador_presente is None
+        or am.op_cam2 is True
+        or int(getattr(am, "n_posto_cam2", 0) or 0) > 0
+        or getattr(am, "operador_ponte", False)
+        or getattr(am, "operador_resgate_cam1_640", False)
+        or getattr(am, "presenca_safety_gate", False)
+    )
+
+
+def _c6_candidatos_slot(am: Amostra) -> list[dict]:
+    """Observações externas físicas da CAM1, nunca pessoas internas."""
+    candidatos = list(getattr(am, "fora_candidatos", None) or am.fora_posto or [])
+    return [
+        p for p in candidatos
+        if p.get("track_id") is not None and _bbox_valido(p.get("bbox"))
+    ]
+
+
+def _c6_hist_sup(pessoa: dict):
+    hist = pessoa.get("_fora_hist_sup")
+    if hist is not None:
+        return hist
+    legado = pessoa.get("_fora_hist")
+    return legado.get("sup") if isinstance(legado, dict) else None
+
+
+def _reconciliar_operador_fora_c6_apos_111d(
+    am: Amostra,
+    estado_111d: str,
+    track_id_111d: int | None,
+) -> None:
+    """Remove decisão C6 obsoleta somente quando 111D assumiu o slot.
+
+    Um `fora` autoritativo preserva a identidade externa já aberta pelo C6,
+    mas substitui track/proveniência pelos da 111D. `dentro` e `ausente`
+    invalidam integralmente o estado C6. Fallbacks não chamam este helper.
+    """
+    tinha_estado_c6 = bool(getattr(am, "operador_fora_estado", False))
+    am.fora_candidatos = []
+    am.img_b64_fora_candidato = None
+    am.operador_fora_migracao = None
+    am.operador_fora_episodio = None
+    if estado_111d == "fora" and tinha_estado_c6:
+        am.operador_fora_estado = True
+        am.operador_fora_proveniencia = "identidade_autoritativa_111d"
+        am.operador_fora_track_id = (
+            int(track_id_111d) if track_id_111d is not None else None
+        )
+        return
+    am.operador_fora_estado = False
+    am.operador_fora_proveniencia = None
+    am.operador_fora_track_id = None
+
+
+def etapa_resolver_operador_fora_c6(
+    amostras: list[Amostra],
+    duracao_s: float | None = None,
+) -> dict:
+    """C6 — resolve OPERADOR_FORA como identidade temporal dentro de um vídeo.
+
+    A regra legada continua sendo a única porta de entrada. Depois da âncora,
+    continuidade, re-ID lógico, backfill e pontes usam somente observações CAM1
+    já coletadas. A função não abre vídeo, não roda detector e não guarda estado
+    global; uma chamada corresponde exatamente a um segmento.
+    """
+    stats = {
+        "modo": _FORA_MODO,
+        "ancoras": 0,
+        "continuidade_track": 0,
+        "trocas_track": 0,
+        "backfill": 0,
+        "pontes": 0,
+        "borda_inicio": 0,
+        "borda_fim": 0,
+        "slots_fora": 0,
+        "ambiguidades": 0,
+        "migracoes": [],
+    }
+    if not amostras or not _fora_ativo():
+        return stats
+
+    decisoes: dict[int, dict] = {}
+    episodio = 0
+
+    def marcar(
+        indice: int,
+        proveniencia: str,
+        track_id: int | None,
+        candidato: dict | None,
+        episodio_atual: int,
+        migracao: tuple | None = None,
+    ) -> None:
+        decisoes[indice] = {
+            "proveniencia": proveniencia,
+            "track_id": track_id,
+            "candidato": candidato,
+            "episodio": episodio_atual,
+            "migracao": migracao,
+        }
+
+    def backfill_mesmo_track(
+        indice_ancora: int,
+        track_id: int,
+        episodio_atual: int,
+    ) -> None:
+        """Reconstrói para trás sem cruzar presença, ambiguidade ou >gap."""
+        cursor_t = float(amostras[indice_ancora].tempo_s)
+        vazios: list[int] = []
+        atingiu_inicio = True
+        for j in range(indice_ancora - 1, -1, -1):
+            am_ant = amostras[j]
+            if _c6_barreira_presenca(am_ant):
+                atingiu_inicio = False
+                break
+            if cursor_t - float(am_ant.tempo_s) > _FORA_ESTADO_GAP_S:
+                atingiu_inicio = False
+                break
+            candidatos = _c6_candidatos_slot(am_ant)
+            if not candidatos:
+                vazios.append(j)
+                continue
+            mesmos = [p for p in candidatos if int(p["track_id"]) == track_id]
+            if len(candidatos) != 1 or len(mesmos) != 1:
+                atingiu_inicio = False
+                break
+            candidato = mesmos[0]
+            marcar(
+                j, "backfill_mesmo_track", track_id, candidato,
+                episodio_atual,
+            )
+            stats["backfill"] += 1
+            for k in vazios:
+                marcar(
+                    k, "ponte_estado_fora", track_id, None,
+                    episodio_atual,
+                )
+                stats["pontes"] += 1
+            vazios.clear()
+            cursor_t = float(am_ant.tempo_s)
+
+        if atingiu_inicio and cursor_t <= _FORA_ESTADO_GAP_S:
+            for k in vazios:
+                marcar(
+                    k, "continuidade_borda_inicio", track_id, None,
+                    episodio_atual,
+                )
+                stats["borda_inicio"] += 1
+
+    aberto = False
+    track_atual: int | None = None
+    ultima_bbox = None
+    ultimo_hist = None
+    ultima_observacao_s: float | None = None
+    pendentes: list[int] = []
+
+    def fechar() -> None:
+        nonlocal aberto, track_atual, ultima_bbox, ultimo_hist
+        nonlocal ultima_observacao_s, pendentes
+        aberto = False
+        track_atual = None
+        ultima_bbox = None
+        ultimo_hist = None
+        ultima_observacao_s = None
+        pendentes = []
+
+    def abrir_ancora(indice: int, candidatos: list[dict]) -> bool:
+        nonlocal aberto, track_atual, ultima_bbox, ultimo_hist
+        nonlocal ultima_observacao_s, episodio, pendentes
+        ancoras = [p for p in candidatos if p.get("_fora_motivo") == "operador"]
+        # A autorização original exige candidato único. C6 não afrouxa a porta.
+        if len(candidatos) != 1 or len(ancoras) != 1:
+            return False
+        candidato = ancoras[0]
+        episodio += 1
+        track_atual = int(candidato["track_id"])
+        ultima_bbox = candidato.get("bbox")
+        ultimo_hist = _c6_hist_sup(candidato)
+        ultima_observacao_s = float(amostras[indice].tempo_s)
+        pendentes = []
+        aberto = True
+        marcar(
+            indice, "anchor_regra_original", track_atual, candidato, episodio,
+        )
+        stats["ancoras"] += 1
+        backfill_mesmo_track(indice, track_atual, episodio)
+        return True
+
+    for indice, am in enumerate(amostras):
+        if _c6_barreira_presenca(am):
+            fechar()
+            continue
+
+        candidatos = _c6_candidatos_slot(am)
+        tempo_s = float(am.tempo_s)
+        if not aberto:
+            abrir_ancora(indice, candidatos)
+            continue
+
+        gap_s = tempo_s - float(ultima_observacao_s)
+        if gap_s > _FORA_ESTADO_GAP_S:
+            fechar()
+            abrir_ancora(indice, candidatos)
+            continue
+
+        if not candidatos:
+            pendentes.append(indice)
+            continue
+
+        mesmos = [p for p in candidatos if int(p["track_id"]) == track_atual]
+        escolhido = None
+        proveniencia = None
+        migracao = None
+        if len(mesmos) == 1:
+            escolhido = mesmos[0]
+            proveniencia = "continuidade_track"
+        elif len(mesmos) > 1:
+            stats["ambiguidades"] += 1
+        elif gap_s <= _FORA_TROCA_TRACK_GAP_S:
+            plausiveis = []
+            for candidato in candidatos:
+                if _c6_iou_bbox(ultima_bbox, candidato.get("bbox")) < _FORA_TROCA_TRACK_IOU_MIN:
+                    continue
+                sim = _sim_hist(_c6_hist_sup(candidato), ultimo_hist)
+                if sim is not None and sim < _FORA_SIM_VETO:
+                    continue
+                plausiveis.append(candidato)
+            if len(plausiveis) == 1:
+                escolhido = plausiveis[0]
+                novo_track = int(escolhido["track_id"])
+                migracao = (track_atual, novo_track)
+                proveniencia = "reid_troca_track"
+            elif len(plausiveis) > 1:
+                stats["ambiguidades"] += 1
+
+        if escolhido is None:
+            fechar()
+            abrir_ancora(indice, candidatos)
+            continue
+
+        for k in pendentes:
+            marcar(k, "ponte_estado_fora", track_atual, None, episodio)
+            stats["pontes"] += 1
+        pendentes = []
+        if migracao is not None:
+            stats["trocas_track"] += 1
+            stats["migracoes"].append(f"{migracao[0]}->{migracao[1]}")
+            track_atual = int(escolhido["track_id"])
+        else:
+            stats["continuidade_track"] += 1
+        marcar(
+            indice, proveniencia, track_atual, escolhido, episodio,
+            migracao=migracao,
+        )
+        ultima_bbox = escolhido.get("bbox")
+        hist_escolhido = _c6_hist_sup(escolhido)
+        if hist_escolhido is not None:
+            ultimo_hist = hist_escolhido
+        ultima_observacao_s = tempo_s
+
+    ultimo_slot_s = float(amostras[-1].tempo_s)
+    duracao_informada = float(duracao_s or 0.0)
+    duracao_real = max(ultimo_slot_s, duracao_informada)
+    if (
+        aberto
+        and ultima_observacao_s is not None
+        and duracao_real - ultima_observacao_s <= _FORA_ESTADO_GAP_S
+    ):
+        for k in pendentes:
+            marcar(
+                k, "continuidade_borda_fim", track_atual, None, episodio,
+            )
+            stats["borda_fim"] += 1
+
+    stats["slots_fora"] = len(decisoes)
+    if _FORA_MODO == "on":
+        # C6 é a decisão temporal final. Remove a autorização pontual legada
+        # dos slots não escolhidos e só então materializa o estado resolvido.
+        for am in amostras:
+            am.operador_fora_estado = False
+            am.operador_fora_proveniencia = None
+            am.operador_fora_track_id = None
+            am.operador_fora_episodio = None
+            am.operador_fora_migracao = None
+            if _c6_candidatos_slot(am):
+                am.fora_posto = []
+
+        for indice, decisao in decisoes.items():
+            am = amostras[indice]
+            candidato = decisao["candidato"]
+            am.operador_fora_estado = True
+            am.operador_fora_proveniencia = decisao["proveniencia"]
+            am.operador_fora_track_id = decisao["track_id"]
+            am.operador_fora_episodio = decisao["episodio"]
+            am.operador_fora_migracao = decisao["migracao"]
+            am.operador_presente = False
+            if candidato is not None:
+                candidato["rotulo"] = "P1"
+                candidato["frame_idx"] = am.frame_idx
+                candidato["_fora_c6_proveniencia"] = decisao["proveniencia"]
+                am.fora_posto = [candidato]
+                if am.img_b64_fora_candidato:
+                    try:
+                        frame = _frame_b64_para_bgr(am.img_b64_fora_candidato)
+                        anotada = _imagem_pessoas_identidade(
+                            frame, [candidato], am.dim,
+                        )
+                        if anotada:
+                            am.img_b64_fora = anotada
+                    except Exception:  # noqa: BLE001 — estado não depende do JPEG
+                        pass
+
+    log.info(
+        "[c6/operador-fora] %s",
+        json.dumps(stats, ensure_ascii=False, separators=(",", ":")),
+    )
+    return stats
 
 
 def inspecionar_video(video_path: str) -> dict:
@@ -4869,6 +5240,20 @@ def etapa_detectar_e_amostrar(
                 fora_ok: list = []
                 fora_indecisos: list = []
                 if fora_frame and not pessoas and _fora_ativo():
+                    # C6 precisa da aparência de TODA observação física fora,
+                    # inclusive das que antecedem a âncora ou já passaram dos
+                    # 30 s. Ela é coletada agora porque o frame não existirá na
+                    # resolução temporal; continua sendo apenas VETO.
+                    for p in fora_frame:
+                        try:
+                            hist_fora = histograma_cor(frame, p.get("bbox"))
+                        except Exception:  # noqa: BLE001 — medida opcional
+                            hist_fora = None
+                        p["_fora_hist"] = hist_fora
+                        p["_fora_hist_sup"] = (
+                            hist_fora.get("sup")
+                            if isinstance(hist_fora, dict) else None
+                        )
                     # Quantos ex-ocupantes recentes há neste instante decide a
                     # regra da unicidade — por isso é contado ANTES do laço.
                     n_cand = sum(
@@ -4994,6 +5379,21 @@ def etapa_detectar_e_amostrar(
                             anotar_frame_com_ids(frame, am_fora)
                         ) if am_fora else None
                     )
+                    img_fora_candidato = None
+                    if fora_frame and _FORA_MODO == "on":
+                        if (
+                            obs_identidade is not None
+                            and precisa_frame_identidade
+                            and obs_identidade.get("frame_b64")
+                        ):
+                            img_fora_candidato = obs_identidade["frame_b64"]
+                        else:
+                            try:
+                                img_fora_candidato = frame_para_base64(
+                                    frame, qualidade=70
+                                )
+                            except Exception:  # noqa: BLE001 — C6 segue sem JPEG
+                                img_fora_candidato = None
                     am_nova = Amostra(
                         frame_idx=frame_idx, tempo_s=tempo_s,
                         img_b64="", pessoas=[], dim=(w, h),
@@ -5001,6 +5401,8 @@ def etapa_detectar_e_amostrar(
                         img_b64_fora=img_fora_legado,
                         fora_auditoria=fora_auditoria,
                         fora_auditoria_amostras_zona=fora_auditoria_amostras,
+                        fora_candidatos=list(fora_frame),
+                        img_b64_fora_candidato=img_fora_candidato,
                     )
                     _guardar_candidato_c3(am_nova, {
                         "c3_candidate": candidato_c3_cam1,
@@ -5842,8 +6244,12 @@ def _analisar_sequencia_fora(
     """
     if not grupo:
         return {}
-    usados = _subamostrar(grupo, _SEQ_MAX_IMG)
-    usados = [a for a in usados if a.img_b64_fora]
+    # C6 inclui pontes/bordas sem imagem. Elas não podem ocupar o teto de
+    # subamostragem e expulsar justamente as observações físicas que o VLM pode
+    # descrever; primeiro selecionamos os frames reais, depois aplicamos o teto.
+    usados = _subamostrar(
+        [a for a in grupo if a.img_b64_fora], _SEQ_MAX_IMG
+    )
     imgs = [a.img_b64_fora for a in usados]
     if not imgs:
         return {}
@@ -6267,6 +6673,47 @@ def etapa_analise_vlm(
         observacoes.append(observacao)
         return True
 
+    def _emitir_operador_fora_estado(
+        am: Amostra,
+        narrativa: str | None,
+    ) -> bool:
+        """Materializa identidade C6 sem inventar atividade ou geometria."""
+        if not getattr(am, "operador_fora_estado", False):
+            return False
+        pessoa = am.fora_posto[0] if am.fora_posto else None
+        bbox = pessoa.get("bbox") if pessoa else None
+        observacoes.append({
+            "tempo_s": am.tempo_s,
+            "frame_idx": am.frame_idx,
+            "track_id": (
+                pessoa.get("track_id") if pessoa
+                else getattr(am, "operador_fora_track_id", None)
+            ) or FORA_POSTO_TID,
+            "descricao": OPERADOR_FORA_ESTADO_DESC,
+            "bbox": list(bbox) if _bbox_valido(bbox) else None,
+            "bbox_cam": "cam1" if _bbox_valido(bbox) else None,
+            "bbox_dim": am.dim if _bbox_valido(bbox) else None,
+            "zona": zona_posto,
+            "papel": PAPEL_OPERADOR_FORA,
+            "origem_gate": "c6_operador_fora_estado",
+            "mudanca_contexto": True,
+            "maquina": None,
+            "imovel": None,
+            "maos_maquina": None,
+            "orientacao": None,
+            "trabalho": None,
+            "produtividade_motivo": "sem_leitura",
+            "produtividade_observada": False,
+            "narrativa": narrativa,
+            "fora_do_posto": getattr(
+                am, "operador_fora_proveniencia", None
+            ) or "estado_temporal",
+            "fora_amostras_zona": (
+                pessoa.get("_fora_amostras_zona") if pessoa else None
+            ),
+        })
+        return True
+
     ancoras: dict[int, dict] = {}   # track_id → {kpts, crop, zona, descricao}
     # Fase 92: dimensões do quadro, para normalizar centro/altura da âncora.
     _dim0 = next((a.dim for a in amostras if getattr(a, "dim", None)), None)
@@ -6359,7 +6806,10 @@ def etapa_analise_vlm(
                 and zona_posto
                 and not am.pessoas
                 and not am.operador_presente
-                and am.fora_posto
+                and (
+                    am.fora_posto
+                    or getattr(am, "operador_fora_estado", False)
+                )
             ):
                 plano.append(("fora_posto", am))
             elif not am.pessoas:
@@ -6685,6 +7135,17 @@ def etapa_analise_vlm(
                 # por pessoa reconhecida pelo teste do passante.
                 _f = desc_fora.get(i) or {}
                 acao = (_f.get("acao") or "").strip()
+                if (
+                    getattr(am, "operador_fora_estado", False)
+                    and (not am.fora_posto or not acao)
+                ):
+                    # C6 decide identidade, não atividade. Falha/teto do VLM ou
+                    # ponte sem imagem preserva OPERADOR_FORA com descrição
+                    # neutra, nunca rebaixa a identidade a posto_vazio.
+                    _emitir_operador_fora_estado(
+                        am, _f.get("resumo") or narrativa_grupo,
+                    )
+                    continue
                 if not acao:
                     # Falha/JSON inválido/ação ausente/teto: restaura
                     # EXATAMENTE o estado numérico anterior. A auditoria diz
@@ -6727,7 +7188,9 @@ def etapa_analise_vlm(
                         "narrativa": _f.get("resumo") or narrativa_grupo,
                         # Auditoria do teste do passante: sem isto a decisão
                         # não é reconstituível depois.
-                        "fora_do_posto": pf.get("_fora_motivo") or "operador",
+                        "fora_do_posto": getattr(
+                            am, "operador_fora_proveniencia", None
+                        ) or pf.get("_fora_motivo") or "operador",
                         "fora_amostras_zona": pf.get("_fora_amostras_zona"),
                     })
                 if getattr(am, "identidade_autoritativa", False):
@@ -10044,6 +10507,7 @@ def aplicar_identidade_logica_segmento(
                 am.img_b64 = imagem_final or ""
             am.operador_presente = False
             ausente += 1
+        _reconciliar_operador_fora_c6_apos_111d(am, estado, tid)
         am.identidade_autoritativa = True
         am.identidade_estado = estado
         am.identidade_track_id = int(tid) if tid is not None else None
@@ -19202,6 +19666,15 @@ def processar_video(
                     "[presenca-safety/c4.2] %d slot(s) vetado(s) por consenso 640",
                     n_c42,
                 )
+
+    # C6: todas as autoridades de presença dentro já tiveram oportunidade de
+    # promover ou vetar o slot. Só agora a CAM1 pode resolver a identidade
+    # temporal fora; o estado nasce e morre neste vídeo, antes de 111D/VLM.
+    if zona_posto:
+        etapa_resolver_operador_fora_c6(
+            amostras,
+            duracao_s=float(info_video.get("duracao_s") or 0.0),
+        )
 
     # Fase 111D: confirmação causal legada já terminou. Só agora a decisão da
     # janela completa pode assumir slots seguros; em falha, os objetos legados
