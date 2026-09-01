@@ -662,8 +662,19 @@ _ADAPTERS = {
 # ═════════════════════════════════════════════════════════════════════════
 # Dispatch com fallback
 # ═════════════════════════════════════════════════════════════════════════
-def _chamar(tier: str, mensagens: list[dict], json_mode: bool, max_tokens: int, temperatura: float) -> str:
-    provs = provedores_disponiveis()
+def _chamar(
+    tier: str,
+    mensagens: list[dict],
+    json_mode: bool,
+    max_tokens: int,
+    temperatura: float,
+    provedor: str | None = None,
+) -> str:
+    if provedor is None:
+        provs = provedores_disponiveis()
+    else:
+        alvo = str(provedor).strip().lower()
+        provs = [alvo] if alvo in _CHAVE_ENV and _tem_chave(alvo) else []
     if not provs:
         raise RuntimeError(
             "[ai] nenhum provedor de IA disponível — defina ANTHROPIC_API_KEY, "
@@ -731,6 +742,7 @@ def vision_call(
     json_mode: bool = True,
     max_tokens: int = 1024,
     temperatura: float = 0.2,
+    provedor: str | None = None,
 ) -> str:
     conteudo: list[dict] = [
         {"type": "text", "text": prompt},
@@ -739,7 +751,14 @@ def vision_call(
     for extra in (imagens_extra or []):
         if extra:
             conteudo.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{extra}"}})
-    return _chamar(VISION, [{"role": "user", "content": conteudo}], json_mode, max_tokens, temperatura)
+    return _chamar(
+        VISION,
+        [{"role": "user", "content": conteudo}],
+        json_mode,
+        max_tokens,
+        temperatura,
+        provedor=provedor,
+    )
 
 
 def chat_call(

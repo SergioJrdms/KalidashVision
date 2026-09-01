@@ -62,6 +62,11 @@ cliente_claude = _ClaudeClient()
 cliente_gpt = _OpenAIClient()
 cliente_real = ai._client
 retry_real = ai._retry
+tem_chave_real = ai._tem_chave
+acima_limite_real = ai._acima_do_limite
+registrar_real = ai.registrar
+adapter_claude_real = ai._ADAPTERS["claude"]
+adapter_gpt_real = ai._ADAPTERS["gpt"]
 
 try:
     ai._client = lambda prov: cliente_claude if prov == "claude" else cliente_gpt
@@ -91,9 +96,32 @@ try:
     check("GPT continua funcional", texto_gpt == "ok", texto_gpt)
     check("GPT continua recebendo temperature", cliente_gpt.chat.completions.kwargs["temperature"] == 0.4,
           cliente_gpt.chat.completions.kwargs)
+
+    print("\n[3] Uma chamada pode exigir Claude sem alterar o ambiente global")
+    chamados = []
+
+    def adapter_alvo(prov):
+        def _adapter(modelo, mensagens, json_mode, max_tokens, temperatura):
+            chamados.append(prov)
+            return '{"provedor": "' + prov + '"}', {"in": 0, "out": 0}
+        return _adapter
+
+    ai._tem_chave = lambda prov: True
+    ai._acima_do_limite = lambda prov: False
+    ai.registrar = lambda *args, **kwargs: None
+    ai._ADAPTERS["claude"] = adapter_alvo("claude")
+    ai._ADAPTERS["gpt"] = adapter_alvo("gpt")
+    resposta = ai.vision_call("IMG", "prompt", provedor="claude")
+    check("seleção por chamada usa somente Claude", chamados == ["claude"], chamados)
+    check("resposta do Claude é preservada", resposta == '{"provedor": "claude"}', resposta)
 finally:
     ai._client = cliente_real
     ai._retry = retry_real
+    ai._tem_chave = tem_chave_real
+    ai._acima_do_limite = acima_limite_real
+    ai.registrar = registrar_real
+    ai._ADAPTERS["claude"] = adapter_claude_real
+    ai._ADAPTERS["gpt"] = adapter_gpt_real
 
 
 print(f"\n{ok} ok · {fail} falha(s)")
