@@ -97,7 +97,13 @@ DEFAULT_LIMIAR_AUTO_VALIDACAO = 2
 # `validado_humano`/`validacao_correto`, que são a verdade de referência do
 # dataset e do placar das camadas.
 ORIGENS_MAQUINA = frozenset(
-    {"correcao_aprendida", "vocabulario_canonico", "posto_vazio", "auditoria"}
+    {
+        "correcao_aprendida",
+        "vocabulario_canonico",
+        "posto_vazio",
+        "auditoria",
+        "ponte_rolante",
+    }
 )
 
 # Fase 62 — GENERALIZAÇÃO AUTOMÁTICA, chave de liga/desliga por processo.
@@ -11004,7 +11010,7 @@ def limiar_duvida(sb: Client, empresa: str, processo: str) -> float:
 # Origens em que `validado_humano=True` NÃO significa "alguém julgou": é o
 # mecanismo que mantém o registro fora da fila. Nunca foram dúvida e não podem
 # entrar na curva histórica como dúvida resolvida.
-_ORIGENS_MECANICAS = frozenset({"posto_vazio", "auditoria"})
+_ORIGENS_MECANICAS = frozenset({"posto_vazio", "auditoria", "ponte_rolante"})
 # Fase 90 — observação que COBRE o tempo sem ter olhado quadro novo. Ela é
 # legítima (sem ela o minuto se parte e o denominador despenca) e não é
 # evidência. A distinção entre "não olhei" e "olhei e não sei" mora aqui.
@@ -16977,10 +16983,11 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     """
     # ── 0 — correção humana, inviolável ──
     # ⚠️ `validado_humano=True` NÃO É DECISÃO HUMANA quando veio de MECANISMO.
-    # `posto_vazio` e `auditoria` usam a flag só para ficar fora da fila (Fase
-    # 62), e no dia 10/08 isso é 255 de 255 eventos — tratá-los como decisão
-    # humana faria a arquitetura nova nunca rodar. A Fase 88 já tinha
-    # documentado esta armadilha; aqui ela voltaria pela porta da precedência.
+    # `posto_vazio`, `auditoria` e `ponte_rolante` usam a flag só para ficar
+    # fora da fila (Fase 62), e no dia 10/08 isso é 255 de 255 eventos —
+    # tratá-los como decisão humana faria a arquitetura nova nunca rodar. A
+    # Fase 88 já tinha documentado esta armadilha; aqui ela voltaria pela porta
+    # da precedência.
     _mecanico = (e.get("origem_validacao") or "") in _ORIGENS_MECANICAS
     if (not _mecanico) and e.get("validado_humano") and (
             e.get("label_corrigido") or e.get("validacao_correto") is True):
@@ -19771,6 +19778,40 @@ def processar_video(
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
 
+    # Observação independente da ponte rolante. Roda em segundo passe sobre os
+    # frames RAW da CAM1, depois que o pipeline normal já foi consolidado e
+    # persistido. Os episódios entram como principal=False e nunca participam
+    # de C1-C6, presença, posto_vazio, operador_fora, catálogo ou Lean.
+    n_eventos_ponte = 0
+    try:
+        from .ponte_rolante import (
+            agrupar_episodios_ponte,
+            detectar_janelas_ponte,
+            persistir_episodios_ponte,
+            ponte_rolante_habilitada,
+        )
+        if (
+            ponte_rolante_habilitada()
+            and str(cam_id or "cam1").strip().lower() == "cam1"
+        ):
+            janelas_ponte = detectar_janelas_ponte(
+                video_path,
+                intervalo_amostragem_s,
+                duracao_s=float(info_video.get("duracao_s") or 0.0),
+            )
+            episodios_ponte = agrupar_episodios_ponte(janelas_ponte)
+            n_eventos_ponte = persistir_episodios_ponte(
+                sb, video_id, empresa, processo, episodios_ponte
+            )
+            log.info(
+                "[ponte-rolante] %d janela(s) positiva(s) → %d episódio(s)",
+                len(janelas_ponte), n_eventos_ponte,
+            )
+    except Exception as e:  # noqa: BLE001
+        # A camada é fail-closed e paralela: sua indisponibilidade nunca
+        # reinterpreta nem derruba os eventos normais já persistidos.
+        log.warning("[ponte-rolante] camada indisponível; sem positivos: %s", e)
+
     # Fase 89: o mapa aprende DEPOIS de persistir o que importa — se ele
     # falhar, o vídeo já está salvo.
     if grade_movimento:
@@ -19887,6 +19928,7 @@ def processar_video(
     return {
         "video_id": video_id,
         "n_eventos": len(eventos),
+        "n_eventos_ponte": n_eventos_ponte,
         "n_auto_validados": n_auto,
         "n_sugestoes": len(sugestoes),
         "n_perguntas": n_perguntas,

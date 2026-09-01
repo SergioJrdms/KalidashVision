@@ -537,6 +537,12 @@ def resumo_uso(periodo: str | None = None) -> dict:
 # Adapters (um por provedor) — consomem mensagens no formato OpenAI
 # Retornam (texto, uso) onde uso = {"in": tokens_entrada, "out": tokens_saida}.
 # ═════════════════════════════════════════════════════════════════════════
+def _erro_temperature_incompativel(exc: TypeError) -> bool:
+    """Reconhece somente a incompatibilidade de assinatura observada no SDK."""
+    msg = str(exc).lower()
+    return "temperature" in msg and "unexpected keyword argument" in msg
+
+
 def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
     cli = _client("claude")
     system, msgs = _para_claude(mensagens)
@@ -546,7 +552,6 @@ def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
     if system:
         kwargs["system"] = system
     if "haiku" in modelo.lower():
-        # Haiku aceita `temperature` e não liga thinking por padrão.
         kwargs["temperature"] = temperatura
     else:
         # Sonnet 5 / Opus rejeitam `temperature` (400). O thinking é OPT-IN
@@ -565,7 +570,22 @@ def _adapter_claude(modelo, mensagens, json_mode, max_tokens, temperatura):
             kwargs["max_tokens"] = max_tokens + max(0, folga)
         else:
             kwargs["thinking"] = {"type": "disabled"}
-    r = _retry(lambda: cli.messages.create(**kwargs), rotulo=f"claude:{modelo}")
+    kwargs_sem_temperature = dict(kwargs)
+    kwargs_sem_temperature.pop("temperature", None)
+    usar_temperature = "temperature" in kwargs
+
+    def _criar_mensagem():
+        nonlocal usar_temperature
+        try:
+            chamada = kwargs if usar_temperature else kwargs_sem_temperature
+            return cli.messages.create(**chamada)
+        except TypeError as exc:
+            if not usar_temperature or not _erro_temperature_incompativel(exc):
+                raise
+            usar_temperature = False
+            return cli.messages.create(**kwargs_sem_temperature)
+
+    r = _retry(_criar_mensagem, rotulo=f"claude:{modelo}")
     texto = ""
     for b in getattr(r, "content", []) or []:
         if getattr(b, "type", None) == "text":
@@ -662,8 +682,19 @@ _ADAPTERS = {
 # ═════════════════════════════════════════════════════════════════════════
 # Dispatch com fallback
 # ═════════════════════════════════════════════════════════════════════════
-def _chamar(tier: str, mensagens: list[dict], json_mode: bool, max_tokens: int, temperatura: float) -> str:
-    provs = provedores_disponiveis()
+def _chamar(
+    tier: str,
+    mensagens: list[dict],
+    json_mode: bool,
+    max_tokens: int,
+    temperatura: float,
+    provedor: str | None = None,
+) -> str:
+    if provedor is None:
+        provs = provedores_disponiveis()
+    else:
+        alvo = str(provedor).strip().lower()
+        provs = [alvo] if alvo in _CHAVE_ENV and _tem_chave(alvo) else []
     if not provs:
         raise RuntimeError(
             "[ai] nenhum provedor de IA disponível — defina ANTHROPIC_API_KEY, "
@@ -731,6 +762,7 @@ def vision_call(
     json_mode: bool = True,
     max_tokens: int = 1024,
     temperatura: float = 0.2,
+    provedor: str | None = None,
 ) -> str:
     conteudo: list[dict] = [
         {"type": "text", "text": prompt},
@@ -739,7 +771,14 @@ def vision_call(
     for extra in (imagens_extra or []):
         if extra:
             conteudo.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{extra}"}})
-    return _chamar(VISION, [{"role": "user", "content": conteudo}], json_mode, max_tokens, temperatura)
+    return _chamar(
+        VISION,
+        [{"role": "user", "content": conteudo}],
+        json_mode,
+        max_tokens,
+        temperatura,
+        provedor=provedor,
+    )
 
 
 def chat_call(
