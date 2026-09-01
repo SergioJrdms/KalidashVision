@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Callable, Iterable
 
 
@@ -82,6 +83,13 @@ def _chamar_claude(frames_b64: list[str]) -> str:
         temperatura=0.0,
         provedor="claude",
     )
+
+
+def ponte_rolante_habilitada() -> bool:
+    """Única flag da feature; o default seguro é desligado."""
+    return os.environ.get("KV_PONTE_ROLANTE", "off").strip().lower() not in {
+        "off", "0", "false", "",
+    }
 
 
 def _bool_ou_none(valor):
@@ -190,6 +198,9 @@ def detectar_janelas_ponte(
     extrair_frames: Callable[[str, float, float | None], list[tuple[float, str | None]]] | None = None,
 ) -> list[dict]:
     """Analisa todas as janelas RAW e devolve somente afirmações positivas."""
+    if chamar_vlm is None and not os.environ.get("ANTHROPIC_API_KEY"):
+        log.warning("[ponte-rolante] Claude indisponível; nenhuma afirmação positiva")
+        return []
     try:
         grade = (extrair_frames or _extrair_frames_raw)(
             video_path, float(intervalo_s), duracao_s
@@ -245,3 +256,50 @@ def agrupar_episodios_ponte(janelas_positivas: Iterable[dict]) -> list[dict]:
         episodio["fases_observadas"] = list(dict.fromkeys(episodio["fases_observadas"]))
         episodio["evidencias_visuais"] = list(dict.fromkeys(episodio["evidencias_visuais"]))
     return episodios
+
+
+def persistir_episodios_ponte(
+    sb,
+    video_id: str,
+    empresa: str,
+    processo: str,
+    episodios: Iterable[dict],
+) -> int:
+    """Persiste episódios paralelos como auditoria, sem catálogo ou Lean."""
+    linhas: list[dict] = []
+    for episodio in episodios:
+        fases = list(episodio.get("fases_observadas") or [])
+        evidencias = list(episodio.get("evidencias_visuais") or [])
+        detalhes = []
+        if fases:
+            detalhes.append("fases observadas: " + ", ".join(str(f) for f in fases))
+        if evidencias:
+            detalhes.append("evidências visuais: " + "; ".join(str(e) for e in evidencias))
+        descricao = "operação visual do sistema de içamento"
+        if detalhes:
+            descricao += " (" + " | ".join(detalhes) + ")"
+        linhas.append({
+            "video_id": video_id,
+            "empresa": empresa,
+            "processo": processo,
+            "pessoa_track_id": PONTE_ROLANTE_TID,
+            "comportamento_label": PONTE_ROLANTE_LABEL,
+            "descricao_bruta": descricao,
+            "tempo_inicio_s": float(episodio["inicio_s"]),
+            "tempo_fim_s": float(episodio["fim_s"]),
+            "n_amostras": int(episodio.get("n_janelas") or 1),
+            "papel_pessoa": "ponte_rolante",
+            "origem_validacao": "ponte_rolante",
+            # O mesmo mecanismo oficial dos eventos crus de auditoria:
+            # não disputa o minuto, não entra em métrica, memória ou fila.
+            "principal": False,
+            "validado_humano": True,
+            "categoria_lean": None,
+            "categoria_lean_origem": None,
+            "em_duvida": False,
+            "descricao_invalida": False,
+        })
+    if not linhas:
+        return 0
+    sb.table("eventos").insert(linhas).execute()
+    return len(linhas)

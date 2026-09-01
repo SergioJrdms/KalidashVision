@@ -19771,6 +19771,40 @@ def processar_video(
     )
     progress_cb("persistir", 100, f"{len(eventos)} eventos · {n_auto} auto-validados")
 
+    # Observação independente da ponte rolante. Roda em segundo passe sobre os
+    # frames RAW da CAM1, depois que o pipeline normal já foi consolidado e
+    # persistido. Os episódios entram como principal=False e nunca participam
+    # de C1-C6, presença, posto_vazio, operador_fora, catálogo ou Lean.
+    n_eventos_ponte = 0
+    try:
+        from .ponte_rolante import (
+            agrupar_episodios_ponte,
+            detectar_janelas_ponte,
+            persistir_episodios_ponte,
+            ponte_rolante_habilitada,
+        )
+        if (
+            ponte_rolante_habilitada()
+            and str(cam_id or "cam1").strip().lower() == "cam1"
+        ):
+            janelas_ponte = detectar_janelas_ponte(
+                video_path,
+                intervalo_amostragem_s,
+                duracao_s=float(info_video.get("duracao_s") or 0.0),
+            )
+            episodios_ponte = agrupar_episodios_ponte(janelas_ponte)
+            n_eventos_ponte = persistir_episodios_ponte(
+                sb, video_id, empresa, processo, episodios_ponte
+            )
+            log.info(
+                "[ponte-rolante] %d janela(s) positiva(s) → %d episódio(s)",
+                len(janelas_ponte), n_eventos_ponte,
+            )
+    except Exception as e:  # noqa: BLE001
+        # A camada é fail-closed e paralela: sua indisponibilidade nunca
+        # reinterpreta nem derruba os eventos normais já persistidos.
+        log.warning("[ponte-rolante] camada indisponível; sem positivos: %s", e)
+
     # Fase 89: o mapa aprende DEPOIS de persistir o que importa — se ele
     # falhar, o vídeo já está salvo.
     if grade_movimento:
@@ -19887,6 +19921,7 @@ def processar_video(
     return {
         "video_id": video_id,
         "n_eventos": len(eventos),
+        "n_eventos_ponte": n_eventos_ponte,
         "n_auto_validados": n_auto,
         "n_sugestoes": len(sugestoes),
         "n_perguntas": n_perguntas,

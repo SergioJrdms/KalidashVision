@@ -5,6 +5,9 @@ Executar: python -X utf8 tests_ponte_rolante.py
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
 from backend import ponte_rolante as pr
 
@@ -132,6 +135,80 @@ check("todas as janelas foram analisadas na ordem", vistas == [
 check("apenas a janela true é emitida", len(positivos) == 1
       and (positivos[0]["inicio_s"], positivos[0]["fim_s"]) == (8.0, 24.0),
       positivos)
+
+
+print("\n[6] Persistência paralela e neutra para produto/Lean")
+
+
+class _TabelaFake:
+    def __init__(self, banco, nome):
+        self.banco = banco
+        self.nome = nome
+
+    def insert(self, linhas):
+        self.banco.inserts.append((self.nome, linhas))
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=[])
+
+
+class _BancoFake:
+    def __init__(self):
+        self.inserts = []
+
+    def table(self, nome):
+        return _TabelaFake(self, nome)
+
+
+banco = _BancoFake()
+n_persistidos = pr.persistir_episodios_ponte(
+    banco,
+    "video-1",
+    "União",
+    "Torneamento Convencional",
+    episodios[:2],
+)
+check("persiste um registro por episódio", n_persistidos == 2, banco.inserts)
+check("reutiliza somente a tabela eventos", [nome for nome, _ in banco.inserts] == ["eventos"],
+      banco.inserts)
+linhas = banco.inserts[0][1]
+check("track sintético -6 identifica o sistema, não uma pessoa",
+      all(l["pessoa_track_id"] == -6 and l["papel_pessoa"] == "ponte_rolante" for l in linhas),
+      linhas)
+check("episódio não disputa principal nem entra na fila",
+      all(l["principal"] is False and l["validado_humano"] is True for l in linhas), linhas)
+check("categoria Lean e origem ficam nulas",
+      all(l["categoria_lean"] is None and l["categoria_lean_origem"] is None for l in linhas),
+      linhas)
+check("evidência mínima permanece na descrição",
+      "evidências visuais" in linhas[0]["descricao_bruta"], linhas[0])
+
+
+print("\n[7] Flag segura e ponto de integração")
+flag_anterior = os.environ.pop("KV_PONTE_ROLANTE", None)
+try:
+    check("flag nasce desligada", pr.ponte_rolante_habilitada() is False)
+    os.environ["KV_PONTE_ROLANTE"] = "on"
+    check("ativação é deliberada", pr.ponte_rolante_habilitada() is True)
+finally:
+    if flag_anterior is None:
+        os.environ.pop("KV_PONTE_ROLANTE", None)
+    else:
+        os.environ["KV_PONTE_ROLANTE"] = flag_anterior
+
+src_pipeline = Path("backend/pipeline.py").read_text(encoding="utf-8")
+persistencia_normal = src_pipeline.index("video_id, n_auto, ids_principais = etapa_persistir(")
+persistencia_ponte = src_pipeline.index("n_eventos_ponte = persistir_episodios_ponte(")
+retencao = src_pipeline.index("frames_stats = {\"ok\": False}", persistencia_ponte)
+check("ponte roda depois da persistência normal e antes da retenção do vídeo",
+      persistencia_normal < persistencia_ponte < retencao)
+check("integração restringe o passe à CAM1",
+      'str(cam_id or "cam1").strip().lower() == "cam1"' in src_pipeline)
+
+env_exemplo = Path("backend/.env.example").read_text(encoding="utf-8")
+check("uma única flag default off está documentada",
+      env_exemplo.count("KV_PONTE_ROLANTE") == 1 and "# KV_PONTE_ROLANTE=off" in env_exemplo)
 
 
 print(f"\n{ok} ok · {fail} falha(s)")
