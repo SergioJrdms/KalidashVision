@@ -7,7 +7,7 @@ import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
 export type Screen = "login" | "processos" | "processo" | "ajuda" | "fila-global";
-export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "rotulos" | "titular" | "arvore" | "precisao" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "descricao" | "configuracoes";
+export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "rotulos" | "titular" | "arvore" | "precisao" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "teste-pipeline" | "descricao" | "configuracoes";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
 
@@ -107,6 +107,7 @@ export function Sidebar({
     { tab: "eventos", label: "Eventos", icon: "table-2" },
     { tab: "padroes", label: "Padrões", icon: "activity" },
     { tab: "fila", label: "Fila", icon: "list-checks" },
+    { tab: "teste-pipeline", label: "Teste do pipeline", icon: "flask-conical" },
     { tab: "descricao", label: "Descrição", icon: "file-text" },
   ];
   const procNavRodape = [
@@ -247,7 +248,7 @@ export function Sidebar({
 
 export function Topbar({ route, proc, go, onOpenPrism, action, isMobile = false, onMenu }: { route: Route; proc?: ProcHeaderMock | null; go: Go; onOpenPrism: () => void; action?: ReactNode; isMobile?: boolean; onMenu?: () => void }) {
   const inProc = route.screen === "processo";
-  const tabLabels: Record<string, string> = { dashboard: "Visão do posto", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", rotulos: "Classificar rótulos", titular: "Quem dominou o posto", arvore: "Produtivo × improdutivo", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", descricao: "Descrição", configuracoes: "Configurações" };
+  const tabLabels: Record<string, string> = { dashboard: "Visão do posto", diaadia: "Dia a dia", auditoria: "Auditoria do dia", duvidas: "Dúvidas", rotulos: "Classificar rótulos", titular: "Quem dominou o posto", arvore: "Produtivo × improdutivo", validacao: "Validação", eventos: "Eventos", padroes: "Padrões", fila: "Fila", upload: "Novo vídeo", "teste-pipeline": "Teste do pipeline", descricao: "Descrição", configuracoes: "Configurações" };
   return (
     <header className="row" style={{ height: isMobile ? 54 : 60, padding: isMobile ? "0 12px" : "0 26px", borderBottom: "1px solid var(--line)", background: "rgba(255,255,255,.82)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 30, justifyContent: "space-between", gap: isMobile ? 8 : 16 }}>
       <div className="row gap2" style={{ fontSize: 13.5, color: "var(--muted)", minWidth: 0 }}>

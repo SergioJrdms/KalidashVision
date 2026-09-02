@@ -6,6 +6,8 @@ raiz = Path(__file__).resolve().parent
 main = (raiz / "backend" / "main.py").read_text(encoding="utf-8")
 drawer = (raiz / "frontend" / "src" / "components" / "EventEvidenceDrawer.tsx").read_text(encoding="utf-8")
 dash = (raiz / "frontend" / "src" / "pages" / "Dashboard.tsx").read_text(encoding="utf-8")
+types = (raiz / "frontend" / "src" / "lib" / "types.ts").read_text(encoding="utf-8")
+rotulo_presenca = drawer[drawer.find("export function rotuloLeituraPresenca"):drawer.find("export function EventEvidenceDrawer")]
 ok = fail = 0
 
 
@@ -31,6 +33,15 @@ print("[3] Paginação acumulativa")
 check("usa páginas infinitas", "useInfiniteQuery" in drawer)
 check("concatena páginas", "flatMap((p) => p.itens)" in drawer)
 check("botão depende de próxima página", "q.hasNextPage" in drawer)
+
+print("[4] Estado canônico de presença no drawer")
+check("tipo transporta estado canônico", "estado_presenca?: string | null" in types)
+check("EST_POSTO_VAZIO recebe rótulo humano", 'estadoPresenca === "posto_vazio"' in rotulo_presenca and '"Posto sem operador"' in rotulo_presenca)
+check("OPERADOR_FORA recebe rótulo humano", 'estadoPresenca === "operador_fora"' in rotulo_presenca and '"Operador fora do posto"' in rotulo_presenca)
+check("OPERADOR_FORA_PRODUTIVO recebe rótulo humano", 'estadoPresenca === "operador_fora_produtivo"' in rotulo_presenca and '"Operador fora do posto"' in rotulo_presenca)
+check("OPERADOR_FORA_IMPRODUTIVO recebe rótulo humano", 'estadoPresenca === "operador_fora_improdutivo"' in rotulo_presenca and '"Operador fora do posto"' in rotulo_presenca)
+check("drawer usa somente o estado canônico", "rotuloLeituraPresenca(e.estado_presenca)" in drawer)
+check("rótulo não calcula C6", "_linha_do_tempo" not in rotulo_presenca and "bbox" not in rotulo_presenca and "track" not in rotulo_presenca)
 
 print(f"\n{ok} ok · {fail} falha(s)")
 sys.exit(1 if fail else 0)

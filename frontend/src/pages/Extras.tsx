@@ -110,19 +110,15 @@ export function Upload({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
         </div>
       </Card>
 
-      <UploadParTeste proc={proc} go={go} />
     </div>
   );
 }
 
-// ── MODO TESTE (temporário): subir um PAR cam1+cam2 do PC, sem o Pi ─────────
-// Usa exatamente o caminho do edge: upload com cam_id → inbox `segmentos`
-// (gravado_em lido do nome seg_YYYYMMDD_HHMMSS) → "processar lote" pareia e
-// dispara o dual-angle com zonas/operador. Para retirar depois: apagar este
-// componente e a linha <UploadParTeste/> acima (+ api.videos.uploadSegmento).
+// ── Teste do pipeline: entrega um par ao mesmo fluxo da captura real ────────
+// upload com cam_id → inbox `segmentos` (gravado_em pelo nome) → lote real.
 const RE_SEG_TOKEN = /seg_(\d{8})_(\d{6})/;
 
-function UploadParTeste({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
+export function TestePipeline({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const [f1, setF1] = useState<File | null>(null);
   const [f2, setF2] = useState<File | null>(null);
   const [enviando, setEnviando] = useState(false);
@@ -211,23 +207,27 @@ function UploadParTeste({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   );
 
   return (
-    <Card style={{ padding: 22, marginTop: 16, border: "1px dashed var(--p-200)" }}>
-      <div className="row gap2" style={{ alignItems: "center" }}>
-        <Icon name="flask-conical" size={16} color="var(--accent)" />
-        <h2 className="font-display" style={{ fontSize: 15.5, fontWeight: 700 }}>Modo teste — par de câmeras (sem o Pi)</h2>
-      </div>
-      <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
-        Sobe um segmento da <b>cam1</b> + um da <b>cam2</b> direto do seu PC, pelo mesmo caminho do
-        Raspberry (inbox → pareamento → análise dual-angle com zonas). Os nomes precisam ter o
-        carimbo <code className="font-mono">seg_AAAAMMDD_HHMMSS</code> com relógios até 6 min de distância — é
-        por ele que o par se encontra e se alinha.
-      </p>
-      <div className="row gap2 wrap" style={{ marginTop: 12 }}>
+    <div style={{ maxWidth: 720, margin: "0 auto" }}>
+      <Card style={{ padding: 24 }}>
+        <div className="row gap2" style={{ alignItems: "center" }}>
+          <Icon name="flask-conical" size={18} color="var(--accent)" />
+          <h1 className="font-display" style={{ fontSize: 22, fontWeight: 700 }}>Teste do pipeline</h1>
+        </div>
+        <p style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.55 }}>
+          Envie um par CAM1 + CAM2 para processar pelo mesmo fluxo utilizado na captura real. Os resultados entram normalmente na Fila, Eventos e métricas do processo.
+        </p>
+        <p className="soft" style={{ fontSize: 12, color: "var(--text)", marginTop: 14, padding: "10px 12px", borderRadius: 10, lineHeight: 1.5 }}>
+          Este teste grava resultados reais neste processo e pode alterar suas métricas. Prefira um processo exclusivo de validação.
+        </p>
+        <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 16, lineHeight: 1.5 }}>
+          Os arquivos devem conter <code className="font-mono">seg_AAAAMMDD_HHMMSS</code>, por exemplo <code className="font-mono">seg_20260901_140000_cam1.mp4</code> e <code className="font-mono">seg_20260901_140002_cam2.mp4</code>. Os pares devem estar dentro da janela esperada de até 6 minutos; o backend faz a validação final do pareamento.
+        </p>
+        <div className="row gap2 wrap" style={{ marginTop: 12 }}>
         <Slot f={f1} cam="cam1" onPick={() => ref1.current?.click()} onClear={() => setF1(null)} inputRef={ref1} />
         <Slot f={f2} cam="cam2" onPick={() => ref2.current?.click()} onClear={() => setF2(null)} inputRef={ref2} />
-      </div>
-      <input ref={ref1} type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => setF1(e.target.files?.[0] || null)} />
-      <input ref={ref2} type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => setF2(e.target.files?.[0] || null)} />
+        </div>
+        <input ref={ref1} type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => setF1(e.target.files?.[0] || null)} />
+        <input ref={ref2} type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => setF2(e.target.files?.[0] || null)} />
 
       {f1 && f2 && !nomesOk && (
         <p style={{ fontSize: 12, color: "var(--desp)", marginTop: 10 }}>
@@ -243,15 +243,27 @@ function UploadParTeste({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
       {erro && <p style={{ fontSize: 12, color: "var(--desp)", marginTop: 10, lineHeight: 1.5 }}>{erro}</p>}
       {passo && <p style={{ fontSize: 12, color: "var(--accent-deep)", marginTop: 10 }}><b>{passo}</b> Não feche esta aba.</p>}
 
-      <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-        <Btn size="sm" disabled={!f1 || !f2 || !nomesOk || !paream || enviando} icon="play" onClick={enviarPar}>
-          {enviando ? "Enviando par…" : erro ? "Tentar de novo" : "Enviar par e processar"}
-        </Btn>
-      </div>
-      <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 8 }}>
-        O progresso aparece na aba <b>Fila</b> (você será levado pra lá). Ferramenta temporária de teste.
-      </p>
-    </Card>
+        <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+          <Btn size="sm" disabled={!f1 || !f2 || !nomesOk || !paream || enviando} icon="play" onClick={enviarPar}>
+            {enviando ? "Enviando par…" : erro ? "Tentar de novo" : "Enviar par e processar"}
+          </Btn>
+        </div>
+        <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 8 }}>
+          Após o envio, você será levado para a <b>Fila</b>, onde acompanha o processamento até a conclusão ou erro.
+        </p>
+      </Card>
+
+      <Card style={{ padding: 20, marginTop: 16 }}>
+        <h2 className="font-display" style={{ fontSize: 16, fontWeight: 700 }}>Depois de processar</h2>
+        <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>Confira os resultados nas superfícies normais deste processo.</p>
+        <div className="row gap2 wrap" style={{ marginTop: 14 }}>
+          <Btn size="sm" variant="secondary" icon="layout-dashboard" onClick={() => go("processo", proc.id, "dashboard")}>Ver Dashboard</Btn>
+          <Btn size="sm" variant="secondary" icon="table-2" onClick={() => go("processo", proc.id, "eventos")}>Ver Eventos</Btn>
+          <Btn size="sm" variant="secondary" icon="git-pull-request-arrow" onClick={() => go("processo", proc.id, "validacao")}>Ver Validação</Btn>
+          <Btn size="sm" variant="secondary" icon="git-branch" onClick={() => go("processo", proc.id, "arvore")}>Ver árvore produtivo × improdutivo</Btn>
+        </div>
+      </Card>
+    </div>
   );
 }
 
