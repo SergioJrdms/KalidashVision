@@ -161,7 +161,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
             partes={[
               { nome: "Operador", valor: p.presenca_pct, cor: "var(--accent)" },
               { nome: "Outra pessoa", valor: p.outra_pessoa_no_posto_pct, cor: "#c79232" },
-              { nome: "Vazio", valor: p.posto_vazio_pct, cor: "#d9dde6" },
+              { nome: "Vazio", valor: p.posto_vazio_pct, cor: "#d9dde6", onClick: () => setEvidenciaPresenca(true) },
             ]}
           />
         </Card>
@@ -263,21 +263,28 @@ function KpiComercial({ titulo, valor, detalhe, cor, icone, onClick }: { titulo:
   );
 }
 
-function BarraComercial({ titulo, partes }: { titulo: string; partes: Array<{ nome: string; valor: number | null; cor: string }> }) {
+function BarraComercial({ titulo, partes }: { titulo: string; partes: Array<{ nome: string; valor: number | null; cor: string; onClick?: () => void }> }) {
   const validas = partes.filter((p) => p.valor != null && p.valor > 0);
   return (
     <div>
       <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>{titulo}</div>
       <div className="row" style={{ height: 12, overflow: "hidden", borderRadius: 999, background: "var(--line-2)", gap: 0 }}>
-        {validas.map((p) => <span key={p.nome} style={{ height: "100%", width: `${p.valor}%`, background: p.cor }} title={`${p.nome}: ${p.valor?.toFixed(1)}%`} />)}
+        {validas.map((p) => p.onClick
+          ? <button key={p.nome} type="button" onClick={p.onClick} aria-label={`Ver evidências: ${p.nome}`} style={{ height: "100%", width: `${p.valor}%`, border: 0, padding: 0, background: p.cor, cursor: "pointer" }} title={`${p.nome}: ${p.valor?.toFixed(1)}% · clique para conferir`} />
+          : <span key={p.nome} style={{ height: "100%", width: `${p.valor}%`, background: p.cor }} title={`${p.nome}: ${p.valor?.toFixed(1)}%`} />)}
       </div>
       <div className="row wrap" style={{ gap: 12, marginTop: 9 }}>
-        {partes.map((p) => (
-          <span key={p.nome} className="row" style={{ gap: 5, color: "var(--muted)", fontSize: 11 }}>
-            <i style={{ width: 8, height: 8, borderRadius: 999, background: p.cor }} />
-            {p.nome} <strong className="tnum" style={{ color: "var(--text)" }}>{p.valor == null ? "—" : `${p.valor.toFixed(1)}%`}</strong>
-          </span>
-        ))}
+        {partes.map((p) => {
+          const conteudo = <><i style={{ width: 8, height: 8, borderRadius: 999, background: p.cor }} />
+            {p.nome} <strong className="tnum" style={{ color: "var(--text)" }}>{p.valor == null ? "—" : `${p.valor.toFixed(1)}%`}</strong></>;
+          return p.onClick ? (
+          <button key={p.nome} type="button" onClick={p.onClick} className="row" style={{ gap: 5, border: 0, padding: 0, background: "transparent", color: "var(--muted)", font: "inherit", fontSize: 11, cursor: "pointer" }} title="Clique para conferir as evidências">
+            {conteudo}
+          </button>
+          ) : <span key={p.nome} className="row" style={{ gap: 5, color: "var(--muted)", fontSize: 11 }}>
+            {conteudo}
+          </span>;
+        })}
       </div>
     </div>
   );
