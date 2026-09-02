@@ -393,6 +393,8 @@ export interface EventoTabela {
   id: string;
   video_id: string;
   video_nome: string;
+  /** Estado de presença já resolvido pela linha do tempo canônica. */
+  estado_presenca?: string | null;
   pessoa_track_id: number;
   comportamento_label: string;
   label_corrigido: string | null;

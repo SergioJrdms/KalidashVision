@@ -29,7 +29,7 @@ import Fila from "./pages/Fila";
 import FilaGlobal from "./pages/FilaGlobal";
 import Ajuda from "./pages/Ajuda";
 import Configuracoes from "./pages/Configuracoes";
-import { Upload, Descricao } from "./pages/Extras";
+import { Upload, Descricao, TestePipeline } from "./pages/Extras";
 import { PrismPanel } from "./pages/PrismChat";
 
 export type Tweaks = { validacao: "fila" | "cards"; dashboard: "minimal" | "equilibrado" | "denso"; tom: "sobrio" | "vibrante" };
@@ -129,6 +129,7 @@ function AppShell() {
     else if (route.tab === "padroes") content = <Padroes proc={proc} go={goTyped} />;
     else if (route.tab === "fila") content = <Fila proc={proc} />;
     else if (route.tab === "upload") content = <Upload proc={proc} go={goTyped} />;
+    else if (route.tab === "teste-pipeline") content = <TestePipeline proc={proc} go={goTyped} />;
     else if (route.tab === "descricao") content = <Descricao proc={proc} go={goTyped} />;
     else if (route.tab === "configuracoes") content = <Configuracoes proc={proc} go={goTyped} />;
   }
