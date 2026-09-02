@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from .auth import CurrentUser, get_current_user
 from .jobs import JOBS
 from .productivity import agregar_produtividade
+from . import productivity as produtividade
 from . import pipeline as pl
 from .pipeline import (
     extrair_3_frames_evento,
@@ -4118,6 +4119,190 @@ def listar_eventos_tabela(
         "page": page,
         "page_size": page_size,
     }
+
+
+@app.get("/processos/{processo_id}/evidencias")
+def evidencias_da_agregacao(
+    processo_id: str,
+    labels: str = Query(..., min_length=1),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(8, ge=1, le=50),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Eventos que compõem exatamente uma ou mais folhas do snapshot.
+
+    Não é uma busca por texto: aplica a mesma exclusão, label efetivo e
+    consolidação multi-câmera de ``montar_snapshot_chat`` antes de filtrar.
+    Assim a lista nunca apresenta exemplos parecidos como se formassem o KPI.
+    """
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    wanted = {x.strip() for x in labels.split(",") if x.strip()}
+    if not wanted:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Informe ao menos um rótulo.")
+
+    campos = (
+        "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
+        "descricao_bruta, tempo_inicio_s, tempo_fim_s, duracao_s, confianca, "
+        "validado_humano, validacao_correto, origem_validacao, criado_em, validado_em, "
+        "principal, papel_pessoa, categoria_lean, categoria_lean_origem"
+    )
+    eventos = varrer(sb, "eventos", campos, empresa=user.empresa, processo=nome)
+    base = [e for e in eventos if e.get("validacao_correto") is not False and e.get("principal") is not False]
+    # As duas chamadas abaixo são as mesmas do snapshot que gera
+    # distribuicao_comportamentos. Mantê-las aqui é o contrato de auditabilidade.
+    pl._anexar_meta_video(base, sb)
+    constituintes = [e for e in pl.consolidar_eventos_para_metricas(base)
+                      if pl._label_efetivo(e) in wanted]
+    constituintes.sort(key=lambda e: (
+        -max(0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0)),
+        str(e.get("criado_em") or ""),
+    ))
+    total = len(constituintes)
+    inicio = (page - 1) * page_size
+    itens = constituintes[inicio:inicio + page_size]
+
+    vids = {e.get("video_id") for e in itens if e.get("video_id")}
+    videos = {}
+    if vids:
+        r = sb.table("videos").select("id, nome, cam_id, gravado_em").in_("id", list(vids)).execute()
+        videos = {v["id"]: v for v in (r.data or [])}
+        segs = (sb.table("segmentos").select("id, video_id, cam_id, gravado_em, nome")
+                .eq("empresa", user.empresa).in_("video_id", list(vids))
+                .eq("status", "concluido").execute().data) or []
+        segs_por_video: dict[str, list[dict]] = {}
+        for s in segs:
+            segs_por_video.setdefault(s.get("video_id"), []).append(s)
+    else:
+        segs_por_video = {}
+    for e in itens:
+        v = videos.get(e.get("video_id"), {})
+        e["label_efetivo"] = pl._label_efetivo(e)
+        e["duracao_s"] = max(0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
+        e["video_nome"] = v.get("nome", "—")
+        e["cam_id"] = v.get("cam_id")
+        e["status_efetivo"] = _status_efetivo(e)
+        pares = [s for s in segs_por_video.get(e.get("video_id"), [])
+                 if s.get("cam_id") and s.get("cam_id") != e.get("cam_id")]
+        if pares:
+            e["segundo_angulo"] = {"segmento_id": pares[0]["id"], "cam_id": pares[0].get("cam_id"),
+                                    "offset_s": _offset_video_segmento(v, pares[0])}
+    return {"itens": itens, "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/processos/{processo_id}/evidencias/presenca")
+def evidencias_de_presenca(
+    processo_id: str,
+    estado: str = Query("posto_vazio"),
+    janela_dias: int = Query(7, ge=1, le=30),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(8, ge=1, le=50),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fatias que compõem o KPI comercial de presença, na mesma janela.
+
+    A resposta é deliberadamente de *leituras*, não de labels: o KPI resolve
+    conflitos e sobreposições em uma linha do tempo exclusiva antes de somar.
+    """
+    if estado != "posto_vazio":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Estado de presença não suportado.")
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    campos = (
+        "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
+        "tempo_inicio_s, tempo_fim_s, validacao_correto, principal, papel_pessoa, "
+        "maos_maquina, orientacao, trabalho, descricao_bruta, bbox_stats, "
+        "categoria_lean, categoria_lean_origem, n_amostras, versao_instrumento"
+    )
+    evs = varrer(sb, "eventos", campos, empresa=user.empresa, processo=nome)
+    videos = varrer(sb, "videos", "id, nome, cam_id, gravado_em, processado_em",
+                    empresa=user.empresa, processo=nome)
+    _tz, _ = fuso_do_processo(sb, user.empresa, nome)
+    meta_video: dict[str, tuple[datetime, str | None]] = {}
+    for v in videos:
+        dt = _inicio_video_dt(v)
+        if v.get("id") and dt is not None:
+            dt = dt.replace(tzinfo=_tz) if dt.tzinfo is None else dt.astimezone(_tz)
+            meta_video[str(v["id"])] = (dt, v.get("cam_id"))
+    leituras: list[dict] = []
+    for e in evs:
+        # Mesmo recorte histórico do dashboard: versões antigas só entram se a
+        # configuração da vitrine autorizá-las, e apenas para presença.
+        legado = int(e.get("versao_instrumento") or 0) < 9
+        if legado and not _HISTORICO_PRESENCA:
+            continue
+        meta = meta_video.get(str(e.get("video_id")))
+        if not meta:
+            continue
+        dt, cam = meta
+        leitura = dict(e)
+        if legado:
+            leitura.update({"maos_maquina": None, "orientacao": None, "trabalho": None})
+        leitura.update({"_capturado_em": dt, "_dia": dt.date().isoformat(), "_cam_id": cam})
+        leituras.append(leitura)
+    ultimo = max((e["_capturado_em"] for e in leituras), default=None)
+    inicio_janela = ultimo - timedelta(days=janela_dias) if ultimo else None
+    periodo = [e for e in leituras if inicio_janela is None or e["_capturado_em"] >= inicio_janela]
+
+    # Mesma configuração de orientação que o dashboard entrega a
+    # agregar_produtividade. Ela participa da resolução de conflitos na linha
+    # do tempo, portanto não pode ser omitida no read-model.
+    frentes: dict[str, str] = {}
+    orientacao_liberada = os.environ.get("KV_ORIENTACAO_VERIFICADA", "off").strip().lower() in {"1", "true", "on", "yes"}
+    if orientacao_liberada:
+        try:
+            for z in varrer(sb, "zonas_camera", "cam_id, papel, frente_maquina, ativo", empresa=user.empresa, processo=nome):
+                if z.get("ativo") is not False and z.get("papel") == "maquina" and z.get("cam_id") and z.get("frente_maquina"):
+                    frentes[str(z["cam_id"])] = str(z["frente_maquina"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[evidencias/presenca] configuração por câmera indisponível: %s", exc)
+
+    # É literalmente a mesma linha do tempo usada por agregar_produtividade.
+    # O KPI "posto vazio" inclui estado vazio e operador fora do posto.
+    estados_vazios = {
+        produtividade.EST_POSTO_VAZIO,
+        produtividade.EST_OPERADOR_FORA,
+        produtividade.EST_OPERADOR_FORA_PRODUTIVO,
+        produtividade.EST_OPERADOR_FORA_IMPRODUTIVO,
+    }
+    observacoes = []
+    for ini, fim, est, motivo, rep in produtividade._linha_do_tempo(periodo, frentes):
+        if est not in estados_vazios:
+            continue
+        item = dict(rep)
+        item.update({
+            "id": rep.get("id"), "evento_id": rep.get("id"),
+            "tempo_inicio_s": ini, "tempo_fim_s": fim, "duracao_s": fim - ini,
+            "estado_presenca": est, "motivo_presenca": motivo,
+            "label_efetivo": rep.get("label_corrigido") or rep.get("comportamento_label") or "posto_vazio",
+        })
+        observacoes.append(item)
+    observacoes.sort(key=lambda e: (-float(e["duracao_s"]), str(e.get("_capturado_em") or "")))
+    total = len(observacoes)
+    itens = observacoes[(page - 1) * page_size:page * page_size]
+
+    vids = {e.get("video_id") for e in itens if e.get("video_id")}
+    meta_itens = {v["id"]: v for v in videos if v.get("id") in vids}
+    if vids:
+        segs = (sb.table("segmentos").select("id, video_id, cam_id, gravado_em, nome")
+                .eq("empresa", user.empresa).in_("video_id", list(vids))
+                .eq("status", "concluido").execute().data) or []
+        por_video: dict[str, list[dict]] = {}
+        for s in segs:
+            por_video.setdefault(s.get("video_id"), []).append(s)
+    else:
+        por_video = {}
+    for e in itens:
+        v = meta_itens.get(e.get("video_id"), {})
+        e["video_nome"] = v.get("nome", "—")
+        e["cam_id"] = v.get("cam_id")
+        pares = [s for s in por_video.get(e.get("video_id"), [])
+                 if s.get("cam_id") and s.get("cam_id") != e.get("cam_id")]
+        if pares:
+            e["segundo_angulo"] = {"segmento_id": pares[0]["id"], "cam_id": pares[0].get("cam_id"),
+                                    "offset_s": _offset_video_segmento(v, pares[0])}
+    return {"itens": itens, "total": total, "page": page, "page_size": page_size,
+            "janela_dias": janela_dias, "tipo": "leituras"}
 
 
 @app.get("/eventos/{evento_id}/frames")

@@ -6,6 +6,7 @@ import type {
   EventoPendente,
   EventosTabelaParams,
   EventosTabelaResposta,
+  EvidenciasResposta,
   FilaResposta,
   FilaGlobalResposta,
   JobStatus,
@@ -214,6 +215,10 @@ export const api = {
       const sufixo = qs.toString() ? `?${qs.toString()}` : "";
       return req<EventosTabelaResposta>(`/processos/${processoId}/eventos/tabela${sufixo}`);
     },
+    evidencias: (processoId: string, labels: string[], page = 1, pageSize = 8) =>
+      req<EvidenciasResposta>(`/processos/${processoId}/evidencias?labels=${encodeURIComponent(labels.join(","))}&page=${page}&page_size=${pageSize}`),
+    evidenciasPresenca: (processoId: string, janelaDias: number, page = 1, pageSize = 8) =>
+      req<EvidenciasResposta>(`/processos/${processoId}/evidencias/presenca?estado=posto_vazio&janela_dias=${janelaDias}&page=${page}&page_size=${pageSize}`),
   },
   // Fase 102 — a precisão MEDIDA, por amostragem cega.
   amostragem: {
