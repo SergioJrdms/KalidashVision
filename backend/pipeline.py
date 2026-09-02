@@ -890,6 +890,10 @@ def _anexar_segundo_angulo(
                 }, str(cam_id or "cam2"))
 
     try:
+        # Vídeo secundário fornecido exige voto CAM2 na regra de cor. Enquanto
+        # não houver frame/candidato utilizável, ele é uma abstenção explícita.
+        for am in amostras:
+            am.evidencia_cor_cam2 = {"estado_cam2": "indisponivel"}
         cap = cv2.VideoCapture(video_path_secundario)
         if not cap.isOpened():
             log.warning(f"2º ângulo: não abriu {video_path_secundario}")
@@ -930,6 +934,7 @@ def _anexar_segundo_angulo(
             # p/ o RESGATE pela lateral (a cam2 vê o operador que a cam1 não vê).
             am.img_b64_secundario = frame_para_base64(frame)
             n += 1
+            am.evidencia_cor_cam2 = {"estado_cam2": "sem_medida"}
             # Confirmação do operador pela cam2 (Fase 28) — barata: predict
             # (sem tracker/estado) só nos slots de amostra, imgsz pequeno.
             if posto_sec is None:
@@ -1030,6 +1035,24 @@ def _anexar_segundo_angulo(
                         n_cena2 += 1
                         if no_posto2:
                             n_posto2 += 1
+                            # Cor é apenas evidência deste candidato que JÁ
+                            # passou pela geometria. Reaproveita frame, bbox e
+                            # pose da inferência CAM2 acima; não chama YOLO.
+                            try:
+                                pessoa2["roupa_superior"] = avaliar_roupa_superior(
+                                    frame,
+                                    pessoa2.get("bbox"),
+                                    kpts=pessoa2.get("kpts"),
+                                    exigir_pose=True,
+                                )
+                            except Exception:  # cor nunca altera a presença CAM2
+                                pessoa2["roupa_superior"] = {
+                                    "cor_superior": "incerto", "confianca_cor": 0.0,
+                                    "motivo_cor": "medida_indisponivel",
+                                }
+                            pessoa2["rotulo_interlocutor_cam2"] = (
+                                f"C2P{len(candidatos_posto2) + 1}"
+                            )
                             bx1, by1, bx2, by2 = pessoa2["bbox"]
                             area2 = max(0, bx2 - bx1) * max(0, by2 - by1)
                             maos_pessoa = bool(
@@ -1075,6 +1098,49 @@ def _anexar_segundo_angulo(
                                 candidatos_posto2, key=lambda c: c[1]
                             )
                             bbox_no_posto = (pessoa2["bbox"], area2)
+                    am.roupas_superiores_cam2 = [
+                        candidato[0].get("roupa_superior")
+                        for candidato in candidatos_posto2
+                        if isinstance(candidato[0].get("roupa_superior"), dict)
+                    ]
+                    candidatos_cor_cam2 = [
+                        {
+                            "rotulo": candidato[0]["rotulo_interlocutor_cam2"],
+                            "roupa_superior": candidato[0]["roupa_superior"],
+                        }
+                        for candidato in candidatos_posto2
+                        if isinstance(candidato[0].get("roupa_superior"), dict)
+                    ]
+                    if candidatos_cor_cam2:
+                        try:
+                            am.img_b64_secundario_interlocutor = frame_para_base64(
+                                anotar_frame_com_ids(
+                                    frame,
+                                    [
+                                        {
+                                            "bbox": candidato[0]["bbox"],
+                                            "rotulo": candidato[0]["rotulo_interlocutor_cam2"],
+                                        }
+                                        for candidato in candidatos_posto2
+                                    ],
+                                )
+                            )
+                        except Exception:  # anotação nunca interfere na CAM2
+                            am.img_b64_secundario_interlocutor = None
+                    # O VLM só associa interlocutor a um rótulo/track CAM1.
+                    # Não há vínculo CAM2→esse rótulo: mesmo um candidato único
+                    # pode ser o operador. CAM2 participa explicitamente como
+                    # ambígua, sem inventar matching entre câmeras.
+                    tem_voto_cor_cam2 = any(
+                        medida.get("cor_superior") in {"cinza", "nao_cinza"}
+                        and float(medida.get("confianca_cor") or 0.0)
+                        >= CONFIANCA_COR_GESTOR_MIN
+                        for medida in am.roupas_superiores_cam2
+                    )
+                    am.evidencia_cor_cam2 = {
+                        "estado_cam2": "ambiguo" if tem_voto_cor_cam2 else "incerto",
+                        "candidatos": candidatos_cor_cam2,
+                    }
                     if bbox_no_posto is not None:
                         am.bbox_cam2 = bbox_no_posto[0]
                         am.dim_cam2 = (w2, h2)
@@ -3057,8 +3123,9 @@ Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índ
 - "conversa_estado" deve ser "identificada" SOMENTE quando o operador está claramente conversando e há exatamente um interlocutor marcado; "incerta" quando a conversa é visível mas não dá para associar com segurança a uma única pessoa; "ausente" quando não há conversa;
 - "interlocutor" é obrigatório somente em conversa "identificada" e deve ser o rótulo da OUTRA pessoa, nunca o operador. Em conversa incerta/ausente deve ser null. Com duas pessoas possíveis, NÃO escolha arbitrariamente: use "incerta".
 - NÃO julgue cor de roupa nem diga quem é gestor. O sistema mede a roupa superior separadamente; você apenas associa a conversa à pessoa certa.
+- Quando a última imagem lateral tiver rótulos C2P1, C2P2..., "interlocutor_cam2" aponta SOMENTE o C2Px visualmente correspondente ao "interlocutor" da imagem principal indicada. Não altere P1/P2, não decida atividade por C2Px e não use cor. Sem associação inequívoca, use null.
 
-{{"resumo": "TRÊS A CINCO FRASES contando a sequência em ordem, sem concluir uma ação. É o campo mais longo desta resposta.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "observando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno", "conversa_estado": "ausente", "interlocutor": null}}, {{"i": 1, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "conversando ao lado do torno", "P2": "conversando com o operador"}}, "imovel": true, "trabalho": false, "motivo": "conversa_ou_celular", "conversa_estado": "identificada", "interlocutor": "P2"}}]}}"""
+{{"resumo": "TRÊS A CINCO FRASES contando a sequência em ordem, sem concluir uma ação. É o campo mais longo desta resposta.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "observando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno", "conversa_estado": "ausente", "interlocutor": null, "interlocutor_cam2": null}}, {{"i": 1, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "conversando ao lado do torno", "P2": "conversando com o operador"}}, "imovel": true, "trabalho": false, "motivo": "conversa_ou_celular", "conversa_estado": "identificada", "interlocutor": "P2", "interlocutor_cam2": "C2P2"}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA_CAM2_V8 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
@@ -3781,6 +3848,9 @@ class Amostra:
     img_b64: str
     pessoas: list
     img_b64_secundario: str | None = None   # 2º ângulo (cam2) no mesmo instante (Fase 6)
+    # Cópia CAM2 anotada somente para a associação visual P↔C2P da conversa.
+    # Não entra em presença, tracker, identidade física ou persistência.
+    img_b64_secundario_interlocutor: str | None = None
     op_cam2: bool | None = None             # Fase 28: operador visto no posto pela cam2
     maos_cam2: bool = False                  # Fase 44: punho na zona 'maquina' pela cam2
     # Fase 91 — a cam2 passa a CONTAR, não só a dizer sim/não. `op_cam2` é um
@@ -3798,6 +3868,11 @@ class Amostra:
     # frame, sem o qual a caixa não é comparável entre câmeras/resoluções.
     bbox_cam2: tuple | None = None
     dim_cam2: tuple | None = None
+    # Medidas HSV dos candidatos CAM2 que já passaram pela geometria do posto.
+    # São transitórias; com CAM2 fornecida, a ausência de associação estrutural
+    # vira abstenção canônica, nunca fallback silencioso para CAM1.
+    roupas_superiores_cam2: list = field(default_factory=list)
+    evidencia_cor_cam2: dict | None = None
     # Dimensões do frame da cam1 (largura, altura). Uma altura de bbox em pixels
     # não significa nada sem a altura do quadro: 300px num frame de 480 e num de
     # 1080 são pessoas de tamanhos aparentes completamente diferentes.
@@ -5617,6 +5692,18 @@ def _cam2_ajuda(grupo: list) -> bool:
     return False
 
 
+def _cam2_para_interlocutor(usados: list[Amostra]) -> Amostra | None:
+    """Escolhe um frame já sincronizado que pode ter interlocutor CAM1."""
+    return next(
+        (
+            am for am in usados
+            if len(am.pessoas) > 1
+            and getattr(am, "img_b64_secundario_interlocutor", None)
+        ),
+        None,
+    )
+
+
 def _contexto_zonas(amostra: Amostra, modo_op: bool,
                     frente_maquina: str | None = None,
                     movimento: dict | None = None,
@@ -5852,6 +5939,69 @@ def _resumo_da_sequencia(bruto: dict) -> str | None:
     return montada
 
 
+def _fundir_evidencias_roupa_superior(
+    roupa_cam1: dict | None,
+    roupa_cam2: dict | None,
+    *,
+    cam2_obrigatoria: bool = False,
+    estado_cam2: str | None = None,
+) -> dict:
+    """Funde somente votos válidos de cor, sem escolher entre câmeras."""
+    def _voto(roupa: dict | None) -> dict | None:
+        if not isinstance(roupa, dict):
+            return None
+        cor = roupa.get("cor_superior")
+        try:
+            confianca = float(roupa.get("confianca_cor") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if cor in {"cinza", "nao_cinza"} and confianca >= CONFIANCA_COR_GESTOR_MIN:
+            return {"cor_superior": cor, "confianca_cor": confianca}
+        return None
+
+    voto_cam1, voto_cam2 = _voto(roupa_cam1), _voto(roupa_cam2)
+    estado_cam2 = estado_cam2 or ("valida" if voto_cam2 else "ausente")
+    auditoria = {"cam1": voto_cam1, "cam2": voto_cam2, "estado_cam2": estado_cam2}
+    if cam2_obrigatoria and estado_cam2 != "valida":
+        return {
+            "cor_superior": "incerto", "confianca_cor": 0.0,
+            "motivo": f"cam2_{estado_cam2}",
+            "evidencia_cor_cameras": auditoria,
+        }
+    if cam2_obrigatoria and (not voto_cam1 or not voto_cam2):
+        return {
+            "cor_superior": "incerto", "confianca_cor": 0.0,
+            "motivo": "evidencia_dual_insuficiente",
+            "evidencia_cor_cameras": auditoria,
+        }
+    if voto_cam1 and voto_cam2:
+        if voto_cam1["cor_superior"] != voto_cam2["cor_superior"]:
+            return {
+                "cor_superior": "incerto", "confianca_cor": 0.0,
+                "motivo": "conflito", "evidencia_cor_cameras": auditoria,
+            }
+        return {
+            "cor_superior": voto_cam1["cor_superior"],
+            "confianca_cor": min(voto_cam1["confianca_cor"], voto_cam2["confianca_cor"]),
+            "motivo": "concordancia", "evidencia_cor_cameras": auditoria,
+        }
+    if voto_cam1 or voto_cam2:
+        voto = voto_cam1 or voto_cam2
+        return {
+            "cor_superior": voto["cor_superior"], "confianca_cor": voto["confianca_cor"],
+            "motivo": "somente_cam1" if voto_cam1 else "somente_cam2",
+            "evidencia_cor_cameras": auditoria,
+        }
+    try:
+        confianca_cam1 = float((roupa_cam1 or {}).get("confianca_cor") or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        confianca_cam1 = 0.0
+    return {
+        "cor_superior": "incerto", "confianca_cor": confianca_cam1,
+        "motivo": "sem_evidencia", "evidencia_cor_cameras": auditoria,
+    }
+
+
 def _evidencia_conversa_do_trecho(
     trecho: dict,
     amostra: Amostra,
@@ -5904,6 +6054,31 @@ def _evidencia_conversa_do_trecho(
             "motivo_cor": "medida_ausente",
         }
 
+    # A mesma resposta VLM pode ligar o rótulo CAM1 do interlocutor a um C2Px
+    # desenhado no frame lateral. Sem esse vínculo visual, dual-camera abstém.
+    evidencia_cam2 = getattr(amostra, "evidencia_cor_cam2", None)
+    interlocutor_cam2 = trecho.get("interlocutor_cam2")
+    roupa_cam2 = None
+    estado_cam2 = (evidencia_cam2 or {}).get("estado_cam2")
+    if isinstance(evidencia_cam2, dict):
+        candidatos_cam2 = evidencia_cam2.get("candidatos") or []
+        selecionados = [
+            candidato
+            for candidato in candidatos_cam2
+            if isinstance(candidato, dict)
+            and candidato.get("rotulo") == interlocutor_cam2
+        ]
+        if isinstance(interlocutor_cam2, str) and len(selecionados) == 1:
+            roupa_cam2 = selecionados[0].get("roupa_superior")
+            estado_cam2 = "valida"
+        else:
+            estado_cam2 = "ambiguo"
+    fusao = _fundir_evidencias_roupa_superior(
+        roupa,
+        roupa_cam2,
+        cam2_obrigatoria=isinstance(evidencia_cam2, dict),
+        estado_cam2=estado_cam2,
+    )
     evidencia = {
         **base,
         "interlocutor_track_id": int(interlocutor_tid),
@@ -5917,12 +6092,16 @@ def _evidencia_conversa_do_trecho(
             )
             if roupa.get(k) is not None
         },
+        "evidencia_cor_cameras": fusao["evidencia_cor_cameras"],
+        "motivo_fusao_cor": fusao["motivo"],
     }
-    cor = evidencia.get("cor_superior")
-    try:
-        confianca = float(evidencia.get("confianca_cor") or 0.0)
-    except (TypeError, ValueError):
-        confianca = 0.0
+    if isinstance(evidencia_cam2, dict) and evidencia_cam2.get("candidatos"):
+        evidencia["evidencia_cor_cameras"]["cam2_candidatos"] = (
+            evidencia_cam2["candidatos"]
+        )
+        evidencia["interlocutor_cam2"] = interlocutor_cam2
+    cor = fusao["cor_superior"]
+    confianca = fusao["confianca_cor"]
     if cor == "cinza" and confianca >= CONFIANCA_COR_GESTOR_MIN:
         evidencia["tipo"] = TIPO_INTERLOCUTOR_GESTOR
     elif cor == "nao_cinza" and confianca >= CONFIANCA_COR_GESTOR_MIN:
@@ -5991,13 +6170,10 @@ def _analisar_sequencia_vlm(
     e para isso um instante resolve. Mandá-la em todos os instantes dobraria as
     imagens e comeria o ganho de custo.
 
-    Fase 90 — E SÓ ENTRA QUANDO HÁ O QUE DESAMBIGUAR. Ela custa ~8% das
-    imagens da chamada e ia em TODO minuto, inclusive nos em que a cam1 vê o
-    operador inteiro e nada está oculto. A lateral existe para responder "o
-    que a máquina esconde"; sem oclusão ela não responde nada e é imagem paga
-    à toa. Critério: alguém sem pose completa (corpo cortado/ocluso), ou
-    operador ausente da cam1 no minuto, ou mãos na máquina pela cam2 — os três
-    casos em que a cam1 sozinha erra.
+    Fase 90 mantém a CAM2 para atividade somente quando há o que desambiguar.
+    A única exceção é a cópia lateral C2Px para conversa/cor, quando algum
+    frame já tem dois candidatos CAM1 e candidatos CAM2 anotados; continua
+    sendo a mesma chamada e não muda ação, presença ou identidade física.
     """
     if not grupo:
         return {}
@@ -6007,16 +6183,34 @@ def _analisar_sequencia_vlm(
         return {}
 
     meio = usados[len(usados) // 2]
-    img_cam2 = meio.img_b64_secundario if _cam2_ajuda(grupo) else None
+    cam2_interlocutor = _cam2_para_interlocutor(usados)
+    # A decisão da atividade mantém exatamente o critério Fase 90. A exceção
+    # abaixo só transporta a lateral já anotada para associar interlocutor/cor.
+    cam2_atividade = meio if _cam2_ajuda(grupo) else None
+    cam2_escolhida = cam2_interlocutor or cam2_atividade
+    img_cam2 = (
+        getattr(cam2_escolhida, "img_b64_secundario_interlocutor", None)
+        if cam2_escolhida is cam2_interlocutor
+        else getattr(cam2_escolhida, "img_b64_secundario", None)
+    )
     linha_cam2 = ""
     if img_cam2:
         imgs.append(img_cam2)
-        linha_cam2 = (
-            f"\nA ÚLTIMA imagem ({len(imgs)}ª) é da CÂMERA LATERAL, tirada no instante "
-            "do meio da sequência — use-a para ver o que a máquina esconde na "
-            "câmera principal. Ela NÃO é um instante a mais: não gere entrada "
-            "para ela."
-        )
+        if cam2_escolhida is cam2_interlocutor:
+            indice_cam2 = usados.index(cam2_escolhida)
+            linha_cam2 = (
+                f"\nA ÚLTIMA imagem ({len(imgs)}ª) é da CÂMERA LATERAL sincronizada "
+                f"com a IMAGEM {indice_cam2} e traz C2P1, C2P2... para associar SOMENTE "
+                "o interlocutor. Ela NÃO é um instante a mais: não gere entrada para ela; "
+                f"preencha interlocutor_cam2 somente no trecho i={indice_cam2}."
+            )
+        else:
+            linha_cam2 = (
+                f"\nA ÚLTIMA imagem ({len(imgs)}ª) é da CÂMERA LATERAL, tirada no instante "
+                "do meio da sequência — use-a para ver o que a máquina esconde na "
+                "câmera principal. Ela NÃO é um instante a mais: não gere entrada "
+                "para ela."
+            )
 
     modo_op = any(p.get("papel") for a in usados for p in a.pessoas)
     tem_operador = any(p.get("papel") == "operador" for a in usados for p in a.pessoas)
