@@ -12,6 +12,7 @@ import { Btn, Card, Icon, Prism, Help, PrioBadge, MaturityMeter, LeanBar, Donut,
 import { leituraDoPosto, nomeHumano } from "../design/rotulos";
 import type { Go } from "../design/Shell";
 import { ArvoreProdutividade } from "./Arvore";
+import { EventEvidenceDrawer } from "../components/EventEvidenceDrawer";
 import type { AcaoSugestao, DistribuicaoComportamento, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso, SugestaoPratica } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
@@ -21,6 +22,7 @@ const COMP_VISIVEL_PADRAO = 5;
 export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const isMobile = useIsMobile();
   const [janela, setJanela] = useState<1 | 7 | 30>(7);
+  const [evidenciaPresenca, setEvidenciaPresenca] = useState(false);
   const q = useQuery({
     queryKey: ["dashboard", proc.id, janela],
     queryFn: () => api.processos.dashboard(proc.id, janela),
@@ -135,7 +137,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,minmax(0,1fr))", gap: 14 }}>
         <KpiComercial titulo="Produtividade" valor={p.produtividade_pct} detalhe="entre leituras com operador identificado e decisão válida" cor="#187a43" icone="gauge" />
         <KpiComercial titulo="Operador no posto" valor={p.presenca_pct} detalhe="entre as leituras de presença válidas" cor="var(--accent)" icone="user-check" />
-        <KpiComercial titulo="Posto vazio" valor={p.posto_vazio_pct} detalhe="entre as leituras de presença válidas" cor="#b74a3a" icone="user-x" />
+        <KpiComercial titulo="Posto vazio" valor={p.posto_vazio_pct} detalhe="entre as leituras de presença válidas · clique para conferir" cor="#b74a3a" icone="user-x" onClick={() => setEvidenciaPresenca(true)} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.15fr .85fr", gap: 14, alignItems: "stretch" }}>
@@ -178,6 +180,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
         proc={proc}
         distribuicao={q.data.snapshot.distribuicao_comportamentos}
       />
+      {evidenciaPresenca && <EventEvidenceDrawer processoId={proc.id} titulo="Posto vazio" categoria="Presença no posto" janelaPresenca={janela} onClose={() => setEvidenciaPresenca(false)} />}
     </div>
   );
 }
@@ -245,9 +248,9 @@ function leituraAtual(estado: NonNullable<DetMock["produtividade"]>["estado_atua
   return { titulo: "Leitura inconclusiva", detalhe: "Não foi possível identificar o operador com segurança.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" };
 }
 
-function KpiComercial({ titulo, valor, detalhe, cor, icone }: { titulo: string; valor: number | null; detalhe: string; cor: string; icone: IconeNome }) {
+function KpiComercial({ titulo, valor, detalhe, cor, icone, onClick }: { titulo: string; valor: number | null; detalhe: string; cor: string; icone: IconeNome; onClick?: () => void }) {
   return (
-    <Card style={{ padding: 20 }}>
+    <Card onClick={onClick} style={{ padding: 20, cursor: onClick ? "pointer" : undefined }}>
       <div className="row" style={{ justifyContent: "space-between", gap: 12 }}>
         <span style={{ color: "var(--muted)", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em" }}>{titulo}</span>
         <Icon name={icone} size={18} color={cor} />
@@ -479,7 +482,7 @@ function OperacaoEmGraficos({ det, iq, processoId }: { det: DetMock; iq: Insight
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 380px),1fr))", gap: 16 }}>
         <EvolucaoPanel processoId={processoId} />
         <RitmoDoDia iq={iq} />
-        <ParetoPanel det={det} />
+        <ParetoPanel det={det} processoId={processoId} />
         <ComposicaoPanel det={det} />
         <FluxoPanel det={det} />
         <Aprendizado det={det} />
@@ -1279,8 +1282,9 @@ function ComposicaoPanel({ det }: { det: DetMock }) {
   );
 }
 
-function ParetoPanel({ det }: { det: DetMock }) {
+function ParetoPanel({ det, processoId }: { det: DetMock; processoId: string }) {
   const data = det.pareto;
+  const [evidencia, setEvidencia] = useState<string | null>(null);
   const W = 460, H = 220, padL = 8, padR = 8, padT = 14, padB = 44;
   const bw = (W - padL - padR) / Math.max(1, data.length);
   const x = (i: number) => padL + i * bw;
@@ -1295,13 +1299,14 @@ function ParetoPanel({ det }: { det: DetMock }) {
           {[0, 25, 50, 75, 100].map((g) => <line key={g} x1={padL} x2={W - padR} y1={yT(g)} y2={yT(g)} stroke="var(--line-2)" />)}
           {data.map((d, i) => {
             const top = yT(d.pct), h = (H - padT - padB) - (top - padT);
-            return <rect key={i} x={x(i) + 3} y={top} width={bw - 6} height={Math.max(2, h)} rx="4" fill={leanCor(d.cat)} opacity={0.92} />;
+            return <rect key={i} x={x(i) + 3} y={top} width={bw - 6} height={Math.max(2, h)} rx="4" fill={leanCor(d.cat)} opacity={0.92} style={{ cursor: "pointer" }} onClick={() => setEvidencia(d.nome)} />;
           })}
           <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="2.2" />
           {data.map((d, i) => <circle key={i} cx={x(i) + bw / 2} cy={yT(d.acc)} r="3" fill="var(--accent)" />)}
           {data.map((d, i) => <text key={i} x={x(i) + bw / 2} y={H - padB + 14} fontSize="8.5" textAnchor="end" transform={`rotate(-32 ${x(i) + bw / 2} ${H - padB + 14})`} fill="var(--muted)">{nomeHumano(d.nome)}</text>)}
         </svg>
       )}
+      {evidencia && <EventEvidenceDrawer processoId={processoId} labels={[evidencia]} titulo={evidencia} categoria="Pareto do tempo" onClose={() => setEvidencia(null)} />}
     </Card>
   );
 }
@@ -1338,6 +1343,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
   const qc = useQueryClient();
   const [edit, setEdit] = useState<string | null>(null);
   const [verTodos, setVerTodos] = useState(false);
+  const [evidencia, setEvidencia] = useState<string | null>(null);
   // Reclassifica pelo RÓTULO, não pelo id do catálogo: rótulo que ainda não
   // entrou em `comportamentos` vinha sem id, e o clique morria em silêncio —
   // justamente nos rótulos sem linha no catálogo, que era onde o cinza caía.
@@ -1364,7 +1370,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
           return (
             <li key={d.id}>
               <div className="row gap2" style={{ marginBottom: 4 }}>
-                <span className="truncate" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", maxWidth: 180 }} title={d.nome}>{nomeHumano(d.nome)}</span>
+                <button onClick={() => setEvidencia(d.nome)} className="truncate" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", maxWidth: 180, border: 0, padding: 0, background: "transparent", cursor: "pointer", textAlign: "left" }} title="Ver eventos que compõem este número">{nomeHumano(d.nome)}</button>
                 {editing ? (
                   <span className="row gap1" style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 8, padding: "2px 4px", boxShadow: "var(--glow)" }}>
                     {(["va", "desp"] as LeanShort[]).map((c) => <button key={c} disabled={setCat.isPending} onClick={() => setCat.mutate({ label: d.nome, cat: c })} title={leanLabel(c)} style={{ width: 18, height: 18, borderRadius: 5, border: d.cat === c ? "2px solid var(--ink)" : "none", background: leanCor(c), opacity: setCat.isPending ? 0.5 : 1 }} />)}
@@ -1392,6 +1398,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
           </button>
         </div>
       )}
+      {evidencia && <EventEvidenceDrawer processoId={processoId} labels={[evidencia]} titulo={evidencia} categoria="Tempo por comportamento" onClose={() => setEvidencia(null)} />}
     </Card>
   );
 }

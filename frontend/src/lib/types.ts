@@ -424,6 +424,15 @@ export interface EventosTabelaResposta {
   page_size: number;
 }
 
+/** Evento já consolidado pela mesma regra do snapshot que originou o número. */
+export interface EvidenciaEvento extends EventoTabela {}
+export interface EvidenciasResposta {
+  itens: EvidenciaEvento[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export type StatusSegmento =
   | "pendente"
   | "enfileirado"

@@ -33,6 +33,7 @@ import { leanCor } from "../design/helpers";
 import { nomeHumano, familiaLabel } from "../design/rotulos";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { CategoriaLean, DistribuicaoComportamento } from "../lib/types";
+import { EventEvidenceDrawer } from "../components/EventEvidenceDrawer";
 
 type Ramo = "va" | "desp" | "sem";
 
@@ -141,6 +142,7 @@ export function ArvoreProdutividade({
   const qc = useQueryClient();
   const [salvando, setSalvando] = useState<string | null>(null);
   const [ramo, setRamo] = useState<Ramo>("va");
+  const [evidencia, setEvidencia] = useState<Galho | null>(null);
 
   const classificar = useMutation({
     mutationFn: ({ label, cat }: { label: string; cat: CategoriaLean }) =>
@@ -328,23 +330,27 @@ export function ArvoreProdutividade({
                 // outras do lado errado, e ele nem saberia que existem.
                 onMover={(cat) => d.labels.forEach(
                   (l) => classificar.mutate({ label: l, cat }))}
+                onEvidencia={() => setEvidencia(d)}
               />
             ))}
             {naCauda.length > 0 && (
               <Cauda itens={naCauda} cor={atual.cor} ramo={ramo}
                      salvando={salvando}
+                     onEvidencia={(d) => setEvidencia(d)}
                      onMover={(labels, cat) => labels.forEach(
                        (l) => classificar.mutate({ label: l, cat }))} />
             )}
           </div>
         )}
       </Card>
+      {evidencia && <EventEvidenceDrawer processoId={proc.id} labels={evidencia.labels} titulo={evidencia.familia}
+        categoria={RAMOS[ramo].titulo} onClose={() => setEvidencia(null)} />}
     </div>
   );
 }
 
 function Folha({
-  d, cor, ramo, ultima, salvando, onMover,
+  d, cor, ramo, ultima, salvando, onMover, onEvidencia,
 }: {
   d: Galho;
   cor: string;
@@ -352,6 +358,7 @@ function Folha({
   ultima: boolean;
   salvando: boolean;
   onMover: (cat: CategoriaLean) => void;
+  onEvidencia: () => void;
 }) {
   const humano = d.categoria_lean_origem === "humano";
   // O destino é sempre o OUTRO lado. Em "sem classificação" há dois destinos,
@@ -390,9 +397,9 @@ function Folha({
           border: "1px solid var(--line)",
         }}
       >
-        <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ink)" }}>
+        <button onClick={onEvidencia} title="Ver os eventos que compõem este número" style={{ border: 0, padding: 0, background: "transparent", cursor: "pointer", textAlign: "left", color: "var(--ink)", fontSize: 14, fontWeight: 600 }}>
           {nomeHumano(d.familia)}
-        </span>
+        </button>
         {/* ⭐ A fatia DESTE LADO primeiro — é a pergunta da tela. A do turno
             continua ao lado, menor: sem ela o leitor perderia a noção de
             tamanho real e "45% do produtivo" pareceria 45% do dia. */}
@@ -413,7 +420,7 @@ function Folha({
         {destinos.map((t) => (
           <button
             key={t.cat}
-            onClick={() => onMover(t.cat)}
+            onClick={(e) => { e.stopPropagation(); onMover(t.cat); }}
             disabled={salvando}
             title={d.labels.length > 1
               ? `Mover "${nomeHumano(d.familia)}" (${d.labels.length} variantes) para ${t.rot.toLowerCase()}`
@@ -450,9 +457,10 @@ function Folha({
 // continua classificável dentro. Esconder a cauda seria trocar um problema de
 // leitura por um problema de honestidade.
 // ═══════════════════════════════════════════════════════════════════════
-function Cauda({ itens, cor, ramo, salvando, onMover }: {
+function Cauda({ itens, cor, ramo, salvando, onMover, onEvidencia }: {
   itens: Galho[]; cor: string; ramo: Ramo; salvando: string | null;
   onMover: (labels: string[], cat: CategoriaLean) => void;
+  onEvidencia: (item: Galho) => void;
 }) {
   const [aberta, setAberta] = useState(false);
   const somaRamo = itens.reduce((t, d) => t + d.pct_ramo, 0);
@@ -497,6 +505,7 @@ function Cauda({ itens, cor, ramo, salvando, onMover }: {
               ultima={i === itens.length - 1}
               salvando={d.labels.includes(salvando ?? "")}
               onMover={(cat) => onMover(d.labels, cat)}
+              onEvidencia={() => onEvidencia(d)}
             />
           ))}
         </div>
