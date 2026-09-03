@@ -216,7 +216,6 @@ def seq_adversarial(track_errado=12, trabalho=True):
 
 autoridade_original = pl.AUTORIDADE_111D_CONFIGURADA
 modo_original = pl._OPERADOR_SEGMENTO_MODO
-gap_original = pl._OPERADOR_GAP_SLOTS
 imagem_original = pl._imagem_fora_identidade
 decode_original = pl._frame_b64_para_bgr
 
@@ -672,7 +671,6 @@ try:
 
     print("\n[identity_only] Identidade sem autoridade física")
     pl._OPERADOR_SEGMENTO_MODO = "identity_only"
-    pl._OPERADOR_GAP_SLOTS = 3
 
     io_cam2 = amostra(30, [], presente=True)
     io_cam2.op_cam2 = True
@@ -682,7 +680,7 @@ try:
         [io_cam2], [resultado_confirmado((9,))], [observacao(30, {})],
     )
     obs_io_cam2 = analisar([io_cam2])
-    check("T3 identity_only preserva presença física positiva da CAM2",
+    check("identity_only preserva presença física positiva da CAM2",
           r_io_cam2["motivo"] == "identidade_confirmada_sem_autoridade_fisica"
           and io_cam2.identidade_estado == "ausente"
           and io_cam2.operador_presente is True
@@ -691,12 +689,6 @@ try:
           and io_cam2.operador_ponte is True
           and not any(o.get("papel") == "posto_vazio" for o in obs_io_cam2),
           (r_io_cam2, io_cam2, obs_io_cam2))
-    check("T16 identidade ausente não cria evidência negativa nem posto vazio",
-          io_cam2.identidade_autoritativa is True
-          and io_cam2.identidade_estado == "ausente"
-          and io_cam2.operador_presente is True
-          and not any(o.get("papel") == "posto_vazio" for o in obs_io_cam2),
-          (io_cam2, obs_io_cam2))
 
     io_c6 = marcar_estado_c6(amostra(31, [], presente=False), 9)
     c6_antes = deepcopy(io_c6)
@@ -763,72 +755,20 @@ try:
         [io_dentro], [resultado_confirmado((9,))],
         [observacao(34, {9: "dentro", 12: "dentro"})],
     )
-    check("T1 identity_only funde titular e geometria CAM1 positivamente",
+    check("identity_only mantém titular e visitantes sem promover presença",
           r_io_dentro["reatribuicoes_dentro"] == 1
           and io_dentro.identidade_autoritativa is True
           and io_dentro.identidade_estado == "dentro"
           and io_dentro.identidade_track_id == 9
           and {p["track_id"]: p["papel"] for p in io_dentro.pessoas}
           == {9: "operador", 12: "visitante"}
-          and io_dentro.operador_presente is True
-          and io_dentro.operador_ponte is False,
+          and io_dentro.operador_presente is False,
           (r_io_dentro, io_dentro))
 
-    io_tid_ausente = amostra(34.1, [pessoa(15, "operador")], presente=None)
-    io_tid_ausente.identidade_autoritativa = True
-    io_tid_ausente.identidade_estado = "dentro"
-    io_tid_ausente.identidade_track_id = 10
-    check("T2 identidade dentro sem o mesmo track físico não promove presença",
-          pl._fundir_identidade_presenca_cam1(io_tid_ausente) is False
-          and io_tid_ausente.operador_presente is None
-          and io_tid_ausente.operador_ponte is False,
-          io_tid_ausente)
-
-    io_ausente_none = amostra(34.2, [], presente=None)
-    aplicar(
-        [io_ausente_none], [resultado_confirmado((9,))],
-        [observacao(34.2, {})],
-    )
-    check("T4 identidade ausente preserva operador_presente=None",
-          io_ausente_none.identidade_estado == "ausente"
-          and io_ausente_none.operador_presente is None
-          and io_ausente_none.operador_ponte is False,
-          io_ausente_none)
-
-    io_dentro_safety = amostra(34.3, [pessoa(9, "visitante")], presente=None)
-    io_dentro_safety.presenca_safety_gate = True
-    io_dentro_safety.presenca_safety_motivo = (
-        "veto_posto_vazio_por_consenso_multicamera_640"
-    )
-    aplicar(
-        [io_dentro_safety], [resultado_confirmado((9,))],
-        [observacao(34.3, {9: "dentro"})],
-    )
-    check("T6 fusão positiva não altera slot protegido por safety",
-          io_dentro_safety.identidade_estado == "dentro"
-          and io_dentro_safety.pessoas[0]["papel"] == "operador"
-          and io_dentro_safety.operador_presente is None
-          and io_dentro_safety.operador_ponte is False,
-          io_dentro_safety)
-
-    io_dentro_c6 = marcar_estado_c6(
-        amostra(34.4, [pessoa(9, "visitante")], presente=False), 9,
-    )
-    aplicar(
-        [io_dentro_c6], [resultado_confirmado((9,))],
-        [observacao(34.4, {9: "dentro"})],
-    )
-    check("T7 fusão positiva não altera slot soberano do C6",
-          io_dentro_c6.identidade_estado == "dentro"
-          and io_dentro_c6.pessoas[0]["papel"] == "operador"
-          and io_dentro_c6.operador_presente is False
-          and io_dentro_c6.operador_ponte is False
-          and io_dentro_c6.operador_fora_estado is True,
-          io_dentro_c6)
-
     io_fora_identitario = amostra(
-        34.5, [pessoa(12, "operador")], presente=False,
+        34.5, [pessoa(12, "operador")], presente=True,
     )
+    io_fora_identitario.op_cam2 = True
     aplicar(
         [io_fora_identitario], [resultado_confirmado((9,))],
         [observacao(
@@ -836,11 +776,12 @@ try:
             detalhes={9: detalhe(9, "fora"), 12: detalhe(12, "dentro")},
         )],
     )
-    check("T8 identidade fora não promove presença nem fabrica OPERADOR_FORA",
+    check("identity_only registra titular fora sem fabricar OPERADOR_FORA",
           io_fora_identitario.identidade_estado == "fora"
           and io_fora_identitario.identidade_track_id == 9
           and io_fora_identitario.pessoas[0]["papel"] == "visitante"
-          and io_fora_identitario.operador_presente is False
+          and io_fora_identitario.operador_presente is True
+          and io_fora_identitario.op_cam2 is True
           and io_fora_identitario.fora_posto == []
           and io_fora_identitario.operador_fora_estado is False,
           io_fora_identitario)
@@ -853,7 +794,7 @@ try:
     obs_io_visitante = analisar(
         [io_visitante], seq=seq_adversarial(12, True),
     )
-    check("T5 identidade ausente preserva False e mantém visitante",
+    check("identity_only mantém não vencedor como visitante sem criar vazio",
           io_visitante.identidade_estado == "ausente"
           and io_visitante.pessoas[0]["papel"] == "visitante"
           and io_visitante.operador_presente is False
@@ -863,111 +804,13 @@ try:
                       for o in obs_io_visitante),
           (io_visitante, obs_io_visitante))
 
-    ponte_io = [
-        amostra(40, [], presente=True),
-        amostra(45, [], presente=False),
-        amostra(50, [], presente=False),
-        amostra(55, [pessoa(9, "visitante")], presente=False),
-    ]
-    r_ponte_io = aplicar(
-        ponte_io, [resultado_confirmado((9,))],
-        [
-            observacao(40, {}), observacao(45, {}), observacao(50, {}),
-            observacao(55, {9: "dentro"}),
-        ],
-    )
-    check("T9 ponte pós-fusão preenche somente o buraco entre duas âncoras",
-          [a.operador_presente for a in ponte_io]
-          == [True, True, True, True]
-          and [a.operador_ponte for a in ponte_io]
-          == [False, True, True, False],
-          (r_ponte_io, ponte_io))
-
-    ponte_safety = [
-        amostra(60, [], presente=True),
-        amostra(65, [], presente=False),
-        amostra(70, [], presente=None),
-        amostra(75, [pessoa(9, "visitante")], presente=False),
-    ]
-    ponte_safety[2].presenca_safety_gate = True
-    ponte_safety[2].presenca_safety_motivo = "veto_teste"
-    r_ponte_safety = aplicar(
-        ponte_safety, [resultado_confirmado((9,))],
-        [
-            observacao(60, {}), observacao(65, {}), observacao(70, {}),
-            observacao(75, {9: "dentro"}),
-        ],
-    )
-    check("T10 ponte pós-fusão não atravessa safety",
-          ponte_safety[1].operador_presente is False
-          and ponte_safety[2].operador_presente is None
-          and not any(a.operador_ponte for a in ponte_safety),
-          (r_ponte_safety, ponte_safety))
-
-    ponte_c6 = [
-        amostra(80, [], presente=True),
-        amostra(85, [], presente=False),
-        marcar_estado_c6(amostra(90, [], presente=False), 9),
-        amostra(95, [pessoa(9, "visitante")], presente=False),
-    ]
-    r_ponte_c6 = aplicar(
-        ponte_c6, [resultado_confirmado((9,))],
-        [
-            observacao(80, {}), observacao(85, {}), observacao(90, {}),
-            observacao(95, {9: "dentro"}),
-        ],
-    )
-    check("T11 ponte pós-fusão não atravessa operador_fora_estado",
-          ponte_c6[1].operador_presente is False
-          and ponte_c6[2].operador_presente is False
-          and ponte_c6[2].operador_fora_estado is True
-          and not any(a.operador_ponte for a in ponte_c6),
-          (r_ponte_c6, ponte_c6))
-
-    ponte_fora = [
-        amostra(100, [], presente=True),
-        amostra(105, [], presente=False),
-        amostra(110, [], presente=False),
-        amostra(115, [pessoa(9, "visitante")], presente=False),
-    ]
-    r_ponte_fora = aplicar(
-        ponte_fora, [resultado_confirmado((9,))],
-        [
-            observacao(100, {}), observacao(105, {}),
-            observacao(110, {9: "fora"}),
-            observacao(115, {9: "dentro"}),
-        ],
-    )
-    check("T12 ponte pós-fusão não atravessa identidade fora",
-          ponte_fora[1].operador_presente is False
-          and ponte_fora[2].identidade_estado == "fora"
-          and ponte_fora[2].operador_presente is False
-          and not any(a.operador_ponte for a in ponte_fora),
-          (r_ponte_fora, ponte_fora))
-
-    ponte_borda = [
-        amostra(120, [], presente=True),
-        amostra(125, [], presente=True),
-        amostra(130, [], presente=False),
-        amostra(135, [], presente=False),
-    ]
-    r_ponte_borda = aplicar(
-        ponte_borda, [resultado_confirmado((9,))],
-        [observacao(t, {}) for t in (120, 125, 130, 135)],
-    )
-    check("T13 ponte pós-fusão não extrapola a borda final",
-          [a.operador_presente for a in ponte_borda]
-          == [True, True, False, False]
-          and not any(a.operador_ponte for a in ponte_borda),
-          (r_ponte_borda, ponte_borda))
-
     pl._OPERADOR_SEGMENTO_MODO = "on"
     legado_on = marcar_estado_c6(amostra(36, [], presente=True), 9)
     legado_on.operador_ponte = True
     aplicar(
         [legado_on], [resultado_confirmado((9,))], [observacao(36, {})],
     )
-    check("T14 on preserva autoridade física legada para o A/B",
+    check("on preserva autoridade física legada para o A/B",
           legado_on.identidade_estado == "ausente"
           and legado_on.operador_presente is False
           and legado_on.operador_ponte is False
@@ -977,28 +820,21 @@ try:
     for modo_sem_autoridade in ("sombra", "off"):
         pl._OPERADOR_SEGMENTO_MODO = modo_sem_autoridade
         pl.AUTORIDADE_111D_CONFIGURADA = False
-        desligada = amostra(37, [pessoa(9, "operador")], presente=False)
-        desligada.identidade_autoritativa = True
-        desligada.identidade_estado = "dentro"
-        desligada.identidade_track_id = 9
+        desligada = amostra(37, [pessoa(12, "operador")], presente=True)
         desligada_antes = deepcopy(desligada)
         r_desligada = aplicar(
             [desligada], [resultado_confirmado((9,))],
             [observacao(37, {})],
         )
-        fundiu_desligada = pl._fundir_identidade_presenca_cam1(desligada)
-        check(f"T15 {modo_sem_autoridade} não recebe a promoção positiva",
+        check(f"{modo_sem_autoridade} permanece sem autoridade e sem mutação",
               desligada == desligada_antes
-              and r_desligada["status"] == "fallback_legado"
-              and fundiu_desligada is False
-              and desligada.operador_presente is False,
-              (r_desligada, fundiu_desligada, desligada))
+              and r_desligada["status"] == "fallback_legado",
+              (r_desligada, desligada))
     pl.AUTORIDADE_111D_CONFIGURADA = True
 
 finally:
     pl.AUTORIDADE_111D_CONFIGURADA = autoridade_original
     pl._OPERADOR_SEGMENTO_MODO = modo_original
-    pl._OPERADOR_GAP_SLOTS = gap_original
     pl._imagem_fora_identidade = imagem_original
     pl._frame_b64_para_bgr = decode_original
 
