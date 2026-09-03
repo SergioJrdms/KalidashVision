@@ -4421,6 +4421,38 @@ def operador_segmento_autoridade_configurada(
 
 
 AUTORIDADE_111D_CONFIGURADA = operador_segmento_autoridade_configurada()
+
+# ══════════════════════════════════════════════════════════════════════════
+# Fase 111E — "NÃO RECONHECI O TITULAR" ≠ "NÃO TEM NINGUÉM NO POSTO".
+#
+# A 111D respondia às duas perguntas com a mesma frase. Quando nenhum track
+# do titular aparecia num slot, ela escrevia `operador_presente = False` — e,
+# de quebra, apagava `fora_posto`, `operador_ponte` e os papéis que C5, C4.2 e
+# C6 já tinham resolvido. Identificar QUEM é a pessoa e constatar que NÃO HÁ
+# pessoa são perguntas diferentes, e só a segunda pode afirmar posto vazio.
+#
+# O que a medição diz (84 pares, 30/07–24/08, verdade humana revista a olho
+# em 6 vídeos): esse caminho produziu 111 afirmações de posto vazio no
+# conjunto de desenvolvimento e acertou ZERO. É 91% de todos os falsos
+# posto_vazio reais. Em 96 deles a CAM2 tinha visto o operador dentro do
+# posto — a evidência chegou íntegra e foi sobrescrita por esta etapa, que
+# roda depois de todas as outras.
+#
+# ⚠️ A CORREÇÃO NÃO É ABSTER; É NÃO ASSUMIR O SLOT. Abstenção (INCONCLUSIVO)
+# compraria precisão pagando com cobertura. Devolver o slot ao caminho legado
+# devolve a decisão a quem já a tomava: `etapa_confirmar_operador` com as duas
+# câmeras. Nos 96 casos acima isso não vira "inconclusivo", vira PRESENTE — e
+# correto. Foi por isso que a política testada em notebook (posto_vazio →
+# inconclusivo) não deve ser portada literalmente para cá: ela é a simulação
+# da correção feita sobre um CSV, não a correção.
+#
+# A chave existe para o replay: ligá-la reproduz o comportamento antigo no
+# MESMO binário, para que a comparação A/B mude uma variável só. Ela não é
+# uma opção de produção.
+# ══════════════════════════════════════════════════════════════════════════
+_111D_AFIRMA_AUSENCIA = os.environ.get(
+    "KV_111D_AFIRMA_AUSENCIA", "off"
+).strip().lower() in {"1", "true", "on", "yes"}
 # A tríade da 111D é autossuficiente: ela não cria uma quarta chave implícita.
 # Sob autoridade, o caminho estruturado anterior também é parte do V11.
 PRODUTIVIDADE_OPERADOR_ESTRUTURADA = (
@@ -10531,6 +10563,12 @@ def aplicar_identidade_logica_segmento(
         return _fallback("mapping_vencedor_ausente")
     amostras_zona = int(_num(vencedora.get("n_amostras_posto")) or 0)
 
+    # Quantos slots a identidade devolveu ao legado por não ter reconhecido o
+    # titular. É o contador que torna a Fase 111E auditável no log: se ele for
+    # alto, a eleição do titular está frágil naquele segmento — e isso é uma
+    # informação sobre o Re-ID, não sobre a ocupação do posto.
+    titular_nao_reconhecido = 0
+
     # Planos prontos primeiro: se qualquer helper interno quebrar, nenhuma
     # Amostra terá sido parcialmente reatribuída.
     planos: list[tuple[Amostra, dict] | None] = []
@@ -10565,9 +10603,33 @@ def aplicar_identidade_logica_segmento(
                 continue
 
             if not vistos:
-                planos.append((am, {
-                    "estado": "ausente", "track_id": None, "obs": obs,
-                }))
+                # Fase 111E — AQUI. `vistos` vazio significa "nenhum track do
+                # titular foi reconhecido neste slot", e isso é uma afirmação
+                # sobre a IDENTIDADE, não sobre o posto. Todas as outras
+                # incertezas desta função já caem no legado (veto C3, slot não
+                # medido, mapping conflitante, fragmentos simultâneos); esta
+                # era a única que afirmava. Agora ela se comporta como as
+                # outras quatro.
+                # ⚠️ A DISTINÇÃO É `am.pessoas`, e ela separa duas perguntas
+                # que a 111D respondia junto:
+                #
+                #   cam1 VIU alguém no posto, e não é o titular
+                #     → rebaixar para visitante é trabalho legítimo da
+                #       identidade: ela sabe QUEM está ali. Comportamento
+                #       preservado (C9/C12).
+                #
+                #   cam1 não viu NINGUÉM no posto
+                #     → a identidade não tem observação nenhuma sobre o posto.
+                #       Afirmar ausência aqui é inventar uma medição a partir
+                #       de uma não-medição, e é o que apagava a ponte temporal
+                #       e o resgate da cam2.
+                if _111D_AFIRMA_AUSENCIA or am.pessoas:
+                    planos.append((am, {
+                        "estado": "ausente", "track_id": None, "obs": obs,
+                    }))
+                else:
+                    titular_nao_reconhecido += 1
+                    planos.append(None)
                 continue
 
             tid, estado = vistos[0]
@@ -10727,6 +10789,11 @@ def aplicar_identidade_logica_segmento(
         "reatribuicoes_fora": fora,
         "reatribuicoes_ausente": ausente,
         "slots_fallback": fallback,
+        # Fase 111E: separado de `slots_fallback` de propósito. Fallback por
+        # falha técnica e devolução deliberada por identidade não reconhecida
+        # têm causas diferentes e pedem ações diferentes.
+        "titular_nao_reconhecido": titular_nao_reconhecido,
+        "afirma_ausencia": _111D_AFIRMA_AUSENCIA,
         "motivo": "identidade_confirmada" if aplicados else "slots_sem_mapping",
     }
 

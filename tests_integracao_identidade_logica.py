@@ -450,10 +450,24 @@ try:
         [observacao(0, {})],
     )
     obs13 = analisar([a13])
-    check("C13 R1 invisível e ninguém relevante preserva posto_vazio",
-          r13["reatribuicoes_ausente"] == 1
-          and a13.operador_ponte is False
-          and len(obs13) == 1 and obs13[0]["papel"] == "posto_vazio",
+    # ⚠️ Fase 111E — CONTRATO INVERTIDO, com evidência.
+    #
+    # Este check afirmava o contrário: com R1 invisível e o posto sem pessoa
+    # detectada, a identidade assumia o slot, apagava a ponte temporal e
+    # gravava posto_vazio. A medição sobre 84 pares mostrou que esse caminho
+    # produziu 111 afirmações de posto vazio e acertou ZERO — 91% de todos os
+    # falsos posto_vazio reais. Em 96 deles a CAM2 tinha visto o operador no
+    # posto, e esta etapa, que roda por último, sobrescrevia a evidência.
+    # Três vídeos foram assistidos ponta a ponta para confirmar.
+    #
+    # Sem pessoa detectada, a identidade não tem observação sobre o posto:
+    # afirmar ausência é converter uma não-medição em medição. Agora o slot
+    # volta ao caminho legado e a decisão das câmeras permanece.
+    check("C13 R1 invisível sem pessoa no posto NÃO fabrica ausência",
+          r13["reatribuicoes_ausente"] == 0
+          and r13["titular_nao_reconhecido"] == 1
+          and a13.operador_ponte is True
+          and a13.identidade_autoritativa is False,
           (r13, obs13))
     check("C14 operador visível fora nunca vira vazio quando VLM responde",
           obs8[0]["papel"] == pl.PAPEL_OPERADOR_FORA
@@ -589,13 +603,33 @@ try:
         [observacao(22, {})],
     )
     obs_c6_ausente = analisar([c6_ausente])
-    check("C6 fora → 111D ausente limpa C6 e não vaza operador_fora",
-          r_c6_ausente["reatribuicoes_ausente"] == 1
-          and c6_limpo(c6_ausente)
-          and c6_ausente.fora_posto == []
+    # ⚠️ Fase 111E — CONTRATO INVERTIDO, mesma evidência do C13.
+    #
+    # Antes: sem pessoa detectada no posto, a 111D assumia o slot e apagava a
+    # decisão do C6, convertendo "o operador está fora do posto" (observado)
+    # em "posto vazio" (não observado). Aqui o C6 diz que o track 9 está fora,
+    # a identidade é o próprio track 9, e o slot não o reconheceu — as duas
+    # etapas CONCORDAM que ele não está dentro. Apagar a mais informativa era
+    # perda de informação, não segurança.
+    #
+    # A invariante nova, e ela vale para os dois checks invertidos: se a
+    # identidade não assume o slot, ela não muda nada no slot. É o mesmo
+    # comportamento que as outras quatro incertezas da função já tinham.
+    #
+    # Para presença isto é seguro: `operador_fora` continua sendo AUSÊNCIA do
+    # posto em `productivity.classificar_observacao`. Não vira presença, não
+    # infla ocupação — só deixa de virar `posto_vazio` sem ninguém ter olhado.
+    check("C6 fora → 111D sem reconhecer preserva a decisão do C6",
+          r_c6_ausente["reatribuicoes_ausente"] == 0
+          and r_c6_ausente["titular_nao_reconhecido"] == 1
+          and c6_ausente.operador_fora_estado is True
+          and c6_ausente.fora_posto != []
           and len(obs_c6_ausente) == 1
-          and obs_c6_ausente[0]["papel"] == "posto_vazio",
+          and obs_c6_ausente[0]["papel"] == pl.PAPEL_OPERADOR_FORA,
           (r_c6_ausente, c6_ausente, obs_c6_ausente))
+    check("e `operador_fora` continua contando como ausência do posto",
+          prod.classificar_observacao(
+              {"papel_pessoa": "operador_fora"})[0] == prod.EST_OPERADOR_FORA)
 
     c6_fora = marcar_estado_c6(amostra(23, [], presente=False), 4)
     r_c6_fora = aplicar(
