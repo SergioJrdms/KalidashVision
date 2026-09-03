@@ -3908,8 +3908,6 @@ class Amostra:
     # janela inteira ser fechada. Estes campos morrem com a Amostra: não são
     # schema, não são persistidos e nunca atravessam vídeos/câmeras.
     identidade_autoritativa: bool = False
-    # `ausente` significa somente que a identidade lógica vencedora não foi
-    # observada no slot; isoladamente, não prova ausência física do operador.
     identidade_estado: str | None = None       # dentro | fora | ausente
     identidade_track_id: int | None = None     # track físico deste slot
     # C1 — Presence Safety Gate. Estes campos são somente telemetria transitória:
@@ -4370,9 +4368,8 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #  10 = conversa associa um interlocutor estruturado e mede S+V somente no
 #       tronco superior dele; cinza seguro vira gestor, demais casos fecham para
 #       colega/incerto sem deixar label ou prosa promover produtividade.
-#  11 = a identidade lógica local do segmento (111A/B/C) identifica o titular.
-#       `on` preserva a autoridade física legada; `identity_only` aplica somente
-#       identidade e deixa presença/estado físico sob responsabilidade de C1-C6.
+#  11 = a identidade lógica local do segmento (111A/B/C) assume autoridade
+#       sobre operador/operador_fora antes do VLM, com fallback legado por slot.
 def _env_ligada(nome: str, padrao: str = "off") -> bool:
     """Flags críticas são fail-closed: só uma allowlist explícita liga."""
     return os.environ.get(nome, padrao).strip().lower() in {
@@ -4391,7 +4388,7 @@ except (TypeError, ValueError):
 _OPERADOR_SEGMENTO_MODO = os.environ.get(
     "KV_OPERADOR_SEGMENTO", "off"
 ).strip().lower()
-if _OPERADOR_SEGMENTO_MODO not in ("off", "sombra", "on", "identity_only"):
+if _OPERADOR_SEGMENTO_MODO not in ("off", "sombra", "on"):
     _OPERADOR_SEGMENTO_MODO = "off"
 
 
@@ -4401,7 +4398,7 @@ def operador_segmento_autoridade_configurada(
     fora: str | None = None,
     tracker_config: str | None = None,
 ) -> bool:
-    """Ativa a 111D em ``on`` ou ``identity_only``, sempre fail-closed."""
+    """As três chaves da 111D, fail-closed e verificando o YAML real."""
     modo_n = (_OPERADOR_SEGMENTO_MODO if modo is None else modo).strip().lower()
     tracker_n = (
         os.environ.get("KV_TRACKER", "") if tracker is None else tracker
@@ -4416,7 +4413,7 @@ def operador_segmento_autoridade_configurada(
     except (OSError, ValueError, TypeError):
         reid_real = False
     return (
-        modo_n in {"on", "identity_only"}
+        modo_n == "on"
         and tracker_n in {"reid", "fixa_reid"}
         and reid_real
         and fora_n == "on"
@@ -4424,8 +4421,6 @@ def operador_segmento_autoridade_configurada(
 
 
 AUTORIDADE_111D_CONFIGURADA = operador_segmento_autoridade_configurada()
-# Nome preservado por compatibilidade interna. Em `identity_only`, esta flag
-# habilita a aplicação identitária da 111D, não autoridade de presença física.
 # A tríade da 111D é autossuficiente: ela não cria uma quarta chave implícita.
 # Sob autoridade, o caminho estruturado anterior também é parte do V11.
 PRODUTIVIDADE_OPERADOR_ESTRUTURADA = (
@@ -6957,11 +6952,8 @@ def etapa_analise_vlm(
                 # uma autoridade posterior que desconheça esta evidência 640.
                 plano.append(("resgate_cam1_640", am))
                 continue
-            if (
-                getattr(am, "identidade_autoritativa", False)
-                and _OPERADOR_SEGMENTO_MODO != "identity_only"
-            ):
-                # Fase 111D legada: cam1 já assume também a presença física.
+            if getattr(am, "identidade_autoritativa", False):
+                # Fase 111D: cam1 já conhece a identidade física deste slot.
                 # A cam2 continua evidência de atividade, mas não pode resgatar
                 # outra pessoa nem esconder o operador visto fora da ROI.
                 if am.identidade_estado == "fora" and am.fora_posto:
@@ -10480,10 +10472,8 @@ def aplicar_identidade_logica_segmento(
 
     Mapping e decodificação são validados antes da primeira mutação; a imagem
     final substitui a única string comprimida slot a slot. Slots ambíguos
-    permanecem no caminho legado; R1 nunca chega a evento ou persistência. Em
-    ``identity_only``, só papéis e metadados identitários podem ser alterados.
+    permanecem no caminho legado; R1 nunca chega a evento ou persistência.
     """
-    identity_only = _OPERADOR_SEGMENTO_MODO == "identity_only"
     base = {
         "status": "fallback_legado",
         "cam_id": str(cam_id_primaria or "cam1"),
@@ -10594,14 +10584,6 @@ def aplicar_identidade_logica_segmento(
                 }))
                 continue
 
-            if identity_only:
-                # A identidade do titular pode ser registrada como `fora` sem
-                # fabricar/reescrever a evidência física usada por C1-C6.
-                planos.append((am, {
-                    "estado": "fora", "track_id": tid, "obs": obs,
-                }))
-                continue
-
             detalhes = obs.get("pessoas") or {}
             detalhe = detalhes.get(tid) or detalhes.get(str(tid))
             if (
@@ -10639,48 +10621,6 @@ def aplicar_identidade_logica_segmento(
     )
 
     dentro = fora = ausente = fallback = 0
-    if identity_only:
-        for item in planos:
-            if item is None:
-                fallback += 1
-                continue
-            am, plano = item
-            estado, tid = plano["estado"], plano.get("track_id")
-            for pessoa in am.pessoas:
-                pessoa["papel"] = (
-                    "operador"
-                    if estado == "dentro" and int(pessoa.get("track_id")) == tid
-                    else "visitante"
-                )
-            dentro += int(estado == "dentro")
-            fora += int(estado == "fora")
-            ausente += int(estado == "ausente")
-            am.identidade_autoritativa = True
-            am.identidade_estado = estado
-            am.identidade_track_id = int(tid) if tid is not None else None
-
-        # O coletor de identity_only não guarda JPEG cru. Esta limpeza também
-        # protege chamadas isoladas/testes que forneçam dados temporários.
-        for obs in dados_temporarios.get("observacoes") or []:
-            if str(obs.get("cam_id") or "cam1") == camera:
-                obs["frame_b64"] = None
-
-        aplicados = dentro + fora + ausente
-        return {
-            **base,
-            "status": "aplicado" if aplicados else "fallback_legado",
-            "identidade_logica": identidade_nome,
-            "track_ids": sorted(track_ids),
-            "reatribuicoes_dentro": dentro,
-            "reatribuicoes_fora": fora,
-            "reatribuicoes_ausente": ausente,
-            "slots_fallback": fallback,
-            "motivo": (
-                "identidade_confirmada_sem_autoridade_fisica"
-                if aplicados else "slots_sem_mapping"
-            ),
-        }
-
     for item in planos:
         if item is None:
             fallback += 1
@@ -10795,7 +10735,7 @@ def _registrar_identidades_segmento_sombra(
     dados_shadow: dict, cameras: list[str], *, duracao_s: float,
 ) -> list[dict]:
     """Executa 111C após a 111B RAW; resultado vive apenas em log/memória."""
-    if _OPERADOR_SEGMENTO_MODO not in {"sombra", "on", "identity_only"}:
+    if _OPERADOR_SEGMENTO_MODO not in {"sombra", "on"}:
         return []
 
     por_camera: dict[str, list[dict]] = defaultdict(list)
@@ -19734,12 +19674,8 @@ def processar_video(
     identidade_shadow = (
         {
             "observacoes": [], "descritores": [],
-            # JPEG cru por slot só é necessário para a reatribuição física
-            # legada; identity_only preserva as imagens já produzidas por C1-C6.
-            "guardar_frames": bool(
-                AUTORIDADE_111D_CONFIGURADA
-                and _OPERADOR_SEGMENTO_MODO == "on"
-            ),
+            # JPEG por slot existe exclusivamente no on com as três chaves.
+            "guardar_frames": bool(AUTORIDADE_111D_CONFIGURADA),
         }
         if (
             _OPERADOR_SEGMENTO_MODO == "sombra"
@@ -19760,10 +19696,9 @@ def processar_video(
     )
 
     if not amostras:
-        if _OPERADOR_SEGMENTO_MODO in {"on", "identity_only"}:
+        if _OPERADOR_SEGMENTO_MODO == "on":
             log.info(
-                "[operador-segmento/%s] %s",
-                _OPERADOR_SEGMENTO_MODO,
+                "[operador-segmento/on] %s",
                 json.dumps({
                     "status": "fallback_legado",
                     "motivo": (
@@ -19870,10 +19805,9 @@ def processar_video(
             identidade_shadow or {}, cameras_posto,
             duracao_s=float(info_video.get("duracao_s") or 0.0),
         )
-    elif _OPERADOR_SEGMENTO_MODO in {"on", "identity_only"}:
+    elif _OPERADOR_SEGMENTO_MODO == "on":
         log.info(
-            "[operador-segmento/%s] %s",
-            _OPERADOR_SEGMENTO_MODO,
+            "[operador-segmento/on] %s",
             json.dumps({
                 "status": "fallback_legado",
                 "motivo": "configuracao_incompleta",
@@ -19943,9 +19877,9 @@ def processar_video(
             duracao_s=float(info_video.get("duracao_s") or 0.0),
         )
 
-    # Fase 111D: confirmação causal legada já terminou. `on` pode assumir o
-    # estado físico do slot; `identity_only` registra apenas quem é o titular.
-    # Em falha, os objetos legados permanecem intactos.
+    # Fase 111D: confirmação causal legada já terminou. Só agora a decisão da
+    # janela completa pode assumir slots seguros; em falha, os objetos legados
+    # permanecem intactos e o VLM recebe exatamente o caminho anterior.
     if AUTORIDADE_111D_CONFIGURADA:
         resumo_111d = aplicar_identidade_logica_segmento(
             amostras,
@@ -19954,8 +19888,7 @@ def processar_video(
             cam_primaria_efetiva,
         )
         log.info(
-            "[operador-segmento/%s] %s",
-            _OPERADOR_SEGMENTO_MODO,
+            "[operador-segmento/on] %s",
             json.dumps(resumo_111d, ensure_ascii=False, separators=(",", ":")),
         )
 

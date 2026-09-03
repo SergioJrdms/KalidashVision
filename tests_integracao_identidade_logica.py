@@ -215,7 +215,6 @@ def seq_adversarial(track_errado=12, trabalho=True):
 
 
 autoridade_original = pl.AUTORIDADE_111D_CONFIGURADA
-modo_original = pl._OPERADOR_SEGMENTO_MODO
 imagem_original = pl._imagem_fora_identidade
 decode_original = pl._frame_b64_para_bgr
 
@@ -245,11 +244,6 @@ try:
               "on", "reid", "on", reid)
           and pl.operador_segmento_autoridade_configurada(
               "on", "fixa_reid", "on", reid))
-    check("identity_only exige e aceita as mesmas três chaves",
-          pl.operador_segmento_autoridade_configurada(
-              "identity_only", "reid", "on", reid)
-          and not pl.operador_segmento_autoridade_configurada(
-              "identity_only", "reid", "off", reid))
     check("valor inválido permanece fail-closed",
           not pl.operador_segmento_autoridade_configurada(
               "talvez", "reid", "on", reid))
@@ -669,172 +663,8 @@ try:
           == {4: "visitante", 9: "operador"},
           (r19b, a19b))
 
-    print("\n[identity_only] Identidade sem autoridade física")
-    pl._OPERADOR_SEGMENTO_MODO = "identity_only"
-
-    io_cam2 = amostra(30, [], presente=True)
-    io_cam2.op_cam2 = True
-    io_cam2.n_posto_cam2 = 2
-    io_cam2.operador_ponte = True
-    r_io_cam2 = aplicar(
-        [io_cam2], [resultado_confirmado((9,))], [observacao(30, {})],
-    )
-    obs_io_cam2 = analisar([io_cam2])
-    check("identity_only preserva presença física positiva da CAM2",
-          r_io_cam2["motivo"] == "identidade_confirmada_sem_autoridade_fisica"
-          and io_cam2.identidade_estado == "ausente"
-          and io_cam2.operador_presente is True
-          and io_cam2.op_cam2 is True
-          and io_cam2.n_posto_cam2 == 2
-          and io_cam2.operador_ponte is True
-          and not any(o.get("papel") == "posto_vazio" for o in obs_io_cam2),
-          (r_io_cam2, io_cam2, obs_io_cam2))
-
-    io_c6 = marcar_estado_c6(amostra(31, [], presente=False), 9)
-    c6_antes = deepcopy(io_c6)
-    r_io_c6 = aplicar(
-        [io_c6], [resultado_confirmado((9,))], [observacao(31, {})],
-    )
-    obs_io_c6 = analisar([io_c6], fora=lambda *_a, **_k: {})
-    check("identity_only não limpa nem reescreve C6",
-          r_io_c6["reatribuicoes_ausente"] == 1
-          and io_c6.operador_fora_estado == c6_antes.operador_fora_estado
-          and io_c6.operador_fora_proveniencia == c6_antes.operador_fora_proveniencia
-          and io_c6.operador_fora_track_id == c6_antes.operador_fora_track_id
-          and io_c6.operador_fora_episodio == c6_antes.operador_fora_episodio
-          and io_c6.operador_fora_migracao == c6_antes.operador_fora_migracao
-          and io_c6.fora_candidatos == c6_antes.fora_candidatos
-          and io_c6.fora_posto == c6_antes.fora_posto
-          and len(obs_io_c6) == 1
-          and obs_io_c6[0]["papel"] == pl.PAPEL_OPERADOR_FORA,
-          (r_io_c6, io_c6, obs_io_c6))
-
-    io_c5 = amostra(32, [], presente=True)
-    io_c5.operador_resgate_cam1_640 = True
-    io_c5.operador_resgate_cam1_640_confidence = 0.61
-    io_c5.operador_resgate_cam1_640_bbox = (20, 20, 120, 320)
-    io_c5.operador_resgate_cam1_640_ancora = (70, 320)
-    aplicar([io_c5], [resultado_confirmado((9,))], [observacao(32, {})])
-    obs_io_c5 = analisar([io_c5])
-    check("identity_only preserva integralmente o C5 positivo",
-          io_c5.operador_presente is True
-          and io_c5.operador_resgate_cam1_640 is True
-          and io_c5.operador_resgate_cam1_640_confidence == 0.61
-          and io_c5.operador_resgate_cam1_640_bbox == (20, 20, 120, 320)
-          and io_c5.operador_resgate_cam1_640_ancora == (70, 320)
-          and len(obs_io_c5) == 1
-          and obs_io_c5[0].get("origem_gate") == "resgate_cam1_640",
-          (io_c5, obs_io_c5))
-
-    io_safety = amostra(33, [], presente=None)
-    io_safety.presenca_safety_gate = True
-    io_safety.presenca_safety_motivo = "veto_posto_vazio_por_consenso_multicamera_640"
-    aplicar(
-        [io_safety], [resultado_confirmado((9,))], [observacao(33, {})],
-    )
-    obs_io_safety = analisar([io_safety])
-    check("identity_only preserva safety e mantém o slot inconclusivo",
-          io_safety.operador_presente is None
-          and io_safety.presenca_safety_gate is True
-          and io_safety.presenca_safety_motivo
-          == "veto_posto_vazio_por_consenso_multicamera_640"
-          and io_safety.identidade_estado == "ausente"
-          and len(obs_io_safety) == 1
-          and obs_io_safety[0]["papel"] is None
-          and obs_io_safety[0].get("origem_gate")
-          == "confirmacao_presenca_indisponivel",
-          (io_safety, obs_io_safety))
-
-    io_dentro = amostra(
-        34,
-        [pessoa(9, "visitante"),
-         pessoa(12, "operador", bbox=(200, 10, 300, 310))],
-        presente=False,
-    )
-    r_io_dentro = aplicar(
-        [io_dentro], [resultado_confirmado((9,))],
-        [observacao(34, {9: "dentro", 12: "dentro"})],
-    )
-    check("identity_only mantém titular e visitantes sem promover presença",
-          r_io_dentro["reatribuicoes_dentro"] == 1
-          and io_dentro.identidade_autoritativa is True
-          and io_dentro.identidade_estado == "dentro"
-          and io_dentro.identidade_track_id == 9
-          and {p["track_id"]: p["papel"] for p in io_dentro.pessoas}
-          == {9: "operador", 12: "visitante"}
-          and io_dentro.operador_presente is False,
-          (r_io_dentro, io_dentro))
-
-    io_fora_identitario = amostra(
-        34.5, [pessoa(12, "operador")], presente=True,
-    )
-    io_fora_identitario.op_cam2 = True
-    aplicar(
-        [io_fora_identitario], [resultado_confirmado((9,))],
-        [observacao(
-            34.5, {9: "fora", 12: "dentro"},
-            detalhes={9: detalhe(9, "fora"), 12: detalhe(12, "dentro")},
-        )],
-    )
-    check("identity_only registra titular fora sem fabricar OPERADOR_FORA",
-          io_fora_identitario.identidade_estado == "fora"
-          and io_fora_identitario.identidade_track_id == 9
-          and io_fora_identitario.pessoas[0]["papel"] == "visitante"
-          and io_fora_identitario.operador_presente is True
-          and io_fora_identitario.op_cam2 is True
-          and io_fora_identitario.fora_posto == []
-          and io_fora_identitario.operador_fora_estado is False,
-          io_fora_identitario)
-
-    io_visitante = amostra(35, [pessoa(12, "operador")], presente=False)
-    aplicar(
-        [io_visitante], [resultado_confirmado((9,))],
-        [observacao(35, {12: "dentro"})],
-    )
-    obs_io_visitante = analisar(
-        [io_visitante], seq=seq_adversarial(12, True),
-    )
-    check("identity_only mantém não vencedor como visitante sem criar vazio",
-          io_visitante.identidade_estado == "ausente"
-          and io_visitante.pessoas[0]["papel"] == "visitante"
-          and io_visitante.operador_presente is False
-          and len(obs_io_visitante) == 1
-          and obs_io_visitante[0]["papel"] == "visitante"
-          and not any(o.get("papel") == "posto_vazio"
-                      for o in obs_io_visitante),
-          (io_visitante, obs_io_visitante))
-
-    pl._OPERADOR_SEGMENTO_MODO = "on"
-    legado_on = marcar_estado_c6(amostra(36, [], presente=True), 9)
-    legado_on.operador_ponte = True
-    aplicar(
-        [legado_on], [resultado_confirmado((9,))], [observacao(36, {})],
-    )
-    check("on preserva autoridade física legada para o A/B",
-          legado_on.identidade_estado == "ausente"
-          and legado_on.operador_presente is False
-          and legado_on.operador_ponte is False
-          and c6_limpo(legado_on),
-          legado_on)
-
-    for modo_sem_autoridade in ("sombra", "off"):
-        pl._OPERADOR_SEGMENTO_MODO = modo_sem_autoridade
-        pl.AUTORIDADE_111D_CONFIGURADA = False
-        desligada = amostra(37, [pessoa(12, "operador")], presente=True)
-        desligada_antes = deepcopy(desligada)
-        r_desligada = aplicar(
-            [desligada], [resultado_confirmado((9,))],
-            [observacao(37, {})],
-        )
-        check(f"{modo_sem_autoridade} permanece sem autoridade e sem mutação",
-              desligada == desligada_antes
-              and r_desligada["status"] == "fallback_legado",
-              (r_desligada, desligada))
-    pl.AUTORIDADE_111D_CONFIGURADA = True
-
 finally:
     pl.AUTORIDADE_111D_CONFIGURADA = autoridade_original
-    pl._OPERADOR_SEGMENTO_MODO = modo_original
     pl._imagem_fora_identidade = imagem_original
     pl._frame_b64_para_bgr = decode_original
 
@@ -855,14 +685,6 @@ try:
     os.environ["KV_OPERADOR_SEGMENTO"] = "on"
     versao_on = importlib.reload(pl).VERSAO_INSTRUMENTO
 
-    os.environ["KV_OPERADOR_SEGMENTO"] = "identity_only"
-    modulo_identity_only = importlib.reload(pl)
-    versao_identity_only = modulo_identity_only.VERSAO_INSTRUMENTO
-    estruturada_identity_only = (
-        modulo_identity_only.PRODUTIVIDADE_OPERADOR_ESTRUTURADA
-    )
-
-    os.environ["KV_OPERADOR_SEGMENTO"] = "on"
     os.environ["KV_PRODUTIVIDADE_OPERADOR_V9"] = "off"
     modulo_on_sem_v9 = importlib.reload(pl)
     versao_on_sem_v9 = modulo_on_sem_v9.VERSAO_INSTRUMENTO
@@ -882,9 +704,6 @@ try:
 
     check("C18 tríade autoritativa carimba V11",
           versao_on == 11, versao_on)
-    check("C18 identity_only mantém a construção identitária V11",
-          versao_identity_only == 11 and estruturada_identity_only is True,
-          (versao_identity_only, estruturada_identity_only))
     check("C18 tríade não depende de quarta chave V9",
           versao_on_sem_v9 == 11 and estruturada_on_sem_v9 is True,
           (versao_on_sem_v9, estruturada_on_sem_v9))
