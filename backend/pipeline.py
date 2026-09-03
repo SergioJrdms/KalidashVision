@@ -10470,6 +10470,79 @@ def _materializar_imagens_legadas_identidade(
             am.img_b64 = imagem or ""
 
 
+def _fundir_identidade_presenca_cam1(am: Amostra) -> bool:
+    """Confirma presença só quando o titular está fisicamente em ``pessoas``."""
+    if (
+        _OPERADOR_SEGMENTO_MODO != "identity_only"
+        or not getattr(am, "identidade_autoritativa", False)
+        or getattr(am, "identidade_estado", None) != "dentro"
+        or getattr(am, "identidade_track_id", None) is None
+        or getattr(am, "presenca_safety_gate", False)
+        or getattr(am, "operador_fora_estado", False)
+    ):
+        return False
+
+    try:
+        tid = int(am.identidade_track_id)
+    except (TypeError, ValueError):
+        return False
+    titular = None
+    for pessoa in (am.pessoas or []):
+        try:
+            mesmo_track = int(pessoa.get("track_id")) == tid
+        except (TypeError, ValueError):
+            mesmo_track = False
+        if mesmo_track and pessoa.get("papel") == "operador":
+            titular = pessoa
+            break
+    if titular is None:
+        return False
+
+    # 111D identifica quem; a geometria CAM1, materializada em `pessoas`,
+    # confirma onde. Esta fusão só acrescenta evidência positiva.
+    am.operador_presente = True
+    am.operador_ponte = False
+    return True
+
+
+def _aplicar_ponte_presenca_pos_identidade(amostras: list[Amostra]) -> int:
+    """Reaplica a Fase 34 após novas âncoras positivas de identity_only."""
+    if (
+        _OPERADOR_SEGMENTO_MODO != "identity_only"
+        or _OPERADOR_GAP_SLOTS <= 0
+        or len(amostras or []) <= 2
+    ):
+        return 0
+
+    presentes = [a.operador_presente is True for a in amostras]
+    barreiras = [bool(
+        getattr(a, "presenca_safety_gate", False)
+        or getattr(a, "operador_fora_estado", False)
+        or getattr(a, "identidade_estado", None) == "fora"
+    ) for a in amostras]
+
+    def _tem_ancora(indice: int, passo: int) -> bool:
+        for distancia in range(1, _OPERADOR_GAP_SLOTS + 1):
+            j = indice + passo * distancia
+            if j < 0 or j >= len(amostras):
+                return False
+            if barreiras[j]:
+                return False
+            if presentes[j]:
+                return True
+        return False
+
+    pontes = 0
+    for i, am in enumerate(amostras):
+        if presentes[i] or barreiras[i]:
+            continue
+        if _tem_ancora(i, -1) and _tem_ancora(i, 1):
+            am.operador_presente = True
+            am.operador_ponte = True
+            pontes += 1
+    return pontes
+
+
 def aplicar_identidade_logica_segmento(
     amostras: list[Amostra],
     resultados_identidade: list[dict],
@@ -10658,6 +10731,9 @@ def aplicar_identidade_logica_segmento(
             am.identidade_autoritativa = True
             am.identidade_estado = estado
             am.identidade_track_id = int(tid) if tid is not None else None
+            _fundir_identidade_presenca_cam1(am)
+
+        _aplicar_ponte_presenca_pos_identidade(amostras)
 
         # O coletor de identity_only não guarda JPEG cru. Esta limpeza também
         # protege chamadas isoladas/testes que forneçam dados temporários.
