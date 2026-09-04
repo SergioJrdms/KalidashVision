@@ -1370,6 +1370,28 @@ _CAM2_REBAIXA_MAX = float(os.environ.get("KV_CAM2_REBAIXA_MAX", "0.8"))
 # em oclusão momentânea; sem a ponte, cada piscada virava posto_vazio falso).
 _OPERADOR_GAP_SLOTS = max(0, int(os.environ.get("KV_OPERADOR_GAP_SLOTS", "3")))
 
+# ══════════════════════════════════════════════════════════════════════════
+# Fase 111F — UMA FOTO SOZINHA NÃO AFIRMA.
+#
+# A amostragem é de 5 em 5 segundos, então um trecho de 5s de ausência é UMA
+# imagem decidindo. Se o operador abaixou para pegar uma peça no instante da
+# foto, isso virava "posto sem operador" com o mesmo peso de um posto deserto
+# por dois minutos.
+#
+# O que a medição diz (84 pares, replay A/B do commit cb94a9b, já com a
+# correção da 111D): sem piso, a precisão por card é 67,8%; com piso de 20s
+# ela vai a 98,4%, retendo 97% do tempo de ausência verdadeira. O preço são
+# 18 cards curtos verdadeiros que deixam de ser afirmados.
+#
+# ⚠️ O TRECHO CURTO NÃO VIRA PRESENÇA. Vira ABSTENÇÃO. Afirmar que o operador
+# está lá seria inventar o oposto a partir da mesma falta de evidência — o
+# erro que a Fase 111E acabou de corrigir do outro lado.
+#
+# ⚠️ Padrão 0 = desligado. O piso ainda não foi confirmado em vídeos que não
+# participaram da sua escolha; até lá ele não entra em produção sozinho.
+# ══════════════════════════════════════════════════════════════════════════
+_PISO_AUSENCIA_S = max(0.0, float(os.environ.get("KV_PISO_AUSENCIA_S", "0")))
+
 POSTO_VAZIO_LABEL = "posto_vazio"
 POSTO_VAZIO_TID = -1
 POSTO_VAZIO_DESC = "posto de trabalho vazio (operador ausente)"
@@ -3934,6 +3956,8 @@ class Amostra:
     operador_resgate_cam1_640_bbox: tuple | None = None
     operador_resgate_cam1_640_ancora: tuple | None = None
     # C3 — candidato CAM1 de baixa confiança, sem pessoa/track/papel.
+    # Fase 111F — trecho de ausência curto demais, rebaixado a abstenção.
+    ausencia_curta_rebaixada: bool = False
     presenca_c3_confidence: float | None = None
     presenca_c3_bbox: tuple | None = None
     presenca_c3_ancora: tuple | None = None
@@ -10492,6 +10516,70 @@ def _materializar_imagens_legadas_identidade(
             am.img_b64_fora = imagem
         elif alvos:
             am.img_b64 = imagem or ""
+
+
+def etapa_piso_afirmacao_ausencia(
+    amostras: list, intervalo_s: float, piso_s: float | None = None,
+) -> dict:
+    """Fase 111F — trecho de ausência curto demais deixa de ser afirmação.
+
+    Roda por ÚLTIMO, depois de C1-C6 e da 111D: o piso julga a afirmação que
+    sobreviveu a todas as etapas, não um estado intermediário. Antes delas o
+    trecho ainda pode crescer ou ser vetado, e medir duração no meio do
+    caminho mediria outra coisa.
+
+    A unidade é o trecho contíguo — o mesmo recorte que vira um card na
+    plataforma. Um buraco de amostragem interrompe o trecho: falta de medida
+    não é continuidade.
+    """
+    piso = _PISO_AUSENCIA_S if piso_s is None else float(piso_s)
+    base = {"piso_s": piso, "ativo": piso > 0,
+            "trechos": 0, "trechos_rebaixados": 0, "slots_rebaixados": 0}
+    if piso <= 0 or not amostras:
+        return base
+
+    ordem = sorted(range(len(amostras)), key=lambda i: float(amostras[i].tempo_s))
+    trechos: list[list[int]] = []
+    atual: list[int] = []
+    for i in ordem:
+        am = amostras[i]
+        # A afirmação de ausência, seja ela vazio ou fora: os dois dizem
+        # "não há operador trabalhando no posto", que é o que o card afirma.
+        if am.operador_presente is not False:
+            if atual:
+                trechos.append(atual)
+            atual = []
+            continue
+        if atual:
+            anterior = float(amostras[atual[-1]].tempo_s)
+            if float(am.tempo_s) - anterior > float(intervalo_s) * 1.5:
+                trechos.append(atual)
+                atual = []
+        atual.append(i)
+    if atual:
+        trechos.append(atual)
+
+    rebaixados = slots = 0
+    for trecho in trechos:
+        ini = float(amostras[trecho[0]].tempo_s)
+        fim = float(amostras[trecho[-1]].tempo_s) + float(intervalo_s)
+        if (fim - ini) >= piso:
+            continue
+        for i in trecho:
+            am = amostras[i]
+            # Abstenção, não presença. E a afirmação de "fora" é retirada
+            # junto: ela também era uma afirmação de ausência do posto.
+            am.operador_presente = None
+            am.operador_ponte = False
+            am.operador_fora_estado = False
+            am.fora_posto = []
+            am.ausencia_curta_rebaixada = True
+            slots += 1
+        rebaixados += 1
+
+    base.update({"trechos": len(trechos), "trechos_rebaixados": rebaixados,
+                 "slots_rebaixados": slots})
+    return base
 
 
 def aplicar_identidade_logica_segmento(
@@ -19958,6 +20046,13 @@ def processar_video(
             "[operador-segmento/on] %s",
             json.dumps(resumo_111d, ensure_ascii=False, separators=(",", ":")),
         )
+
+    # Fase 111F: por último. O piso julga a afirmação final, não um estado
+    # intermediário que ainda pode crescer ou ser vetado pelas etapas acima.
+    resumo_piso = etapa_piso_afirmacao_ausencia(amostras, intervalo_amostragem_s)
+    if resumo_piso.get("ativo"):
+        log.info("[piso-ausencia] %s",
+                 json.dumps(resumo_piso, ensure_ascii=False, separators=(",", ":")))
 
     observacoes = etapa_analise_vlm(
         groq_client, amostras, descricao, memoria, progress_cb,
