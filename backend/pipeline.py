@@ -4540,6 +4540,22 @@ _DOMINANCIA_MIN_OBS_POSTO = int(_operador_segmento_env_float(
 _DOMINANCIA_GAP_FRAG_S = _operador_segmento_env_float(
     "KV_DOMINANCIA_GAP_FRAG_S", 15.0, 0.0, 120.0,
 )
+# Fase 112-A' — a identidade relaxada so pode AFIRMAR PRESENCA.
+#
+# O A/B nos 84 pares mostrou que a eleicao relaxada funciona (6,0% -> 16,7% de
+# identidade confirmada) mas envenena o outro lado: a reatribuicao para "fora"
+# levou a precisao de ausencia por card de 98,41% para 95,38%, com P(B>A)=0,0%,
+# e a precisao de presenca NAO subiu. O ganho vinha inteiro de
+# INCONCLUSIVO -> DENTRO; o dano, de DENTRO -> OPERADOR_FORA.
+#
+# Com esta chave, um plano cujo estado nao seja "dentro" e DEVOLVIDO em vez de
+# assumido — o slot mantem o que C1-C6 decidiram. E a licao da 111E aplicada um
+# nivel acima: nao reconhecer, ou reconhecer fora, nunca vira afirmacao de
+# ausencia vinda da identidade.
+#
+# Padrao LIGADA: se alguem ligar a dominancia relaxada, ela vem no modo seguro.
+# Desligue-a para reproduzir a medicao do braco B original.
+_DOMINANCIA_SO_PRESENCA = _env_ligada("KV_DOMINANCIA_SO_PRESENCA", "on")
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -10924,6 +10940,12 @@ def aplicar_identidade_logica_segmento(
         am, plano = item
         estado, tid = plano["estado"], plano.get("track_id")
         obs = plano["obs"]
+        # Fase 112-A': a identidade relaxada so assume slot de PRESENCA.
+        # Devolver e o mesmo caminho do fallback: o slot fica com o que C1-C6
+        # decidiram, e a identidade nao afirma nada sobre ausencia.
+        if _DOMINANCIA_RELAXADA and _DOMINANCIA_SO_PRESENCA and estado != "dentro":
+            fallback += 1
+            continue
         bruto = obs.get("frame_b64")
         teve_bruto = bool(bruto)
         imagem_final = None
