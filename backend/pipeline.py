@@ -4514,6 +4514,33 @@ _OPERADOR_SEG_MIN_GAP = _operador_segmento_env_float(
     "KV_OPERADOR_SEGMENTO_MIN_GAP", 0.25, 0.0, 1.0,
 )
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Fase 112-A — DOMINÂNCIA RELAXADA COM FUSÃO DE FRAGMENTOS
+#
+# Medido offline em 84 pares / 5 dias / 807 detecções no posto:
+#   · a eleição trava por TEMPO, não por ambiguidade entre pessoas
+#     (76,2% `evidencia_insuficiente` contra 8,4% de ambiguidade)
+#   · o tracker fragmenta o ocupante do posto — mediana de 5 tracks por
+#     segmento, líder por track de 12 s contra 45 s de posto ocupado
+#   · fundindo fragmentos consecutivos e baixando o piso, a eleição sai de
+#     8,3% para 27,4% dos segmentos no mesmo modelo (3,3x)
+#
+# A GUARDA: a fusão só atravessa instantes com UM ocupante no posto. Instante
+# com dois ou mais quebra o fragmento — senão duas pessoas simultâneas no
+# polígono viram um "ocupante" só, que é exatamente o erro que esta fase
+# existe para não cometer. Custo medido da guarda: 1,2 ponto percentual.
+# ═══════════════════════════════════════════════════════════════════════════
+_DOMINANCIA_RELAXADA = _env_ligada("KV_DOMINANCIA_RELAXADA", "off")
+_DOMINANCIA_MIN_TEMPO_POSTO_S = _operador_segmento_env_float(
+    "KV_DOMINANCIA_SEG_MIN_S", 15.0, 0.1, 300.0,
+)
+_DOMINANCIA_MIN_OBS_POSTO = int(_operador_segmento_env_float(
+    "KV_DOMINANCIA_SEG_MIN_OBS", 3.0, 1.0, 300.0,
+))
+_DOMINANCIA_GAP_FRAG_S = _operador_segmento_env_float(
+    "KV_DOMINANCIA_GAP_FRAG_S", 15.0, 0.0, 120.0,
+)
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # Fase 83 — DESCRITOR POR TRACK. Só o que a detecção JÁ calcula.
@@ -4702,6 +4729,8 @@ def acumular_descritor(acc: dict, tid: int, *, frame, pessoa: dict,
     d = acc.setdefault(tid, {
         "razoes": defaultdict(list), "hist_sup": [], "hist_inf": [],
         "alturas_rel": [], "aspectos": [], "n": 0, "n_posto": 0,
+        # Fase 112-A: os instantes de posto, não só a contagem.
+        "instantes_posto": [],
         "papeis": Counter(), "t_ini": tempo_s, "t_fim": tempo_s,
         "melhor_area": -1.0, "bbox_ref": None, "frame_ref": None,
         # Fase 92: as pontas do track. A costura pergunta "onde este terminou e
@@ -4714,6 +4743,10 @@ def acumular_descritor(acc: dict, tid: int, *, frame, pessoa: dict,
     d["t_ini"] = min(d["t_ini"], tempo_s)
     if no_posto:
         d["n_posto"] += 1
+        # A fusão precisa saber QUANDO cada observação de posto aconteceu, e a
+        # guarda de ambiguidade precisa saber se dois tracks estavam no posto
+        # no MESMO instante. `n_posto` sozinho não responde nem uma nem outra.
+        d["instantes_posto"].append(round(float(tempo_s), 2))
     if papel:
         d["papeis"][papel] += 1
 
@@ -4799,6 +4832,9 @@ def fechar_descritores(acc: dict, intervalo_s: float, cam_id: str | None,
             # sistemática, então isto é uma ESTIMATIVA do tempo real na zona,
             # não uma cronometragem.
             "tempo_posto_s": round(d["n_posto"] * float(intervalo_s), 1),
+            # Fase 112-A: insumo da fusão de fragmentos. Ordenado para a
+            # costura poder caminhar na linha do tempo sem reordenar.
+            "instantes_posto": sorted(d.get("instantes_posto") or []),
             "tempo_visivel_s": round(d["n"] * float(intervalo_s), 1),
             "papel_predominante": papel,
             "altura_rel": round(alt_rel, 5) if alt_rel is not None else None,
@@ -4823,6 +4859,106 @@ def fechar_descritores(acc: dict, intervalo_s: float, cam_id: str | None,
     return saida
 
 
+def fundir_fragmentos_posto(descritores: list[dict]) -> list[dict]:
+    """Fase 112-A: junta fragmentos consecutivos do MESMO ocupante do posto.
+
+    O tracker perde o operador quando ele some atrás do torno e devolve um
+    `track_id` novo. A eleição vê vários pedaços curtos e nenhum alcança o
+    piso. Esta função costura os pedaços consecutivos na linha do tempo —
+    continuidade temporal, sem aparência e sem Re-ID.
+
+    A GUARDA: a costura só atravessa instantes com UM ocupante no posto. Com
+    dois ou mais, o fragmento fecha ali — exceto quando um dos tracks
+    presentes é o mesmo do fragmento em curso, caso em que a continuidade de
+    track desempata. Sem isso, duas pessoas simultâneas no polígono virariam
+    um "ocupante" só.
+
+    Pura: não altera a entrada, não persiste, não lê ambiente além das
+    constantes do módulo. Descritor sem `instantes_posto` (dado antigo) faz a
+    função devolver a lista original — nunca inventa fusão sem evidência.
+    """
+    porta: list[tuple[float, int]] = []
+    for d in descritores or []:
+        try:
+            tid = int(d.get("pessoa_track_id"))
+        except (TypeError, ValueError):
+            continue
+        for t in (d.get("instantes_posto") or []):
+            try:
+                tf = float(t)
+            except (TypeError, ValueError):
+                continue
+            if tf != tf or tf in (float("inf"), float("-inf")):
+                continue
+            porta.append((tf, tid))
+    if not porta:
+        return list(descritores or [])
+
+    # Intervalo de amostragem, deduzido do próprio descritor: `tempo_posto_s`
+    # já é n_amostras x intervalo, então a divisão devolve o intervalo.
+    intervalo = 5.0
+    for d in descritores or []:
+        try:
+            n = int(d.get("n_amostras_posto") or 0)
+            tp = float(d.get("tempo_posto_s") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and tp > 0.0:
+            intervalo = tp / n
+            break
+
+    por_t: dict[float, list[int]] = {}
+    for t, tid in porta:
+        por_t.setdefault(t, []).append(tid)
+
+    visivel: dict[int, float] = {}
+    for d in descritores or []:
+        try:
+            visivel[int(d.get("pessoa_track_id"))] = float(
+                d.get("tempo_visivel_s") or 0.0)
+        except (TypeError, ValueError):
+            continue
+
+    fragmentos: list[list[tuple[float, int]]] = []
+    atual: list[tuple[float, int]] = []
+    for t in sorted(por_t):
+        tids = por_t[t]
+        if len(tids) == 1:
+            escolhido = tids[0]
+        else:
+            # Ambíguo. Só continua se o ocupante em curso estiver entre eles.
+            ultimo = atual[-1][1] if atual else None
+            escolhido = ultimo if (ultimo is not None and ultimo in tids) else None
+        if escolhido is None:
+            if atual:
+                fragmentos.append(atual)
+            atual = []
+            continue
+        if atual and (t - atual[-1][0]) <= _DOMINANCIA_GAP_FRAG_S:
+            atual.append((t, escolhido))
+        else:
+            if atual:
+                fragmentos.append(atual)
+            atual = [(t, escolhido)]
+    if atual:
+        fragmentos.append(atual)
+
+    saida: list[dict] = []
+    for frag in fragmentos:
+        contagem = Counter(tid for _, tid in frag)
+        tid_dom = contagem.most_common(1)[0][0]
+        tempo = round(len(frag) * intervalo, 1)
+        saida.append({
+            "pessoa_track_id": tid_dom,
+            "n_amostras_posto": len(frag),
+            "tempo_posto_s": tempo,
+            "tempo_visivel_s": visivel.get(tid_dom, tempo),
+            "instantes_posto": [t for t, _ in frag],
+            "fundido_de": sorted(contagem),
+        })
+    return saida
+
+
 def eleger_operador_segmento(descritores: list[dict]) -> dict:
     """Elege o operador lógico de uma câmera usando a janela completa.
 
@@ -4830,6 +4966,16 @@ def eleger_operador_segmento(descritores: list[dict]) -> dict:
     não altera os descritores. Todos os gates precisam passar; na dúvida o
     track fica nulo e o estado é ``indefinido``.
     """
+    # Fase 112-A: com a chave LIGADA a eleição roda sobre ocupantes fundidos e
+    # com piso menor. DESLIGADA, nada muda — nem um byte.
+    if _DOMINANCIA_RELAXADA:
+        descritores = fundir_fragmentos_posto(descritores)
+        _min_tempo = _DOMINANCIA_MIN_TEMPO_POSTO_S
+        _min_obs = _DOMINANCIA_MIN_OBS_POSTO
+    else:
+        _min_tempo = _OPERADOR_SEG_MIN_TEMPO_POSTO_S
+        _min_obs = _OPERADOR_SEG_MIN_OBS_POSTO
+
     campos = {
         "status": "indefinido",
         "track_id": None,
@@ -4888,8 +5034,8 @@ def eleger_operador_segmento(descritores: list[dict]) -> dict:
     })
 
     if (
-        lider["tempo_posto_s"] < _OPERADOR_SEG_MIN_TEMPO_POSTO_S
-        or lider["n_observacoes"] < _OPERADOR_SEG_MIN_OBS_POSTO
+        lider["tempo_posto_s"] < _min_tempo
+        or lider["n_observacoes"] < _min_obs
     ):
         campos["motivo"] = "evidencia_insuficiente"
         return campos
