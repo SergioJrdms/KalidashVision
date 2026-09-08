@@ -72,7 +72,7 @@ const evidenceModalStyles = `
 export function rotuloLeituraPresenca(estadoPresenca?: string | null) {
   if (estadoPresenca === "operador_fora" ||
     estadoPresenca === "operador_fora_produtivo" ||
-    estadoPresenca === "operador_fora_improdutivo") return "Operador fora do posto";
+    estadoPresenca === "operador_fora_improdutivo") return "Posto sem operador";
   if (estadoPresenca === "posto_vazio") return "Posto sem operador";
   return "Posto sem operador";
 }

@@ -84,7 +84,7 @@ export function rotulosAtribuiveis(labels: (string | null | undefined)[]): strin
 // pobre ou ambígua. Tudo o que não estiver aqui é convertido sozinho.
 const SEMENTE: Record<string, string> = {
   operar_torno: "Operando o torno",
-  posto_vazio: "Posto vazio",
+  posto_vazio: "Posto sem operador",
   monitorar_maquina: "Acompanhando a máquina",
   conversando_colega: "Conversando com colega",
   // Fase 100: os dois carimbos de ausência não recebem nome de atividade. O
