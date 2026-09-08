@@ -133,10 +133,14 @@ export function TestePipeline({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   }
   const t1 = tokenDe(f1);
   const t2 = tokenDe(f2);
-  const nomesOk = !!(t1 && t2);
+  // Solo: com apenas a CAM1, basta o token dela. O backend processa o
+  // segmento sem par depois da carencia (KV_LOTE_SOLO_GRACE_S, 20 min).
+  const nomesOk = !!t1 && (!f2 || !!t2);
   // Pareamento tolera ~6 min entre os relógios dos nomes.
   const paream = (() => {
-    if (!t1 || !t2) return false;
+    if (!t1) return false;
+    if (!f2) return true;   // solo: nao ha par para conferir
+    if (!t2) return false;
     const p = (t: string) => {
       const d = t.split("_");
       return new Date(+d[0].slice(0, 4), +d[0].slice(4, 6) - 1, +d[0].slice(6, 8),
@@ -146,7 +150,7 @@ export function TestePipeline({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   })();
 
   async function enviarPar() {
-    if (!f1 || !f2) return;
+    if (!f1) return;
     setErro(null);
     setEnviando(true);
     let etapa = "Cam 1";
@@ -155,22 +159,30 @@ export function TestePipeline({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
       const r1 = await api.videos.uploadSegmento(proc.id, f1, "cam1");
       if (r1.status === "duplicado") toast("Cam 1: este segmento já estava na plataforma.", { icon: "info" });
 
-      etapa = "Cam 2";
-      setPasso(`Enviando Cam 2 (${(f2.size / 1048576).toFixed(0)} MB)…`);
-      const r2 = await api.videos.uploadSegmento(proc.id, f2, "cam2");
-      if (r2.status === "duplicado") toast("Cam 2: este segmento já estava na plataforma.", { icon: "info" });
+      if (f2) {
+        etapa = "Cam 2";
+        setPasso(`Enviando Cam 2 (${(f2.size / 1048576).toFixed(0)} MB)…`);
+        const r2 = await api.videos.uploadSegmento(proc.id, f2, "cam2");
+        if (r2.status === "duplicado") toast("Cam 2: este segmento já estava na plataforma.", { icon: "info" });
+      }
 
       etapa = "pareamento";
-      setPasso("Pareando cam1+cam2 e disparando a análise…");
+      setPasso(f2 ? "Pareando cam1+cam2 e disparando a análise…"
+                  : "Enfileirando o segmento solo da CAM1…");
       const r = await api.processos.processarLote(proc.id);
       if (r.itens === 0) {
         setErro(
-          "Nada novo entrou na fila — este par provavelmente JÁ FOI processado antes (o upload é " +
-          "idempotente por nome). Para reprocessar o mesmo par, exclua o vídeo antigo no Dashboard " +
-          "(lista de vídeos) e envie de novo.",
+          f2
+            ? "Nada novo entrou na fila — este par provavelmente JÁ FOI processado antes (o upload é " +
+              "idempotente por nome). Para reprocessar o mesmo par, exclua o vídeo antigo no Dashboard " +
+              "(lista de vídeos) e envie de novo."
+            : "O segmento SUBIU, mas ainda não entrou na fila — e isso é o esperado. Um vídeo sem par " +
+              "fica ~20 min em carência esperando a outra câmera chegar. Passado esse tempo, clique de " +
+              "novo em \"Enviar CAM1 e processar\" com o MESMO arquivo: o upload é idempotente (não " +
+              "sobe de novo) e aí o segmento entra na fila sozinho.",
         );
       } else {
-        toast(`Par enviado — ${r.itens} item(ns) na fila de processamento.`, { icon: "check" });
+        toast(`${f2 ? "Par" : "Segmento CAM1"} enviado — ${r.itens} item(ns) na fila de processamento.`, { icon: "check" });
         setF1(null); setF2(null);
         go("processo", proc.id, "fila");
       }
@@ -214,7 +226,7 @@ export function TestePipeline({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
           <h1 className="font-display" style={{ fontSize: 22, fontWeight: 700 }}>Teste do pipeline</h1>
         </div>
         <p style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.55 }}>
-          Envie um par CAM1 + CAM2 para processar pelo mesmo fluxo utilizado na captura real. Os resultados entram normalmente na Fila, Eventos e métricas do processo.
+          Envie um par CAM1 + CAM2 para processar pelo mesmo fluxo utilizado na captura real. Os resultados entram normalmente na Fila, Eventos e métricas do processo. A CAM2 é <b>opcional</b>: sem ela o segmento é processado solo, depois de ~20 min de carência.
         </p>
         <p className="soft" style={{ fontSize: 12, color: "var(--text)", marginTop: 14, padding: "10px 12px", borderRadius: 10, lineHeight: 1.5 }}>
           Este teste grava resultados reais neste processo e pode alterar suas métricas. Prefira um processo exclusivo de validação.
@@ -229,7 +241,7 @@ export function TestePipeline({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
         <input ref={ref1} type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => setF1(e.target.files?.[0] || null)} />
         <input ref={ref2} type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => setF2(e.target.files?.[0] || null)} />
 
-      {f1 && f2 && !nomesOk && (
+      {f1 && !nomesOk && (
         <p style={{ fontSize: 12, color: "var(--desp)", marginTop: 10 }}>
           Os nomes precisam conter <code className="font-mono">seg_AAAAMMDD_HHMMSS</code> (ex.:
           <code className="font-mono"> seg_20260715_080001_roi.mp4</code>) — sem isso o par não se forma. Renomeie os arquivos e selecione de novo.
@@ -244,8 +256,8 @@ export function TestePipeline({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
       {passo && <p style={{ fontSize: 12, color: "var(--accent-deep)", marginTop: 10 }}><b>{passo}</b> Não feche esta aba.</p>}
 
         <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-          <Btn size="sm" disabled={!f1 || !f2 || !nomesOk || !paream || enviando} icon="play" onClick={enviarPar}>
-            {enviando ? "Enviando par…" : erro ? "Tentar de novo" : "Enviar par e processar"}
+          <Btn size="sm" disabled={!f1 || !nomesOk || !paream || enviando} icon="play" onClick={enviarPar}>
+            {enviando ? "Enviando…" : erro ? "Tentar de novo" : f2 ? "Enviar par e processar" : "Enviar CAM1 e processar"}
           </Btn>
         </div>
         <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 8 }}>
