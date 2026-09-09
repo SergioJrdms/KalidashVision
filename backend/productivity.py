@@ -173,6 +173,15 @@ def _voltado_para_maquina(orientacao: Any, frente_maquina: Any) -> bool | None:
     return None
 
 
+# Fase 113 — a marca da ponte rolante. Importada de `ponte_rolante.py` para
+# não haver duas verdades para a mesma string; a chave é a mesma do pipeline,
+# e desligá-la devolve o número de antes sem tocar em dado.
+from .ponte_rolante import PONTE_SEGMENTO_ORIGEM as _ORIGEM_PONTE_SEGMENTO
+
+_PONTE_SEGMENTO_DECIDE = os.environ.get(
+    "KV_PONTE_SEGMENTO", "off").strip().lower() not in ("off", "0", "false", "")
+
+
 def classificar_observacao(
     e: dict,
     frentes_por_camera: dict[str, str] | None = None,
@@ -196,6 +205,18 @@ def classificar_observacao(
     não transforma um posto sem operador em "ocupado".
     """
     papel = _texto_normalizado(e.get("papel_pessoa"))
+
+    # ── Fase 113 — PONTE ROLANTE MARCOU O SEGMENTO ──
+    # Decide só a PRODUTIVIDADE. A presença continua vindo do papel: quem
+    # estava fora (ou em posto vazio) segue fora, agora como fora PRODUTIVO —
+    # o mesmo balde de presença, categoria diferente. É o que separa "o
+    # operador estava trabalhando na ponte" de "o operador estava no posto".
+    if _PONTE_SEGMENTO_DECIDE and _texto_normalizado(
+            e.get("categoria_lean_origem")) == _ORIGEM_PONTE_SEGMENTO:
+        if papel in (EST_POSTO_VAZIO, EST_OPERADOR_FORA):
+            return EST_OPERADOR_FORA_PRODUTIVO, "ponte_rolante_no_segmento"
+        if papel == "operador":
+            return EST_PRODUTIVO, "ponte_rolante_no_segmento"
 
     if papel == EST_POSTO_VAZIO:
         # Sinal de pessoa junto com "vazio" é contradição, não ausência. Há

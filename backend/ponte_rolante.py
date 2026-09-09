@@ -303,3 +303,233 @@ def persistir_episodios_ponte(
         return 0
     sb.table("eventos").insert(linhas).execute()
     return len(linhas)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Fase 113 — O SEGMENTO INTEIRO, QUANDO A PONTE É CERTA
+#
+# Decisão de negócio: com CERTEZA de operação de ponte rolante no segmento,
+# o segmento inteiro vale como ponte rolante. Sem micro-ação, sem disputa
+# minuto a minuto. EXCLUSIVO da ponte rolante.
+#
+# A marca que move número NÃO é o rótulo — `decidir_permanencia` ignora
+# rótulo por contrato. É a origem `PONTE_SEGMENTO_ORIGEM`, lida lá num nível
+# próprio, abaixo da correção humana.
+#
+# ⚠️ Fail-closed em todos os pontos: sem duração, sem janelas, sem confiança
+# alta ou sem cobertura, o veredito é `certo=False` e nada é escrito.
+# ══════════════════════════════════════════════════════════════════════════
+PONTE_SEGMENTO_ORIGEM = "ponte_rolante_segmento"
+
+# As mesmas origens mecânicas do pipeline: `validado_humano` nelas é só
+# "fora da fila", nunca decisão de gente.
+_ORIGENS_MECANICAS_PONTE = frozenset({"posto_vazio", "auditoria", "ponte_rolante"})
+
+
+def _env_ligada_ponte(nome: str, padrao: str) -> bool:
+    return os.environ.get(nome, padrao).strip().lower() not in {
+        "off", "0", "false", "",
+    }
+
+
+def _env_num_ponte(nome: str, padrao: float, minimo: float, maximo: float) -> float:
+    try:
+        valor = float(os.environ.get(nome, padrao))
+    except (TypeError, ValueError):
+        return float(padrao)
+    return valor if minimo <= valor <= maximo else float(padrao)
+
+
+def ponte_segmento_habilitada() -> bool:
+    """Chave própria, separada da detecção. Padrão DESLIGADO."""
+    return _env_ligada_ponte("KV_PONTE_SEGMENTO", "off")
+
+
+def segmento_certeza_ponte(
+    janelas_positivas, episodios, duracao_s: float | None,
+) -> dict:
+    """Veredito por segmento — pura, sem banco, sem VLM.
+
+    Devolve sempre o mesmo dicionário, com os números que sustentam o "sim"
+    ou a lista de motivos do "não". O motivo é o que vai para o log: um
+    veredito sem motivo legível é um veredito que ninguém audita.
+    """
+    min_janelas = int(_env_num_ponte("KV_PONTE_SEG_MIN_JANELAS", 3, 1, 1000))
+    min_cobertura = _env_num_ponte("KV_PONTE_SEG_MIN_COBERTURA", 0.5, 0.0, 1.0)
+    exige_alta = _env_ligada_ponte("KV_PONTE_SEG_EXIGE_ALTA", "on")
+
+    janelas = [
+        j for j in (janelas_positivas or [])
+        if isinstance(j, dict) and j.get("operando_ponte_rolante") is True
+    ]
+    n_janelas = len(janelas)
+    n_alta = sum(1 for j in janelas if str(j.get("confianca") or "") == "alta")
+    tempo = 0.0
+    for ep in (episodios or []):
+        try:
+            tempo += max(0.0, float(ep.get("duracao_s") or 0.0))
+        except (TypeError, ValueError):
+            continue
+    try:
+        dur = float(duracao_s or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    cobertura = (tempo / dur) if dur > 0 else 0.0
+
+    motivos: list[str] = []
+    if n_janelas < min_janelas:
+        motivos.append(f"janelas positivas {n_janelas} < {min_janelas}")
+    if exige_alta and n_alta < 1:
+        motivos.append("nenhuma janela de confianca alta")
+    if dur <= 0:
+        motivos.append("duracao do segmento desconhecida")
+    elif cobertura < min_cobertura:
+        motivos.append(f"cobertura {cobertura:.0%} < {min_cobertura:.0%}")
+
+    return {
+        "certo": not motivos,
+        "n_janelas": n_janelas,
+        "n_janelas_alta": n_alta,
+        "tempo_ponte_s": round(tempo, 1),
+        "duracao_s": round(dur, 1),
+        "cobertura": round(cobertura, 4),
+        "min_janelas": min_janelas,
+        "min_cobertura": min_cobertura,
+        "motivo": "; ".join(motivos) if motivos else "certeza_ponte_rolante",
+    }
+
+
+def _decisao_humana_evento(e: dict) -> bool:
+    """Espelha o nível 0 de `decidir_permanencia`. Gente ganha da máquina."""
+    mecanico = (e.get("origem_validacao") or "") in _ORIGENS_MECANICAS_PONTE
+    return (
+        (not mecanico)
+        and bool(e.get("validado_humano"))
+        and bool(e.get("label_corrigido") or e.get("validacao_correto") is True)
+    )
+
+
+def garantir_catalogo_ponte(sb, empresa: str, processo: str) -> str:
+    """O rótulo precisa existir no catálogo COM categoria — o painel calcula
+    a categoria pelo catálogo, e rótulo ausente cai em desperdício."""
+    try:
+        atual = (
+            sb.table("comportamentos")
+            .select("id, categoria_lean, categoria_lean_origem")
+            .eq("empresa", empresa).eq("processo", processo)
+            .eq("label", PONTE_ROLANTE_LABEL).limit(1).execute().data
+        ) or []
+        if not atual:
+            sb.table("comportamentos").insert({
+                "empresa": empresa, "processo": processo,
+                "label": PONTE_ROLANTE_LABEL,
+                "descricao": "Operação do sistema de içamento (ponte rolante).",
+                "categoria_lean": "valor_agregado",
+                "categoria_lean_origem": "humano",
+            }).execute()
+            return "criado"
+        if atual[0].get("categoria_lean") != "valor_agregado":
+            log.warning(
+                "[ponte-rolante/segmento] catalogo tem %s = %r, nao "
+                "'valor_agregado' — o painel vai divergir do nivel novo. "
+                "Corrija no catalogo; nao sobrescrevo escolha ja registrada.",
+                PONTE_ROLANTE_LABEL, atual[0].get("categoria_lean"),
+            )
+            return "divergente"
+        return "ok"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[ponte-rolante/segmento] catalogo nao conferido: %s", exc)
+        return "indisponivel"
+
+
+_CAMPOS_ALVO_PONTE = (
+    "id, comportamento_label, principal, origem_validacao, validado_humano, "
+    "label_corrigido, validacao_correto"
+)
+
+
+def _atualizar_lote(sb, ids: list, campos: dict) -> str | None:
+    """UPDATE em lotes de 100. Devolve o erro, ou None se foi tudo."""
+    for i in range(0, len(ids), 100):
+        try:
+            sb.table("eventos").update(campos).in_("id", ids[i : i + 100]).execute()
+        except Exception as exc:  # noqa: BLE001
+            return str(exc)
+    return None
+
+
+def marcar_segmento_como_ponte(
+    sb, video_id: str, empresa: str, processo: str, veredito: dict,
+) -> dict:
+    """Marca o segmento inteiro — nos DOIS instrumentos.
+
+    ⚠️ SÃO DOIS, e marcar só um não move número:
+      · a TELA (cards, árvore) decide por `decidir_permanencia`, que lê os
+        eventos PRINCIPAIS;
+      · a PRODUTIVIDADE do posto decide por `classificar_observacao`, e
+        `_eventos_do_instrumento` prefere os eventos CRUS (`principal=False`)
+        sempre que o vídeo os tem — que é sempre, na V9.
+    Por isso o principal troca de RÓTULO (é o que você lê) e o cru recebe a
+    MARCA (é o que conta). Rótulo de evento cru não é tocado: ele é o registro
+    de auditoria do que foi observado em cada amostra.
+
+    Não toca em evento decidido por gente. Reprocessar é idempotente, e
+    `label_original` nunca é sobrescrito.
+    """
+    resumo = {"video_id": str(video_id), "principais_marcados": 0,
+              "crus_marcados": 0, "preservados_humanos": 0,
+              "ja_marcados": 0, "erro": None}
+    try:
+        linhas = (
+            sb.table("eventos").select(_CAMPOS_ALVO_PONTE)
+            .eq("video_id", video_id).execute().data
+        ) or []
+    except Exception as exc:  # noqa: BLE001
+        resumo["erro"] = f"leitura falhou: {exc}"
+        return resumo
+
+    por_label: dict[str, list] = {}
+    so_marca: list = []
+    for e in linhas:
+        if _decisao_humana_evento(e):
+            resumo["preservados_humanos"] += 1
+            continue
+        if e.get("principal") is False:
+            so_marca.append(e["id"])
+            continue
+        if e.get("comportamento_label") == PONTE_ROLANTE_LABEL:
+            # Já é ponte: recarimbar as marcas é idempotente, e trocar o
+            # rótulo por ele mesmo apagaria o `label_original` de verdade.
+            resumo["ja_marcados"] += 1
+            so_marca.append(e["id"])
+            continue
+        por_label.setdefault(str(e.get("comportamento_label") or ""), []).append(e["id"])
+
+    marca = {"categoria_lean": "valor_agregado",
+             "categoria_lean_origem": PONTE_SEGMENTO_ORIGEM}
+
+    for label_antigo, ids in por_label.items():
+        campos = {**marca, "comportamento_label": PONTE_ROLANTE_LABEL,
+                  "label_original": label_antigo}
+        erro = _atualizar_lote(sb, ids, campos)
+        if erro and "label_original" in erro:
+            log.warning(
+                "[ponte-rolante/segmento] sem a coluna `label_original` neste "
+                "banco (%s) — marcando sem ela.", erro,
+            )
+            campos.pop("label_original")
+            erro = _atualizar_lote(sb, ids, campos)
+        if erro:
+            resumo["erro"] = f"update principal falhou: {erro}"
+        else:
+            resumo["principais_marcados"] += len(ids)
+
+    if so_marca:
+        erro = _atualizar_lote(sb, so_marca, marca)
+        if erro:
+            resumo["erro"] = f"update cru falhou: {erro}"
+        else:
+            resumo["crus_marcados"] += len(so_marca)
+
+    resumo["veredito"] = veredito
+    return resumo

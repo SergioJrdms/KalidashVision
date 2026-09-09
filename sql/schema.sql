@@ -96,6 +96,9 @@ create table if not exists eventos (
 );
 
 alter table eventos add column if not exists categoria_lean        text;
+-- Fase 113: o rótulo que o evento tinha ANTES de a ponte rolante marcar o
+-- segmento inteiro. Sem ele, a marcação seria irreversível.
+alter table eventos add column if not exists label_original text;
 alter table eventos add column if not exists categoria_lean_origem text;
 
 create table if not exists sugestoes_melhoria (

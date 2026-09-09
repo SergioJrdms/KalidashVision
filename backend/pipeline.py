@@ -43,6 +43,10 @@ from .productivity import (
     decisao_conversa_evidenciada,
 )
 from .roupa_superior import avaliar_roupa_superior
+# Fase 113: a origem que marca "o segmento inteiro é ponte rolante" nasce em
+# `ponte_rolante.py`. Importar em vez de repetir a string evita duas verdades
+# para a mesma marca — e `decidir_permanencia` depende dela para decidir.
+from .ponte_rolante import PONTE_SEGMENTO_ORIGEM as ORIGEM_PONTE_SEGMENTO
 # NOTA: `from ultralytics import YOLO` foi removido do topo de propósito.
 # torch + ultralytics pesam centenas de MB no boot do uvicorn. Como o módulo
 # usa `from __future__ import annotations`, as anotações de tipo `YOLO` são
@@ -12357,9 +12361,32 @@ def etapa_persistir(
                 # `cam_id` nunca nulo: coluna de chave com NULL não deduplica.
                 **{**d, "cam_id": (d.get("cam_id") or cam_id or "cam1")},
             } for d in descritores_track]
-            sb.table("descritores_track").upsert(
-                linhas_desc, on_conflict="video_id,cam_id,pessoa_track_id"
-            ).execute()
+            # Fase 112-B: MESMA recuperação do insert de `eventos`. Uma
+            # coluna de enriquecimento que o banco ainda não tem sai da linha
+            # e a gravação é repetida; ela nunca mais derruba a tabela toda.
+            # O PostgREST pode revelar só UMA coluna desconhecida por
+            # tentativa — por isso o laço, limitado pela tupla de opcionais.
+            _removidas: set[str] = set()
+            while True:
+                try:
+                    sb.table("descritores_track").upsert(
+                        linhas_desc, on_conflict="video_id,cam_id,pessoa_track_id"
+                    ).execute()
+                    break
+                except Exception as _erro:   # noqa: BLE001
+                    _faltando = [c for c in _COLUNAS_OPCIONAIS_DESCRITOR
+                                 if c not in _removidas and c in str(_erro)]
+                    if not _faltando:
+                        raise
+                    _removidas.update(_faltando)
+                    log.warning(
+                        "[descritor] coluna(s) %s não existe(m) neste banco — "
+                        "gravando sem ela(s) (rode o schema.sql para tê-la(s)).",
+                        ", ".join(_faltando),
+                    )
+                    for _l in linhas_desc:
+                        for _c in _faltando:
+                            _l.pop(_c, None)
             log.info("[descritor] %d track(s) descritos neste vídeo.", len(linhas_desc))
         except Exception as e:   # noqa: BLE001
             log.warning("[descritor] não gravado (%s) — o vídeo segue normal.", e)
@@ -13169,6 +13196,10 @@ _COLUNAS_OPCIONAIS_COMPORTAMENTO = ("exige_decisao_humana",)
 # `em_duvida`, que precisa ser escrita explicitamente em toda linha).
 _COLUNAS_OPCIONAIS_EVENTO = ("narrativa", "fora_do_posto", "fora_amostras_zona",
                              "pessoas_cena_cam2")
+# Idem para `descritores_track`. `instantes_posto` nasceu na Fase 112-A e o
+# schema não a tinha: sem esta lista, o upsert inteiro caía calado e a tabela
+# ficou 16 dias sem uma linha. Só colunas ANULÁVEIS e de enriquecimento.
+_COLUNAS_OPCIONAIS_DESCRITOR = ("instantes_posto",)
 
 
 def _sem_colunas_opcionais(linha: dict, erro: str) -> dict | None:
@@ -17162,6 +17193,12 @@ _ARVORE_DECIDE = os.environ.get("KV_ARVORE_DECIDE", "off") not in (
     "off", "0", "false", "False", "")
 
 NIVEL_HUMANO = "humano"
+# Fase 113 — a ponte rolante é o ÚNICO mecanismo que pode afirmar trabalho no
+# segmento inteiro. Chave própria e desligada por padrão: ligá-la muda número,
+# desligá-la devolve o número de antes sem tocar em dado nenhum.
+NIVEL_PONTE_SEGMENTO = "ponte_rolante"
+_PONTE_SEGMENTO_DECIDE = os.environ.get(
+    "KV_PONTE_SEGMENTO", "off").strip().lower() not in ("off", "0", "false", "")
 NIVEL_PRESENCA = "presenca"
 NIVEL_MOVIMENTO = "movimento"
 NIVEL_MANUAL = "manual"
@@ -17517,6 +17554,18 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
         est, _v = estado_permanencia(e, frente_maquina)
         return (categoria_efetiva(e.get("_cat_humana")),
                 NIVEL_HUMANO, "você decidiu este trecho", est)
+
+    # ── 0b — PONTE ROLANTE: o segmento inteiro (Fase 113) ──
+    # Vem DEPOIS da correção humana e ANTES de tudo o mais, de propósito: o
+    # ponto desta fase é justamente atravessar `fora do posto` e `posto
+    # vazio`, que é onde o operador da ponte aparece. A marca é escrita pela
+    # camada da ponte, só com o portão de certeza fechado, e só nela.
+    if (_PONTE_SEGMENTO_DECIDE
+            and e.get("categoria_lean_origem") == ORIGEM_PONTE_SEGMENTO):
+        est, _v = estado_permanencia(e, frente_maquina)
+        return ("valor_agregado", NIVEL_PONTE_SEGMENTO,
+                "o segmento inteiro foi marcado como operação de ponte rolante",
+                est)
 
     estado, voltado = estado_permanencia(e, frente_maquina)
 
@@ -20311,8 +20360,12 @@ def processar_video(
         from .ponte_rolante import (
             agrupar_episodios_ponte,
             detectar_janelas_ponte,
+            garantir_catalogo_ponte,
+            marcar_segmento_como_ponte,
             persistir_episodios_ponte,
             ponte_rolante_habilitada,
+            ponte_segmento_habilitada,
+            segmento_certeza_ponte,
         )
         if (
             ponte_rolante_habilitada()
@@ -20331,6 +20384,23 @@ def processar_video(
                 "[ponte-rolante] %d janela(s) positiva(s) → %d episódio(s)",
                 len(janelas_ponte), n_eventos_ponte,
             )
+            # Fase 113: com o portão de certeza fechado, o segmento INTEIRO
+            # vira ponte rolante. O veredito vai para o log mesmo quando é
+            # "não" — é ele que explica por que um segmento não foi marcado.
+            if ponte_segmento_habilitada():
+                veredito = segmento_certeza_ponte(
+                    janelas_ponte, episodios_ponte,
+                    float(info_video.get("duracao_s") or 0.0),
+                )
+                log.info("[ponte-rolante/segmento] %s", json.dumps(
+                    {"video_id": str(video_id), **veredito},
+                    ensure_ascii=False, separators=(",", ":")))
+                if veredito.get("certo"):
+                    garantir_catalogo_ponte(sb, empresa, processo)
+                    log.info("[ponte-rolante/segmento] %s", json.dumps(
+                        marcar_segmento_como_ponte(
+                            sb, video_id, empresa, processo, veredito),
+                        ensure_ascii=False, separators=(",", ":"), default=str))
     except Exception as e:  # noqa: BLE001
         # A camada é fail-closed e paralela: sua indisponibilidade nunca
         # reinterpreta nem derruba os eventos normais já persistidos.

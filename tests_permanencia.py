@@ -139,9 +139,15 @@ _fn = _fn[:_fn.index("\ndef ", 1)]
 check("a função não consulta o rótulo, nem o mapa de categoria por rótulo",
       "cat_por_label" not in _fn
       and "comportamento_label" not in _fn)
-check("⭐ a única categoria consultada exige a marca de decisão HUMANA",
-      _fn.count("categoria_lean") == 2
-      and "ORIGEM_HUMANO_ROTULO" in _fn)
+# ⭐ Fase 113 — A SEGUNDA PORTA, e a última até alguém escrever aqui o
+# porquê de uma terceira. A ponte rolante pode afirmar trabalho no segmento
+# inteiro; para isso a função lê `categoria_lean_origem` mais uma vez. A
+# contagem sobe de 2 para 3 — e continua sendo esta linha que impede uma
+# leitura de categoria entrar aqui sem justificativa.
+check("⭐ as categorias consultadas exigem marca humana OU a da ponte rolante",
+      _fn.count("categoria_lean") == 3
+      and "ORIGEM_HUMANO_ROTULO" in _fn
+      and "ORIGEM_PONTE_SEGMENTO" in _fn)
 check("⭐ e só é alcançável para quem está fora do posto",
       'e.get("papel_pessoa") == PAPEL_OPERADOR_FORA' in _fn)
 
@@ -587,6 +593,43 @@ check("nenhum UPDATE em massa de comportamento_label",
       or "update({\"comportamento_label\"" not in main2)
 check("e a família continua unindo o histórico na leitura",
       pl.familia_label("monitorar_maquina_parada") == "monitorar_maquina")
+
+print("\n[24] ⭐ Fase 113 — a ponte rolante marca o segmento inteiro")
+# A porta nova, no comportamento e não no texto. Ela existe para atravessar
+# `fora do posto` e `posto vazio`: é lá que o operador da ponte aparece.
+import importlib as _il
+_env_ponte = os.environ.get("KV_PONTE_SEGMENTO")
+os.environ["KV_PONTE_SEGMENTO"] = "on"
+_pl_on = _il.reload(pl)
+_marca = {"categoria_lean_origem": _pl_on.ORIGEM_PONTE_SEGMENTO,
+          "categoria_lean": "valor_agregado"}
+check("com a chave ligada, a marca da ponte vale trabalho",
+      _pl_on.decidir_permanencia(dict(_marca), OPOSTA)[:2]
+      == ("valor_agregado", _pl_on.NIVEL_PONTE_SEGMENTO))
+check("⭐ e atravessa o posto vazio auto-validado por mecanismo",
+      _pl_on.decidir_permanencia(
+          {**_marca, "papel_pessoa": "posto_vazio",
+           "origem_validacao": "posto_vazio", "validado_humano": True},
+          OPOSTA)[0] == "valor_agregado")
+check("⭐ mas a correção humana continua ganhando dela",
+      _pl_on.decidir_permanencia(
+          {**_marca, "validado_humano": True, "label_corrigido": "conversando",
+           "_cat_humana": "desperdicio"}, OPOSTA)[:2]
+      == ("desperdicio", _pl_on.NIVEL_HUMANO))
+check("⭐ e nenhuma outra origem abre essa porta",
+      _pl_on.decidir_permanencia(
+          {"categoria_lean": "valor_agregado", "categoria_lean_origem": "ia"},
+          OPOSTA)[1] != _pl_on.NIVEL_PONTE_SEGMENTO)
+os.environ["KV_PONTE_SEGMENTO"] = "off"
+_pl_off = _il.reload(pl)
+check("⭐ desligar a chave devolve o número de antes, sem tocar em dado",
+      _pl_off.decidir_permanencia(dict(_marca), OPOSTA)[1]
+      != _pl_off.NIVEL_PONTE_SEGMENTO)
+if _env_ponte is None:
+    os.environ.pop("KV_PONTE_SEGMENTO", None)
+else:
+    os.environ["KV_PONTE_SEGMENTO"] = _env_ponte
+pl = _il.reload(pl)
 
 print(f"\n{'='*56}\n  {ok} ok · {fail} falha(s)\n{'='*56}")
 sys.exit(1 if fail else 0)
