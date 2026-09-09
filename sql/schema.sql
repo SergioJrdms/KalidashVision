@@ -1410,6 +1410,22 @@ alter table descritores_track add column if not exists bbox_fim jsonb;
 
 
 -- ════════════════════════════════════════════════════════════════════════
+-- Fase 112-B — `instantes_posto`, a coluna que faltava.
+--
+-- A Fase 112-A passou a gravar em cada descritor os INSTANTES em que aquele
+-- track esteve no posto — insumo da fusão de fragmentos e, de quebra, o que
+-- torna a eleição reproduzível fora do pipeline. O campo entrou no descritor
+-- sem entrar aqui, e o upsert passou a falhar inteiro: 16 dias sem um único
+-- descritor gravado, em silêncio, porque a gravação é não-fatal de propósito.
+--
+-- A lição, do lado do código, está no `_COLUNAS_OPCIONAIS_DESCRITOR`: coluna
+-- de enriquecimento que o banco recusa tem de sair da linha, não derrubar a
+-- linha. Aqui, a coluna simplesmente passa a existir.
+-- ════════════════════════════════════════════════════════════════════════
+alter table descritores_track add column if not exists instantes_posto jsonb;
+
+
+-- ════════════════════════════════════════════════════════════════════════
 -- Fase 94 — O TERCEIRO ESTADO: OPERAÇÃO MANUAL
 --
 -- O dono abriu o vídeo que a análise apontou (pct_com_movimento=0, VLM dizendo
