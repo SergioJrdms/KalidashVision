@@ -5079,6 +5079,68 @@ def eleger_operador_segmento(descritores: list[dict]) -> dict:
     return campos
 
 
+def herdar_track_de_eleicoes_token(
+    decisao_local: dict,
+    eleicoes_do_token: list[dict],
+) -> dict:
+    """Se a janela local ficou indefinida, herda track confirmado do mesmo token.
+
+    Usado quando cam/janela falha (evidencia_insuficiente) mas outra eleição
+    do mesmo vídeo/token já cravou dominante_claro. Não inventa track: só
+    reutiliza status=confirmado com maior share_dominancia/share.
+    Flag: KV_HERANCA_TRACK_TOKEN=on
+    """
+    if os.environ.get("KV_HERANCA_TRACK_TOKEN", "off").strip().lower() not in (
+        "on", "1", "true", "yes",
+    ):
+        return decisao_local
+
+    if not isinstance(decisao_local, dict):
+        return decisao_local
+    if str(decisao_local.get("status") or "").lower() == "confirmado":
+        return decisao_local
+    if decisao_local.get("track_id") is not None:
+        return decisao_local
+
+    candidatas = []
+    for e in eleicoes_do_token or []:
+        if not isinstance(e, dict):
+            continue
+        if str(e.get("status") or "").lower() != "confirmado":
+            continue
+        tid = e.get("track_id", e.get("track_eleito"))
+        try:
+            tid_i = int(tid)
+        except (TypeError, ValueError):
+            continue
+        if tid_i < 0:
+            continue
+        share = e.get("share_dominancia", e.get("share", 0.0))
+        try:
+            share_f = float(share or 0.0)
+        except (TypeError, ValueError):
+            share_f = 0.0
+        candidatas.append((share_f, tid_i, e))
+
+    if not candidatas:
+        return decisao_local
+
+    candidatas.sort(key=lambda x: -x[0])
+    share_f, tid_i, origem = candidatas[0]
+    out = dict(decisao_local)
+    out.update({
+        "status": "confirmado",
+        "track_id": tid_i,
+        "confianca": round(share_f, 4),
+        "motivo": "heranca_token_confirmado",
+        "herdado_de": {
+            "motivo_origem": origem.get("motivo"),
+            "share": share_f,
+            "cam_id": origem.get("cam_id"),
+        },
+    })
+    return out
+
 def _registrar_operador_segmento_sombra(
     descritores: list[dict], cameras: list[str],
 ) -> list[dict]:
@@ -11070,6 +11132,7 @@ def _registrar_identidades_segmento_sombra(
     por_camera: dict[str, list[dict]] = defaultdict(list)
     for d in dados_shadow.get("descritores") or []:
         por_camera[str(d.get("cam_id") or "cam1")].append(d)
+
     saida: list[dict] = []
     for camera in dict.fromkeys(str(c or "cam1") for c in cameras):
         try:
@@ -11132,6 +11195,42 @@ def _registrar_identidades_segmento_sombra(
             })
         except Exception as exc:  # noqa: BLE001 — sombra nunca derruba produção
             log.warning("[identidade-segmento] cam=%s erro=%s", camera, exc)
+
+    # ── Herança de track entre câmeras do mesmo segmento/token ──────────
+    # Se uma câmera ficou indefinida e outra (ou a mesma eleição no token)
+    # já tem status=confirmado, herda o track. Flag: KV_HERANCA_TRACK_TOKEN=on
+    eleicoes = [item.get("decisao") or {} for item in saida]
+    for item in saida:
+        d0 = item.get("decisao") or {}
+        d1 = herdar_track_de_eleicoes_token(d0, eleicoes)
+        if d1.get("motivo") != "heranca_token_confirmado":
+            continue
+        item["decisao"] = d1
+        tid = d1.get("track_id")
+        vencedora = next(
+            (
+                i for i in (item.get("identidades") or [])
+                if i.get("pessoa_track_id") == tid
+            ),
+            None,
+        )
+        if vencedora is not None:
+            item["decisao"]["identidade_logica"] = vencedora.get("identidade_logica")
+            item["decisao"]["track_ids"] = vencedora.get("track_ids", [])
+            try:
+                item["timeline"] = construir_timeline_identidade_segmento(
+                    dados_shadow.get("observacoes") or [], vencedora, duracao_s
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "[operador-segmento-heranca] timeline cam=%s erro=%s",
+                    item.get("cam_id"), exc,
+                )
+        log.info(
+            "[operador-segmento-heranca] %s",
+            json.dumps(d1, ensure_ascii=False, separators=(",", ":")),
+        )
+
     return saida
 
 
