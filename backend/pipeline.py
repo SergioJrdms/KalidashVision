@@ -12147,6 +12147,10 @@ def etapa_persistir(
             # assim que dá para comparar antes/depois no mesmo dado.
             "maos_maquina": e.get("maos_maquina"),
             "orientacao": e.get("orientacao"),
+            # Fase 114 — o motivo que licenciou o `trabalho`. Gravado SEMPRE,
+            # com flag ligada ou desligada: e a unica forma de responder
+            # "por que este minuto virou desperdicio?" depois do fato.
+            "produtividade_motivo": e.get("produtividade_motivo"),
             # A NARRATIVA DO MINUTO (`KV_NARRATIVA`). Só é escrita quando existe
             # — assim o `insert` não carrega a chave em banco que ainda não tem
             # a coluna, e a fase pode subir antes do SQL rodar.
@@ -13105,6 +13109,52 @@ ORIGEM_SEM_EVIDENCIA = "fallback"
 # por isso que ela pode ter poder de decisão sem reabrir o buraco do 41%→81%.
 ORIGEM_HUMANO_ROTULO = "humano_rotulo"
 
+# ═════════════════════════════════════════════════════════════════════════
+# Fase 114 — A CLASSIFICAÇÃO DO GESTOR VALE DENTRO DO POSTO TAMBÉM.
+#
+# A assimetria que esta fase remove: no nível 1a, com o operador FORA do
+# posto, a categoria que um humano pôs no rótulo DECIDE. No nível 3, com
+# ele DENTRO, a mesma categoria é ignorada e quem decide é o booleano
+# `trabalho` do VLM. A classificação dele valia quando o operador saía e
+# não valia quando ele ficava.
+#
+# E o booleano erra assimetricamente, medido em 111 trechos:
+#   `trabalho=True`  → 90% de acerto (só sai com evidência positiva)
+#   `trabalho=False` →  5% de acerto (sai de POSTURA e de IMOBILIDADE)
+# porque o prompt lista "parado sem atividade aparente" como false e
+# `costas_ou_lado` licencia false no validador — e "de costas" é a postura
+# de trabalho no torno. Ver Fase 115 para o conserto do prompt.
+#
+# ⚠️ PORTÃO ESTRITO, e não é `categoria_tem_evidencia`: aquela aceita
+# origem 'ia' (só recusa `ORIGEM_SEM_EVIDENCIA`). Aqui só entra o que o
+# gestor classificou à mão. Nenhum LLM, cluster ou classificador escreve
+# esta string no catálogo — é o que permite dar poder de decisão a ela sem
+# reabrir o buraco do 41%→81%.
+#
+# ⚠️ E O QUE ESTA FASE NÃO CONSERTA: `monitorar_maquina` é documentado na
+# Fase 98 como "depósito de tudo que ele não entendia". Ligar isto torna a
+# categoria de um rótulo-depósito decisiva. Por isso a FLAG, desligada por
+# padrão, e por isso a medição tem de ser refeita depois de ligar.
+# ═════════════════════════════════════════════════════════════════════════
+ORIGEM_CATALOGO_HUMANO = "humano"
+NIVEL_CATALOGO_HUMANO = "catalogo_humano"
+_CATALOGO_NIVEL3 = os.environ.get("KV_CATALOGO_NIVEL3", "off") in (
+    "on", "1", "true", "True")
+
+
+def categoria_do_catalogo_humano(e: dict) -> str | None:
+    """Categoria que o GESTOR pôs no rótulo deste evento, ou None.
+
+    None em tudo que não seja decisão humana explícita: origem 'ia',
+    'aprendido', 'fallback', nula, ou categoria fora do par válido.
+    FUNÇÃO PURA — só lê o dict do evento."""
+    if not _CATALOGO_NIVEL3:
+        return None
+    if (e.get("_cat_humana_origem") or "") != ORIGEM_CATALOGO_HUMANO:
+        return None
+    cat = e.get("_cat_humana")
+    return cat if cat in CATEGORIAS_LEAN_VALIDAS else None
+
 
 def categoria_efetiva(cat: str | None) -> str:
     """Categoria Lean que a tela mostra. NUNCA devolve None.
@@ -13200,6 +13250,9 @@ _COLUNAS_OPCIONAIS_EVENTO = ("narrativa", "fora_do_posto", "fora_amostras_zona",
 # schema não a tinha: sem esta lista, o upsert inteiro caía calado e a tabela
 # ficou 16 dias sem uma linha. Só colunas ANULÁVEIS e de enriquecimento.
 _COLUNAS_OPCIONAIS_DESCRITOR = ("instantes_posto",)
+# Fase 114: idem para `eventos`. Se o schema ainda nao rodou, o insert
+# derruba a coluna e grava o resto — nunca perde o evento por causa dela.
+_COLUNAS_OPCIONAIS_EVENTO = ("produtividade_motivo",)
 
 
 def _sem_colunas_opcionais(linha: dict, erro: str) -> dict | None:
@@ -13997,7 +14050,7 @@ def relatorio_propagacao_lean(
                        empresa=empresa, processo=processo)
     except Exception as e:
         return {"erro": f"leitura de comportamentos falhou: {e}"}
-    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+    cat_por_label = CatalogoLean(comps)
 
     def _dur(e):
         return max(0.0, float(e.get("tempo_fim_s") or 0) - float(e.get("tempo_inicio_s") or 0))
@@ -17132,6 +17185,26 @@ def evento_conta_no_vocabulario(e: dict) -> bool:
     return not sem_descricao_utilizavel(e)
 
 
+class CatalogoLean(dict):
+    """label → categoria_lean, carregando também a ORIGEM de cada uma.
+
+    É um `dict` para todo efeito: os cinco consumidores de `cat_por_label`
+    continuam valendo sem mudança. O extra é `.origem`, que a Fase 114 usa
+    para separar 'o gestor classificou' de 'a IA chutou'.
+
+    ⚠️ A categoria e a origem são lidas do CATÁLOGO na hora da consulta, não
+    da cópia congelada em `eventos.categoria_lean_origem`. É de propósito:
+    a cópia do evento é do dia do insert, e reclassificar um rótulo depois
+    não a atualiza — a mudança nasceria inerte exatamente nos trechos que
+    motivaram esta fase."""
+
+    def __init__(self, comps):
+        super().__init__({c["label"]: c.get("categoria_lean")
+                          for c in comps if c.get("label")})
+        self.origem = {c["label"]: c.get("categoria_lean_origem")
+                       for c in comps if c.get("label")}
+
+
 def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
     """(label efetivo, categoria lean, duração) de um evento principal.
 
@@ -17150,6 +17223,12 @@ def _cat_do_evento(e: dict, cat_por_label: dict) -> tuple[str, str, float]:
         # A categoria do rótulo entra APENAS no caminho humano — é a decisão
         # dela sobre aquele rótulo, não o rótulo decidindo sozinho.
         e2["_cat_humana"] = cat_por_label.get(label)
+        # Fase 114: a ORIGEM viaja junto. Sem ela o portão não distingue
+        # "o gestor classificou" de "a IA chutou", e a decisão do nível 2b
+        # seria o próprio buraco que ela evita. `cat_por_label` sem o
+        # atributo (chamador antigo) → {} → None → portão fechado.
+        e2["_cat_humana_origem"] = getattr(
+            cat_por_label, "origem", {}).get(label)
         cat, _niv, _mot, _est = decidir_permanencia(e2, e.get("_frente_maquina"))
         return label, cat, dur
     _label, cat, dur, _nivel, _cand = _cat_com_arvore(e, cat_por_label)
@@ -17307,9 +17386,10 @@ def comparar_arvore(sb, empresa: str, processo: str, dia: str | None = None) -> 
         empresa=empresa, processo=processo,
     )
     frente = frente_maquina_do_processo(sb, empresa, processo)
-    comps = varrer(sb, "comportamentos", "label, categoria_lean",
+    comps = varrer(sb, "comportamentos",
+                   "label, categoria_lean, categoria_lean_origem",
                    empresa=empresa, processo=processo)
-    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+    cat_por_label = CatalogoLean(comps)
 
     if dia:
         videos = varrer(sb, "videos", "id, nome, processado_em",
@@ -17621,6 +17701,21 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     if estado == EST_NO_TORNO:
         return ("valor_agregado", "orientacao",
                 "no posto e voltado para o torno — medido pela pose", estado)
+
+    # ── 2b — A SUA CLASSIFICAÇÃO, DENTRO DO POSTO (Fase 114) ──
+    # Vem DEPOIS da pose (nível 2, que é medição) e ANTES do VLM (nível 3,
+    # que é opinião). A ordem é a da precedência já declarada nesta função:
+    #     correção humana > sinal medido > decisão humana sobre o rótulo
+    #     > opinião do VLM
+    # ⚠️ Isto NÃO é "o rótulo decide". O rótulo continua não decidindo: quem
+    # decide é a CATEGORIA QUE UM HUMANO ATRIBUIU àquele rótulo. Se ninguém
+    # classificou, `categoria_do_catalogo_humano` devolve None e o VLM segue
+    # julgando, exatamente como antes.
+    _cat_cat = categoria_do_catalogo_humano(e)
+    if _cat_cat is not None:
+        return (_cat_cat, NIVEL_CATALOGO_HUMANO,
+                "no posto, e você classificou esta atividade no catálogo",
+                estado)
 
     # ── 3 — no posto, voltado para outro lado: o VLM julga ──
     t = e.get("trabalho")
@@ -18949,9 +19044,10 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str | None,
                 "nota": ("Nenhum vídeo processado neste processo." if dia is None
                          else "Nenhum vídeo com gravação nesta data.")}
 
-    comps = varrer(sb, "comportamentos", "label, categoria_lean",
+    comps = varrer(sb, "comportamentos",
+                   "label, categoria_lean, categoria_lean_origem",
                    empresa=empresa, processo=processo)
-    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+    cat_por_label = CatalogoLean(comps)
     _frente = frente_maquina_do_processo(sb, empresa, processo)
 
     ids = sorted(inicio_por_video)
@@ -19116,9 +19212,10 @@ def montar_analise_diaria(sb: Client, empresa: str, processo: str, dias: int = 3
     if not inicio_por_video:
         return {"dias": [], "janelas": None, "tendencia": None}
 
-    comps = varrer(sb, "comportamentos", "label, categoria_lean",
+    comps = varrer(sb, "comportamentos",
+                   "label, categoria_lean, categoria_lean_origem",
                    empresa=empresa, processo=processo)
-    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+    cat_por_label = CatalogoLean(comps)
 
     eventos = varrer(
         sb, "eventos",
@@ -19477,9 +19574,10 @@ def montar_serie_temporal(sb: Client, empresa: str, processo: str) -> dict:
         empresa=empresa, processo=processo,
     )
 
-    comps = varrer(sb, "comportamentos", "label, categoria_lean",
+    comps = varrer(sb, "comportamentos",
+                   "label, categoria_lean, categoria_lean_origem",
                    empresa=empresa, processo=processo)
-    cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps}
+    cat_por_label = CatalogoLean(comps)
 
     # agrupa eventos por vídeo (Fase 16: só principais; crus de auditoria fora)
     por_video: dict = defaultdict(list)

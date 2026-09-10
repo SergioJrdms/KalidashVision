@@ -954,6 +954,24 @@ create index if not exists idx_eventos_desc_invalida
 --     and (bbox_inicio->>'y2')::numeric - (bbox_inicio->>'y1')::numeric > 1
 -- ════════════════════════════════════════════════════════════════════════
 alter table eventos add column if not exists bbox_cam   text;
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Fase 114 — POR QUE ESTE TRECHO VIROU DESPERDÍCIO?
+--
+-- `produtividade_motivo` existe no pipeline desde a V9 e NUNCA foi gravado.
+-- É o motivo que licenciou o booleano `trabalho` — 'maos_no_torno',
+-- 'voltado_para_torno', 'costas_ou_lado', 'conversa_ou_celular',
+-- 'sem_atividade', 'sem_leitura'. Sem ele, a pergunta do título não tem
+-- resposta auditável: o número aparece e a razão dele morre na memória do
+-- processo.
+--
+-- Foi exatamente esta coluna que faltou para MEDIR a causa do lado
+-- improdutivo: a análise teve de inferir o motivo a partir do texto da
+-- descrição, e errou o diagnóstico duas vezes por isso.
+-- ════════════════════════════════════════════════════════════════════════
+alter table eventos add column if not exists produtividade_motivo text;
+create index if not exists idx_eventos_prod_motivo
+    on eventos(empresa, processo, produtividade_motivo);
 alter table eventos add column if not exists bbox_stats jsonb;
 
 
