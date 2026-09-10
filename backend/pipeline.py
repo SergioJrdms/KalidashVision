@@ -3103,9 +3103,10 @@ Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índ
 Devolva também, por imagem:
 - "imovel": true se a pessoa está na MESMA posição da imagem anterior, false se mudou.
 Responda também "trabalho" por imagem: a atividade descrita é TRABALHO DO POSTO?
-- true  = ler desenho técnico, medir peça, buscar ferramenta ou material, organizar bancada, limpar cavaco, conversar SOBRE O SERVIÇO
-- false = celular, conversa paralela, parado sem atividade aparente, ausente do enquadramento
-- null  = não dá para dizer
+- true  = ler desenho técnico, medir peça, buscar ferramenta ou material, organizar bancada, limpar cavaco, conversar SOBRE O SERVIÇO, mãos no torno/peça/ferramenta, OU parado/junto ao torno monitorando o ciclo / aguardando a máquina (inspeção visual, espera de processamento)
+- false = celular, conversa paralela prolongada (não sobre o serviço), costas totais para o processo sem atenção ao posto, ausência clara do enquadramento com ociosidade evidente
+- null  = parado junto/ao lado do torno SEM outro sinal de ociosidade (celular, conversa paralela, costas totais), ou evidência insuficiente
+Na dúvida, prefira null a false. NÃO marque false só porque está imóvel ao lado da máquina.
 Julgue a ATIVIDADE, não a pessoa: a pergunta é se aquilo é serviço do posto, não se ele é produtivo em geral. Na dúvida, null — nunca chute true.
 
 """  + _BLOCO_RESUMO + """
@@ -3230,9 +3231,10 @@ NÃO AFIRME O ESTADO DA MÁQUINA — nem "parada", nem "em ciclo", nem equivalen
 IDENTIDADE E PRODUTIVIDADE SÃO PERGUNTAS SEPARADAS. Um operador conversando, de costas ou no celular continua sendo o operador — apenas fica improdutivo. Use "ausente" somente quando estiver claro que a pessoa visível não assumiu o posto; na dúvida use "incerto".
 
 REGRA ÚNICA DE PRODUTIVIDADE:
-- true: mão no torno/peça/ferramenta OU voltado para o torno acompanhando a operação;
-- false: de costas/de lado, conversando, no celular ou sem atenção ao posto;
-- null: evidência insuficiente.
+- true: mão no torno/peça/ferramenta OU voltado para o torno acompanhando a operação OU parado junto/ao lado do torno monitorando/aguardando ciclo (sem celular e sem conversa paralela);
+- false: conversando (não sobre o serviço), no celular, OU costas totais para o processo com desatenção clara ao posto;
+- null: parado junto ao torno sem sinal claro de ociosidade, ou evidência insuficiente.
+NÃO use false só por imobilidade ao lado da máquina. Na dúvida, null.
 
 Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). "operador_estado" deve ser "identificado", "ausente" ou "incerto". "trabalho" só pode ser true/false quando identificado; nos demais casos deve ser null. "motivo" deve ser: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa_ou_celular", "sem_atividade" ou "sem_leitura".
 {{"trechos": [{{"i": 0, "operador_estado": "identificado", "acao": "mãos no torno, ajustando a peça", "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "incerto", "acao": "pessoa parcialmente oclusa ao lado", "imovel": true, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
@@ -17890,7 +17892,8 @@ Olhando as imagens de novo, com a correção do supervisor em mãos, responda:
 1. A sua DESCRIÇÃO estava correta? Se não, o que faltou ver?
 2. A atividade corrigida ("{rotulo_novo}") é TRABALHO DO POSTO?
    - trabalho = ler desenho, medir peça, buscar ferramenta ou material, organizar bancada, limpar cavaco, conversar sobre o serviço, operar a máquina
-   - não é trabalho = celular, conversa paralela, parado sem atividade aparente
+   - não é trabalho = celular, conversa paralela prolongada (não sobre o serviço), ociosidade evidente
+   - parado junto ao torno sem outro sinal de ociosidade → null (não false)
    - null se não der para dizer
 
 Responda em JSON:
