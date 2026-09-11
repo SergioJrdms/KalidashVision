@@ -3191,6 +3191,33 @@ def _processo_nome(sb, user: CurrentUser, processo_id: str) -> str:
     return r.data[0]["processo"]
 
 
+def _varrer_eventos_com_motivo(
+    sb,
+    campos_base: str,
+    *,
+    empresa: str,
+    processo: str,
+) -> list[dict]:
+    """Lê a proveniência V9 sem quebrar bancos ainda sem a coluna opcional."""
+    try:
+        return varrer(
+            sb, "eventos", f"{campos_base}, produtividade_motivo",
+            empresa=empresa, processo=processo,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if "produtividade_motivo" not in str(exc):
+            raise
+        log.warning(
+            "[produtividade] coluna produtividade_motivo ausente; "
+            "decisões negativas sem proveniência ficarão inconclusivas "
+            "até a aplicação de sql/schema.sql."
+        )
+        return varrer(
+            sb, "eventos", campos_base,
+            empresa=empresa, processo=processo,
+        )
+
+
 @app.get("/processos/{processo_id}/dashboard")
 def dashboard(
     processo_id: str,
@@ -3211,8 +3238,8 @@ def dashboard(
     # comportamentos, snapshot do chat) era calculado sobre esse pedaço.
     # `videos` era pior ainda: sem `.limit()` nenhum, o teto do PostgREST
     # aplicava-se igual e em silêncio.
-    evs = varrer(
-        sb, "eventos",
+    evs = _varrer_eventos_com_motivo(
+        sb,
         "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
         "tempo_inicio_s, tempo_fim_s, validacao_correto, validado_humano, "
         "origem_validacao, confianca, principal, zona_contexto, "
@@ -4214,7 +4241,9 @@ def evidencias_de_presenca(
         "maos_maquina, orientacao, trabalho, descricao_bruta, bbox_stats, "
         "categoria_lean, categoria_lean_origem, n_amostras, versao_instrumento"
     )
-    evs = varrer(sb, "eventos", campos, empresa=user.empresa, processo=nome)
+    evs = _varrer_eventos_com_motivo(
+        sb, campos, empresa=user.empresa, processo=nome,
+    )
     videos = varrer(sb, "videos", "id, nome, cam_id, gravado_em, processado_em",
                     empresa=user.empresa, processo=nome)
     _tz, _ = fuso_do_processo(sb, user.empresa, nome)

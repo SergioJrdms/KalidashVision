@@ -51,10 +51,10 @@ check("mão no torno vence e é produtivo",
 check("texto herdado não decide produtividade",
       prod.classificar_observacao(ev(descricao_bruta="de costas conversando"))[0]
       == prod.EST_PRODUTIVIDADE_INCONCLUSIVA)
-check("a decisão estruturada marca a conversa como improdutiva",
+check("booleano negativo sem motivo não acusa improdutividade",
       prod.classificar_observacao(
           ev(descricao_bruta="de costas conversando", trabalho=False)
-      )[0] == prod.EST_IMPRODUTIVO)
+      )[0] == prod.EST_PRODUTIVIDADE_INCONCLUSIVA)
 check("orientação calibrada decide",
       prod.classificar_observacao(
           ev(orientacao="frente"), {"cam1": "camera"}
@@ -63,8 +63,18 @@ check("configuração perfil não inventa esquerda/direita",
       prod.classificar_observacao(
           ev(orientacao="perfil"), {"cam1": "perfil"}
       )[0] == prod.EST_PRODUTIVIDADE_INCONCLUSIVA)
-check("booleano estruturado é o fallback final",
-      prod.classificar_observacao(ev(trabalho=False))[0] == prod.EST_IMPRODUTIVO)
+check("motivo negativo específico libera o fallback final",
+      prod.classificar_observacao(ev(
+          trabalho=False, produtividade_motivo="sem_atividade",
+      ))[0] == prod.EST_IMPRODUTIVO)
+check("motivo incompatível não libera acusação",
+      prod.classificar_observacao(ev(
+          trabalho=False, produtividade_motivo="maos_no_torno",
+      ))[0] == prod.EST_PRODUTIVIDADE_INCONCLUSIVA)
+check("motivo legado que mistura conversa e celular se abstém",
+      prod.classificar_observacao(ev(
+          trabalho=False, produtividade_motivo="conversa_ou_celular",
+      ))[0] == prod.EST_PRODUTIVIDADE_INCONCLUSIVA)
 check("vazio contradito por sinal de pessoa é inconclusivo",
       prod.classificar_observacao(ev("posto_vazio", maos_maquina=True))[0]
       == prod.EST_SEM_LEITURA)
@@ -86,7 +96,7 @@ check("humano_rotulo produtivo é aceito sem virar presença",
 print("\n[2] Denominadores separados")
 eventos = [
     ev(trabalho=True),
-    ev(ini=60, fim=120, trabalho=False),
+    ev(ini=60, fim=120, trabalho=False, produtividade_motivo="sem_atividade"),
     ev(ini=120, fim=180),
     ev("visitante", ini=180, fim=240),
     ev("posto_vazio", ini=240, fim=300),
@@ -142,7 +152,7 @@ check("boa cobertura libera a leitura", publicavel["publicavel"] is True, public
 
 base_fora = [
     ev(trabalho=True),
-    ev(ini=60, fim=120, trabalho=False),
+    ev(ini=60, fim=120, trabalho=False, produtividade_motivo="sem_atividade"),
     ev("posto_vazio", ini=120, fim=180),
 ]
 substituido = [

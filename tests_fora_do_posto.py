@@ -421,7 +421,10 @@ def _ev_comercial(papel, ini, fim, **extra):
 
 _com_base = [
     _ev_comercial("operador", 0, 60, trabalho=True),
-    _ev_comercial("operador", 60, 120, trabalho=False),
+    _ev_comercial(
+        "operador", 60, 120, trabalho=False,
+        produtividade_motivo="sem_atividade",
+    ),
     _ev_comercial("posto_vazio", 120, 180),
 ]
 _com_fora = [*_com_base[:2], _ev_comercial(pl.PAPEL_OPERADOR_FORA, 120, 180)]

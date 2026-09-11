@@ -3137,7 +3137,8 @@ NÃO AFIRME O ESTADO DA MÁQUINA. Não diga "máquina parada", "em ciclo", "torn
 
 REGRA ÚNICA DE PRODUTIVIDADE DO OPERADOR ESCOLHIDO:
 - true: está com a mão no torno/peça/ferramenta OU está voltado para o torno, acompanhando a operação;
-- false: está de costas ou de lado para o torno, conversando, no celular ou sem atenção ao posto;
+- false: está de costas para o torno com desatenção clara, usa visivelmente o celular ou não apresenta atividade observável;
+- conversa: reporte provisoriamente false com motivo "conversa"; a CPU decidirá produtivo, improdutivo ou inconclusivo pela associação e roupa do interlocutor. Nunca misture conversa com celular;
 - null: não foi possível identificar o operador ou a evidência visual é insuficiente.
 O CONTEXTO de mãos/orientação vem de sensores e prevalece sobre impressão visual. Não use categoria Lean, vocabulário, estado mecânico da máquina ou conhecimento presumido do processo.
 
@@ -3146,13 +3147,13 @@ Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índ
 """  + _BLOCO_RESUMO + """- "operador_estado" deve ser "identificado" quando exatamente um candidato ocupa funcionalmente o posto, "ausente" quando está claro que nenhum candidato é o operador, ou "incerto" quando há oclusão/evidência insuficiente;
 - "operador" é obrigatório somente em "identificado" e deve ser um rótulo visível naquela imagem; nos outros estados deve ser null;
 - "trabalho" só pode ser true/false em "identificado"; nos outros estados deve ser null;
-- "motivo" deve ser um destes valores: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa_ou_celular", "sem_atividade", "sem_leitura".
+- "motivo" deve ser um destes valores: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa", "uso_celular", "sem_atividade", "sem_leitura". Use "conversa" somente quando houver fala/interação com outra pessoa; use "uso_celular" somente quando o aparelho estiver visível.
 - "conversa_estado" deve ser "identificada" SOMENTE quando o operador está claramente conversando e há exatamente um interlocutor marcado; "incerta" quando a conversa é visível mas não dá para associar com segurança a uma única pessoa; "ausente" quando não há conversa;
 - "interlocutor" é obrigatório somente em conversa "identificada" e deve ser o rótulo da OUTRA pessoa, nunca o operador. Em conversa incerta/ausente deve ser null. Com duas pessoas possíveis, NÃO escolha arbitrariamente: use "incerta".
 - NÃO julgue cor de roupa nem diga quem é gestor. O sistema mede a roupa superior separadamente; você apenas associa a conversa à pessoa certa.
 - Quando a última imagem lateral tiver rótulos C2P1, C2P2..., "interlocutor_cam2" aponta SOMENTE o C2Px visualmente correspondente ao "interlocutor" da imagem principal indicada. Não altere P1/P2, não decida atividade por C2Px e não use cor. Sem associação inequívoca, use null.
 
-{{"resumo": "TRÊS A CINCO FRASES contando a sequência em ordem, sem concluir uma ação. É o campo mais longo desta resposta.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "observando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno", "conversa_estado": "ausente", "interlocutor": null, "interlocutor_cam2": null}}, {{"i": 1, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "conversando ao lado do torno", "P2": "conversando com o operador"}}, "imovel": true, "trabalho": false, "motivo": "conversa_ou_celular", "conversa_estado": "identificada", "interlocutor": "P2", "interlocutor_cam2": "C2P2"}}]}}"""
+{{"resumo": "TRÊS A CINCO FRASES contando a sequência em ordem, sem concluir uma ação. É o campo mais longo desta resposta.", "trechos": [{{"i": 0, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "mãos no torno, ajustando a peça", "P2": "observando ao lado"}}, "imovel": false, "trabalho": true, "motivo": "maos_no_torno", "conversa_estado": "ausente", "interlocutor": null, "interlocutor_cam2": null}}, {{"i": 1, "operador_estado": "identificado", "operador": "P1", "acoes": {{"P1": "conversando ao lado do torno", "P2": "conversando com o operador"}}, "imovel": true, "trabalho": false, "motivo": "conversa", "conversa_estado": "identificada", "interlocutor": "P2", "interlocutor_cam2": "C2P2"}}]}}"""
 
 
 PROMPT_VLM_SEQUENCIA_CAM2_V8 = """Você é um analista de processos industriais observando UM posto de trabalho pela CÂMERA LATERAL (com profundidade).
@@ -3232,20 +3233,21 @@ IDENTIDADE E PRODUTIVIDADE SÃO PERGUNTAS SEPARADAS. Um operador conversando, de
 
 REGRA ÚNICA DE PRODUTIVIDADE:
 - true: mão no torno/peça/ferramenta OU voltado para o torno acompanhando a operação OU parado junto/ao lado do torno monitorando/aguardando ciclo (sem celular e sem conversa paralela);
-- false: conversando (não sobre o serviço), no celular, OU costas totais para o processo com desatenção clara ao posto;
+- false: conversando (decisão provisória), usando visivelmente o celular, OU costas totais para o processo com desatenção clara ao posto;
 - null: parado junto ao torno sem sinal claro de ociosidade, ou evidência insuficiente.
 NÃO use false só por imobilidade ao lado da máquina. Na dúvida, null.
 
-Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). "operador_estado" deve ser "identificado", "ausente" ou "incerto". "trabalho" só pode ser true/false quando identificado; nos demais casos deve ser null. "motivo" deve ser: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa_ou_celular", "sem_atividade" ou "sem_leitura".
+Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). "operador_estado" deve ser "identificado", "ausente" ou "incerto". "trabalho" só pode ser true/false quando identificado; nos demais casos deve ser null. "motivo" deve ser: "maos_no_torno", "voltado_para_torno", "costas_ou_lado", "conversa", "uso_celular", "sem_atividade" ou "sem_leitura". Não misture conversa e celular no mesmo motivo.
 {{"trechos": [{{"i": 0, "operador_estado": "identificado", "acao": "mãos no torno, ajustando a peça", "imovel": false, "trabalho": true, "motivo": "maos_no_torno"}}, {{"i": 1, "operador_estado": "incerto", "acao": "pessoa parcialmente oclusa ao lado", "imovel": true, "trabalho": null, "motivo": "sem_leitura"}}]}}"""
 
 
 _MOTIVOS_PRODUTIVOS_V9 = frozenset({
     "maos_no_torno", "voltado_para_torno",
 })
+_MOTIVOS_CONVERSA_V9 = frozenset({"conversa", "conversa_ou_celular"})
 _MOTIVOS_IMPRODUTIVOS_V9 = frozenset({
-    "costas_ou_lado", "conversa_ou_celular", "sem_atividade",
-})
+    "costas_ou_lado", "uso_celular", "sem_atividade",
+}) | _MOTIVOS_CONVERSA_V9
 _MOTIVOS_V9 = (
     _MOTIVOS_PRODUTIVOS_V9
     | _MOTIVOS_IMPRODUTIVOS_V9
@@ -4400,6 +4402,9 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #       colega/incerto sem deixar label ou prosa promover produtividade.
 #  11 = a identidade lógica local do segmento (111A/B/C) assume autoridade
 #       sobre operador/operador_fora antes do VLM, com fallback legado por slot.
+#  12 = o voto negativo exige motivo auditável; conversa e celular deixam de
+#       compartilhar motivo e conversa incerta passa a abstenção.
+#  13 = o mesmo contrato negativo da V12 com autoridade de identidade 111D.
 def _env_ligada(nome: str, padrao: str = "off") -> bool:
     """Flags críticas são fail-closed: só uma allowlist explícita liga."""
     return os.environ.get(nome, padrao).strip().lower() in {
@@ -4492,8 +4497,8 @@ PRODUTIVIDADE_OPERADOR_ESTRUTURADA = (
 # fallback continua V11: ele foi medido sob o instrumento novo e a abstenção é
 # parte auditável desse instrumento. Histórico nunca é reescrito.
 VERSAO_INSTRUMENTO = (
-    11 if AUTORIDADE_111D_CONFIGURADA
-    else 10 if PRODUTIVIDADE_OPERADOR_V9
+    13 if AUTORIDADE_111D_CONFIGURADA
+    else 12 if PRODUTIVIDADE_OPERADOR_V9
     else min(8, _VERSAO_LEGADA)
 )
 
@@ -6328,7 +6333,7 @@ def _evidencia_conversa_do_trecho(
     fechar, o resultado é ``incerto``. Campo ausente/malformado não confirma
     nem mesmo a conversa e preserva o fluxo anterior.
     """
-    if operador_tid is None or motivo != "conversa_ou_celular":
+    if operador_tid is None or motivo not in _MOTIVOS_CONVERSA_V9:
         return None
     estado = str(trecho.get("conversa_estado") or "").strip().lower()
     interlocutor_rotulo = trecho.get("interlocutor")
@@ -6438,7 +6443,9 @@ def _aplicar_regra_conversa(
     if tipo == TIPO_INTERLOCUTOR_COLEGA:
         return False, "conversa_colega_nao_cinza"
     if tipo == TIPO_INTERLOCUTOR_INCERTO:
-        return False, "conversa_interlocutor_incerto"
+        return None, "conversa_interlocutor_incerto"
+    if motivo in _MOTIVOS_CONVERSA_V9:
+        return None, "conversa_sem_interlocutor_validado"
     return trabalho, motivo
 
 
@@ -13447,16 +13454,11 @@ _COLUNAS_OPCIONAIS_COMPORTAMENTO = ("exige_decisao_humana",)
 # anuláveis — coluna NOT NULL não pode entrar aqui (ver a armadilha do
 # `em_duvida`, que precisa ser escrita explicitamente em toda linha).
 _COLUNAS_OPCIONAIS_EVENTO = ("narrativa", "fora_do_posto", "fora_amostras_zona",
-                             "pessoas_cena_cam2")
+                             "pessoas_cena_cam2", "produtividade_motivo")
 # Idem para `descritores_track`. `instantes_posto` nasceu na Fase 112-A e o
 # schema não a tinha: sem esta lista, o upsert inteiro caía calado e a tabela
 # ficou 16 dias sem uma linha. Só colunas ANULÁVEIS e de enriquecimento.
 _COLUNAS_OPCIONAIS_DESCRITOR = ("instantes_posto",)
-# Fase 114: idem para `eventos`. Se o schema ainda nao rodou, o insert
-# derruba a coluna e grava o resto — nunca perde o evento por causa dela.
-_COLUNAS_OPCIONAIS_EVENTO = ("produtividade_motivo",)
-
-
 def _sem_colunas_opcionais(linha: dict, erro: str) -> dict | None:
     """A linha sem a coluna que o banco recusou, ou None se o erro é outro."""
     faltando = [c for c in _COLUNAS_OPCIONAIS_COMPORTAMENTO if c in erro]
@@ -17911,6 +17913,13 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     conversa = decisao_conversa_evidenciada(e)
     if conversa is not None:
         _estado_conversa, _motivo_conversa = conversa
+        if _estado_conversa not in {"produtivo", "improdutivo"}:
+            return (
+                None,
+                "duvida",
+                _motivo_conversa.replace("_", " "),
+                estado,
+            )
         return (
             "valor_agregado" if _estado_conversa == "produtivo" else "desperdicio",
             "julgamento_visual_roupa",

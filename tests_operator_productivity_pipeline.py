@@ -391,7 +391,9 @@ main_fonte = open(os.path.join(os.path.dirname(__file__), "backend", "main.py"),
 check("vitrine recusa instrumentos anteriores à V9",
       'int(_e.get("versao_instrumento") or 0) < 9' in main_fonte)
 check("query comercial traz o piso de evidência persistido",
-      '"n_amostras, versao_instrumento"' in main_fonte)
+      '"n_amostras, versao_instrumento"' in main_fonte
+      and 'f"{campos_base}, produtividade_motivo"' in main_fonte
+      and "_varrer_eventos_com_motivo(" in main_fonte)
 
 print(f"\n{ok} ok · {fail} falha(s)")
 raise SystemExit(1 if fail else 0)

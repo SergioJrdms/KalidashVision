@@ -45,15 +45,27 @@ TIPO_INTERLOCUTOR_COLEGA = "outra_pessoa"
 TIPO_INTERLOCUTOR_INCERTO = "incerto"
 CONFIANCA_COR_GESTOR_MIN = 0.72
 
+# Um ``trabalho=False`` isolado é opinião binária, não evidência auditável.
+# Só motivos negativos específicos chegam ao KPI por esse fallback. Orientação
+# medida continua sendo tratada acima, e conversa tem o próprio contrato com
+# interlocutor verificado. ``costas_ou_lado`` fica de fora deliberadamente:
+# sem calibração da câmera, esse motivo do VLM também confunde monitoramento
+# lateral com ociosidade.
+MOTIVOS_IMPRODUTIVOS_CONFIRMADOS = frozenset({
+    "uso_celular",
+    "sem_atividade",
+})
+
 
 def decisao_conversa_evidenciada(e: dict) -> tuple[str, str] | None:
     """Decisão estreita da conversa, ou ``None`` sem o contrato completo.
 
-    A regra exige quatro peças coerentes produzidas no mesmo frame: rótulo
-    canônico ORIGINAL, booleano ``trabalho``, associação estruturada ao
-    interlocutor e classificação objetiva da roupa superior. Assim, nem uma
-    correção textual para "gestor" nem um label inventado pelo cluster movem o
-    KPI. O recorte auditável viaja no JSONB ``bbox_stats``, já existente.
+    Uma decisão positiva/negativa exige quatro peças coerentes produzidas no
+    mesmo frame: rótulo canônico ORIGINAL, booleano ``trabalho``, associação
+    estruturada ao interlocutor e classificação objetiva da roupa superior.
+    A abstenção aceita o mesmo contrato sem booleano, pois nunca soma ponto.
+    Assim, nem uma correção textual para "gestor" nem um label inventado pelo
+    cluster movem o KPI. O recorte auditável viaja no JSONB ``bbox_stats``.
     """
     if _texto_normalizado(e.get("papel_pessoa")) != "operador":
         return None
@@ -93,15 +105,15 @@ def decisao_conversa_evidenciada(e: dict) -> tuple[str, str] | None:
         return EST_IMPRODUTIVO, "conversa_com_colega_nao_cinza"
 
     # A conversa foi observada, mas a roupa/associação não autorizou afirmar
-    # gestor. Mantém a convenção conservadora anterior: não rende produtividade.
+    # gestor NEM colega. A resposta correta é abster; improdutividade aqui seria
+    # uma acusação fabricada justamente pela falha do classificador de roupa.
     if (
         label == LABEL_CONVERSANDO_INCERTO
-        and trabalho is False
         and conversa_estado in {"identificada", "incerta"}
         and tipo == TIPO_INTERLOCUTOR_INCERTO
         and cor == "incerto"
     ):
-        return EST_IMPRODUTIVO, "conversa_com_interlocutor_incerto"
+        return EST_PRODUTIVIDADE_INCONCLUSIVA, "conversa_com_interlocutor_incerto"
     return None
 
 
@@ -263,8 +275,17 @@ def classificar_observacao(
 
     if e.get("trabalho") is True:
         return EST_PRODUTIVO, "julgamento_visual_direto"
+    motivo_negativo = _texto_normalizado(e.get("produtividade_motivo"))
+    if (
+        e.get("trabalho") is False
+        and motivo_negativo in MOTIVOS_IMPRODUTIVOS_CONFIRMADOS
+    ):
+        return EST_IMPRODUTIVO, f"julgamento_visual_{motivo_negativo}"
     if e.get("trabalho") is False:
-        return EST_IMPRODUTIVO, "julgamento_visual_direto"
+        return (
+            EST_PRODUTIVIDADE_INCONCLUSIVA,
+            "julgamento_negativo_sem_motivo_confirmado",
+        )
     return EST_PRODUTIVIDADE_INCONCLUSIVA, "evidencia_insuficiente"
 
 
@@ -649,7 +670,10 @@ def agregar_produtividade(
         "serie_diaria": serie,
         "regra": {
             "produtivo": "mãos no torno, voltado para o torno ou julgamento visual direto",
-            "improdutivo": "de costas/de lado, conversa/celular ou julgamento visual direto",
+            "improdutivo": (
+                "orientação calibrada para fora, uso visível do celular, "
+                "ausência clara de atividade ou conversa com colega confirmada"
+            ),
             "presenca": "operador dentro da zona do posto",
         },
     }

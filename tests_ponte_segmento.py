@@ -248,7 +248,8 @@ ok(pd_.classificar_observacao({"papel_pessoa": "posto_vazio"})[0]
 
 # ⭐ A propriedade que importa: a marca move produtividade e NAO move presenca.
 _sem = [_ev(0, 60, papel_pessoa="posto_vazio"),
-        _ev(60, 90, papel_pessoa="operador", trabalho=False)]
+        _ev(60, 90, papel_pessoa="operador", trabalho=False,
+            produtividade_motivo="sem_atividade")]
 _com = [{**e, **_m} if e["papel_pessoa"] == "posto_vazio" else e for e in _sem]
 _a, _b = pd_._metricas(_sem, {}), pd_._metricas(_com, {})
 ok(_a["presenca_pct"] == _b["presenca_pct"]

@@ -960,8 +960,9 @@ alter table eventos add column if not exists bbox_cam   text;
 --
 -- `produtividade_motivo` existe no pipeline desde a V9 e NUNCA foi gravado.
 -- É o motivo que licenciou o booleano `trabalho` — 'maos_no_torno',
--- 'voltado_para_torno', 'costas_ou_lado', 'conversa_ou_celular',
--- 'sem_atividade', 'sem_leitura'. Sem ele, a pergunta do título não tem
+-- 'voltado_para_torno', 'costas_ou_lado', 'conversa', 'uso_celular',
+-- 'sem_atividade', 'sem_leitura' e os motivos de conversa resolvidos pela CPU.
+-- Sem ele, a pergunta do título não tem
 -- resposta auditável: o número aparece e a razão dele morre na memória do
 -- processo.
 --

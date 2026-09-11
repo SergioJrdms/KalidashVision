@@ -163,6 +163,19 @@ check("sem contrato de conversa preserva o fluxo antigo",
       pl._evidencia_conversa_do_trecho(
           {}, amostra(), {"P1": 1, "P2": 2}, 1, "conversa_ou_celular",
       ) is None)
+check("conversa sem interlocutor se abstém",
+      pl._aplicar_regra_conversa(None, False, "conversa")
+      == (None, "conversa_sem_interlocutor_validado"))
+check("interlocutor incerto se abstém",
+      pl._aplicar_regra_conversa(
+          {"tipo": pl.TIPO_INTERLOCUTOR_INCERTO}, False, "conversa",
+      )[0] is None)
+check("celular visível continua sendo decisão negativa direta",
+      pl._aplicar_regra_conversa(None, False, "uso_celular")
+      == (False, "uso_celular"))
+check("prompt novo separa conversa de celular",
+      '"conversa", "uso_celular"' in pl.PROMPT_VLM_SEQUENCIA
+      and 'motivo": "conversa"' in pl.PROMPT_VLM_SEQUENCIA)
 
 original_call = pl.groq_vision_call
 try:
@@ -224,14 +237,15 @@ check("gestor de costas é produtivo",
       prod.classificar_observacao(gestor, {"cam1": "camera"})[0] == "produtivo")
 check("colega voltado ao torno e com mãos não é promovido",
       prod.classificar_observacao(colega, {"cam1": "camera"})[0] == "improdutivo")
-check("conversa incerta não é promovida",
-      prod.classificar_observacao(incerto, {"cam1": "camera"})[0] == "improdutivo")
+check("conversa incerta se abstém mesmo diante de pose positiva",
+      prod.classificar_observacao(incerto, {"cam1": "camera"})[0]
+      == prod.EST_PRODUTIVIDADE_INCONCLUSIVA)
 check("decidir_permanencia: gestor de costas agrega valor",
       pl.decidir_permanencia(gestor, "camera")[0] == "valor_agregado")
 check("decidir_permanencia: colega voltado ao torno é desperdício",
       pl.decidir_permanencia(colega, "camera")[0] == "desperdicio")
-check("decidir_permanencia: incerto voltado ao torno é desperdício",
-      pl.decidir_permanencia(incerto, "camera")[0] == "desperdicio")
+check("decidir_permanencia: interlocutor incerto vira dúvida",
+      pl.decidir_permanencia(incerto, "camera")[:2] == (None, "duvida"))
 
 incompletos = [
     ("sem label", {**gestor, "comportamento_label": None}),

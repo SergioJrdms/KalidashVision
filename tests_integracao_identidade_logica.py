@@ -736,13 +736,13 @@ try:
     os.environ["KV_FORA_DO_POSTO"] = "off"
     versao_sem_110 = importlib.reload(pl).VERSAO_INSTRUMENTO
 
-    check("C18 tríade autoritativa carimba V11",
-          versao_on == 11, versao_on)
+    check("C18 tríade autoritativa carimba V13",
+          versao_on == 13, versao_on)
     check("C18 tríade não depende de quarta chave V9",
-          versao_on_sem_v9 == 11 and estruturada_on_sem_v9 is True,
+          versao_on_sem_v9 == 13 and estruturada_on_sem_v9 is True,
           (versao_on_sem_v9, estruturada_on_sem_v9))
     check("C18 off/sombra/config incompleta preservam a versão anterior",
-          versao_anterior == 10
+          versao_anterior == 12
           and versao_sombra == versao_anterior
           and versao_sem_reid == versao_anterior
           and versao_sem_110 == versao_anterior,

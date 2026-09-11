@@ -120,8 +120,9 @@ check("⭐ SEM neutralizar, o histórico daria 100% produtivo — nunca outro va
 check("`maos=True` decide produtivo", classificar_observacao(ev(maos=True))[0] == "produtivo")
 check("mas `maos=False` NÃO decide improdutivo — não há evidência contrária",
       classificar_observacao(ev(maos=False))[0] == "produtividade_inconclusiva")
-check("e `trabalho` é o único sinal que diria improdutivo",
-      classificar_observacao(ev(trabalho=False))[0] == "improdutivo")
+check("e `trabalho=false` sem motivo auditável não acusa improdutividade",
+      classificar_observacao(ev(trabalho=False))[0]
+      == "produtividade_inconclusiva")
 check("o motivo medido está escrito no código, com o número",
       "produtividade_pct` = 100,0% com 80% de" in main
       and "estruturalmente" in main)

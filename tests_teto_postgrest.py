@@ -173,7 +173,8 @@ check("Dia a dia: eventos paginados",
       'varrer(\n        sb, "eventos"' in bloco_dia or 'varrer(sb, "eventos"' in bloco_dia)
 i_dash = mn.index("def dashboard(")
 check("Dashboard: eventos e vídeos paginados",
-      'varrer(\n        sb, "eventos"' in mn[i_dash: i_dash + 2500]
+      ('varrer(\n        sb, "eventos"' in mn[i_dash: i_dash + 2500]
+       or '_varrer_eventos_com_motivo(' in mn[i_dash: i_dash + 2500])
       and 'varrer(\n        sb, "videos"' in mn[i_dash: i_dash + 2500])
 i_serie = pipe.index("def montar_serie_temporal(")
 bloco_serie = pipe[i_serie: i_serie + 2000]
