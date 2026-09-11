@@ -11147,6 +11147,54 @@ def aplicar_identidade_logica_segmento(
         "motivo": "identidade_confirmada" if aplicados else "slots_sem_mapping",
     }
 
+_TRACKS_SENTINELA = {-2, -3, -5, -6}
+
+
+def carimbar_track_eleito_nos_eventos(
+    eventos: list[dict],
+    resultados_identidade: list[dict],
+    cam_id_primaria: str,
+) -> int:
+    """Se o segmento elegeu titular e o evento ficou com track sentinela,
+    grava o track LOCAL. Não muda label, trabalho nem presença."""
+    if not eventos:
+        return 0
+    camera = str(cam_id_primaria or "cam1")
+    resultado = next(
+        (r for r in (resultados_identidade or [])
+         if str(r.get("cam_id") or "cam1") == camera),
+        None,
+    )
+    if not isinstance(resultado, dict):
+        return 0
+    decisao = resultado.get("decisao") or {}
+    if str(decisao.get("status") or "").lower() != "confirmado":
+        return 0
+    try:
+        tid = int(decisao.get("track_id"))
+    except (TypeError, ValueError):
+        return 0
+    if tid < 0:
+        return 0
+
+    n = 0
+    for e in eventos:
+        papel = str(e.get("papel_pessoa") or "").lower()
+        if papel == "visitante":
+            continue
+        try:
+            atual = int(e.get("pessoa_track_id"))
+        except (TypeError, ValueError):
+            atual = -2
+        if atual in _TRACKS_SENTINELA:
+            e["pessoa_track_id"] = tid
+            n += 1
+    if n:
+        log.info(
+            "[operador-segmento/carimbo] cam=%s track=%s eventos=%d",
+            camera, tid, n,
+        )
+    return n
 
 def _registrar_identidades_segmento_sombra(
     dados_shadow: dict, cameras: list[str], *, duracao_s: float,
@@ -20576,11 +20624,20 @@ def processar_video(
         except Exception as e:  # noqa: BLE001
             log.warning(f"[principal] consolidação falhou (não-fatal): {e}")
             principais = []
+
     if principais:
         eventos, eventos_auditoria = principais, eventos_crus
     else:
         eventos, eventos_auditoria = eventos_crus, None
     progress_cb("segmentar", 100, f"{len(eventos_crus)} eventos → {len(eventos)} principais")
+
+    carimbar_track_eleito_nos_eventos(
+        eventos, resultados_identidade, cam_primaria_efetiva,
+    )
+    if eventos_auditoria:
+        carimbar_track_eleito_nos_eventos(
+            eventos_auditoria, resultados_identidade, cam_primaria_efetiva,
+        )
 
     progress_cb("persistir", 0, "Salvando no banco de dados")
     video_id, n_auto, ids_principais = etapa_persistir(
