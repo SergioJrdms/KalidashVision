@@ -5083,11 +5083,11 @@ def herdar_track_de_eleicoes_token(
     decisao_local: dict,
     eleicoes_do_token: list[dict],
 ) -> dict:
-    """Se a janela local ficou indefinida, herda track confirmado do mesmo token.
+    """Se a janela local ficou indefinida, herda CONFIRMAÇÃO do mesmo token.
 
-    Usado quando cam/janela falha (evidencia_insuficiente) mas outra eleição
-    do mesmo vídeo/token já cravou dominante_claro. Não inventa track: só
-    reutiliza status=confirmado com maior share_dominancia/share.
+    Track ID só é copiado se a origem for a MESMA câmera.
+    Confirmação de OUTRA câmera marca heranca_outras_cams=True e NÃO
+    cola o track_id alienígena (senão a timeline da cam1 quebra).
     Flag: KV_HERANCA_TRACK_TOKEN=on
     """
     if os.environ.get("KV_HERANCA_TRACK_TOKEN", "off").strip().lower() not in (
@@ -5102,7 +5102,9 @@ def herdar_track_de_eleicoes_token(
     if decisao_local.get("track_id") is not None:
         return decisao_local
 
-    candidatas = []
+    cam_local = str(decisao_local.get("cam_id") or "").strip().lower()
+
+    mesma, outras = [], []
     for e in eleicoes_do_token or []:
         if not isinstance(e, dict):
             continue
@@ -5115,28 +5117,52 @@ def herdar_track_de_eleicoes_token(
             continue
         if tid_i < 0:
             continue
-        share = e.get("share_dominancia", e.get("share", 0.0))
         try:
-            share_f = float(share or 0.0)
+            share_f = float(e.get("share_dominancia", e.get("share", 0.0)) or 0.0)
         except (TypeError, ValueError):
             share_f = 0.0
-        candidatas.append((share_f, tid_i, e))
+        cam_e = str(e.get("cam_id") or "").strip().lower()
+        item = (share_f, tid_i, e)
+        if cam_local and cam_e == cam_local:
+            mesma.append(item)
+        else:
+            outras.append(item)
 
-    if not candidatas:
+    # 1) mesma câmera: pode copiar o track
+    if mesma:
+        mesma.sort(key=lambda x: -x[0])
+        share_f, tid_i, origem = mesma[0]
+        out = dict(decisao_local)
+        out.update({
+            "status": "confirmado",
+            "track_id": tid_i,
+            "confianca": round(share_f, 4),
+            "motivo": "heranca_token_confirmado",
+            "herdado_de": {
+                "motivo_origem": origem.get("motivo"),
+                "share": share_f,
+                "cam_id": origem.get("cam_id"),
+            },
+        })
+        return out
+
+    # 2) só outra câmera: confirma que EXISTE operador, sem colar o ID
+    if not outras:
         return decisao_local
-
-    candidatas.sort(key=lambda x: -x[0])
-    share_f, tid_i, origem = candidatas[0]
+    outras.sort(key=lambda x: -x[0])
+    share_f, tid_i, origem = outras[0]
     out = dict(decisao_local)
     out.update({
         "status": "confirmado",
-        "track_id": tid_i,
+        "track_id": None,  # NÃO usar track da outra cam
         "confianca": round(share_f, 4),
         "motivo": "heranca_token_confirmado",
+        "heranca_outras_cams": True,
         "herdado_de": {
             "motivo_origem": origem.get("motivo"),
             "share": share_f,
             "cam_id": origem.get("cam_id"),
+            "track_origem": tid_i,
         },
     })
     return out
@@ -11196,36 +11222,61 @@ def _registrar_identidades_segmento_sombra(
         except Exception as exc:  # noqa: BLE001 — sombra nunca derruba produção
             log.warning("[identidade-segmento] cam=%s erro=%s", camera, exc)
 
-    # ── Herança de track entre câmeras do mesmo segmento/token ──────────
-    # Se uma câmera ficou indefinida e outra (ou a mesma eleição no token)
-    # já tem status=confirmado, herda o track. Flag: KV_HERANCA_TRACK_TOKEN=on
+
+    # Herança: mesma câmera copia track; outra câmera SÓ confirma
+    # e mapeia para a melhor identidade LOCAL (tempo no posto).
     eleicoes = [item.get("decisao") or {} for item in saida]
     for item in saida:
         d0 = item.get("decisao") or {}
         d1 = herdar_track_de_eleicoes_token(d0, eleicoes)
         if d1.get("motivo") != "heranca_token_confirmado":
             continue
+
+        identidades = item.get("identidades") or []
+        vencedora = None
+        if d1.get("heranca_outras_cams") or d1.get("track_id") is None:
+            com_posto = [
+                i for i in identidades
+                if float(i.get("tempo_posto_s") or 0) > 0
+            ]
+            pool = com_posto or identidades
+            if pool:
+                vencedora = max(
+                    pool,
+                    key=lambda i: float(i.get("tempo_posto_s") or 0),
+                )
+                d1["track_id"] = vencedora.get("pessoa_track_id")
+                d1["herdado_de"] = {
+                    **(d1.get("herdado_de") or {}),
+                    "mapeado_cam_local": item.get("cam_id"),
+                    "track_local": d1.get("track_id"),
+                }
+        else:
+            tid = d1.get("track_id")
+            vencedora = next(
+                (i for i in identidades if i.get("pessoa_track_id") == tid),
+                None,
+            )
+
+        if vencedora is None:
+            log.info(
+                "[operador-segmento-heranca] recusada cam=%s sem identidade local",
+                item.get("cam_id"),
+            )
+            continue
+
+        d1["identidade_logica"] = vencedora.get("identidade_logica")
+        d1["track_ids"] = vencedora.get("track_ids", [])
         item["decisao"] = d1
-        tid = d1.get("track_id")
-        vencedora = next(
-            (
-                i for i in (item.get("identidades") or [])
-                if i.get("pessoa_track_id") == tid
-            ),
-            None,
-        )
-        if vencedora is not None:
-            item["decisao"]["identidade_logica"] = vencedora.get("identidade_logica")
-            item["decisao"]["track_ids"] = vencedora.get("track_ids", [])
-            try:
-                item["timeline"] = construir_timeline_identidade_segmento(
-                    dados_shadow.get("observacoes") or [], vencedora, duracao_s
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "[operador-segmento-heranca] timeline cam=%s erro=%s",
-                    item.get("cam_id"), exc,
-                )
+        try:
+            item["timeline"] = construir_timeline_identidade_segmento(
+                dados_shadow.get("observacoes") or [], vencedora, duracao_s
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "[operador-segmento-heranca] timeline cam=%s erro=%s",
+                item.get("cam_id"), exc,
+            )
         log.info(
             "[operador-segmento-heranca] %s",
             json.dumps(d1, ensure_ascii=False, separators=(",", ":")),
