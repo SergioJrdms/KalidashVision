@@ -17963,9 +17963,23 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
 
     # `None` — e aqui está a regra que impede o viés voltar pela porta dos
     # fundos: omissão NÃO rende ponto. Vira desperdício E vira dúvida.
+    _lbl = str(
+        e.get("label_corrigido") or e.get("comportamento_label") or ""
+    ).lower()
+    # H6: dúvida ≠ improdutivo no KPI (categoria vazia)
+    if estado == EST_OUTRO_LADO or any(
+        k in _lbl for k in ("monitorar", "acompanhar", "operar_torno")
+    ):
+        return (
+            None, "duvida",
+            "no posto — não afirma ociosidade sem evidência",
+            estado,
+        )
     return (CATEGORIA_SEM_EVIDENCIA, "duvida",
             "no posto, de outro lado, e não deu para dizer se é serviço — "
             "entra na fila", estado)
+
+
 
 
 # ═════════════════════════════════════════════════════════════════════════
