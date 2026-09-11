@@ -8960,7 +8960,9 @@ def etapa_consolidar_principais(
             "imovel": rep.get("imovel"),
             # Fase 97: o julgamento do minuto — maioria simples entre os crus,
             # e `None` vence empate (na dúvida, dúvida).
-            "trabalho": _trabalho_do_minuto(bucket_operador),
+            "trabalho": _guardrail_h6_trabalho(
+                _trabalho_do_minuto(bucket_operador), escolhido,
+            ),
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": papel_minuto,
             "fora_do_posto": (
@@ -17754,6 +17756,14 @@ def _trabalho_do_minuto(no_bucket: list):
     return sim > nao
 
 
+def _guardrail_h6_trabalho(trabalho, label: str | None) -> bool | None:
+    """H6: monitorar/acompanhar não afirma ociosidade."""
+    lab = str(label or "").lower()
+    if trabalho is False and any(k in lab for k in ("monitorar", "acompanhar")):
+        return None
+    return trabalho
+
+
 def estado_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     """(estado, voltado_para_o_torno) — onde a pessoa esteve e para onde olhava.
 
@@ -17849,7 +17859,18 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
 
     estado, voltado = estado_permanencia(e, frente_maquina)
 
+
     if estado == EST_INCONCLUSIVO:
+        _lbl = str(
+            e.get("label_corrigido") or e.get("comportamento_label") or ""
+        ).lower()
+        # H6: identidade falhou mas o label é trabalho no torno → não é ociosidade
+        if any(k in _lbl for k in ("operar_torno", "monitorar", "acompanhar")):
+            return (
+                "valor_agregado", "identidade_posto",
+                "operador não identificado, atividade de posto — não acusar ociosidade",
+                estado,
+            )
         return (CATEGORIA_SEM_EVIDENCIA, "identidade",
                 "não foi possível identificar o operador neste trecho", estado)
 
@@ -17922,10 +17943,24 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     if t is True:
         return ("valor_agregado", "julgamento",
                 "no posto, de outro lado, e a atividade é serviço do posto", estado)
+
     if t is False:
+        _lbl = str(
+            e.get("label_corrigido") or e.get("comportamento_label") or ""
+        ).lower()
+        # H6: outro lado / monitorar → não afirma improdutivo (categoria vazia)
+        if estado == EST_OUTRO_LADO or any(
+            k in _lbl for k in ("monitorar", "acompanhar")
+        ):
+            return (
+                None, "duvida",
+                "no posto, de outro lado — não afirma ociosidade",
+                estado,
+            )
         return ("desperdicio", "julgamento",
                 "no posto, de outro lado, e a atividade não é serviço do posto",
                 estado)
+
     # `None` — e aqui está a regra que impede o viés voltar pela porta dos
     # fundos: omissão NÃO rende ponto. Vira desperdício E vira dúvida.
     return (CATEGORIA_SEM_EVIDENCIA, "duvida",
