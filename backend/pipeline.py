@@ -4405,6 +4405,9 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #  12 = o voto negativo exige motivo auditável; conversa e celular deixam de
 #       compartilhar motivo e conversa incerta passa a abstenção.
 #  13 = o mesmo contrato negativo da V12 com autoridade de identidade 111D.
+#  14 = o motivo do voto atravessa principal, auditoria e reload do banco;
+#       empate de causas se abstém. Sem autoridade de identidade 111D.
+#  15 = o mesmo contrato de proveniência da V14 com autoridade 111D.
 def _env_ligada(nome: str, padrao: str = "off") -> bool:
     """Flags críticas são fail-closed: só uma allowlist explícita liga."""
     return os.environ.get(nome, padrao).strip().lower() in {
@@ -4497,8 +4500,8 @@ PRODUTIVIDADE_OPERADOR_ESTRUTURADA = (
 # fallback continua V11: ele foi medido sob o instrumento novo e a abstenção é
 # parte auditável desse instrumento. Histórico nunca é reescrito.
 VERSAO_INSTRUMENTO = (
-    13 if AUTORIDADE_111D_CONFIGURADA
-    else 12 if PRODUTIVIDADE_OPERADOR_V9
+    15 if AUTORIDADE_111D_CONFIGURADA
+    else 14 if PRODUTIVIDADE_OPERADOR_V9
     else min(8, _VERSAO_LEGADA)
 )
 
@@ -8936,6 +8939,12 @@ def etapa_consolidar_principais(
         if _interlocutor_principal:
             _bbox_principal = dict(_bbox_principal or {})
             _bbox_principal["interlocutor"] = _interlocutor_principal
+        _trabalho_principal = _guardrail_h6_trabalho(
+            _trabalho_do_minuto(bucket_operador), escolhido,
+        )
+        _motivo_produtividade_principal = _produtividade_motivo_do_minuto(
+            bucket_operador, _trabalho_principal,
+        )
         principais.append({
             "pessoa_track_id": rep["pessoa_track_id"],
             # A narrativa do minuto vem de qualquer observação do balde — é a
@@ -8967,9 +8976,11 @@ def etapa_consolidar_principais(
             "imovel": rep.get("imovel"),
             # Fase 97: o julgamento do minuto — maioria simples entre os crus,
             # e `None` vence empate (na dúvida, dúvida).
-            "trabalho": _guardrail_h6_trabalho(
-                _trabalho_do_minuto(bucket_operador), escolhido,
-            ),
+            "trabalho": _trabalho_principal,
+            # O portão negativo do dashboard exige uma causa auditável. Sem
+            # carregar a causa dominante junto com o booleano, o mesmo evento
+            # era improdutivo em memória e virava inconclusivo após o reload.
+            "produtividade_motivo": _motivo_produtividade_principal,
             "zona_contexto": rep["zona_contexto"],
             "papel_pessoa": papel_minuto,
             "fora_do_posto": (
@@ -12487,6 +12498,14 @@ def etapa_persistir(
             ),
             "trabalho": (
                 e.get("trabalho") if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else None
+            ),
+            # O dashboard do instrumento estruturado prefere os eventos crus.
+            # A causa precisa atravessar esta mesma fronteira; persistir só no
+            # principal não evita que o reload apague a licença do portão
+            # negativo.
+            "produtividade_motivo": (
+                e.get("produtividade_motivo")
+                if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else None
             ),
             "versao_instrumento": VERSAO_INSTRUMENTO,
             "n_amostras": e["n_amostras"], "confianca": e["confianca"],
@@ -17756,6 +17775,35 @@ def _trabalho_do_minuto(no_bucket: list):
     if abs(sim - nao) < 1e-9:
         return None
     return sim > nao
+
+
+def _produtividade_motivo_do_minuto(
+    no_bucket: list, trabalho_minuto: bool | None,
+) -> str | None:
+    """Causa dominante do mesmo voto de produtividade que venceu o minuto.
+
+    Motivos de votos opostos são ignorados. A causa usa a mesma ponderação por
+    sobreposição temporal de ``_trabalho_do_minuto`` e empate se abstém. Assim
+    o resumo nunca combina ``trabalho=False`` com a justificativa de um voto
+    positivo (nem inventa uma causa quando os quadros discordam).
+    """
+    if trabalho_minuto is not True and trabalho_minuto is not False:
+        return None
+    pesos: dict[str, float] = defaultdict(float)
+    for e, ov in no_bucket:
+        if e.get("trabalho") is not trabalho_minuto:
+            continue
+        motivo = str(e.get("produtividade_motivo") or "").strip().lower()
+        if not motivo:
+            continue
+        peso = float(ov or 0.0) if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else 1.0
+        pesos[motivo] += peso
+    if not pesos:
+        return None
+    maior = max(pesos.values())
+    vencedores = [motivo for motivo, peso in pesos.items()
+                  if abs(peso - maior) < 1e-9]
+    return vencedores[0] if len(vencedores) == 1 else None
 
 
 def _guardrail_h6_trabalho(trabalho, label: str | None) -> bool | None:

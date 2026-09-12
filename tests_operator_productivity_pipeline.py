@@ -331,7 +331,7 @@ check("dois quadros produtivos e um improdutivo viram duas durações",
       segmentados)
 
 print("\n[4] Consolidação não mistura visitante com operador")
-def cru(tid, papel, trabalho, maos, orientacao):
+def cru(tid, papel, trabalho, maos, orientacao, motivo=None):
     return {
         "pessoa_track_id": tid, "comportamento_label": f"acao_{tid}",
         "descricao_bruta": f"pessoa {tid}", "tempo_inicio_s": 0,
@@ -341,6 +341,7 @@ def cru(tid, papel, trabalho, maos, orientacao):
         "papel_pessoa": papel, "n_amostras": 3, "n_observacoes": 3,
         "confianca": 1.0, "trabalho": trabalho,
         "maos_maquina": maos, "orientacao": orientacao,
+        "produtividade_motivo": motivo,
     }
 
 principal = pl.etapa_consolidar_principais([
@@ -354,6 +355,25 @@ check("mão do visitante não é do operador", principal["maos_maquina"] is None
 check("orientação vem só do operador", principal["orientacao"] == "costas", principal)
 check("trabalho vem só do operador", principal["trabalho"] is False, principal)
 
+principal_motivo = pl.etapa_consolidar_principais([
+    cru(1, "operador", False, None, "costas", "uso_celular"),
+    {**cru(1, "operador", False, None, "costas", "uso_celular"),
+     "tempo_inicio_s": 0, "tempo_fim_s": 40},
+    {**cru(1, "operador", False, None, "costas", "sem_atividade"),
+     "tempo_inicio_s": 40, "tempo_fim_s": 60},
+], {}, 60.0)[0]
+check("principal preserva a causa dominante do voto negativo",
+      principal_motivo["trabalho"] is False
+      and principal_motivo["produtividade_motivo"] == "uso_celular",
+      principal_motivo)
+
+empate_motivo = pl._produtividade_motivo_do_minuto([
+    (cru(1, "operador", False, None, "costas", "uso_celular"), 30),
+    (cru(1, "operador", False, None, "costas", "sem_atividade"), 30),
+], False)
+check("empate de causas não inventa proveniência", empate_motivo is None,
+      empate_motivo)
+
 incerto = pl.etapa_consolidar_principais([
     cru(1, None, None, None, None),
 ], {}, 60.0)[0]
@@ -365,6 +385,9 @@ persistir = fonte.split("def etapa_persistir(", 1)[1].split("def ", 1)[0]
 check("trabalho entra no payload estruturado V9/V11 principal",
       '"trabalho": (' in persistir
       and 'if PRODUTIVIDADE_OPERADOR_ESTRUTURADA else None' in persistir)
+check("motivo entra tanto no principal quanto na auditoria crua",
+      persistir.count('"produtividade_motivo"') >= 2
+      and '_produtividade_motivo_do_minuto(' in fonte)
 check("instrumento foi versionado", pl.VERSAO_INSTRUMENTO >= 9, pl.VERSAO_INSTRUMENTO)
 check("V9 tem kill switch desligado por padrão no código",
       'PRODUTIVIDADE_OPERADOR_V9 = _env_ligada("KV_PRODUTIVIDADE_OPERADOR_V9")' in fonte
