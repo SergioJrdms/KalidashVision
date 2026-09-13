@@ -28,3 +28,6 @@ dist/
 *.avi
 !frontend/public/*.mp4
 *.tsbuildinfo
+
+# Saidas locais dos notebooks de avaliacao (podem conter IDs internos)
+notebooks/outputs/
