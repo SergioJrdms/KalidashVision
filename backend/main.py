@@ -8,7 +8,7 @@ import re
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import (
     BackgroundTasks,
@@ -242,12 +242,14 @@ class ProcessoUpdateArea(BaseModel):
 class ValidacaoBody(BaseModel):
     acao: str  # confirmar | corrigir | descartar | descricao_invalida | reabrir
     label_corrigido: str | None = None
+    produtividade_humana: Literal["PRODUTIVO", "IMPRODUTIVO", "ABSTEM"] | None = None
 
 
 class LoteBody(BaseModel):
     ids: list[str] = Field(min_length=1)
     acao: str  # "confirmar" | "corrigir" | "descartar" | "reabrir"
     label_corrigido: str | None = None
+    produtividade_humana: Literal["PRODUTIVO", "IMPRODUTIVO", "ABSTEM"] | None = None
 
 
 class ChatBody(BaseModel):
@@ -3692,7 +3694,16 @@ def listar_eventos(
         "id, video_id, comportamento_label, descricao_bruta, tempo_inicio_s, "
         "tempo_fim_s, confianca, validado_humano, validacao_correto, n_amostras, "
         "label_corrigido, origem_validacao, frame_inicio, frame_fim, bbox_inicio, "
-        "pessoa_track_id, principal, papel_pessoa"
+        "pessoa_track_id, principal, papel_pessoa, maos_maquina, orientacao, "
+        "trabalho, bbox_stats, categoria_lean, categoria_lean_origem"
+    )
+    _COLS_OPCIONAIS = (
+        "narrativa",
+        "produtividade_motivo",
+        "produtividade_predita",
+        "produtividade_regra",
+        "produtividade_humana",
+        "produtividade_validada_em",
     )
 
     def _buscar(cols: str):
@@ -3708,21 +3719,36 @@ def listar_eventos(
             _q = _q.eq("validado_humano", True)
         return _q.order("tempo_inicio_s").limit(500).execute()
 
-    # A NARRATIVA é opcional no banco: o SQL é rodado à mão, e a fila não pode
-    # ficar de pé esperando isso. Pede-se a coluna; se ela não existir, repete
-    # sem ela e a tela simplesmente não mostra o parágrafo.
-    try:
-        r = _buscar(_COLS + ", narrativa")
-    except Exception as _e:  # noqa: BLE001
-        if "narrativa" not in str(_e):
-            raise
-        log.warning("[fila] coluna `narrativa` não existe neste banco — "
-                    "seguindo sem ela (rode o schema.sql para tê-la).")
-        r = _buscar(_COLS)
+    # Enriquecimentos são aditivos: o backend novo deve continuar servindo a
+    # fila durante a janela entre deploy e migração. O laço remove somente a
+    # coluna explicitamente citada pelo PostgREST e nunca engole outro erro.
+    opcionais = list(_COLS_OPCIONAIS)
+    while True:
+        try:
+            r = _buscar(_COLS + (", " + ", ".join(opcionais) if opcionais else ""))
+            break
+        except Exception as _e:  # noqa: BLE001
+            faltando = next((c for c in opcionais if c in str(_e)), None)
+            if not faltando:
+                raise
+            opcionais.remove(faltando)
+            log.warning(
+                "[fila] coluna `%s` não existe — seguindo sem ela; rode schema.sql.",
+                faltando,
+            )
     itens = r.data or []
     # Fase 16: só os PRINCIPAIS (1/min) vão pros cards de validação; os crus de
     # auditoria (principal=False) ficam de fora. Vídeos antigos (null) seguem.
     itens = [e for e in itens if e.get("principal") is not False]
+
+    # Backfill apenas na resposta para eventos anteriores à coluna. Não grava e
+    # não reescreve história: a ausência de valor persistido continua visível,
+    # mas a tela já consegue mostrar qual seria a decisão do contrato atual.
+    for item in itens:
+        if not item.get("produtividade_predita"):
+            pred, regra = produtividade.classificar_produtividade_auditavel(item)
+            item["produtividade_predita"] = pred
+            item["produtividade_regra"] = regra
 
     # Categoria Lean PREVISTA + total_ocorrencias por label (join leve). A
     # categoria alimenta o display E o gate de relevância (Fase 5); o
@@ -4589,7 +4615,12 @@ def frames_segmento(
     return {"frames": ["data:image/jpeg;base64," + base64.b64encode(j).decode("ascii") for j in jpegs]}
 
 
-def _montar_update_validacao(acao: str, label_original: str, label_corrigido: str | None) -> dict[str, Any]:
+def _montar_update_validacao(
+    acao: str,
+    label_original: str,
+    label_corrigido: str | None,
+    produtividade_humana: str | None = None,
+) -> dict[str, Any]:
     """Calcula o estado final do evento para cada ação humana.
 
     IMPORTANTE (coerência do aprendizado): a memória do negócio é recalculada
@@ -4622,6 +4653,21 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
     from datetime import datetime
 
     now = datetime.utcnow().isoformat()
+    if produtividade_humana is not None and produtividade_humana not in {
+        "PRODUTIVO", "IMPRODUTIVO", "ABSTEM"
+    }:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "produtividade_humana deve ser PRODUTIVO, IMPRODUTIVO ou ABSTEM",
+        )
+    julgamento_prod = (
+        {
+            "produtividade_humana": produtividade_humana,
+            "produtividade_validada_em": now,
+        }
+        if produtividade_humana in {"PRODUTIVO", "IMPRODUTIVO", "ABSTEM"}
+        else {}
+    )
     if acao == "confirmar":
         # Confirmar = "o label original está certo": limpa qualquer correção antiga.
         return {
@@ -4630,6 +4676,7 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
             "label_corrigido": None,
             "origem_validacao": "humano",
             "validado_em": now,
+            **julgamento_prod,
         }
     if acao == "corrigir":
         # ⚠️ Fase 99 — A GUARDA VALE AQUI TAMBÉM. A tela oferece os rótulos do
@@ -4648,6 +4695,7 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
             "label_corrigido": lc,
             "origem_validacao": "humano",
             "validado_em": now,
+            **julgamento_prod,
         }
     if acao == "descartar":
         # Falso positivo. Mantém label_corrigido inalterado (não enviado no update).
@@ -4656,6 +4704,8 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
             "validacao_correto": False,
             "origem_validacao": "humano",
             "validado_em": now,
+            "produtividade_humana": None,
+            "produtividade_validada_em": None,
         }
     if acao == "descricao_invalida":
         # A DESCRIÇÃO está errada — o VLM alucinou a cena. Corrigir o RÓTULO
@@ -4673,6 +4723,8 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
             "descricao_invalida": True,
             "origem_validacao": "humano",
             "validado_em": now,
+            "produtividade_humana": None,
+            "produtividade_validada_em": None,
         }
     if acao == "reabrir":
         # Devolve à fila como pendente, limpando toda marca de validação.
@@ -4683,6 +4735,8 @@ def _montar_update_validacao(acao: str, label_original: str, label_corrigido: st
             "descricao_invalida": False,
             "origem_validacao": None,
             "validado_em": None,
+            "produtividade_humana": None,
+            "produtividade_validada_em": None,
         }
     raise HTTPException(status.HTTP_400_BAD_REQUEST, "ação inválida")
 
@@ -4701,7 +4755,12 @@ def validar_evento(
     if ev["empresa"] != user.empresa:
         raise HTTPException(status.HTTP_403_FORBIDDEN)
 
-    update = _montar_update_validacao(body.acao, ev["comportamento_label"], body.label_corrigido)
+    update = _montar_update_validacao(
+        body.acao,
+        ev["comportamento_label"],
+        body.label_corrigido,
+        body.produtividade_humana,
+    )
     sb.table("eventos").update(update).eq("id", evento_id).execute()
 
     # Fase 98 — REAVALIAÇÃO: uma chamada de visão para DIAGNOSTICAR o erro.
@@ -4801,7 +4860,12 @@ def validar_lote(body: LoteBody, user: CurrentUser = Depends(get_current_user)):
 
     aplicados = 0
     for ev in encontrados:
-        update = _montar_update_validacao(body.acao, ev["comportamento_label"], body.label_corrigido)
+        update = _montar_update_validacao(
+            body.acao,
+            ev["comportamento_label"],
+            body.label_corrigido,
+            body.produtividade_humana,
+        )
         sb.table("eventos").update(update).eq("id", ev["id"]).execute()
         aplicados += 1
     return {"ok": True, "aplicados": aplicados}

@@ -40,6 +40,7 @@ from .productivity import (
     TIPO_INTERLOCUTOR_COLEGA,
     TIPO_INTERLOCUTOR_GESTOR,
     TIPO_INTERLOCUTOR_INCERTO,
+    classificar_produtividade_auditavel,
     decisao_conversa_evidenciada,
 )
 from .roupa_superior import avaliar_roupa_superior
@@ -12467,6 +12468,13 @@ def etapa_persistir(
             row["validacao_correto"] = True
             row["validado_em"] = datetime.utcnow().isoformat()
             n_auto_validados += 1
+        # Congela a saída ternária e a regra no instante da ingestão. Recalcular
+        # depois de um deploy apagaria a versão realmente julgada e impediria
+        # medir precisão de produção sem vazamento temporal.
+        (
+            row["produtividade_predita"],
+            row["produtividade_regra"],
+        ) = classificar_produtividade_auditavel(row)
         linhas_eventos.append(row)
 
     # Fase 16: eventos crus só como AUDITORIA (principal=False) — não contam em
@@ -12478,7 +12486,7 @@ def etapa_persistir(
             if _dec_visual_aud and _dec_visual_aud[0] == "produtivo"
             else "desperdicio" if _dec_visual_aud else None
         )
-        linhas_eventos.append({
+        row_auditoria = {
             "video_id": video_id, "empresa": empresa, "processo": processo,
             "pessoa_track_id": e["pessoa_track_id"],
             "comportamento_label": e["comportamento_label"],
@@ -12538,7 +12546,12 @@ def etapa_persistir(
                     else "herdado"
                 ),
             } if cat_ingestao.get(e["comportamento_label"]) else {}),
-        })
+        }
+        (
+            row_auditoria["produtividade_predita"],
+            row_auditoria["produtividade_regra"],
+        ) = classificar_produtividade_auditavel(row_auditoria)
+        linhas_eventos.append(row_auditoria)
 
     CHUNK = 100
     inseridos: list[dict] = []
@@ -13472,8 +13485,11 @@ _COLUNAS_OPCIONAIS_COMPORTAMENTO = ("exige_decisao_humana",)
 # Idem para `eventos`. Ordem irrelevante; o que importa é que TODAS sejam
 # anuláveis — coluna NOT NULL não pode entrar aqui (ver a armadilha do
 # `em_duvida`, que precisa ser escrita explicitamente em toda linha).
-_COLUNAS_OPCIONAIS_EVENTO = ("narrativa", "fora_do_posto", "fora_amostras_zona",
-                             "pessoas_cena_cam2", "produtividade_motivo")
+_COLUNAS_OPCIONAIS_EVENTO = (
+    "narrativa", "fora_do_posto", "fora_amostras_zona",
+    "pessoas_cena_cam2", "produtividade_motivo",
+    "produtividade_predita", "produtividade_regra",
+)
 # Idem para `descritores_track`. `instantes_posto` nasceu na Fase 112-A e o
 # schema não a tinha: sem esta lista, o upsert inteiro caía calado e a tabela
 # ficou 16 dias sem uma linha. Só colunas ANULÁVEIS e de enriquecimento.

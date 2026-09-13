@@ -101,6 +101,17 @@ alter table eventos add column if not exists categoria_lean        text;
 alter table eventos add column if not exists label_original text;
 alter table eventos add column if not exists categoria_lean_origem text;
 
+-- Ground truth de produtividade separado do rótulo de atividade. A predição e
+-- a regra são congeladas na ingestão; o julgamento humano chega depois pela
+-- fila. ABSTEM é uma saída legítima e nunca é convertido em P/I por default.
+alter table eventos add column if not exists produtividade_predita text;
+alter table eventos add column if not exists produtividade_regra text;
+alter table eventos add column if not exists produtividade_humana text;
+alter table eventos add column if not exists produtividade_validada_em timestamptz;
+create index if not exists idx_eventos_produtividade_validada
+    on eventos(empresa, processo, produtividade_validada_em)
+    where produtividade_humana is not null;
+
 create table if not exists sugestoes_melhoria (
     id uuid primary key default gen_random_uuid(),
     video_id uuid references videos(id) on delete cascade,

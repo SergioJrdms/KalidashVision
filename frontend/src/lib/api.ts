@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import type {
   AcaoEvento,
+  ProdutividadeHumana,
   CategoriaLean,
   DashboardData,
   EventoPendente,
@@ -195,17 +196,17 @@ export const api = {
   },
   eventos: {
     frames: (id: string) => req<{ frames: string[] }>(`/eventos/${id}/frames`),
-    validar: (id: string, acao: AcaoEvento, label_corrigido?: string) =>
+    validar: (id: string, acao: AcaoEvento, label_corrigido?: string, produtividade_humana?: ProdutividadeHumana) =>
       req<{ ok: boolean }>(`/eventos/${id}/validar`, {
         method: "POST",
-        body: JSON.stringify({ acao, label_corrigido }),
+        body: JSON.stringify({ acao, label_corrigido, produtividade_humana }),
       }),
     reabrir: (id: string) =>
       req<{ ok: boolean }>(`/eventos/${id}/reabrir`, { method: "POST" }),
-    lote: (ids: string[], acao: AcaoEvento, label_corrigido?: string) =>
+    lote: (ids: string[], acao: AcaoEvento, label_corrigido?: string, produtividade_humana?: ProdutividadeHumana) =>
       req<{ ok: boolean; aplicados: number }>(`/eventos/lote`, {
         method: "POST",
-        body: JSON.stringify({ ids, acao, label_corrigido }),
+        body: JSON.stringify({ ids, acao, label_corrigido, produtividade_humana }),
       }),
     tabela: (processoId: string, params: EventosTabelaParams = {}) => {
       const qs = new URLSearchParams();
