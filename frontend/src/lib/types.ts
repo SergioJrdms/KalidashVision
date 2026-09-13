@@ -346,6 +346,8 @@ export interface EventoIrmaoPendente {
   categoria_lean_prevista?: string | null;
 }
 
+export type ProdutividadeHumana = "PRODUTIVO" | "IMPRODUTIVO" | "ABSTEM";
+
 export interface EventoPendente {
   id: string;
   video_id: string;
@@ -360,6 +362,12 @@ export interface EventoPendente {
   origem_validacao: string | null;
   pessoa_track_id: number;
   papel_pessoa?: string | null; // Fase 28: 'operador' | 'visitante' | 'posto_vazio'
+  /** Saída ternária congelada na ingestão, separada do rótulo da atividade. */
+  produtividade_predita?: ProdutividadeHumana | null;
+  produtividade_regra?: string | null;
+  produtividade_motivo?: string | null;
+  produtividade_humana?: ProdutividadeHumana | null;
+  produtividade_validada_em?: string | null;
   categoria_lean_prevista?: string | null;
   cam_id?: string | null;
   gravado_em?: string | null;

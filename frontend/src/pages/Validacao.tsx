@@ -17,7 +17,7 @@ import { rotulosAtribuiveis } from "../design/rotulos";
 import { ConfirmaQueima } from "./Duvidas";
 import type { Go } from "../design/Shell";
 import type { Tweaks } from "../App";
-import type { AcaoValidacao } from "../lib/types";
+import type { AcaoValidacao, ProdutividadeHumana } from "../lib/types";
 
 const TAMANHO_LOTE = 10;
 
@@ -119,16 +119,16 @@ export default function Validacao({ proc, go, t }: { proc: ProcHeaderMock; go: G
   const validar = useMutation({
     // Resolve o grupo inteiro num lote atômico: o primário + todos os irmãos
     // (câmeras diferentes da mesma ação). Com 1 id só, o lote age como validar.
-    mutationFn: ({ ids, acao, label }: { ids: string[]; acao: AcaoValidacao; label?: string }) =>
-      api.eventos.lote(ids, acao, label),
+    mutationFn: ({ ids, acao, label, produtividade }: { ids: string[]; acao: AcaoValidacao; label?: string; produtividade?: ProdutividadeHumana }) =>
+      api.eventos.lote(ids, acao, label, produtividade),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["dashboard", proc.id] }); qc.invalidateQueries({ queryKey: ["processos"] }); },
   });
   const respMut = useMutation({ mutationFn: ({ id, resposta }: { id: string; resposta: string }) => api.perguntas.responder(id, resposta) });
   const dispMut = useMutation({ mutationFn: (id: string) => api.perguntas.dispensar(id) });
 
-  function resolver(ev: PendMock, acao: AcaoValidacao, novoLabel?: string) {
+  function resolver(ev: PendMock, acao: AcaoValidacao, novoLabel?: string, produtividade?: ProdutividadeHumana) {
     const ids = [ev.id, ...(ev.irmaos?.map((s) => s.id) ?? [])];
-    validar.mutate({ ids, acao, label: novoLabel });
+    validar.mutate({ ids, acao, label: novoLabel, produtividade });
     setQueue((q) => q.filter((x) => x.id !== ev.id));
     setBlocoIds((ids) => ids.filter((id) => id !== ev.id));
     setDone((d) => d + 1);
@@ -421,7 +421,7 @@ function FilaFoco({
   loteIdx: number;
   totalLotes: number;
   naFilaAposBloco: number;
-  onResolver: (ev: PendMock, k: AcaoValidacao, l?: string) => void;
+  onResolver: (ev: PendMock, k: AcaoValidacao, l?: string, p?: ProdutividadeHumana) => void;
   onPular: () => void;
   procId: string;
   labels: string[];
@@ -441,6 +441,7 @@ function FilaFoco({
   const [label, setLabel] = useState(evento.label);
   const [conf, setConf] = useState(Math.round(evento.conf * 100));
   const [resolvedKind, setResolvedKind] = useState<string | null>(null);
+  const [produtividadeHumana, setProdutividadeHumana] = useState<ProdutividadeHumana | null>(evento.produtividadeHumana);
   // Swipe horizontal (mouse + touch) — arraste pra qualquer lado pra pular.
   const [drag, setDrag] = useState<{ startX: number; dx: number } | null>(null);
 
@@ -450,6 +451,7 @@ function FilaFoco({
     // Cada card recomeça pela DESCRIÇÃO. Sem isto o segundo card já abriria no
     // passo do rótulo e a ordem — que é o ponto da mudança — se perderia.
     setPasso("descricao"); setConfirmandoQueima(false);
+    setProdutividadeHumana(evento.produtividadeHumana);
   }, [evento.id]);
 
   function act(kind: AcaoValidacao | "pular", lbl?: string) {
@@ -458,7 +460,8 @@ function FilaFoco({
     if (kind !== "descartar" && kind !== "descricao_invalida") setConf(Math.min(98, Math.round(evento.conf * 100) + 23));
     setPhase("confirm");
     setTimeout(() => setPhase("leaving"), 620);
-    setTimeout(() => onResolver(evento, kind, lbl), 980);
+    const julgamento = kind === "confirmar" || kind === "corrigir" ? produtividadeHumana ?? undefined : undefined;
+    setTimeout(() => onResolver(evento, kind, lbl, julgamento), 980);
   }
 
   // ── Swipe ────────────────────────────────────────────────
@@ -675,6 +678,13 @@ function FilaFoco({
               <span className="tnum font-mono" style={{ fontSize: 12, color: resolvedKind && resolvedKind !== "descartar" && resolvedKind !== "pular" ? "var(--va)" : "var(--accent)", width: 38, textAlign: "right" }}>{conf}%</span>
             </div>
 
+            {phase === "idle" && passo === "rotulo" && (
+              <EscolhaProdutividade
+                valor={produtividadeHumana}
+                onChange={setProdutividadeHumana}
+              />
+            )}
+
             {/* PERGUNTA 2 — só chega aqui quem confirmou a descrição. Agora
                 corrigir o rótulo é seguro: a frase descreve a cena. */}
             {phase === "idle" && passo === "rotulo" && !corrigir && (
@@ -683,7 +693,7 @@ function FilaFoco({
                   A descrição bate. E o rótulo — está certo?
                 </span>
                 <div className="row gap2 wrap">
-                  <button onClick={() => act("confirmar")} className="btn btn-ok btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={19} strokeWidth={2.6} /> Rótulo certo</button>
+                  <button onClick={() => act("confirmar")} disabled={!produtividadeHumana} className="btn btn-ok btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={19} strokeWidth={2.6} /> Rótulo certo</button>
                   <button onClick={() => setCorrigir(true)} className="btn btn-secondary btn-lg" style={{ flex: "1 1 140px" }}><Icon name="pencil" size={17} /> Corrigir rótulo</button>
                   <button onClick={() => act("descartar")} className="btn btn-danger btn-lg" style={{ flex: "1 1 160px" }} title="A cena existe e a descrição bate, mas isto não é um evento a contar">
                     <Icon name="x" size={18} strokeWidth={2.4} /> Não é um evento
@@ -697,7 +707,7 @@ function FilaFoco({
             )}
             {phase === "idle" && corrigir && (
               <div className="row gap2 wrap">
-                <button onClick={() => act("corrigir", label.trim())} disabled={!label.trim()} className="btn btn-primary btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={18} strokeWidth={2.5} /> Salvar correção</button>
+                <button onClick={() => act("corrigir", label.trim())} disabled={!label.trim() || !produtividadeHumana} className="btn btn-primary btn-lg" style={{ flex: "1 1 200px" }}><Icon name="check" size={18} strokeWidth={2.5} /> Salvar correção</button>
                 <button onClick={() => { setCorrigir(false); setLabel(evento.label); }} className="btn btn-ghost btn-lg">Cancelar</button>
               </div>
             )}
@@ -826,7 +836,58 @@ function LoteConcluido({ loteIdx, totalLotes, restantesFila, tamanhoLote, onProx
   );
 }
 
-function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolver: (ev: PendMock, k: AcaoValidacao, l?: string) => void; labels: string[] }) {
+function EscolhaProdutividade({
+  valor,
+  onChange,
+  compact = false,
+}: {
+  valor: ProdutividadeHumana | null;
+  onChange: (valor: ProdutividadeHumana) => void;
+  compact?: boolean;
+}) {
+  const opcoes: { valor: ProdutividadeHumana; rotulo: string; cor: string }[] = [
+    { valor: "PRODUTIVO", rotulo: "Produtivo", cor: "var(--va)" },
+    { valor: "IMPRODUTIVO", rotulo: "Improdutivo", cor: "var(--desp)" },
+    { valor: "ABSTEM", rotulo: "Não dá para dizer", cor: "var(--muted)" },
+  ];
+  return (
+    <div style={{ marginBottom: compact ? 10 : 16, padding: compact ? "9px 10px" : "12px 14px", border: "1px solid var(--line)", borderRadius: 10, background: "var(--soft)" }}>
+      <div className="row gap2 wrap" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+        <span style={{ fontSize: compact ? 11.5 : 12.5, fontWeight: 700, color: "var(--ink)" }}>
+          Neste intervalo, o trabalho foi…
+        </span>
+      </div>
+      <div className="row gap1 wrap">
+        {opcoes.map((opcao) => {
+          const ativa = valor === opcao.valor;
+          return (
+            <button
+              key={opcao.valor}
+              type="button"
+              aria-pressed={ativa}
+              onClick={() => onChange(opcao.valor)}
+              style={{
+                border: `1px solid ${ativa ? opcao.cor : "var(--line)"}`,
+                background: ativa ? "#fff" : "transparent",
+                color: ativa ? opcao.cor : "var(--muted)",
+                borderRadius: 999,
+                padding: compact ? "5px 9px" : "7px 12px",
+                fontSize: compact ? 10.5 : 12,
+                fontWeight: ativa ? 800 : 600,
+                cursor: "pointer",
+              }}
+            >
+              {opcao.rotulo}
+            </button>
+          );
+        })}
+      </div>
+      {!valor && <p style={{ margin: "6px 0 0", fontSize: 10.5, color: "var(--muted)" }}>Escolha uma opção para concluir a validação.</p>}
+    </div>
+  );
+}
+
+function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolver: (ev: PendMock, k: AcaoValidacao, l?: string, p?: ProdutividadeHumana) => void; labels: string[] }) {
   // Marca a troca de faixa horária. A fila já chega em ordem cronológica do
   // backend; aqui só se torna visível que ela está em ordem.
   let horaAnterior: string | null = null;
@@ -846,11 +907,12 @@ function CardsGrid({ queue, onResolver, labels }: { queue: PendMock[]; onResolve
     </div>
   );
 }
-function CardEvento({ ev, onResolver, labels }: { ev: PendMock; onResolver: (ev: PendMock, k: AcaoValidacao, l?: string) => void; labels: string[] }) {
+function CardEvento({ ev, onResolver, labels }: { ev: PendMock; onResolver: (ev: PendMock, k: AcaoValidacao, l?: string, p?: ProdutividadeHumana) => void; labels: string[] }) {
   const [leaving, setLeaving] = useState<string | null>(null);
   const [corrigir, setCorrigir] = useState(false);
   const [label, setLabel] = useState(ev.label);
-  function act(kind: AcaoValidacao, lbl?: string) { setLeaving(kind); setTimeout(() => onResolver(ev, kind, lbl), 360); }
+  const [produtividadeHumana, setProdutividadeHumana] = useState<ProdutividadeHumana | null>(ev.produtividadeHumana);
+  function act(kind: AcaoValidacao, lbl?: string) { setLeaving(kind); setTimeout(() => onResolver(ev, kind, lbl, produtividadeHumana ?? undefined), 360); }
   return (
     <div className={`card ${leaving ? (leaving === "descartar" ? "leave-r" : "leave-l") : "anim-fadeup"}`} style={{ padding: 0, overflow: "hidden" }}>
       <FrameReal id={ev.id} pessoa={ev.pessoa} height={130} />
@@ -866,15 +928,16 @@ function CardEvento({ ev, onResolver, labels }: { ev: PendMock; onResolver: (ev:
         )}
         <datalist id="labels-cards">{labels.map((l) => <option key={l} value={l} />)}</datalist>
         <p className="clamp2" style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.4, minHeight: 32, marginBottom: 10 }}>{ev.descricao}</p>
+        <EscolhaProdutividade valor={produtividadeHumana} onChange={setProdutividadeHumana} compact />
         {!corrigir ? (
           <div className="row gap1">
-            <button onClick={() => act("confirmar")} className="btn btn-ok btn-sm grow"><Icon name="check" size={15} strokeWidth={2.6} /> Confirmar</button>
+            <button onClick={() => act("confirmar")} disabled={!produtividadeHumana} className="btn btn-ok btn-sm grow"><Icon name="check" size={15} strokeWidth={2.6} /> Confirmar</button>
             <button onClick={() => setCorrigir(true)} className="btn btn-secondary btn-sm" title="Corrigir"><Icon name="pencil" size={14} /></button>
             <button onClick={() => act("descartar")} className="btn btn-danger btn-sm" title="Descartar"><Icon name="x" size={15} strokeWidth={2.4} /></button>
           </div>
         ) : (
           <div className="row gap1">
-            <button onClick={() => act("corrigir", label.trim())} disabled={!label.trim()} className="btn btn-primary btn-sm grow"><Icon name="check" size={14} /> Salvar</button>
+            <button onClick={() => act("corrigir", label.trim())} disabled={!label.trim() || !produtividadeHumana} className="btn btn-primary btn-sm grow"><Icon name="check" size={14} /> Salvar</button>
             <button onClick={() => { setCorrigir(false); setLabel(ev.label); }} className="btn btn-ghost btn-sm">Cancelar</button>
           </div>
         )}

@@ -69,7 +69,7 @@ export interface DetMock {
 }
 
 export interface PendIrmaoMock { id: string; camId: string | null; label: string; pessoa: number; ini: number; fim: number; conf: number; sugestao: LeanShort }
-export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; narrativa: string | null; hora: string | null; faixaHora: string | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
+export interface PendMock { id: string; label: string; descricao: string; pessoa: number; papel: string | null; ini: number; fim: number; conf: number; sugestao: LeanShort; camId: string | null; narrativa: string | null; hora: string | null; faixaHora: string | null; produtividadePredita: "PRODUTIVO" | "IMPRODUTIVO" | "ABSTEM" | null; produtividadeRegra: string | null; produtividadeMotivo: string | null; produtividadeHumana: "PRODUTIVO" | "IMPRODUTIVO" | "ABSTEM" | null; irmaos: PendIrmaoMock[]; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 // `impacto`: % do tempo observado que a resposta reclassifica. É o que ordena
 // a fila e o que justifica interromper o gestor.
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[]; impacto: number | null }
@@ -210,6 +210,10 @@ export function mapPendentes(rows: EventoPendente[]): PendMock[] {
     narrativa: e.narrativa ?? null,
     hora: e.instante_fabrica ?? null,
     faixaHora: e.faixa_hora_fabrica ?? null,
+    produtividadePredita: e.produtividade_predita ?? null,
+    produtividadeRegra: e.produtividade_regra ?? null,
+    produtividadeMotivo: e.produtividade_motivo ?? null,
+    produtividadeHumana: e.produtividade_humana ?? null,
     irmaos: (e.irmaos || []).map((s) => ({
       id: s.id,
       camId: s.cam_id ?? null,

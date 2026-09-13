@@ -34,6 +34,13 @@ EST_OPERADOR_FORA_IMPRODUTIVO = "operador_fora_improdutivo"
 EST_SEM_LEITURA = "sem_leitura"
 EST_IGNORAR = "ignorar"
 
+# Saida persistida para auditoria/rotulagem. E deliberadamente diferente dos
+# estados internos acima: presença, identidade e posto vazio não viram uma
+# decisão binária de produtividade por aproximação.
+AUDIT_PRODUTIVO = "PRODUTIVO"
+AUDIT_IMPRODUTIVO = "IMPRODUTIVO"
+AUDIT_ABSTEM = "ABSTEM"
+
 # Regra comercial de conversa. Estes valores só têm efeito quando aparecem
 # juntos com a evidência visual estruturada gravada em
 # ``bbox_stats.interlocutor``; o texto e o rótulo, isoladamente, nunca votam.
@@ -266,6 +273,25 @@ def classificar_observacao(
     if e.get("trabalho") is False:
         return EST_IMPRODUTIVO, "julgamento_visual_direto"
     return EST_PRODUTIVIDADE_INCONCLUSIVA, "evidencia_insuficiente"
+
+
+def classificar_produtividade_auditavel(
+    e: dict,
+    frentes_por_camera: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Projeta a decisão ternária que deve ser congelada junto ao evento.
+
+    O helper não cria regra nova: apenas traduz o contrato canônico existente
+    para ``PRODUTIVO``/``IMPRODUTIVO``/``ABSTEM``. Assim a fila humana compara
+    o julgamento feito na ingestão com a verdade posterior, mesmo depois que
+    o código mudar. Estados de presença continuam fora da pergunta P/I.
+    """
+    estado, motivo = classificar_observacao(e, frentes_por_camera)
+    if estado in {EST_PRODUTIVO, EST_OPERADOR_FORA_PRODUTIVO}:
+        return AUDIT_PRODUTIVO, motivo
+    if estado in {EST_IMPRODUTIVO, EST_OPERADOR_FORA_IMPRODUTIVO}:
+        return AUDIT_IMPRODUTIVO, motivo
+    return AUDIT_ABSTEM, motivo
 
 
 def _percentual(parte: float, total: float) -> float | None:
