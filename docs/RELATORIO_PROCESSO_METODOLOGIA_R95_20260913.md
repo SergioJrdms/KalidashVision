@@ -1,6 +1,7 @@
 # Processo e metodologia — evolução da precisão R1 + R95
 
-Data: 13/09/2026  
+Data: 13/09/2026
+
 Produção: branch `claude/youthful-davinci-R3xSP`, commit `82626d0`
 
 ## 1. Resumo executivo
