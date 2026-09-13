@@ -41,8 +41,10 @@ from .productivity import (
     TIPO_INTERLOCUTOR_GESTOR,
     TIPO_INTERLOCUTOR_INCERTO,
     acao_indefinida_deve_abster,
+    acao_indefinida_com_maos_produtiva,
     classificar_produtividade_auditavel,
     decisao_conversa_evidenciada,
+    improdutividade_incerta_deve_abster,
 )
 from .roupa_superior import avaliar_roupa_superior
 # Fase 113: a origem que marca "o segmento inteiro é ponte rolante" nasce em
@@ -17847,6 +17849,14 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     # R1 — sem nome não é uma atividade e, portanto, não pode votar em P/I.
     # A ponte confirmada é a única exceção: o segmento já possui evidência
     # específica e deve continuar produtivo conforme a regra comercial.
+    if acao_indefinida_com_maos_produtiva(e) and not _ponte_confirmada:
+        est, _voltado = estado_permanencia(e, frente_maquina)
+        return (
+            "valor_agregado",
+            "maos_maquina",
+            "ação ainda sem nome, mas com mãos na máquina",
+            est,
+        )
     if acao_indefinida_deve_abster(e) and not _ponte_confirmada:
         est, _voltado = estado_permanencia(e, frente_maquina)
         return (
@@ -17932,6 +17942,13 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
                     "fora do posto, fazendo algo que ainda não foi classificado",
                     estado)
         # 1c — posto vazio / visitante: inalterado.
+        if improdutividade_incerta_deve_abster(e):
+            return (
+                None,
+                "duvida",
+                "sinal de improdutividade contradito — enviado para validação",
+                estado,
+            )
         return ("desperdicio", NIVEL_PRESENCA,
                 "fora do posto — medido por zona e rastreamento", estado)
 
@@ -17941,6 +17958,16 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     conversa = decisao_conversa_evidenciada(e)
     if conversa is not None:
         _estado_conversa, _motivo_conversa = conversa
+        if (
+            _estado_conversa == "improdutivo"
+            and improdutividade_incerta_deve_abster(e)
+        ):
+            return (
+                None,
+                "duvida",
+                "conversa com evidência insuficiente — enviada para validação",
+                estado,
+            )
         return (
             "valor_agregado" if _estado_conversa == "produtivo" else "desperdicio",
             "julgamento_visual_roupa",
@@ -17987,6 +18014,13 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
                 "no posto, de outro lado — não afirma ociosidade",
                 estado,
             )
+        if improdutividade_incerta_deve_abster(e):
+            return (
+                None,
+                "duvida",
+                "sinal de improdutividade contradito — enviado para validação",
+                estado,
+            )
         return ("desperdicio", "julgamento",
                 "no posto, de outro lado, e a atividade não é serviço do posto",
                 estado)
@@ -18003,6 +18037,13 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
         return (
             None, "duvida",
             "no posto — não afirma ociosidade sem evidência",
+            estado,
+        )
+    if improdutividade_incerta_deve_abster(e):
+        return (
+            None,
+            "duvida",
+            "sinal de improdutividade contradito — enviado para validação",
             estado,
         )
     return (CATEGORIA_SEM_EVIDENCIA, "duvida",

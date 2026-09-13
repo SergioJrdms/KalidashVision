@@ -58,6 +58,11 @@ CONFIANCA_COR_GESTOR_MIN = 0.72
 # grupo de falsas acusações sem derrubar a cobertura abaixo de 65%.
 ROTULOS_ACAO_INDEFINIDA = frozenset({"acao_indefinida", "nao_nomeado"})
 
+# Gate experimental R95. Qualquer acusacao de improdutividade precisa de quatro
+# quadros realmente observados. O limiar e monotônico e usa o contador de
+# evidencia que ja e persistido pelo pipeline; o rotulo da acao nao participa.
+MIN_AMOSTRAS_IMPRODUTIVIDADE = 4
+
 
 def decisao_conversa_evidenciada(e: dict) -> tuple[str, str] | None:
     """Decisão estreita da conversa, ou ``None`` sem o contrato completo.
@@ -185,6 +190,49 @@ def acao_indefinida_deve_abster(e: dict) -> bool:
     )
 
 
+def acao_indefinida_com_maos_produtiva(e: dict) -> bool:
+    """Permite P sem inventar uma acao quando ha evidencia objetiva de trabalho.
+
+    A excecao e estreita: a pessoa precisa estar identificada como operador e
+    ter as maos na maquina. Visitante, posto vazio e operador fora continuam
+    obedecendo ao contrato de presenca. Uma correcao humana nomeada deixa de ser
+    um caso de acao indefinida e segue a decisao normal.
+    """
+    if not acao_indefinida_deve_abster(e):
+        return False
+    return (
+        _texto_normalizado(e.get("papel_pessoa")) == "operador"
+        and e.get("maos_maquina") is True
+    )
+
+
+def improdutividade_incerta_deve_abster(e: dict) -> bool:
+    """Veta somente uma futura alegacao I; nunca reclassifica o evento.
+
+    A validacao humana de uma acao nomeada resolve a incerteza. Antes disso,
+    uma camada ativa de duvida ou menos de quatro amostras observadas nao possui
+    evidencia suficiente para acusar improdutividade.
+    """
+    corrigido = _texto_normalizado(e.get("label_corrigido"))
+    tem_correcao = bool(
+        corrigido and corrigido not in {"nan", "none", "null", "nat"}
+    )
+    decisao_humana = (
+        _texto_normalizado(e.get("origem_validacao")) == "humano"
+        and e.get("validado_humano") is True
+    )
+    if tem_correcao or decisao_humana:
+        return False
+
+    if e.get("em_duvida") is True:
+        return True
+    try:
+        n_amostras = int(e.get("n_amostras"))
+    except (TypeError, ValueError):
+        return False
+    return n_amostras < MIN_AMOSTRAS_IMPRODUTIVIDADE
+
+
 def _voltado_para_maquina(orientacao: Any, frente_maquina: Any) -> bool | None:
     """Traduz pose em relação à câmera para pose em relação ao torno.
 
@@ -249,6 +297,11 @@ def classificar_observacao(
         if papel == "operador":
             return EST_PRODUTIVO, "ponte_rolante_no_segmento"
 
+    # R8: nao e preciso nomear a acao para reconhecer a evidencia objetiva de
+    # trabalho. A excecao recupera coverage sem tocar em identidade/presenca.
+    if acao_indefinida_com_maos_produtiva(e):
+        return EST_PRODUTIVO, "acao_indefinida_maos_na_maquina_r8"
+
     # R1: "sem nome" é dúvida, não uma atividade improdutiva. A ponte fica
     # acima porque a reunião definiu que o segmento confirmado de ponte rolante
     # é produtivo mesmo fora do centro da área de interesse.
@@ -291,6 +344,11 @@ def classificar_observacao(
     # completa é obrigatória — label ou prosa sozinhos não entram aqui.
     conversa = decisao_conversa_evidenciada(e)
     if conversa is not None:
+        if conversa[0] == EST_IMPRODUTIVO and improdutividade_incerta_deve_abster(e):
+            return (
+                EST_PRODUTIVIDADE_INCONCLUSIVA,
+                "improdutividade_incerta_abstencao_r95",
+            )
         return conversa
 
     if e.get("maos_maquina") is True:
@@ -302,11 +360,21 @@ def classificar_observacao(
     if voltado is True:
         return EST_PRODUTIVO, "voltado_para_o_torno"
     if voltado is False:
+        if improdutividade_incerta_deve_abster(e):
+            return (
+                EST_PRODUTIVIDADE_INCONCLUSIVA,
+                "improdutividade_incerta_abstencao_r95",
+            )
         return EST_IMPRODUTIVO, "costas_ou_lado"
 
     if e.get("trabalho") is True:
         return EST_PRODUTIVO, "julgamento_visual_direto"
     if e.get("trabalho") is False:
+        if improdutividade_incerta_deve_abster(e):
+            return (
+                EST_PRODUTIVIDADE_INCONCLUSIVA,
+                "improdutividade_incerta_abstencao_r95",
+            )
         return EST_IMPRODUTIVO, "julgamento_visual_direto"
     return EST_PRODUTIVIDADE_INCONCLUSIVA, "evidencia_insuficiente"
 

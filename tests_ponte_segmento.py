@@ -230,7 +230,10 @@ print("\n5) O OUTRO INSTRUMENTO — classificar_observacao")
 
 def _ev(i, f, **k):
     return {"id": f"e{i}", "video_id": "v", "tempo_inicio_s": i,
-            "tempo_fim_s": f, "principal": False, "n_amostras": 1,
+            # O gate R95 exige quatro amostras para uma acusacao I. Este teste
+            # mede a semantica da ponte, portanto usa evidencia suficiente nos
+            # dois lados da comparacao.
+            "tempo_fim_s": f, "principal": False, "n_amostras": 4,
             "versao_instrumento": 9, "_cam_id": "cam1", **k}
 
 
