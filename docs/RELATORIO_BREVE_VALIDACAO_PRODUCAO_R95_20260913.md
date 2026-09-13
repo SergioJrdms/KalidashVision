@@ -2,21 +2,29 @@
 
 ## Resultado
 
-Replay do código de produção sobre os mesmos **1.558 eventos recentes
-validados** usados no gate:
+Comparação entre o primeiro baseline legado, medido em 111 janelas julgáveis de
+24/08/2026, e o replay do código hoje em produção sobre **1.558 eventos recentes
+validados**:
 
 | Cenário | Precisão improdutividade | Precisão produtividade | Coverage |
 |---|---:|---:|---:|
-| Antes — somente R1 | 90,65% | 98,24% | 89,15% |
+| Primeiro resultado — legado | 28,60% | 90,20% | 100,00%* |
 | Agora — R1 + R95 | **98,39%** | **97,54%** | **89,99%** |
 
-Resultado líquido: **+7,74 pontos** de precisão de improdutividade,
-**-0,70 ponto** de produtividade e **+0,84 ponto** de coverage. O gate
+Evolução observada: **+69,79 pontos** de precisão de improdutividade,
+**+7,34 pontos** de produtividade e **-10,01 pontos** de coverage. O gate
 `95% / 95% / 65%` foi aprovado.
+
+\* O coverage inicial de 100% era apenas aparente: o legado transformava
+fallback e ausência de evidência em `IMPRODUTIVO`, sem opção real de abstenção.
+Como o baseline inicial e o resultado atual usam universos diferentes, esta é
+uma comparação de evolução do produto, não um A/B pareado sobre as mesmas linhas.
 
 ## O que foi investigado e resolvido
 
 - A R1 eliminou acusações causadas por ações que o sistema não conseguiu nomear.
+- Como marco intermediário, a R1 alcançou 90,65% I, 98,24% P e 89,15% de
+  coverage no universo recente combinado.
 - O erro restante se concentrou em alegações improdutivas já marcadas como
   duvidosas ou apoiadas por poucas observações.
 - A R95 passou a abster uma acusação I com `em_duvida=true` ou menos de quatro
@@ -44,3 +52,6 @@ Resultado líquido: **+7,74 pontos** de precisão de improdutividade,
 Os percentuais acima são o replay validado do código agora publicado. Eventos
 novos gerados após o deploy ainda precisarão de validação humana para formar uma
 medição pós-deploy independente.
+
+O processo completo, as hipóteses rejeitadas e a metodologia estão em
+`RELATORIO_PROCESSO_METODOLOGIA_R95_20260913.md`.
