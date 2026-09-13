@@ -35,6 +35,7 @@ o resultado combinado foi 97,56% de improdutividade, 98,22% de produtividade e
 
 ## Status
 
-Implementação e notebook estão na branch experimental
-`exp/productivity-95-gate-20260913`. Esta rodada não foi promovida para
-produção.
+Implementação promovida para a branch de produção
+`claude/youthful-davinci-R3xSP` no commit `82626d0`. A validação robusta e o
+status final do Render estão no relatório
+`RELATORIO_BREVE_VALIDACAO_PRODUCAO_R95_20260913.md`.
