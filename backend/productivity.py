@@ -52,6 +52,12 @@ TIPO_INTERLOCUTOR_COLEGA = "outra_pessoa"
 TIPO_INTERLOCUTOR_INCERTO = "incerto"
 CONFIANCA_COR_GESTOR_MIN = 0.72
 
+# R1 — os dois carimbos abaixo significam que o sistema não conseguiu nomear
+# a ação. A reunião definiu que esses casos devem ir para validação, e o
+# screening de 30 dias mostrou que esta única abstenção remove o principal
+# grupo de falsas acusações sem derrubar a cobertura abaixo de 65%.
+ROTULOS_ACAO_INDEFINIDA = frozenset({"acao_indefinida", "nao_nomeado"})
+
 
 def decisao_conversa_evidenciada(e: dict) -> tuple[str, str] | None:
     """Decisão estreita da conversa, ou ``None`` sem o contrato completo.
@@ -161,6 +167,24 @@ def _texto_normalizado(v: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", txt).strip("_")
 
 
+def acao_indefinida_deve_abster(e: dict) -> bool:
+    """True quando ainda não há uma ação nomeada para decidir P/I.
+
+    Uma correção humana que atribui um rótulo real resolve a dúvida. A simples
+    confirmação do carimbo ``acao_indefinida`` não resolve: continua faltando
+    saber qual atividade ocorreu.
+    """
+    corrigido = _texto_normalizado(e.get("label_corrigido"))
+    # CSVs representam nulo como NaN; o evento vivo usa None. Ambos significam
+    # ausência de correção e precisam produzir a mesma decisão no notebook e
+    # no backend.
+    if corrigido and corrigido not in {"nan", "none", "null", "nat"}:
+        return False
+    return _texto_normalizado(e.get("comportamento_label")) in (
+        ROTULOS_ACAO_INDEFINIDA
+    )
+
+
 def _voltado_para_maquina(orientacao: Any, frente_maquina: Any) -> bool | None:
     """Traduz pose em relação à câmera para pose em relação ao torno.
 
@@ -224,6 +248,18 @@ def classificar_observacao(
             return EST_OPERADOR_FORA_PRODUTIVO, "ponte_rolante_no_segmento"
         if papel == "operador":
             return EST_PRODUTIVO, "ponte_rolante_no_segmento"
+
+    # R1: "sem nome" é dúvida, não uma atividade improdutiva. A ponte fica
+    # acima porque a reunião definiu que o segmento confirmado de ponte rolante
+    # é produtivo mesmo fora do centro da área de interesse.
+    if acao_indefinida_deve_abster(e):
+        if papel == EST_OPERADOR_FORA:
+            return EST_OPERADOR_FORA, "acao_indefinida_abstencao_r1"
+        if papel == "operador":
+            return (
+                EST_PRODUTIVIDADE_INCONCLUSIVA,
+                "acao_indefinida_abstencao_r1",
+            )
 
     if papel == EST_POSTO_VAZIO:
         # Sinal de pessoa junto com "vazio" é contradição, não ausência. Há

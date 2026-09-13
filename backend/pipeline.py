@@ -40,6 +40,7 @@ from .productivity import (
     TIPO_INTERLOCUTOR_COLEGA,
     TIPO_INTERLOCUTOR_GESTOR,
     TIPO_INTERLOCUTOR_INCERTO,
+    acao_indefinida_deve_abster,
     classificar_produtividade_auditavel,
     decisao_conversa_evidenciada,
 )
@@ -4401,6 +4402,8 @@ _HERANCA_MAX_SEGUIDAS = max(1, int(os.environ.get("KV_HERANCA_MAX_SEGUIDAS", "2"
 #       colega/incerto sem deixar label ou prosa promover produtividade.
 #  11 = a identidade lógica local do segmento (111A/B/C) assume autoridade
 #       sobre operador/operador_fora antes do VLM, com fallback legado por slot.
+#  12 = ação indefinida deixa de votar em P/I e vai para validação; mantém V9.
+#  13 = a mesma abstenção R1 com autoridade de identidade 111D.
 def _env_ligada(nome: str, padrao: str = "off") -> bool:
     """Flags críticas são fail-closed: só uma allowlist explícita liga."""
     return os.environ.get(nome, padrao).strip().lower() in {
@@ -4489,12 +4492,12 @@ _111D_AFIRMA_AUSENCIA = os.environ.get(
 PRODUTIVIDADE_OPERADOR_ESTRUTURADA = (
     PRODUTIVIDADE_OPERADOR_V9 or AUTORIDADE_111D_CONFIGURADA
 )
-# O carimbo acompanha a semântica configurada. Um segmento V11 que caiu em
-# fallback continua V11: ele foi medido sob o instrumento novo e a abstenção é
+# O carimbo acompanha a semântica configurada. Um segmento V13 que caiu em
+# fallback continua V13: ele foi medido sob o instrumento novo e a abstenção é
 # parte auditável desse instrumento. Histórico nunca é reescrito.
 VERSAO_INSTRUMENTO = (
-    11 if AUTORIDADE_111D_CONFIGURADA
-    else 10 if PRODUTIVIDADE_OPERADOR_V9
+    13 if AUTORIDADE_111D_CONFIGURADA
+    else 12 if PRODUTIVIDADE_OPERADOR_V9
     else min(8, _VERSAO_LEGADA)
 )
 
@@ -17833,9 +17836,26 @@ def estado_permanencia(e: dict, frente_maquina: str | None) -> tuple:
 def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     """(categoria, nivel, motivo, estado) — a decisão nova. FUNÇÃO PURA.
 
-    Nenhum rótulo de atividade entra aqui. É a garantia de que rótulo novo não
-    move número nenhum.
+    Nenhum nome de atividade decide sozinho. Os carimbos de ausência de ação
+    nomeada entram apenas para abster, nunca para votar em P/I.
     """
+    _ponte_confirmada = (
+        _PONTE_SEGMENTO_DECIDE
+        and e.get("categoria_lean_origem") == ORIGEM_PONTE_SEGMENTO
+    )
+
+    # R1 — sem nome não é uma atividade e, portanto, não pode votar em P/I.
+    # A ponte confirmada é a única exceção: o segmento já possui evidência
+    # específica e deve continuar produtivo conforme a regra comercial.
+    if acao_indefinida_deve_abster(e) and not _ponte_confirmada:
+        est, _voltado = estado_permanencia(e, frente_maquina)
+        return (
+            None,
+            "duvida",
+            "ação indefinida — enviada para validação",
+            est,
+        )
+
     # ── 0 — correção humana, inviolável ──
     # ⚠️ `validado_humano=True` NÃO É DECISÃO HUMANA quando veio de MECANISMO.
     # `posto_vazio`, `auditoria` e `ponte_rolante` usam a flag só para ficar
@@ -17861,8 +17881,7 @@ def decidir_permanencia(e: dict, frente_maquina: str | None) -> tuple:
     # ponto desta fase é justamente atravessar `fora do posto` e `posto
     # vazio`, que é onde o operador da ponte aparece. A marca é escrita pela
     # camada da ponte, só com o portão de certeza fechado, e só nela.
-    if (_PONTE_SEGMENTO_DECIDE
-            and e.get("categoria_lean_origem") == ORIGEM_PONTE_SEGMENTO):
+    if _ponte_confirmada:
         est, _v = estado_permanencia(e, frente_maquina)
         return ("valor_agregado", NIVEL_PONTE_SEGMENTO,
                 "o segmento inteiro foi marcado como operação de ponte rolante",
