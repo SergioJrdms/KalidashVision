@@ -63,7 +63,7 @@ export default function Auditoria({ proc, dia: diaInicial }: { proc: ProcHeaderM
       <Card style={{ padding: 20 }}>
         <PanelHead
           titulo="Auditar um dia"
-          ajuda="Abre um dia inteiro para conferência — inclusive os trechos que NÃO precisam de validação. Eventos de posto vazio e de auditoria saem da fila por mecanismo, não porque alguém os julgou; sem esta tela, um dia inteiro classificado como posto vazio ficaria invisível. Nada aqui entra na fila nem altera validação."
+          ajuda="Abre um dia inteiro para conferência, inclusive os trechos Sem operador no posto que não entram na fila de validação. Nada nesta tela altera a classificação."
           leitura="Auditar é olhar. Validar é decidir. Esta tela só faz a primeira."
         />
         <div className="row gap2 wrap" style={{ alignItems: "flex-end" }}>
@@ -110,7 +110,7 @@ export default function Auditoria({ proc, dia: diaInicial }: { proc: ProcHeaderM
                 <Icon name="alert-triangle" size={18} color="var(--desp)" />
                 <div className="col" style={{ gap: 4 }}>
                   <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)" }}>
-                    Dia atípico — {d.posto_vazio_pct.toFixed(0)}% do tempo como posto vazio
+                    Dia atípico — {d.posto_vazio_pct.toFixed(0)}% sem operador no posto
                   </span>
                   <p style={{ fontSize: 12.5, color: "var(--text)", margin: 0, lineHeight: 1.5 }}>
                     Acima de {d.limiar_atipico.toFixed(0)}%, um dia assim ou é <b>falta real</b> do
@@ -131,7 +131,7 @@ export default function Auditoria({ proc, dia: diaInicial }: { proc: ProcHeaderM
                 <b style={{ color: "var(--desp)" }}>
                   <Icon name="alert-octagon" size={13} /> {d.contradicoes_c1} contradição(ões) lógica(s)
                 </b>{" "}
-                neste dia: o rastreamento identificou o <b>operador no posto</b> em trechos
+                neste dia: o rastreamento identificou a <b>presença do operador</b> em trechos
                 rotulados como <code className="font-mono">posto_vazio</code>. Os dois não
                 podem estar certos.
               </span>
@@ -173,7 +173,7 @@ export default function Auditoria({ proc, dia: diaInicial }: { proc: ProcHeaderM
           <Card style={{ padding: 20 }}>
             <PanelHead
               titulo={`Amostras — ${d.amostras.length} trecho(s) de ${d.eventos}`}
-              ajuda="De cada bloco saem início, meio e fim. Não é a lista completa de propósito: 245 trechos de posto vazio não se auditam um a um, e se o operador estivesse lá apareceria em algum destes."
+              ajuda="De cada bloco saem início, meio e fim. É uma amostra dos trechos Sem operador no posto, suficiente para uma conferência visual do dia."
               leitura="Olhe as imagens. Se o posto não estiver vazio em alguma, a leitura do dia está errada."
             />
             <p style={{ fontSize: 11.5, color: "var(--faint)", margin: "0 0 12px", lineHeight: 1.5 }}>

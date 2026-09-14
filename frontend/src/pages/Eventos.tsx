@@ -235,7 +235,7 @@ function LinhaEvento({ e, sel, onToggle, expand, onExpand, onResolver, labels, e
           ) : e.papel === "visitante" ? (
             <span className="badge" style={{ fontSize: 10, background: "#fdf3e0", color: "#9a6b00" }} title={`Pessoa interagindo no posto (track ${e.pessoa})`}>Visitante</span>
           ) : e.papel === "posto_vazio" ? (
-            <span className="badge" style={{ fontSize: 10, background: "var(--line-2)", color: "var(--muted)" }} title="Operador ausente do posto">Posto vazio</span>
+            <span className="badge" style={{ fontSize: 10, background: "var(--line-2)", color: "var(--muted)" }} title="Operador ausente do posto">Sem operador no posto</span>
           ) : (
             String(e.pessoa).padStart(3, "0")
           )}

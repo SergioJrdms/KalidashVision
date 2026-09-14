@@ -30,7 +30,7 @@ export default function Processos({ go }: { go: Go }) {
         <div>
           <h1 className="font-display" style={{ fontSize: 28, fontWeight: 700 }}>Postos monitorados</h1>
           <p className="pretty" style={{ fontSize: 14.5, color: "var(--muted)", marginTop: 6, maxWidth: 560 }}>
-            Acompanhe presença, posto vazio e produtividade do operador em uma única leitura.
+            Acompanhe produtividade e presença do operador em eixos separados.
           </p>
         </div>
         <Btn icon="plus" onClick={() => setNovo(true)}>Novo processo</Btn>
@@ -190,12 +190,12 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
               {Math.round(p.presenca)}%
             </span>
             <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>
-              do turno com o operador no posto
+              de presença do operador
             </span>
           </div>
           {p.postoVazio != null && p.postoVazio >= 1 && (
             <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
-              Posto vazio em {Math.round(p.postoVazio)}% do tempo observado.
+              Sem operador no posto em {Math.round(p.postoVazio)}% do período analisado.
             </span>
           )}
         </div>
@@ -225,7 +225,7 @@ function ProcessoCard({ p, go, i }: { p: ProcMock; go: Go; i: number }) {
       <div className="row" style={{ gap: 10, marginTop: 12, padding: "10px 11px", borderRadius: 10, background: "var(--soft)", border: "1px solid var(--line-2)" }}>
         <span className="center" style={{ width: 30, height: 30, borderRadius: 9, background: "var(--accent-soft)", color: "var(--accent)", flex: "none" }}><Icon name="scan-line" size={16} /></span>
         <div className="col" style={{ gap: 1 }}>
-          <strong style={{ color: "var(--ink)", fontSize: 12.5 }}>Presença e produtividade</strong>
+          <strong style={{ color: "var(--ink)", fontSize: 12.5 }}>Produtividade e presença do operador</strong>
           <span style={{ color: "var(--muted)", fontSize: 11 }}>Abrir visão do posto</span>
         </div>
       </div>

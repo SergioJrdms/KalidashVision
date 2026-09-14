@@ -40,7 +40,7 @@ export default function Rotulos({ proc }: { proc: ProcHeaderMock }) {
     onSettled: () => setSalvando(null),
     onSuccess: (r, { label, cat }) => {
       toast(
-        `"${label}" agora é ${cat === "valor_agregado" ? "produtivo" : "não-produtivo"}`
+        `"${label}" agora é ${cat === "valor_agregado" ? "produtivo" : "improdutivo"}`
         + (r.eventos_atualizados ? ` · ${r.eventos_atualizados} evento(s) atualizados` : ""),
       );
       qc.invalidateQueries({ queryKey: ["rotulos-sem-categoria", proc.id] });
@@ -96,7 +96,7 @@ export default function Rotulos({ proc }: { proc: ProcHeaderMock }) {
         <Empty
           icon="check-circle"
           title="Todo rótulo com tempo já tem categoria"
-          desc="Nada aqui está contando como não-produtivo por falta de decisão. Quando o vocabulário crescer, os rótulos novos aparecem nesta tela."
+          desc="Não há rótulos aguardando decisão. Quando o vocabulário crescer, os novos aparecem nesta tela."
         />
       )}
 

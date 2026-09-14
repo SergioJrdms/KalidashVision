@@ -83,7 +83,7 @@ if r.returncode == 0:
     # que fez o rótulo ser confirmado na fila, virar vocabulário canônico e
     # engolir 38,7% do dia 14/08. O texto agora diz o que a linha É: trabalho
     # pendente do gestor.
-    esperado = ["Operando o torno", "Posto vazio", "Acompanhando a máquina",
+    esperado = ["Operando o torno", "Sem operador no posto", "Acompanhando a máquina",
                 "Conversando com colega", "Sem nome — aguardando você"]
     for got, exp in zip(v, esperado):
         check(f"{exp!r}", got == exp, got)
@@ -180,8 +180,8 @@ for tab, rotulo in (("dashboard", "Visão do posto"), ("diaadia", "Dia a dia"),
 check("Validação mantém o badge", 'tab: "validacao"' in visiveis and 'badge: proc?.pendencias' in visiveis)
 ferramentas = re.search(r"const procNavFerramentas = \[(.*?)\n  \];", shell, re.S).group(1)
 tabs_ferramentas = re.findall(r'tab: "([^"]+)"', ferramentas)
-check("Ferramentas tem exatamente os seis itens definidos",
-      tabs_ferramentas == ["auditoria", "duvidas", "eventos", "padroes", "fila", "descricao"],
+check("Ferramentas tem exatamente os sete itens definidos",
+      tabs_ferramentas == ["auditoria", "duvidas", "eventos", "padroes", "fila", "teste-pipeline", "descricao"],
       tabs_ferramentas)
 for t in ("auditoria", "duvidas", "eventos", "padroes", "fila", "descricao"):
     check(f"'{t}' está em Ferramentas", f'tab: "{t}"' in ferramentas)
@@ -237,7 +237,7 @@ if r.returncode == 0:
     L = json.loads(r.stdout)
     check("com muita dúvida, a ressalva aparece", bool(L["ressalva"]), L)
     check("e explica o efeito no número",
-          "improdutivo até alguém decidir" in (L["ressalva"] or ""), L["ressalva"])
+          "Sem decisão até alguém validar" in (L["ressalva"] or ""), L["ressalva"])
 check("a frase é gerada por REGRA, não por LLM",
       "fetch" not in ROTULOS and "api." not in ROTULOS
       and "POR REGRA" in ROTULOS.upper(),
@@ -300,8 +300,8 @@ check("nenhum texto de interface em inglês na árvore",
 print("\n[10] O card do posto fala do POSTO — e a barra tem preenchimento")
 proc = ler("pages", "Processos.tsx")
 check("o card mostra a presença como número grande",
-      "do turno com o operador no posto" in proc)
-check("e o posto vazio como apoio", "Posto vazio em" in proc)
+      "de presença do operador" in proc)
+check("e a ausência usa a nomenclatura canônica", "Sem operador no posto em" in proc)
 # ⛔ "791 vídeos" era métrica do NOSSO acervo, não do posto do cliente.
 # `p.videos` continua no MODAL DE EXCLUSÃO, e ali é essencial: diz o que você
 # está prestes a destruir. O que saiu foi o contador do CARD.

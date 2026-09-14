@@ -139,7 +139,7 @@ export default function Duvidas({ proc }: { proc: ProcHeaderMock; go: Go }) {
       <Card style={{ padding: 20 }}>
         <PanelHead
           titulo="O que o sistema não sabe"
-          ajuda="O sistema nunca deixa tempo sem classificar: todo minuto é produtivo ou não-produtivo. Esta tela mostra os trechos em que a resposta que ESTÁ VALENDO no dashboard foi dada com pouca ou nenhuma evidência. Cada item resolvido move um pedaço do placar da suposição para o fato."
+          ajuda="Esta tela reúne os trechos sem decisão segura. Cada item resolvido move uma parte do tempo capturado de Sem decisão para Produtivo ou Improdutivo."
           leitura="A fila é ordenada por MINUTOS EM JOGO — validar de cima para baixo é o que mais move o placar."
           right={
             <span className="font-mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
@@ -339,7 +339,7 @@ function ItemDaFila({ it, procId, ocupado, onValidar, onClassificar }: {
                 onClick={() => onClassificar(c)}
               >
                 <i style={{ width: 9, height: 9, borderRadius: 2, background: leanCor(c), display: "inline-block", marginRight: 6 }} />
-                {c === "va" ? "Sim — produtivo" : "Não — não-produtivo"}
+                {c === "va" ? "Sim — produtivo" : "Não — improdutivo"}
               </Btn>
             ))}
           </div>

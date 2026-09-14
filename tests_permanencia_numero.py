@@ -233,18 +233,18 @@ dash = open(os.path.join(RAIZ, "frontend", "src", "pages", "Dashboard.tsx"),
 corpo_padrao = dash.split("export default function Dashboard", 1)[1].split(
     "type IconeNome", 1
 )[0]
-check("o topo responde produtividade, presença e posto vazio",
+check("o topo separa produtividade e presença",
       all(x in corpo_padrao for x in (
-          'titulo="Produtividade"', 'titulo="Operador no posto"',
-          'titulo="Posto vazio"')))
+          'titulo="Produtivo"', 'titulo="Improdutivo"',
+          'titulo="Sem decisão"', 'Presença do operador')))
 # Fase 106 — DECISÃO DE PRODUTO: a cobertura saiu da tela do cliente. Ela
 # falava do MEDIDOR (quanto da leitura foi excluída), não da fábrica, e o dono
 # não compra o medidor. O que a suíte ainda protege é o que a cobertura
 # protegia: incerteza NÃO PODE virar improdutividade. Isso continua valendo no
 # backend — o número já nasce calculado só sobre leitura válida — e na tela
 # pelo selo de calibração, que barra o uso comercial de leitura fraca.
-check("a incerteza continua fora do número (o cálculo é só sobre leitura válida)",
-      "somente sobre leituras válidas do posto" in corpo_padrao)
+check("a incerteza é mostrada sem virar produtividade",
+      "Produtivo + improdutivo + sem decisão = 100%" in corpo_padrao)
 check("e a tela do cliente não expõe mais a instrumentação",
       "Qualidade da leitura" not in corpo_padrao
       and "inconclusivo_pct" not in corpo_padrao)

@@ -8,6 +8,7 @@ import type {
   EventosTabelaParams,
   EventosTabelaResposta,
   EvidenciasResposta,
+  IndicadorEvidencia,
   FilaResposta,
   FilaGlobalResposta,
   JobStatus,
@@ -220,6 +221,8 @@ export const api = {
       req<EvidenciasResposta>(`/processos/${processoId}/evidencias?labels=${encodeURIComponent(labels.join(","))}&page=${page}&page_size=${pageSize}`),
     evidenciasPresenca: (processoId: string, janelaDias: number, page = 1, pageSize = 8) =>
       req<EvidenciasResposta>(`/processos/${processoId}/evidencias/presenca?estado=posto_vazio&janela_dias=${janelaDias}&page=${page}&page_size=${pageSize}`),
+    evidenciasIndicador: (processoId: string, indicador: IndicadorEvidencia, janelaDias: number, page = 1, pageSize = 8) =>
+      req<EvidenciasResposta>(`/processos/${processoId}/evidencias/indicador?indicador=${encodeURIComponent(indicador)}&janela_dias=${janelaDias}&page=${page}&page_size=${pageSize}`),
   },
   // Fase 102 — a precisão MEDIDA, por amostragem cega.
   amostragem: {

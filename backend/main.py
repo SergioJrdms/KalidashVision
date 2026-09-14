@@ -4216,22 +4216,26 @@ def evidencias_da_agregacao(
     return {"itens": itens, "total": total, "page": page, "page_size": page_size}
 
 
+@app.get("/processos/{processo_id}/evidencias/indicador")
 @app.get("/processos/{processo_id}/evidencias/presenca")
 def evidencias_de_presenca(
     processo_id: str,
     estado: str = Query("posto_vazio"),
+    indicador: str | None = Query(None),
     janela_dias: int = Query(7, ge=1, le=30),
     page: int = Query(1, ge=1),
     page_size: int = Query(8, ge=1, le=50),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Fatias que compõem o KPI comercial de presença, na mesma janela.
+    """Fatias que compõem um indicador comercial, na mesma janela.
 
-    A resposta é deliberadamente de *leituras*, não de labels: o KPI resolve
-    conflitos e sobreposições em uma linha do tempo exclusiva antes de somar.
+    A resposta é deliberadamente de *leituras*, não de labels: os indicadores
+    resolvem conflitos e sobreposições na mesma linha do tempo exclusiva antes
+    de somar. ``estado=posto_vazio`` permanece como alias retrocompatível.
     """
-    if estado != "posto_vazio":
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Estado de presença não suportado.")
+    indicador_efetivo = indicador or estado
+    if indicador_efetivo not in produtividade.INDICADORES_EVIDENCIA:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Indicador não suportado.")
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
     campos = (
@@ -4284,22 +4288,17 @@ def evidencias_de_presenca(
             log.warning("[evidencias/presenca] configuração por câmera indisponível: %s", exc)
 
     # É literalmente a mesma linha do tempo usada por agregar_produtividade.
-    # O KPI "posto vazio" inclui estado vazio e operador fora do posto.
-    estados_vazios = {
-        produtividade.EST_POSTO_VAZIO,
-        produtividade.EST_OPERADOR_FORA,
-        produtividade.EST_OPERADOR_FORA_PRODUTIVO,
-        produtividade.EST_OPERADOR_FORA_IMPRODUTIVO,
-    }
+    # A associação estado → indicador também é compartilhada com as métricas.
     observacoes = []
     for ini, fim, est, motivo, rep in produtividade._linha_do_tempo(periodo, frentes):
-        if est not in estados_vazios:
+        if not produtividade.estado_compone_indicador(est, indicador_efetivo):
             continue
         item = dict(rep)
         item.update({
             "id": rep.get("id"), "evento_id": rep.get("id"),
             "tempo_inicio_s": ini, "tempo_fim_s": fim, "duracao_s": fim - ini,
             "estado_presenca": est, "motivo_presenca": motivo,
+            "estado_indicador": indicador_efetivo, "motivo_indicador": motivo,
             "label_efetivo": rep.get("label_corrigido") or rep.get("comportamento_label") or "posto_vazio",
         })
         observacoes.append(item)
@@ -4328,7 +4327,8 @@ def evidencias_de_presenca(
             e["segundo_angulo"] = {"segmento_id": pares[0]["id"], "cam_id": pares[0].get("cam_id"),
                                     "offset_s": _offset_video_segmento(v, pares[0])}
     return {"itens": itens, "total": total, "page": page, "page_size": page_size,
-            "janela_dias": janela_dias, "tipo": "leituras"}
+            "janela_dias": janela_dias, "tipo": "leituras",
+            "indicador": indicador_efetivo}
 
 
 @app.get("/eventos/{evento_id}/frames")
