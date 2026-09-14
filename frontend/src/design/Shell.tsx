@@ -7,7 +7,7 @@ import { Icon, Prism, Wordmark, MaturityMeter } from "./ui";
 import type { ProcMock, ProcHeaderMock } from "../lib/adapt";
 
 export type Screen = "login" | "processos" | "processo" | "ajuda" | "fila-global";
-export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "rotulos" | "titular" | "arvore" | "precisao" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "teste-pipeline" | "descricao" | "configuracoes";
+export type Tab = "dashboard" | "diaadia" | "auditoria" | "duvidas" | "rotulos" | "titular" | "arvore" | "precisao" | "replay-precisao" | "validacao" | "eventos" | "padroes" | "fila" | "upload" | "teste-pipeline" | "descricao" | "configuracoes";
 export type Route = { screen: Screen; processId: string | null; tab: Tab };
 export type Go = (screen: Screen, processId?: string | null, tab?: Tab) => void;
 
@@ -107,6 +107,7 @@ export function Sidebar({
     { tab: "eventos", label: "Eventos", icon: "table-2" },
     { tab: "padroes", label: "Padrões", icon: "activity" },
     { tab: "fila", label: "Fila", icon: "list-checks" },
+    { tab: "replay-precisao", label: "Replay de precisão", icon: "badge-check" },
     { tab: "teste-pipeline", label: "Teste do pipeline", icon: "flask-conical" },
     { tab: "descricao", label: "Descrição", icon: "file-text" },
   ];
