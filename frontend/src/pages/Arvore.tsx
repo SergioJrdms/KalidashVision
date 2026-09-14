@@ -46,12 +46,12 @@ const RAMOS: Record<Ramo, { titulo: string; cor: string; ajuda: string }> = {
   desp: {
     titulo: "Improdutivo",
     cor: leanCor("desp"),
-    ajuda: "O tempo que não agrega valor: espera, deslocamento, posto vazio.",
+    ajuda: "O tempo que não agrega valor: espera, deslocamento ou interrupção.",
   },
   sem: {
-    titulo: "Sem classificação",
+    titulo: "Sem decisão",
     cor: "var(--apoio)",
-    ajuda: "O que o sistema ainda não sabe julgar. Enquanto ninguém decide, conta como improdutivo.",
+    ajuda: "O que o sistema ainda não sabe julgar e precisa de validação.",
   },
 };
 

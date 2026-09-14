@@ -26,8 +26,8 @@ export function nivelDe(pct: number) {
 // Lean meta
 export const LEAN: Record<LeanShort, { label: string; cor: string; bg: string }> = {
   va: { label: "Produtivo", cor: "var(--va)", bg: "var(--va-bg)" },
-  desp: { label: "Desperdício", cor: "var(--desp)", bg: "var(--desp-bg)" },
-  vazio: { label: "Posto sem operador", cor: "#8a8598", bg: "var(--none-bg)" },
+  desp: { label: "Improdutivo", cor: "var(--desp)", bg: "var(--desp-bg)" },
+  vazio: { label: "Sem operador no posto", cor: "#8a8598", bg: "var(--none-bg)" },
 };
 
 export function leanCor(c: string) {

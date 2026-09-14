@@ -514,6 +514,74 @@ def _linha_do_tempo(
     return fatias
 
 
+INDICADORES_EVIDENCIA = {
+    "tempo_capturado",
+    "produtivo",
+    "improdutivo",
+    "sem_decisao",
+    "presenca_operador",
+    "posto_sem_operador",
+    "presenca_inconclusiva",
+    # Alias legado preservado para links já publicados.
+    "posto_vazio",
+}
+
+
+def estado_compone_indicador(estado: str, indicador: str) -> bool:
+    """Verdade única entre uma fatia canônica e os indicadores da vitrine."""
+    produtivos = {EST_PRODUTIVO, EST_OPERADOR_FORA_PRODUTIVO}
+    improdutivos = {EST_IMPRODUTIVO, EST_OPERADOR_FORA_IMPRODUTIVO}
+    operador_presente = {
+        EST_PRODUTIVO,
+        EST_IMPRODUTIVO,
+        EST_PRODUTIVIDADE_INCONCLUSIVA,
+    }
+    fora_do_posto = {
+        EST_POSTO_VAZIO,
+        EST_OPERADOR_FORA,
+        EST_OPERADOR_FORA_PRODUTIVO,
+        EST_OPERADOR_FORA_IMPRODUTIVO,
+    }
+    capturados = {
+        EST_PRODUTIVO,
+        EST_IMPRODUTIVO,
+        EST_PRODUTIVIDADE_INCONCLUSIVA,
+        EST_POSTO_VAZIO,
+        EST_OPERADOR_AUSENTE,
+        EST_OPERADOR_FORA,
+        EST_OPERADOR_FORA_PRODUTIVO,
+        EST_OPERADOR_FORA_IMPRODUTIVO,
+        EST_SEM_LEITURA,
+    }
+    if indicador == "tempo_capturado":
+        return estado in capturados
+    if indicador == "produtivo":
+        return estado in produtivos
+    if indicador == "improdutivo":
+        return estado in improdutivos
+    if indicador == "sem_decisao":
+        return estado in capturados - produtivos - improdutivos
+    if indicador == "presenca_operador":
+        return estado in operador_presente
+    if indicador == "posto_sem_operador":
+        return estado == EST_OPERADOR_AUSENTE or estado in fora_do_posto
+    if indicador == "presenca_inconclusiva":
+        return estado == EST_SEM_LEITURA
+    if indicador == "posto_vazio":
+        return estado in fora_do_posto
+    return False
+
+
+def _particao_percentual(valores: list[float]) -> list[float | None]:
+    """Arredonda uma partição preservando soma visual exatamente igual a 100%."""
+    total = sum(valores)
+    if total <= 0:
+        return [None for _ in valores]
+    saida = [round(100.0 * valor / total, 1) for valor in valores[:-1]]
+    saida.append(round(100.0 - sum(saida), 1))
+    return saida
+
+
 def _metricas(eventos: list[dict], frentes_por_camera: dict[str, str]) -> dict:
     pesos = {
         EST_PRODUTIVO: 0.0,
@@ -593,6 +661,30 @@ def _metricas(eventos: list[dict], frentes_por_camera: dict[str, str]) -> dict:
         pesos[EST_SEM_LEITURA] + pesos[EST_PRODUTIVIDADE_INCONCLUSIVA],
         total_bruto,
     )
+    def peso_indicador(indicador: str) -> float:
+        return sum(
+            peso for estado, peso in pesos.items()
+            if estado_compone_indicador(estado, indicador)
+        )
+
+    (
+        produtivo_total_pct,
+        improdutivo_total_pct,
+        sem_decisao_total_pct,
+    ) = _particao_percentual([
+        peso_indicador("produtivo"),
+        peso_indicador("improdutivo"),
+        peso_indicador("sem_decisao"),
+    ])
+    (
+        presenca_operador_total_pct,
+        posto_sem_operador_total_pct,
+        sem_leitura_presenca_total_pct,
+    ) = _particao_percentual([
+        peso_indicador("presenca_operador"),
+        peso_indicador("posto_sem_operador"),
+        peso_indicador("presenca_inconclusiva"),
+    ])
     try:
         minimo_evidencias = max(
             1, int(os.environ.get("KV_PRODUTIVIDADE_MIN_LEITURAS", "20"))
@@ -627,6 +719,14 @@ def _metricas(eventos: list[dict], frentes_por_camera: dict[str, str]) -> dict:
         "cobertura_presenca_pct": cobertura_presenca,
         "cobertura_identificacao_pct": cobertura_identificacao,
         "inconclusivo_pct": inconclusivo,
+        # Vitrine pedida na call: duas leituras independentes, ambas sobre o
+        # mesmo total de intervalos efetivamente capturados e processados.
+        "produtivo_total_pct": produtivo_total_pct,
+        "improdutivo_total_pct": improdutivo_total_pct,
+        "sem_decisao_total_pct": sem_decisao_total_pct,
+        "presenca_operador_total_pct": presenca_operador_total_pct,
+        "posto_sem_operador_total_pct": posto_sem_operador_total_pct,
+        "sem_leitura_presenca_total_pct": sem_leitura_presenca_total_pct,
         "publicavel": publicavel,
         "sem_dado": observado <= 0,
     }

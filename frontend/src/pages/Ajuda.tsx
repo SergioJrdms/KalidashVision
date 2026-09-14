@@ -61,8 +61,8 @@ function Vocabulario() {
     },
     {
       icon: "tag", cor: "var(--va)", termo: "Classificação",
-      def: "Se aquele tempo agrega valor (produtivo) ou não (desperdício) — a leitura de produtividade é binária.",
-      exemplo: "produtivo · desperdício",
+      def: "Se aquele tempo agrega valor (produtivo), não agrega (improdutivo) ou ainda está sem decisão.",
+      exemplo: "produtivo · improdutivo · sem decisão",
     },
   ];
   return (
@@ -148,7 +148,7 @@ function ComoValida() {
     // Fase 80: a quinta ação não é uma decisão — é a única que só OLHA. Existe
     // porque nem tudo passa pela fila: um dia inteiro de posto vazio sai dela
     // por mecanismo e ficaria invisível sem alguém abrir para conferir.
-    { icon: "search", cor: "var(--muted)", bg: "var(--soft)", titulo: "Auditar um dia", txt: "Nem tudo passa pela fila: um dia inteiro de posto vazio sai dela sozinho. Na Auditoria do dia você abre um dia qualquer e confere por amostragem — sem julgar nada, só para ver se a leitura bate com a realidade." },
+    { icon: "search", cor: "var(--muted)", bg: "var(--soft)", titulo: "Auditar um dia", txt: "Nem tudo passa pela fila. Na Auditoria do dia você confere inclusive os trechos Sem operador no posto — sem alterar nada, apenas para verificar se a leitura bate com a realidade." },
   ];
   return (
     <section className="col" style={{ gap: 12 }}>

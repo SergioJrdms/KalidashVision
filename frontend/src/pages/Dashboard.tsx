@@ -13,7 +13,7 @@ import { leituraDoPosto, nomeHumano } from "../design/rotulos";
 import type { Go } from "../design/Shell";
 import { ArvoreProdutividade } from "./Arvore";
 import { EventEvidenceDrawer } from "../components/EventEvidenceDrawer";
-import type { AcaoSugestao, DistribuicaoComportamento, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso, SugestaoPratica } from "../lib/types";
+import type { AcaoSugestao, DistribuicaoComportamento, IndicadorEvidencia, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso, SugestaoPratica } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
@@ -22,7 +22,11 @@ const COMP_VISIVEL_PADRAO = 5;
 export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }) {
   const isMobile = useIsMobile();
   const [janela, setJanela] = useState<1 | 7 | 30>(7);
-  const [evidenciaPresenca, setEvidenciaPresenca] = useState(false);
+  const [evidencia, setEvidencia] = useState<{
+    indicador: IndicadorEvidencia;
+    titulo: string;
+    categoria: string;
+  } | null>(null);
   const q = useQuery({
     queryKey: ["dashboard", proc.id, janela],
     queryFn: () => api.processos.dashboard(proc.id, janela),
@@ -35,7 +39,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
   if (det.snapshot.videos === 0) {
     return (
       <Card>
-        <Empty icon="video" title="Aguardando a primeira captura do posto" desc="Assim que a captura automática for processada, esta tela mostrará presença, posto vazio e produtividade." />
+        <Empty icon="video" title="Aguardando a primeira captura do posto" desc="Assim que a captura automática for processada, esta tela mostrará produtividade e presença do operador em eixos separados." />
       </Card>
     );
   }
@@ -135,39 +139,50 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
       </Card>
 
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,minmax(0,1fr))", gap: 14 }}>
-        <KpiComercial titulo="Produtividade" valor={p.produtividade_pct} detalhe="entre leituras com operador identificado e decisão válida" cor="#187a43" icone="gauge" />
-        <KpiComercial titulo="Operador no posto" valor={p.presenca_pct} detalhe="entre as leituras de presença válidas" cor="var(--accent)" icone="user-check" />
-        <KpiComercial titulo="Posto vazio" valor={p.posto_vazio_pct} detalhe="entre as leituras de presença válidas · clique para conferir" cor="#b74a3a" icone="user-x" onClick={() => setEvidenciaPresenca(true)} />
+        <KpiComercial titulo="Produtivo" valor={p.produtivo_total_pct} detalhe="do tempo capturado · clique para conferir" cor="#187a43" icone="gauge" onClick={() => setEvidencia({ indicador: "produtivo", titulo: "Produtivo", categoria: "Produtividade" })} />
+        <KpiComercial titulo="Improdutivo" valor={p.improdutivo_total_pct} detalhe="do tempo capturado · clique para conferir" cor="#b74a3a" icone="trending-down" onClick={() => setEvidencia({ indicador: "improdutivo", titulo: "Improdutivo", categoria: "Produtividade" })} />
+        <KpiComercial titulo="Sem decisão" valor={p.sem_decisao_total_pct} detalhe="do tempo capturado · clique para validar" cor="#8a5a00" icone="help-circle" onClick={() => setEvidencia({ indicador: "sem_decisao", titulo: "Sem decisão", categoria: "Produtividade" })} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.15fr .85fr", gap: 14, alignItems: "stretch" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14, alignItems: "stretch" }}>
         <Card style={{ padding: 20 }}>
           <div className="row" style={{ justifyContent: "space-between", gap: 12, marginBottom: 18 }}>
             <div>
-              <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>Leitura do período</h2>
-              <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 12 }}>Percentuais calculados somente sobre leituras válidas do posto.</p>
+              <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>Produtividade</h2>
+              <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 12 }}>Como 100% do tempo capturado foi classificado.</p>
             </div>
           </div>
           <BarraComercial
-            titulo="Produtividade com operador presente"
+            titulo="Classificação das horas capturadas"
             partes={[
-              { nome: "Produtivo", valor: p.produtividade_pct, cor: "#2e9d62" },
-              { nome: "Improdutivo", valor: p.improdutividade_pct, cor: "#d66755" },
+              { nome: "Produtivo", valor: p.produtivo_total_pct, cor: "#2e9d62", onClick: () => setEvidencia({ indicador: "produtivo", titulo: "Produtivo", categoria: "Produtividade" }) },
+              { nome: "Improdutivo", valor: p.improdutivo_total_pct, cor: "#d66755", onClick: () => setEvidencia({ indicador: "improdutivo", titulo: "Improdutivo", categoria: "Produtividade" }) },
+              { nome: "Sem decisão", valor: p.sem_decisao_total_pct, cor: "#d9b04c", onClick: () => setEvidencia({ indicador: "sem_decisao", titulo: "Sem decisão", categoria: "Produtividade" }) },
             ]}
           />
-          <div style={{ height: 18 }} />
-          <BarraComercial
-            titulo="Ocupação do posto"
-            partes={[
-              { nome: "Operador", valor: p.presenca_pct, cor: "var(--accent)" },
-              { nome: "Outra pessoa", valor: p.outra_pessoa_no_posto_pct, cor: "#c79232" },
-              { nome: "Vazio", valor: p.posto_vazio_pct, cor: "#d9dde6", onClick: () => setEvidenciaPresenca(true) },
-            ]}
-          />
+          <p style={{ margin: "14px 0 0", color: "var(--muted)", fontSize: 11.5 }}>Produtivo + improdutivo + sem decisão = 100% do tempo capturado.</p>
         </Card>
 
-        <TetoDoPosto pontos={p.serie_diaria} />
+        <Card style={{ padding: 20 }}>
+          <div className="row" style={{ justifyContent: "space-between", gap: 12, marginBottom: 18 }}>
+            <div>
+              <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>Presença do operador</h2>
+              <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 12 }}>Eixo separado da produtividade, sobre o mesmo tempo capturado.</p>
+            </div>
+          </div>
+          <BarraComercial
+            titulo="Presença nas horas capturadas"
+            partes={[
+              { nome: "Presença do operador", valor: p.presenca_operador_total_pct, cor: "var(--accent)", onClick: () => setEvidencia({ indicador: "presenca_operador", titulo: "Presença do operador", categoria: "Presença" }) },
+              { nome: "Sem operador no posto", valor: p.posto_sem_operador_total_pct, cor: "#8a8598", onClick: () => setEvidencia({ indicador: "posto_sem_operador", titulo: "Sem operador no posto", categoria: "Presença" }) },
+              { nome: "Sem leitura", valor: p.sem_leitura_presenca_total_pct, cor: "#d9dde6", onClick: () => setEvidencia({ indicador: "presenca_inconclusiva", titulo: "Sem leitura de presença", categoria: "Presença" }) },
+            ]}
+          />
+          <p style={{ margin: "14px 0 0", color: "var(--muted)", fontSize: 11.5 }}>Presença do operador não altera o percentual produtivo ou improdutivo.</p>
+        </Card>
       </div>
+
+      <TetoDoPosto pontos={p.serie_diaria} />
 
       {/* Depois de "79,7% no posto" e da qualidade da leitura, a próxima
           coisa que o gestor quer é o que fazer com isso. Some sozinho quando
@@ -180,7 +195,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
         proc={proc}
         distribuicao={q.data.snapshot.distribuicao_comportamentos}
       />
-      {evidenciaPresenca && <EventEvidenceDrawer processoId={proc.id} titulo="Posto vazio" categoria="Presença no posto" janelaPresenca={janela} onClose={() => setEvidenciaPresenca(false)} />}
+      {evidencia && <EventEvidenceDrawer processoId={proc.id} titulo={evidencia.titulo} categoria={evidencia.categoria} indicador={evidencia.indicador} janelaDias={janela} onClose={() => setEvidencia(null)} />}
     </div>
   );
 }
@@ -240,22 +255,29 @@ function formatarLeitura(iso: string | null): string {
 }
 
 function leituraAtual(estado: NonNullable<DetMock["produtividade"]>["estado_atual"]): { titulo: string; detalhe: string; cor: string; fundo: string; icone: IconeNome } {
-  if (estado.presenca === "posto_vazio") return { titulo: "Posto vazio", detalhe: "Nenhum operador identificado no posto.", cor: "#b74a3a", fundo: "#fff0ed", icone: "user-x" };
+  if (estado.presenca === "posto_vazio") return { titulo: "Sem operador no posto", detalhe: "Nenhum operador identificado no posto.", cor: "#b74a3a", fundo: "#fff0ed", icone: "user-x" };
   if (estado.presenca === "fora_do_posto") return { titulo: "Operador fora do posto", detalhe: "Há outra pessoa na área, mas não o operador.", cor: "#a46c00", fundo: "#fff6df", icone: "users" };
-  if (estado.presenca === "no_posto" && estado.produtividade === "produtivo") return { titulo: "Operador no posto · produtivo", detalhe: "Mão no torno ou atenção voltada para a operação.", cor: "#187a43", fundo: "#eaf7ef", icone: "circle-check" };
-  if (estado.presenca === "no_posto" && estado.produtividade === "improdutivo") return { titulo: "Operador no posto · improdutivo", detalhe: "Sem interação ou atenção ao torno nesta leitura.", cor: "#b74a3a", fundo: "#fff0ed", icone: "circle-alert" };
-  if (estado.presenca === "no_posto") return { titulo: "Operador no posto", detalhe: "A produtividade desta leitura ficou inconclusiva.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" };
+  if (estado.presenca === "no_posto" && estado.produtividade === "produtivo") return { titulo: "Presença do operador · produtivo", detalhe: "Mão no torno ou atenção voltada para a operação.", cor: "#187a43", fundo: "#eaf7ef", icone: "circle-check" };
+  if (estado.presenca === "no_posto" && estado.produtividade === "improdutivo") return { titulo: "Presença do operador · improdutivo", detalhe: "Sem interação ou atenção ao torno nesta leitura.", cor: "#b74a3a", fundo: "#fff0ed", icone: "circle-alert" };
+  if (estado.presenca === "no_posto") return { titulo: "Presença do operador", detalhe: "A produtividade desta leitura ficou sem decisão.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" };
   return { titulo: "Leitura inconclusiva", detalhe: "Não foi possível identificar o operador com segurança.", cor: "#6f5e87", fundo: "var(--soft)", icone: "help-circle" };
 }
 
 function KpiComercial({ titulo, valor, detalhe, cor, icone, onClick }: { titulo: string; valor: number | null; detalhe: string; cor: string; icone: IconeNome; onClick?: () => void }) {
   return (
-    <Card onClick={onClick} style={{ padding: 20, cursor: onClick ? "pointer" : undefined }}>
+    <Card
+      onClick={onClick}
+      onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") onClick(); } : undefined}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      aria-label={onClick ? `Ver evidências: ${titulo}` : undefined}
+      style={{ padding: 20, cursor: onClick ? "pointer" : undefined }}
+    >
       <div className="row" style={{ justifyContent: "space-between", gap: 12 }}>
         <span style={{ color: "var(--muted)", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em" }}>{titulo}</span>
         <Icon name={icone} size={18} color={cor} />
       </div>
-      <div className="font-display tnum" style={{ marginTop: 12, color: valor == null ? "var(--faint)" : cor, fontSize: 38, lineHeight: 1, fontWeight: 750 }}>
+      <div className="font-display tnum" style={{ marginTop: 12, color: valor != null ? cor : "var(--faint)", fontSize: 38, lineHeight: 1, fontWeight: 750 }}>
         {valor == null ? "—" : `${valor.toFixed(1)}%`}
       </div>
       <p style={{ margin: "9px 0 0", color: "var(--muted)", fontSize: 11.5, lineHeight: 1.4 }}>{detalhe}</p>
@@ -324,7 +346,7 @@ function mediana(xs: number[]): number {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-function faixaDa(pontos: PontoSerie[], campo: "presenca_pct" | "produtividade_pct") {
+function faixaDa(pontos: PontoSerie[], campo: "presenca_operador_total_pct" | "produtivo_total_pct") {
   const validos = pontos.filter((x) => typeof x[campo] === "number") as (PontoSerie & Record<string, number>)[];
   if (validos.length < 3) return null;
   const vals = validos.map((x) => x[campo] as number);
@@ -340,8 +362,8 @@ function faixaDa(pontos: PontoSerie[], campo: "presenca_pct" | "produtividade_pc
 }
 
 function TetoDoPosto({ pontos }: { pontos: PontoSerie[] }) {
-  const presenca = faixaDa(pontos, "presenca_pct");
-  const produtividade = faixaDa(pontos, "produtividade_pct");
+  const presenca = faixaDa(pontos, "presenca_operador_total_pct");
+  const produtividade = faixaDa(pontos, "produtivo_total_pct");
   const base = presenca ?? produtividade;
   return (
     <Card style={{ padding: 20 }}>
@@ -359,11 +381,11 @@ function TetoDoPosto({ pontos }: { pontos: PontoSerie[] }) {
         </div>
       )}
 
-      {presenca && <FaixaTeto titulo="Operador no posto" cor="var(--accent)" f={presenca} />}
+      {presenca && <FaixaTeto titulo="Presença do operador" cor="var(--accent)" f={presenca} />}
       {produtividade && (
         <>
           <div style={{ height: 20 }} />
-          <FaixaTeto titulo="Produtividade" cor="#2e9d62" f={produtividade} />
+          <FaixaTeto titulo="Produtivo no tempo capturado" cor="#2e9d62" f={produtividade} />
         </>
       )}
 
@@ -455,21 +477,21 @@ function SerieComercial({ pontos }: { pontos: NonNullable<DetMock["produtividade
   return (
     <Card style={{ padding: 20 }}>
       <h2 className="font-display" style={{ margin: 0, fontSize: 17 }}>Evolução diária</h2>
-      <p style={{ margin: "4px 0 17px", color: "var(--muted)", fontSize: 12 }}>Produtividade e presença no mesmo instrumento.</p>
+      <p style={{ margin: "4px 0 17px", color: "var(--muted)", fontSize: 12 }}>Produtividade e presença em eixos separados, ambos sobre o tempo capturado.</p>
       <div style={{ display: "grid", gridTemplateColumns: `repeat(${pontos.length}, minmax(34px,1fr))`, gap: 8, minHeight: 150, alignItems: "end", overflowX: "auto" }}>
         {pontos.map((ponto) => (
-          <div key={ponto.dia} className="col" role="group" aria-label={`${ponto.dia}: produtividade ${ponto.produtividade_pct ?? "sem dado"}; presença ${ponto.presenca_pct ?? "sem dado"}`} style={{ gap: 7, alignItems: "center", minWidth: 42 }}>
+          <div key={ponto.dia} className="col" role="group" aria-label={`${ponto.dia}: produtivo ${ponto.produtivo_total_pct ?? "sem dado"}; presença do operador ${ponto.presenca_operador_total_pct ?? "sem dado"}`} style={{ gap: 7, alignItems: "center", minWidth: 42 }}>
             <div className="row" style={{ height: 108, width: "100%", maxWidth: 42, alignItems: "end", gap: 3 }}>
-              {ponto.produtividade_pct != null && <span aria-hidden="true" style={{ width: "50%", height: `${ponto.produtividade_pct}%`, borderRadius: "5px 5px 2px 2px", background: "#2e9d62" }} />}
-              {ponto.presenca_pct != null && <span aria-hidden="true" style={{ width: "50%", height: `${ponto.presenca_pct}%`, borderRadius: "5px 5px 2px 2px", background: "var(--accent)" }} />}
+              {ponto.produtivo_total_pct != null && <span aria-hidden="true" style={{ width: "50%", height: `${ponto.produtivo_total_pct}%`, borderRadius: "5px 5px 2px 2px", background: "#2e9d62" }} />}
+              {ponto.presenca_operador_total_pct != null && <span aria-hidden="true" style={{ width: "50%", height: `${ponto.presenca_operador_total_pct}%`, borderRadius: "5px 5px 2px 2px", background: "var(--accent)" }} />}
             </div>
             <span style={{ fontSize: 9.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{ponto.dia.slice(8, 10)}/{ponto.dia.slice(5, 7)}</span>
-            <span className="tnum" style={{ fontSize: 8.5, color: "var(--muted)", whiteSpace: "nowrap" }}>P {ponto.produtividade_pct == null ? "—" : `${ponto.produtividade_pct.toFixed(0)}%`}</span>
-            <span className="tnum" style={{ fontSize: 8.5, color: "var(--muted)", whiteSpace: "nowrap" }}>O {ponto.presenca_pct == null ? "—" : `${ponto.presenca_pct.toFixed(0)}%`}</span>
+            <span className="tnum" style={{ fontSize: 8.5, color: "var(--muted)", whiteSpace: "nowrap" }}>Prod. {ponto.produtivo_total_pct == null ? "—" : `${ponto.produtivo_total_pct.toFixed(0)}%`}</span>
+            <span className="tnum" style={{ fontSize: 8.5, color: "var(--muted)", whiteSpace: "nowrap" }}>Pres. {ponto.presenca_operador_total_pct == null ? "—" : `${ponto.presenca_operador_total_pct.toFixed(0)}%`}</span>
           </div>
         ))}
       </div>
-      <div className="row" style={{ gap: 14, marginTop: 10, fontSize: 11, color: "var(--muted)" }}><span>● <b style={{ color: "#2e9d62" }}>Produtividade</b></span><span>● <b style={{ color: "var(--accent)" }}>Presença</b></span></div>
+      <div className="row" style={{ gap: 14, marginTop: 10, fontSize: 11, color: "var(--muted)" }}><span>● <b style={{ color: "#2e9d62" }}>Produtivo</b></span><span>● <b style={{ color: "var(--accent)" }}>Presença do operador</b></span></div>
     </Card>
   );
 }
@@ -524,7 +546,7 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Evolução por vídeo"
-        ajuda="Cada coluna é um vídeo (em ordem cronológica), dividida em produtivo e não-produtivo. Mostra se a operação está melhorando de um vídeo para o outro."
+        ajuda="Cada coluna é um vídeo, dividida em Produtivo e Improdutivo. Mostra se a operação está melhorando de um vídeo para o outro."
         leitura="Verde crescendo = o processo está aprendendo a render."
       />
       {pontos.length < 2 ? (
@@ -543,7 +565,7 @@ function EvolucaoPanel({ processoId }: { processoId: string }) {
               const vals: Record<string, number> = { valor_agregado: va, desperdicio: Math.max(0, 100 - va) };
               const x = padL + i * slot + (slot - bw) / 2;
               let yTopo = H - padB; // empilha de baixo (produtivo) pra cima
-              const tip = `${rotulo(p, i)} — produtivo ${Math.round(va)}% · não-produtivo ${Math.round(100 - va)}%`;
+              const tip = `${rotulo(p, i)} — produtivo ${Math.round(va)}% · improdutivo ${Math.round(100 - va)}%`;
               const passoRotulo = Math.ceil(pontos.length / 6);
               const mostraRotulo = i % passoRotulo === 0;
               return (
@@ -581,7 +603,7 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Ritmo do dia"
-        ajuda="O tempo de cada hora do relógio (somando todos os dias filmados), dividido em produtivo e não-produtivo. Revela padrões estruturais: começo de turno lento, queda pós-almoço, fim de dia disperso."
+        ajuda="O tempo de cada hora do relógio, dividido em Produtivo e Improdutivo. Revela padrões estruturais como começo de turno lento e queda pós-almoço."
         leitura="Procure a hora mais vermelha — é onde a rotina trava todo dia."
       />
       {horas.length < 2 ? (
@@ -591,7 +613,7 @@ function RitmoDoDia({ iq }: { iq: InsightsQuantitativos | null }) {
           <ul className="col" style={{ gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
             {horas.map((h) => {
               return (
-                <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
+                <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% improdutivo`}>
                   <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
                   <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
                     <LeanBar va={h.va_pct} desp={h.desp_pct} height={10} />
@@ -842,7 +864,7 @@ function PlacarHero({ placar }: { placar: PlacarProcesso | null }) {
           )}
           {vs && Math.abs(vs.delta_pp) >= 1 && (
             <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
-              Vs {unis} anteriores: desperdício {vs.antes.toFixed(0)}% → {vs.atual.toFixed(0)}% ({vs.delta_pp > 0 ? "+" : "−"}{Math.abs(vs.delta_pp).toFixed(0)} pts)
+              Vs {unis} anteriores: improdutivo {vs.antes.toFixed(0)}% → {vs.atual.toFixed(0)}% ({vs.delta_pp > 0 ? "+" : "−"}{Math.abs(vs.delta_pp).toFixed(0)} pts)
             </span>
           )}
         </div>
@@ -878,8 +900,8 @@ function ProximoPasso({ det, proc, go }: { det: DetMock; proc: ProcHeaderMock; g
     };
   } else if ((desp?.pct ?? 0) >= 15) {
     passo = {
-      titulo: "Ataque o desperdício",
-      desc: `${Math.round(desp!.pct)}% do tempo é desperdício. As perguntas e sugestões abaixo mostram por onde começar.`,
+      titulo: "Reduza o tempo improdutivo",
+      desc: `${Math.round(desp!.pct)}% do tempo está improdutivo. As perguntas e sugestões abaixo mostram por onde começar.`,
       cta: "Ver o que fazer",
       onClick: () => document.getElementById("painel-sugestoes")?.scrollIntoView({ behavior: "smooth", block: "start" }),
     };
@@ -942,7 +964,7 @@ function PorPosto({ iq }: { iq: InsightsQuantitativos | null }) {
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Por posto de trabalho"
-        ajuda="Cada posto é um ROI das câmeras (bancada, esteira…). Mostra quanto do tempo daquele posto é produtivo vs desperdício — o gargalo aparece na cor."
+        ajuda="Cada posto é uma região das câmeras. Mostra quanto do tempo daquele posto é Produtivo ou Improdutivo."
         leitura="Onde o processo trava, por estação."
       />
       <ul className="col" style={{ gap: 12, listStyle: "none", padding: 0, margin: 0 }}>
@@ -955,7 +977,7 @@ function PorPosto({ iq }: { iq: InsightsQuantitativos | null }) {
             </div>
             <LeanBar va={r.va_pct} desp={Math.max(0, 100 - r.va_pct)} />
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
-              <b style={{ color: leanCor("va") }}>{r.va_pct.toFixed(0)}% produtivo</b> · <b style={{ color: leanCor("desp") }}>{r.desp_pct.toFixed(0)}% desperdício</b>
+              <b style={{ color: leanCor("va") }}>{r.va_pct.toFixed(0)}% produtivo</b> · <b style={{ color: leanCor("desp") }}>{r.desp_pct.toFixed(0)}% improdutivo</b>
             </div>
           </li>
         ))}
@@ -983,15 +1005,15 @@ function KpisExecutivos({ det }: { det: DetMock }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 14 }}>
       <KpiHero
-        label="Tempo desperdiçado"
+        label="Tempo improdutivo"
         valor={`${despPct}%`}
         // Fase 56: o TOTAL não muda — posto vazio segue somando aqui. O
         // subtítulo separa "operador ausente" de "operador presente sem agregar
         // valor": são problemas com causas e ações diferentes.
-        sub={vazioPct > 0 ? `${vazioPct} pts são posto vazio` : undefined}
+        sub={vazioPct > 0 ? `${vazioPct} pts sem operador no posto` : undefined}
         icon="alert-triangle"
         cor={leanCor("desp")}
-        ajuda="Parte do tempo observado classificada como desperdício (Lean). Inclui o posto vazio (operador ausente), destacado à parte porque a ação para resolver é outra."
+        ajuda="Parte do tempo analisado classificada como Improdutivo. A ausência do operador é exibida separadamente no eixo de presença."
       />
       <KpiHero
         label="Tempo produtivo"
@@ -1026,11 +1048,11 @@ function KpiTendencia({ trend, texto }: { trend: number | null; texto: string | 
   const cor = !temDado ? "var(--faint)" : piorou ? leanCor("desp") : leanCor("va");
   const seta = !temDado ? "minus" : piorou ? "trending-up" : "trending-down";
   const valor = !temDado ? "estável" : `${piorou ? "+" : "−"}${Math.abs(Math.round(trend ?? 0))} pts`;
-  const sub = !temDado ? "poucos vídeos p/ tendência" : piorou ? "desperdício subindo" : "desperdício caindo";
+  const sub = !temDado ? "poucos vídeos p/ tendência" : piorou ? "improdutivo subindo" : "improdutivo caindo";
   return (
     <Card style={{ padding: 18, borderLeft: `3px solid ${cor}` }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
-        <span className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>Tendência do desperdício <Help text={texto || "Comparação do desperdício nos vídeos mais recentes contra os anteriores. Precisa de alguns vídeos para ser confiável."} width={240} /></span>
+        <span className="row gap1" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)" }}>Tendência do improdutivo <Help text={texto || "Comparação do tempo improdutivo nos vídeos mais recentes contra os anteriores."} width={240} /></span>
         <Icon name={seta} size={17} color={cor} />
       </div>
       <div className="font-display tnum" style={{ fontSize: 34, fontWeight: 700, color: temDado ? cor : "var(--ink)", marginTop: 6, lineHeight: 1 }}>{valor}</div>
@@ -1146,7 +1168,7 @@ function Sugestoes({ det, processoId }: { det: DetMock; processoId: string }) {
 
   return (
     <Card id="painel-sugestoes" style={{ padding: 18 }}>
-      <PanelHead titulo="Sugestões de produtividade" ajuda="Geradas pela IA combinando seus dados agregados com os 7 desperdícios do Lean. Marque como realizada quando aplicar a ação — se ela voltar depois, o Prism avisa que não foi cumprida." right={<span style={{ fontSize: 12, color: "var(--muted)" }}>{visiveis.length} de {lista.length}</span>} />
+      <PanelHead titulo="Sugestões de produtividade" ajuda="Geradas pela IA combinando seus dados agregados com as categorias Lean de improdutividade. Marque como realizada quando aplicar a ação — se ela voltar depois, o Prism avisa que não foi cumprida." right={<span style={{ fontSize: 12, color: "var(--muted)" }}>{visiveis.length} de {lista.length}</span>} />
       <div className="row gap1 wrap" style={{ marginBottom: 12 }}>
         {["todas", "alta", "media", "info"].map((p) => (
           <button key={p} onClick={() => { setPrio(p); setVerTodas(false); }} style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11.5, fontWeight: 600, border: "1px solid", borderColor: prio === p ? "var(--accent)" : "var(--line)", background: prio === p ? "var(--accent)" : "#fff", color: prio === p ? "#fff" : "var(--muted)" }}>
@@ -1267,12 +1289,12 @@ function ComposicaoPanel({ det }: { det: DetMock }) {
   const s = det.snapshot;
   const data = [
     { v: s.va, c: "var(--va)", n: "Produtivo" },
-    { v: Math.max(0, s.desp - (s.vazio || 0)), c: "var(--desp)", n: "Desperdício" },
-    { v: s.vazio || 0, c: "#8a8598", n: "Posto vazio" },
+    { v: Math.max(0, s.desp - (s.vazio || 0)), c: "var(--desp)", n: "Improdutivo" },
+    { v: s.vazio || 0, c: "#8a8598", n: "Sem operador no posto" },
   ];
   return (
     <Card style={{ padding: 20 }}>
-      <PanelHead titulo="Produtivo × não-produtivo" ajuda="Como o tempo observado se divide entre produtivo (agrega valor ao produto) e não-produtivo. São as duas únicas categorias: todo minuto cai em uma delas. 'Posto vazio' é um pedaço do não-produtivo, separado porque a causa é outra. Você pode reclassificar qualquer comportamento." leitura="Há espaço claro para mover tempo de Desperdício para Produtivo." />
+      <PanelHead titulo="Produtivo × improdutivo" ajuda="Como o tempo analisado se divide entre Produtivo e Improdutivo. A presença do operador é um eixo separado." leitura="Há espaço para mover tempo de Improdutivo para Produtivo." />
       <div className="row gap4" style={{ alignItems: "center", justifyContent: "center" }}>
         <Donut data={data} size={168} thickness={26} centerLabel={`${s.va}%`} centerSub="valor" />
         <ul className="col" style={{ gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
@@ -1332,7 +1354,7 @@ function InsightsNumericos({ iq }: { iq: InsightsQuantitativos | null }) {
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Leitura rápida"
-        ajuda="Resumo direto, calculado dos vídeos: onde o tempo foi, produtivo vs desperdício, por ROI e a tendência. Junta os 2 ângulos das câmeras."
+        ajuda="Resumo direto: onde o tempo foi, Produtivo versus Improdutivo, por posto e tendência."
         leitura="Sem achismo — só os números que importam pro chão de fábrica."
       />
       <div className="col" style={{ gap: 9 }}>

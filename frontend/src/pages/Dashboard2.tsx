@@ -102,7 +102,7 @@ function VereditoHero({ dados }: { dados: AnaliseDiaria }) {
           <div className="row gap2 wrap" style={{ fontSize: 12, color: "var(--muted)" }}>
             <ChipStat icon="calendar-check" texto={`${sem.atual.dias_trabalhados} dia(s) trabalhados`} />
             <ChipStat icon="calendar-x" texto={`${sem.atual.dias_sem_trabalho} sem trabalho`} alerta={sem.atual.dias_sem_trabalho > 0} />
-            {sem.atual.vazio_pct > 0 && <ChipStat icon="user-x" texto={`posto vazio ${sem.atual.vazio_pct.toFixed(0)}%`} alerta />}
+            {sem.atual.vazio_pct > 0 && <ChipStat icon="user-x" texto={`sem operador no posto ${sem.atual.vazio_pct.toFixed(0)}%`} alerta />}
           </div>
         </div>
         <JanelaMini titulo="Últimos 30 dias" j={mes.atual} delta={mes.delta_va_pp} />
@@ -250,7 +250,7 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
     <Card style={{ padding: 20 }}>
       <PanelHead
         titulo="Evolução por dia"
-        ajuda="Cada coluna é UM DIA do calendário, dividida em produtivo e não-produtivo (com o posto vazio destacado dentro do não-produtivo). Dias sem trabalho aparecem marcados (cinza = sem captura, vermelho = máquina vazia o dia todo). Clique num dia para ver o ritmo e o resumo dele logo abaixo."
+        ajuda="Cada coluna é um dia do calendário, dividida em Produtivo e Improdutivo. Sem operador no posto aparece destacado. Clique num dia para ver o ritmo e o resumo logo abaixo."
         leitura="Verde crescendo dia após dia = o posto está rendendo mais."
         right={<span style={{ fontSize: 12, color: "var(--muted)" }}>últimos {dias.length} dias</span>}
       />
@@ -266,7 +266,7 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
           if (d.sem_trabalho) {
             const cor = d.sem_trabalho === "posto_vazio" ? leanCor("desp") : "var(--line)";
             const tip = d.sem_trabalho === "posto_vazio"
-              ? `${d.dow} ${d.rot} — máquina vazia o dia todo (posto vazio) · clique e audite: nenhum destes trechos passou por gente`
+              ? `${d.dow} ${d.rot} — sem operador no posto durante todo o período · clique para auditar`
               : `${d.dow} ${d.rot} — sem captura neste dia`;
             return (
               <g key={d.dia} onClick={() => onSelecionar(d)} style={{ cursor: "pointer" }}>
@@ -298,8 +298,8 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
             vazio_pct: vazioDia,
           };
           let yTopo = H - padB;
-          const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · desperdício ${Math.round(d.desp_pct)}%`
-            + (d.atipico_vazio ? ` · ${Math.round(d.posto_vazio_pct)}% de posto vazio — dia atípico, vale auditar` : "");
+          const tip = `${d.dow} ${d.rot} — produtivo ${Math.round(d.va_pct)}% · improdutivo ${Math.round(d.desp_pct)}%`
+            + (d.atipico_vazio ? ` · ${Math.round(d.posto_vazio_pct)}% sem operador no posto — dia atípico, vale auditar` : "");
           return (
             <g key={d.dia} onClick={() => onSelecionar(d)} style={{ cursor: "pointer" }}>
               {sel && <rect x={x - 3} y={padT - 3} width={bw + 6} height={plotH + 6} rx="5" fill="none" stroke="var(--accent)" strokeWidth={1.6} />}
@@ -338,7 +338,7 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
           </span>
         )}
         {dias.some((d) => d.atipico_vazio) && (
-          <span className="row" style={{ gap: 5 }} title="Dia quase todo posto vazio: ou é falta real, ou é falha de detecção. Clique no dia para auditá-lo.">
+          <span className="row" style={{ gap: 5 }} title="Dia quase todo sem operador no posto: pode ser ausência real ou falha de detecção. Clique para auditar.">
             <span style={{ color: leanCor("desp"), fontWeight: 800 }}>!</span> dia atípico (audite)
           </span>
         )}
@@ -384,7 +384,7 @@ function ConviteAuditar({ d, onAuditar }: { d: DiaAnalise; onAuditar: (dia: stri
     <div className="row gap2 wrap" style={{ alignItems: "center", background: "var(--desp-bg)", border: `1px solid ${leanCor("desp")}33`, borderRadius: 10, padding: "10px 12px" }}>
       <Icon name="alert-triangle" size={16} color={leanCor("desp")} />
       <span className="grow" style={{ fontSize: 12.5, color: "var(--text)", minWidth: 200 }}>
-        <b>{Math.round(d.posto_vazio_pct)}% do dia como posto vazio.</b>{" "}
+        <b>{Math.round(d.posto_vazio_pct)}% do dia sem operador no posto.</b>{" "}
         Nenhum destes trechos passou por uma pessoa — eles saem da fila por
         mecanismo. Ou é falta real, ou é falha de detecção.
       </span>
@@ -413,7 +413,7 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado, onAuditar }: { d: Dia
         </span>
         <p style={{ fontSize: 12.5, color: "var(--muted)", margin: 0 }}>
           {d.sem_trabalho === "posto_vazio"
-            ? "As câmeras filmaram, mas o operador não trabalhou no posto — o dia inteiro ficou como posto vazio."
+            ? "Houve captura, mas a presença do operador não foi identificada no posto durante o período."
             : "Nenhuma captura chegou deste dia — câmera desligada, feriado ou falha no Pi."}
         </p>
         {convite && <ConviteAuditar d={d} onAuditar={onAuditar} />}
@@ -442,7 +442,7 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado, onAuditar }: { d: Dia
         ) : (
           <ChipStat icon="gauge" texto={`${d.va_pct.toFixed(0)}% produtivo (${delta >= 0 ? "+" : ""}${delta.toFixed(0)} pts vs média do período)`} alerta={delta < -5} />
         )}
-        {d.posto_vazio_s > 0 && <ChipStat icon="user-x" texto={`posto vazio ${d.posto_vazio_pct.toFixed(0)}%`} alerta={d.posto_vazio_pct >= 20} />}
+        {d.posto_vazio_s > 0 && <ChipStat icon="user-x" texto={`sem operador no posto ${d.posto_vazio_pct.toFixed(0)}%`} alerta={d.posto_vazio_pct >= 20} />}
         {d.visitas > 0 && <ChipStat icon="users" texto={`${d.visitas} visita(s) ao posto`} />}
         {d.primeira_h && d.ultima_h && <ChipStat icon="sunrise" texto={`atividade de ${d.primeira_h} às ${d.ultima_h}`} />}
         {d.top_acao && <ChipStat icon="star" texto={`mais tempo em "${nomeHumano(d.top_acao.label)}"`} />}
@@ -456,7 +456,7 @@ function RitmoDoDiaSelecionado({ d, mediaJanela, agregado, onAuditar }: { d: Dia
         <ul className="col" style={{ gap: 8, listStyle: "none", padding: 0, margin: 0 }}>
           {horas.map((h) => {
             return (
-              <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% desperdício`}>
+              <li key={h.hora} className="row gap2" title={`${h.hora}h — ${Math.round(h.va_pct)}% produtivo · ${Math.round(h.desp_pct)}% improdutivo`}>
                 <span className="tnum" style={{ width: 34, fontSize: 12, fontWeight: 700, color: "var(--text)", flex: "none" }}>{String(h.hora).padStart(2, "0")}h</span>
                 <div className="grow" style={{ opacity: 0.45 + 0.55 * (h.seg / maxSeg) }}>
                   <LeanBar va={h.va_pct} desp={h.desp_pct} vazio={h.vazio_pct || 0} height={10} />
@@ -693,7 +693,7 @@ function PresencaCard({ dias }: { dias: DiaAnalise[] }) {
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
         titulo="Presença no posto"
-        ajuda="Quanto do tempo observado de cada dia teve o operador de fato no posto (100% menos o posto vazio). Dias sem trabalho são listados — máquina vazia o dia todo ou sem captura."
+        ajuda="Quanto do período analisado teve presença do operador. Dias sem captura ou sem operador no posto aparecem separados."
         leitura="A pergunta central: o operador está lá, trabalhando?"
       />
       <ul className="col" style={{ gap: 7, listStyle: "none", padding: 0, margin: 0 }}>
@@ -701,7 +701,7 @@ function PresencaCard({ dias }: { dias: DiaAnalise[] }) {
           const presenca = Math.max(0, 100 - d.posto_vazio_pct);
           const cor = presenca >= 85 ? leanCor("va") : presenca >= 60 ? "#c98a00" : leanCor("desp");
           return (
-            <li key={d.dia} className="row gap2" title={`${d.dow} ${d.rot} — ${presenca.toFixed(0)}% do tempo com o operador no posto`}>
+            <li key={d.dia} className="row gap2" title={`${d.dow} ${d.rot} — presença do operador em ${presenca.toFixed(0)}%`}>
               <span className="tnum" style={{ width: 44, fontSize: 11.5, fontWeight: 700, color: "var(--text)", flex: "none" }}>{d.rot}</span>
               <div className="grow track" style={{ height: 9 }}>
                 <i style={{ width: `${presenca}%`, background: cor, display: "block", height: "100%", borderRadius: 99 }} />
@@ -735,7 +735,7 @@ const CAT_CORES: Record<string, string> = {
   va: leanCor("va"), desp: leanCor("desp"), vazio: "#8a8598",
 };
 const CAT_NOMES: Record<string, string> = {
-  va: "produtivo", desp: "desperdício", vazio: "posto vazio",
+  va: "produtivo", desp: "improdutivo", vazio: "sem operador no posto",
 };
 
 // "2026-08-14" → "14/08". No agregado a lista mistura dias e o dia precisa
@@ -898,8 +898,8 @@ function JornadaDoDia({ d, agregado, proc }: { d: DiaAnalise; agregado?: boolean
       <PanelHead
         titulo={agregado ? "A jornada típica — todos os dias" : `A jornada de ${d.dow} ${d.rot}`}
         ajuda={agregado
-          ? "O dia TÍPICO do operador: em cada faixa de 15 min, a proporção de cada categoria somando todos os dias. Verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = horário sem filmagem em nenhum dia. Clique num bloco para ver os eventos daquele horário em todos os dias — é assim que se responde 'vermelho por quê?'."
-          : "O dia inteiro numa faixa só, em blocos de 15 minutos: verde = produtivo, vermelho = desperdício, cinza = posto vazio. Buracos em branco = sem filmagem naquele horário. Clique num bloco para ver os eventos que o compõem — rótulo, descrição e hora."}
+          ? "O dia típico do operador: verde = Produtivo, vermelho = Improdutivo e cinza = Sem operador no posto. Buracos em branco indicam horário sem captura. Clique num bloco para ver os eventos que o compõem."
+          : "O dia inteiro em blocos de 15 minutos: verde = Produtivo, vermelho = Improdutivo e cinza = Sem operador no posto. Buracos em branco indicam horário sem captura. Clique num bloco para ver os eventos."}
         leitura={agregado
           ? "O padrão do posto: onde o dia costuma render, o horário do almoço e as folgas típicas. Clique num horário para ver o que aconteceu ali, dia a dia."
           : "O filme do dia: dá pra ver quando começou, o almoço, os buracos e onde o dia rendeu. Clique num bloco de 15 min para abrir o que há dentro dele."}
@@ -1252,15 +1252,15 @@ function JanelasComparador({ dados }: { dados: AnaliseDiaria }) {
   }
   const linhas: Array<{ nome: string; cat: LeanShort | "vazio"; a: number; b: number }> = [
     { nome: "Produtivo", cat: "va", a: j.semana.atual.va_pct, b: j.semana.anterior.va_pct },
-    { nome: "Desperdício", cat: "desp", a: j.semana.atual.desp_pct, b: j.semana.anterior.desp_pct },
-    { nome: "Posto vazio", cat: "vazio", a: j.semana.atual.vazio_pct, b: j.semana.anterior.vazio_pct },
+    { nome: "Improdutivo", cat: "desp", a: j.semana.atual.desp_pct, b: j.semana.anterior.desp_pct },
+    { nome: "Sem operador no posto", cat: "vazio", a: j.semana.atual.vazio_pct, b: j.semana.anterior.vazio_pct },
   ];
   return (
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
         titulo="Semana vs semana"
         ajuda="Os últimos 7 dias (barra forte) contra os 7 anteriores (barra clara), categoria a categoria. É a comparação certa: janela contra janela, nunca um dia isolado."
-        leitura="Produtivo subindo + desperdício caindo = a semana foi melhor de verdade."
+        leitura="Produtivo subindo + improdutivo caindo = a semana foi melhor."
       />
       <ul className="col" style={{ gap: 12, listStyle: "none", padding: 0, margin: 0 }}>
         {linhas.map((l) => {

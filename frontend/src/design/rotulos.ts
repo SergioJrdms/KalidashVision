@@ -84,7 +84,7 @@ export function rotulosAtribuiveis(labels: (string | null | undefined)[]): strin
 // pobre ou ambígua. Tudo o que não estiver aqui é convertido sozinho.
 const SEMENTE: Record<string, string> = {
   operar_torno: "Operando o torno",
-  posto_vazio: "Posto sem operador",
+  posto_vazio: "Sem operador no posto",
   monitorar_maquina: "Acompanhando a máquina",
   conversando_colega: "Conversando com colega",
   // Fase 100: os dois carimbos de ausência não recebem nome de atividade. O
@@ -194,14 +194,14 @@ export function leituraDoPosto(d: {
   }
 
   const partes: string[] = [
-    `O posto rendeu ${Math.round(d.vaPct)}% do tempo observado.`,
+    `Produtivo em ${Math.round(d.vaPct)}% do período analisado.`,
   ];
   if (d.vazioPct >= 1) {
     partes.push(
-      `O operador esteve ausente em ${Math.round(d.vazioPct)}% do que foi filmado.`,
+      `Sem operador no posto em ${Math.round(d.vazioPct)}% do período analisado.`,
     );
   } else {
-    partes.push("O operador esteve no posto praticamente o tempo todo filmado.");
+    partes.push("A presença do operador foi identificada praticamente durante todo o período analisado.");
   }
 
   // DÚVIDA ALTA — a frase continua, mas com a ressalva colada. O número não é
@@ -209,7 +209,7 @@ export function leituraDoPosto(d: {
   let ressalva: string | null = null;
   let tom: LeituraDoPosto["tom"] = d.vaPct >= 70 ? "ok" : "atencao";
   if (duvida >= 20) {
-    ressalva = `Em ${Math.round(duvida)}% do tempo o sistema não teve como afirmar o que estava acontecendo — esse pedaço entra como improdutivo até alguém decidir.`;
+    ressalva = `Em ${Math.round(duvida)}% do tempo o sistema não teve como afirmar o que estava acontecendo — esse trecho fica em Sem decisão até alguém validar.`;
     tom = "fraco";
   } else if (duvida >= 8) {
     ressalva = `Em ${Math.round(duvida)}% do tempo a leitura ficou incerta.`;

@@ -48,10 +48,13 @@ _ini = D.index("function mediana(")
 _fim = D.index("function TetoDoPosto(")
 _TS = os.path.join(RAIZ, ".teto_teste.ts")
 open(_TS, "w", encoding="utf-8").write(
-    "type PontoSerie = { dia: string; presenca_pct: number | null; "
-    "produtividade_pct: number | null };\n"
+    "type PontoSerie = { dia: string; presenca_operador_total_pct: number | null; "
+    "produtivo_total_pct: number | null };\n"
     + D[_ini:_fim] + "\nexport { faixaDa, mediana };\n")
-_ESBUILD = os.path.join(RAIZ, "frontend", "node_modules", ".bin", "esbuild")
+_ESBUILD = os.path.join(
+    RAIZ, "frontend", "node_modules", ".bin",
+    "esbuild.cmd" if os.name == "nt" else "esbuild",
+)
 
 
 def js(expr: str):
@@ -68,8 +71,8 @@ def js(expr: str):
 
 
 def serie(*presencas):
-    return [{"dia": f"2026-08-{10 + i:02d}", "presenca_pct": v,
-             "produtividade_pct": None} for i, v in enumerate(presencas)]
+    return [{"dia": f"2026-08-{10 + i:02d}", "presenca_operador_total_pct": v,
+             "produtivo_total_pct": None} for i, v in enumerate(presencas)]
 
 
 # ══════════════════ [1] A instrumentação saiu da tela ══════════════════
@@ -124,7 +127,7 @@ check("mediana de par é o meio-termo dos centrais",
 check("a ordem de entrada não muda nada", js("mediana([89,61,78])") == 78)
 
 # 6 dias bons + 1 dia de manutenção. A média cairia ~8 pontos; a mediana não.
-f = js(f"faixaDa({json.dumps(serie(78,79,80,77,78,81,12))}, 'presenca_pct')")
+f = js(f"faixaDa({json.dumps(serie(78,79,80,77,78,81,12))}, 'presenca_operador_total_pct')")
 check("⭐ um dia de manutenção NÃO desloca o típico",
       f["tipico"] == 78, f)
 check("mas ele continua visível como pior dia", f["pior"] == 12, f)
@@ -149,18 +152,18 @@ check("o motivo está escrito", "o truque de gráfico mais comum" in D)
 print("\n[5] Com 2 dias não há recorde — sorteio não é meta")
 
 check("⭐ 2 dias válidos não desenham faixa",
-      js(f"faixaDa({json.dumps(serie(78, 89))}, 'presenca_pct')") is None)
+      js(f"faixaDa({json.dumps(serie(78, 89))}, 'presenca_operador_total_pct')") is None)
 check("3 já desenham",
-      js(f"faixaDa({json.dumps(serie(78,89,61))}, 'presenca_pct')") is not None)
+      js(f"faixaDa({json.dumps(serie(78,89,61))}, 'presenca_operador_total_pct')") is not None)
 check("dias sem leitura não contam para o mínimo de 3",
-      js(f"faixaDa({json.dumps(serie(78, None, None, 89))}, 'presenca_pct')") is None)
+      js(f"faixaDa({json.dumps(serie(78, None, None, 89))}, 'presenca_operador_total_pct')") is None)
 check("e não entram no cálculo quando há dias suficientes",
-      js(f"faixaDa({json.dumps(serie(78, None, 89, 61))}, 'presenca_pct')")["n"] == 3)
-check("série vazia não quebra", js("faixaDa([], 'presenca_pct')") is None)
+      js(f"faixaDa({json.dumps(serie(78, None, 89, 61))}, 'presenca_operador_total_pct')")["n"] == 3)
+check("série vazia não quebra", js("faixaDa([], 'presenca_operador_total_pct')") is None)
 check("a tela explica a espera em vez de mostrar caixa vazia",
       "o melhor deles é sorteio — não meta" in D)
 check("posto já no teto não inventa folga",
-      js(f"faixaDa({json.dumps(serie(80,80,80))}, 'presenca_pct')")["melhor"] == 80
+      js(f"faixaDa({json.dumps(serie(80,80,80))}, 'presenca_operador_total_pct')")["melhor"] == 80
       and "— e é o seu melhor" in render)
 check("e nesse caso nem desenha o listrado nem a legenda dele",
       "{temFolga && (" in D and "temFolga = f.melhor - f.tipico >= 1" in D)

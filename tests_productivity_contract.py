@@ -1,4 +1,4 @@
-"""Contrato comercial: presença, posto e produtividade sem tempo público."""
+"""Contrato comercial: dois eixos sobre o total capturado, sem duração pública."""
 from datetime import datetime, timezone
 import json
 
@@ -105,6 +105,21 @@ check("falha de identidade não entra como presença",
 check("vazio não infla a cobertura de identificação",
       r["cobertura_identificacao_pct"] == 80.0, r)
 check("cobertura insuficiente bloqueia criativo", r["publicavel"] is False, r)
+check("produtividade comercial fecha 100% do capturado",
+      r["produtivo_total_pct"] == 16.7
+      and r["improdutivo_total_pct"] == 16.7
+      and r["sem_decisao_total_pct"] == 66.6
+      and sum(r[k] for k in (
+          "produtivo_total_pct", "improdutivo_total_pct", "sem_decisao_total_pct"
+      )) == 100.0, r)
+check("presença comercial é uma partição separada",
+      r["presenca_operador_total_pct"] == 50.0
+      and r["posto_sem_operador_total_pct"] == 33.3
+      and r["sem_leitura_presenca_total_pct"] == 16.7
+      and sum(r[k] for k in (
+          "presenca_operador_total_pct", "posto_sem_operador_total_pct",
+          "sem_leitura_presenca_total_pct"
+      )) == 100.0, r)
 
 coexistencia = prod.agregar_produtividade([
     ev(trabalho=True),
@@ -206,6 +221,8 @@ check("payload não publica duração ou minutos",
       all(chave not in serializado for chave in (
           "tempo_inicio", "tempo_fim", "duracao", "duração", "minutos", "segundos"
       )), serializado)
+check("o cliente não recebe o número de horas capturadas",
+      "tempo_capturado_s" not in r, r)
 
 print(f"\n{ok} ok · {fail} falha(s)")
 raise SystemExit(1 if fail else 0)

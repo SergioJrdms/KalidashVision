@@ -44,7 +44,10 @@ _fim = D2.index("function JornadaDoDia")
 _TS = os.path.join(RAIZ, ".jornada_teste.ts")
 open(_TS, "w", encoding="utf-8").write(
     D2[_ini:_fim] + "\nexport { suavizarJornada };\n")
-_ESBUILD = os.path.join(RAIZ, "frontend", "node_modules", ".bin", "esbuild")
+_ESBUILD = os.path.join(
+    RAIZ, "frontend", "node_modules", ".bin",
+    "esbuild.cmd" if os.name == "nt" else "esbuild",
+)
 
 
 def js(expr: str):

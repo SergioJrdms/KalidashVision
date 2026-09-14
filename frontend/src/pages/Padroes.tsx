@@ -14,7 +14,7 @@ const TIPO_PADRAO: Record<string, { icon: string; label: string }> = {
   desvio: { icon: "alert-triangle", label: "Desvio" },
   volatilidade: { icon: "activity", label: "Volatilidade" },
   fluxo: { icon: "git-branch", label: "Fluxo" },
-  desperdicio: { icon: "arrow-down", label: "Desperdício recorrente" },
+  desperdicio: { icon: "arrow-down", label: "Improdutividade recorrente" },
   valor: { icon: "arrow-up", label: "Valor recorrente" },
 };
 

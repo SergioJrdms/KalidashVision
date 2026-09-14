@@ -211,9 +211,27 @@ export interface MetricasProdutividadePosto {
   cobertura_presenca_pct: number | null;
   cobertura_identificacao_pct: number | null;
   inconclusivo_pct: number | null;
+  /** Partição de produtividade sobre o total capturado; fecha em 100%. */
+  produtivo_total_pct: number | null;
+  improdutivo_total_pct: number | null;
+  sem_decisao_total_pct: number | null;
+  /** Partição independente de presença sobre o total capturado; fecha em 100%. */
+  presenca_operador_total_pct: number | null;
+  posto_sem_operador_total_pct: number | null;
+  sem_leitura_presenca_total_pct: number | null;
   publicavel: boolean;
   sem_dado: boolean;
 }
+
+export type IndicadorEvidencia =
+  | "tempo_capturado"
+  | "produtivo"
+  | "improdutivo"
+  | "sem_decisao"
+  | "presenca_operador"
+  | "posto_sem_operador"
+  | "presenca_inconclusiva"
+  | "posto_vazio";
 
 export interface ProdutividadePosto extends MetricasProdutividadePosto {
   janela_dias: number;
@@ -403,6 +421,9 @@ export interface EventoTabela {
   video_nome: string;
   /** Estado de presença já resolvido pela linha do tempo canônica. */
   estado_presenca?: string | null;
+  /** Indicador solicitado; o backend já resolveu a associação. */
+  estado_indicador?: IndicadorEvidencia | null;
+  motivo_indicador?: string | null;
   pessoa_track_id: number;
   comportamento_label: string;
   label_corrigido: string | null;
@@ -441,6 +462,8 @@ export interface EvidenciasResposta {
   total: number;
   page: number;
   page_size: number;
+  janela_dias?: number;
+  indicador?: IndicadorEvidencia;
 }
 
 export type StatusSegmento =
