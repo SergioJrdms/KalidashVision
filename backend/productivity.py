@@ -367,6 +367,19 @@ def classificar_observacao(
             )
         return EST_IMPRODUTIVO, "costas_ou_lado"
 
+    # A árvore não transforma o nome do rótulo em regra automática. Porém,
+    # quando o próprio gestor classificou aquela atividade, a origem
+    # ``humano_rotulo`` deixa explícito quem decidiu. O sinal medido acima
+    # continua tendo precedência; esta decisão humana vence apenas a opinião
+    # estruturada da VLM abaixo e mantém o clique coerente em todas as telas.
+    origem_categoria = _texto_normalizado(e.get("categoria_lean_origem"))
+    categoria_humana = _texto_normalizado(e.get("categoria_lean"))
+    if origem_categoria == "humano_rotulo":
+        if categoria_humana == "valor_agregado":
+            return EST_PRODUTIVO, "atividade_classificada_pelo_gestor"
+        if categoria_humana == "desperdicio":
+            return EST_IMPRODUTIVO, "atividade_classificada_pelo_gestor"
+
     if e.get("trabalho") is True:
         return EST_PRODUTIVO, "julgamento_visual_direto"
     if e.get("trabalho") is False:
@@ -570,6 +583,99 @@ def estado_compone_indicador(estado: str, indicador: str) -> bool:
     if indicador == "posto_vazio":
         return estado in fora_do_posto
     return False
+
+
+def indicador_produtividade_do_estado(estado: str) -> str:
+    """Projeta qualquer estado canônico na partição exibida ao cliente."""
+    if estado_compone_indicador(estado, "produtivo"):
+        return "produtivo"
+    if estado_compone_indicador(estado, "improdutivo"):
+        return "improdutivo"
+    return "sem_decisao"
+
+
+def fatias_produtividade(
+    eventos: list[dict],
+    frentes_por_camera: dict[str, str] | None = None,
+) -> list[dict]:
+    """Read-model público da mesma linha do tempo usada nos percentuais.
+
+    Eventos, árvore, dia a dia e evidências não devem reclassificar nomes do
+    vocabulário. Cada consumidor recebe aqui a decisão já resolvida, inclusive
+    conflitos e sobreposições, e apenas escolhe como apresentá-la.
+    """
+    return [
+        {
+            "tempo_inicio_s": inicio,
+            "tempo_fim_s": fim,
+            "duracao_s": fim - inicio,
+            "estado": estado,
+            "decisao": indicador_produtividade_do_estado(estado),
+            "motivo": motivo,
+            "evento": rep,
+        }
+        for inicio, fim, estado, motivo, rep in _linha_do_tempo(
+            eventos or [], dict(frentes_por_camera or {})
+        )
+    ]
+
+
+def distribuicao_produtividade(
+    eventos: list[dict],
+    frentes_por_camera: dict[str, str] | None = None,
+) -> list[dict]:
+    """Agrupa as fatias canônicas por decisão e rótulo apenas para leitura.
+
+    O mesmo rótulo pode aparecer em mais de um ramo: a VLM pode descrever
+    ``acompanhar_maquina`` com mãos no torno em um trecho e sem evidência no
+    seguinte. Agrupar apenas pelo nome apagava justamente essa distinção.
+    """
+    grupos: dict[tuple[str, str], dict] = {}
+    total = 0.0
+    for fatia in fatias_produtividade(eventos, frentes_por_camera):
+        rep = fatia["evento"]
+        duracao = float(fatia["duracao_s"] or 0.0)
+        if duracao <= 0:
+            continue
+        decisao = str(fatia["decisao"])
+        label = str(
+            rep.get("label_corrigido")
+            or rep.get("comportamento_label")
+            or "sem_leitura"
+        )
+        chave = (decisao, label)
+        atual = grupos.setdefault(chave, {
+            "comportamento": label,
+            "descricao": rep.get("descricao_bruta") or "",
+            "decisao": decisao,
+            "categoria_lean": (
+                "valor_agregado" if decisao == "produtivo"
+                else "desperdicio" if decisao == "improdutivo"
+                else None
+            ),
+            "categoria_lean_origem": "decisao_evento",
+            "tempo_total_s": 0.0,
+            "ocorrencias": 0,
+            "_videos": set(),
+        })
+        atual["tempo_total_s"] += duracao
+        atual["ocorrencias"] += 1
+        if rep.get("video_id"):
+            atual["_videos"].add(str(rep["video_id"]))
+        if len(str(rep.get("descricao_bruta") or "")) > len(atual["descricao"]):
+            atual["descricao"] = str(rep.get("descricao_bruta") or "")
+        total += duracao
+
+    saida = []
+    for item in grupos.values():
+        videos = item.pop("_videos")
+        item["tempo_total_s"] = round(item["tempo_total_s"], 3)
+        item["pct_tempo"] = round(
+            100.0 * item["tempo_total_s"] / total, 3
+        ) if total > 0 else 0.0
+        item["em_n_videos"] = len(videos)
+        saida.append(item)
+    return sorted(saida, key=lambda item: item["tempo_total_s"], reverse=True)
 
 
 def _particao_percentual(valores: list[float]) -> list[float | None]:

@@ -32,7 +32,7 @@ import { Card, PanelHead, Empty, Icon, toast } from "../design/ui";
 import { leanCor } from "../design/helpers";
 import { nomeHumano, familiaLabel } from "../design/rotulos";
 import type { ProcHeaderMock } from "../lib/adapt";
-import type { CategoriaLean, DistribuicaoComportamento } from "../lib/types";
+import type { CategoriaLean, DistribuicaoComportamento, DistribuicaoProdutividade } from "../lib/types";
 import { EventEvidenceDrawer } from "../components/EventEvidenceDrawer";
 
 type Ramo = "va" | "desp" | "sem";
@@ -128,7 +128,10 @@ export default function Arvore({ proc }: { proc: ProcHeaderMock }) {
     return <Empty icon="alert-triangle" title="Não foi possível carregar"
                   desc={q.error ? String((q.error as Error).message || q.error) : undefined} />;
   }
-  return <ArvoreProdutividade proc={proc} distribuicao={q.data.snapshot.distribuicao_comportamentos} />;
+  return <ArvoreProdutividade
+    proc={proc}
+    distribuicao={q.data.distribuicao_produtividade || q.data.snapshot.distribuicao_comportamentos}
+  />;
 }
 
 /** Árvore funcional, reutilizável com a distribuição já carregada pelo Dashboard. */
@@ -137,7 +140,7 @@ export function ArvoreProdutividade({
   distribuicao,
 }: {
   proc: ProcHeaderMock;
-  distribuicao: DistribuicaoComportamento[];
+  distribuicao: Array<DistribuicaoComportamento | DistribuicaoProdutividade>;
 }) {
   const qc = useQueryClient();
   const [salvando, setSalvando] = useState<string | null>(null);
@@ -344,7 +347,10 @@ export function ArvoreProdutividade({
         )}
       </Card>
       {evidencia && <EventEvidenceDrawer processoId={proc.id} labels={evidencia.labels} titulo={evidencia.familia}
-        categoria={RAMOS[ramo].titulo} onClose={() => setEvidencia(null)} />}
+        categoria={RAMOS[ramo].titulo}
+        indicador={ramo === "va" ? "produtivo" : ramo === "desp" ? "improdutivo" : "sem_decisao"}
+        janelaDias={7}
+        onClose={() => setEvidencia(null)} />}
     </div>
   );
 }

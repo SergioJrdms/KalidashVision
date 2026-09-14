@@ -8,6 +8,7 @@
 // não-produtivo, mostrado à parte porque a causa e a ação são outras — não é
 // uma terceira fatia e não entra na soma de 100%.
 export type LeanShort = "va" | "desp" | "vazio";
+export type DecisaoShort = "va" | "desp" | "sem";
 
 // Níveis de maturidade do Prism por processo
 export const NIVEIS = [
@@ -35,6 +36,24 @@ export function leanCor(c: string) {
 }
 export function leanLabel(c: string) {
   return (LEAN[c as LeanShort] || LEAN.desp).label;
+}
+
+/** Tradução exclusiva da decisão ternária do backend; nulo nunca vira I. */
+export function decisaoShort(
+  decisao: string | null | undefined,
+): DecisaoShort {
+  if (decisao === "produtivo" || decisao === "PRODUTIVO") return "va";
+  if (decisao === "improdutivo" || decisao === "IMPRODUTIVO") return "desp";
+  return "sem";
+}
+
+export function decisaoCor(c: DecisaoShort) {
+  return c === "va" ? leanCor("va")
+    : c === "desp" ? leanCor("desp") : "var(--apoio)";
+}
+
+export function decisaoLabel(c: DecisaoShort) {
+  return c === "va" ? "Produtivo" : c === "desp" ? "Improdutivo" : "Sem decisão";
 }
 
 /** Mapa categoria do banco → short do design.

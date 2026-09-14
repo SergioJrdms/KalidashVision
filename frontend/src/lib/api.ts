@@ -231,8 +231,10 @@ export const api = {
       req<EvidenciasResposta>(`/processos/${processoId}/evidencias?labels=${encodeURIComponent(labels.join(","))}&page=${page}&page_size=${pageSize}`),
     evidenciasPresenca: (processoId: string, janelaDias: number, page = 1, pageSize = 8) =>
       req<EvidenciasResposta>(`/processos/${processoId}/evidencias/presenca?estado=posto_vazio&janela_dias=${janelaDias}&page=${page}&page_size=${pageSize}`),
-    evidenciasIndicador: (processoId: string, indicador: IndicadorEvidencia, janelaDias: number, page = 1, pageSize = 8) =>
-      req<EvidenciasResposta>(`/processos/${processoId}/evidencias/indicador?indicador=${encodeURIComponent(indicador)}&janela_dias=${janelaDias}&page=${page}&page_size=${pageSize}`),
+    evidenciasIndicador: (processoId: string, indicador: IndicadorEvidencia, janelaDias: number, page = 1, pageSize = 8, labels: string[] = []) => {
+      const filtro = labels.length ? `&labels=${encodeURIComponent(labels.join(","))}` : "";
+      return req<EvidenciasResposta>(`/processos/${processoId}/evidencias/indicador?indicador=${encodeURIComponent(indicador)}&janela_dias=${janelaDias}&page=${page}&page_size=${pageSize}${filtro}`);
+    },
   },
   // Fase 102 — a precisão MEDIDA, por amostragem cega.
   amostragem: {

@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { mapEventosTabela, type EvTabMock, type ProcHeaderMock } from "../lib/adapt";
-import { fmtSeg, leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
+import { decisaoCor, decisaoLabel, fmtSeg, leanCor, leanLabel, leanLong, type LeanShort } from "../design/helpers";
 import { nomeHumano, rotulosAtribuiveis } from "../design/rotulos";
 import { Btn, Card, Icon, Badge, Empty, Modal, toast } from "../design/ui";
 import { FrameReal, janelaCam2 } from "../lib/frames";
@@ -347,7 +347,7 @@ function LeanCell({ e, onSet, saving }: { e: EvTabMock; onSet: (cat: LeanShort) 
       className="row gap1"
       style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", padding: "2px 8px", borderRadius: 7, border: open ? "1px solid var(--ink)" : "1px solid var(--line)", background: "#fff", cursor: editable ? "pointer" : "default", whiteSpace: "nowrap", opacity: saving ? 0.6 : 1 }}
     >
-      <i style={{ width: 8, height: 8, borderRadius: 2, background: leanCor(e.cat), flex: "none" }} /> {leanLabel(e.cat)}
+      <i style={{ width: 8, height: 8, borderRadius: 2, background: decisaoCor(e.cat), flex: "none" }} /> {decisaoLabel(e.cat)}
       {editable && <Icon name={open ? "chevron-up" : "chevron-down"} size={11} color="var(--faint)" />}
     </button>
   );
@@ -365,7 +365,7 @@ function LeanCell({ e, onSet, saving }: { e: EvTabMock; onSet: (cat: LeanShort) 
 
 function CorrigirForm({ e, labels, onSalvar, onCancelar }: { e: EvTabMock; labels: string[]; onSalvar: (label: string, cat: LeanShort) => void; onCancelar: () => void }) {
   const [label, setLabel] = useState(e.label);
-  const [cat, setCat] = useState<LeanShort>(e.cat);
+  const [cat, setCat] = useState<LeanShort>(e.cat === "sem" ? "va" : e.cat);
   const listId = `labels-ev-${e.id}`;
   return (
     <div className="col anim-fadeup" style={{ gap: 12, maxWidth: 460 }}>

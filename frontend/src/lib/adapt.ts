@@ -2,7 +2,7 @@
 // Adaptadores: resposta real da API → shapes que as telas do design
 // (porte de data.jsx) esperam. Mantém os componentes ~verbatim.
 // ============================================================
-import { leanShort, type LeanShort } from "../design/helpers";
+import { decisaoShort, leanShort, type DecisaoShort, type LeanShort } from "../design/helpers";
 import type {
   DashboardData,
   EventoPendente,
@@ -73,7 +73,7 @@ export interface PendMock { id: string; label: string; descricao: string; pessoa
 // `impacto`: % do tempo observado que a resposta reclassifica. É o que ordena
 // a fila e o que justifica interromper o gestor.
 export interface PergMock { id: string; pergunta: string; motivo: string; relacionados: string[]; chips: string[]; impacto: number | null }
-export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: LeanShort; comportamentoId: string | null; camId: string | null; papel: string | null; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
+export interface EvTabMock { id: string; label: string; corrigido: string | null; labelOrig: string; descricao: string; video: string; ini: number; fim: number; pessoa: number; conf: number; status: string; cat: DecisaoShort; motivoDecisao: string | null; comportamentoId: string | null; camId: string | null; papel: string | null; segundoAngulo: { segmentoId: string; camId: string | null; offsetS: number } | null }
 export interface SerieMock { nVideos: number; pontos: { turno: string; va: number; desp: number }[] }
 export interface PadProcMock { id: string; tipo: string; confianca: string; relevancia: string; titulo: string; descricao: string; recomendacao: string | null; comportamentos: string[] }
 export interface InsightMock { id: string; prioridade: string; titulo: string; descricao: string; processos: string[] }
@@ -261,7 +261,11 @@ export function mapEventosTabela(rows: EventoTabela[]): EvTabMock[] {
     pessoa: e.pessoa_track_id,
     conf: e.confianca || 0,
     status: e.status_efetivo,
-    cat: leanShort(e.categoria_lean),
+    // A coluna responde o que ESTE evento foi, não a categoria histórica do
+    // nome. Isso permite que o mesmo rótulo tenha decisões diferentes quando
+    // a descrição/evidência visual também é diferente.
+    cat: decisaoShort(e.produtividade_decisao),
+    motivoDecisao: e.produtividade_motivo_atual ?? null,
     comportamentoId: e.comportamento_id ?? null,
     camId: e.cam_id ?? null,
     papel: e.papel_pessoa ?? null,

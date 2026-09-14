@@ -3262,6 +3262,34 @@ def _processo_nome(sb, user: CurrentUser, processo_id: str) -> str:
     return r.data[0]["processo"]
 
 
+def _frentes_produtividade_por_camera(
+    sb, empresa: str, processo: str,
+) -> dict[str, str]:
+    """Única leitura da calibração usada por todos os read-models de P/I."""
+    if os.environ.get(
+        "KV_ORIENTACAO_VERIFICADA", "off"
+    ).strip().lower() not in {"1", "true", "on", "yes"}:
+        return {}
+    frentes: dict[str, str] = {}
+    try:
+        for z in varrer(
+            sb, "zonas_camera", "cam_id, papel, frente_maquina, ativo",
+            empresa=empresa, processo=processo,
+        ):
+            if (
+                z.get("ativo") is not False
+                and z.get("papel") == "maquina"
+                and z.get("cam_id")
+                and z.get("frente_maquina")
+            ):
+                frentes[str(z["cam_id"])] = str(z["frente_maquina"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[produtividade] configuração por câmera indisponível: %s", exc
+        )
+    return frentes
+
+
 @app.get("/processos/{processo_id}/dashboard")
 def dashboard(
     processo_id: str,
@@ -3538,29 +3566,9 @@ def dashboard(
         _ee["_cam_id"] = _cam
         _eventos_prod.append(_ee)
 
-    _frentes_por_camera: dict[str, str] = {}
-    _orientacao_liberada = os.environ.get(
-        "KV_ORIENTACAO_VERIFICADA", "off"
-    ).strip().lower() in {"1", "true", "on", "yes"}
-    try:
-        for _z in varrer(
-            sb,
-            "zonas_camera",
-            "cam_id, papel, frente_maquina, ativo",
-            empresa=user.empresa,
-            processo=nome,
-        ):
-            if (
-                _orientacao_liberada
-                and
-                _z.get("ativo") is not False
-                and _z.get("papel") == "maquina"
-                and _z.get("cam_id")
-                and _z.get("frente_maquina")
-            ):
-                _frentes_por_camera[str(_z["cam_id"])] = str(_z["frente_maquina"])
-    except Exception as _exc:  # noqa: BLE001
-        log.warning("[produtividade] configuração por câmera indisponível: %s", _exc)
+    _frentes_por_camera = _frentes_produtividade_por_camera(
+        sb, user.empresa, nome
+    )
 
     _ultimo_inicio = max(
         (_e["_capturado_em"] for _e in _eventos_prod), default=None
@@ -3578,6 +3586,9 @@ def dashboard(
         eventos_estado_atual=_eventos_prod,
         janela_dias=janela_dias,
         agora=datetime.now(timezone.utc),
+    )
+    distribuicao_produtividade = produtividade.distribuicao_produtividade(
+        _eventos_janela, _frentes_por_camera
     )
     # A PROVENIÊNCIA VIAJA COM O NÚMERO. Misturar instrumentos em silêncio era
     # a preocupação legítima do corte original; a resposta não é esconder o
@@ -3617,6 +3628,9 @@ def dashboard(
         "snapshot": snapshot,
         "permanencia": permanencia,
         "produtividade_posto": produtividade_posto,
+        # A árvore usa exatamente as mesmas fatias do número principal. O
+        # catálogo antigo continua no snapshot apenas para telas legadas.
+        "distribuicao_produtividade": distribuicao_produtividade,
         "sugestoes_praticas": sugestoes_praticas,
         # Fase 102: a descrição é o diferencial — e vem com o próprio
         # certificado de origem ao lado.
@@ -4075,7 +4089,9 @@ def listar_eventos_tabela(
         "descricao_bruta, tempo_inicio_s, tempo_fim_s, duracao_s, confianca, "
         "validado_humano, validacao_correto, origem_validacao, criado_em, validado_em, "
         "descricao_invalida, "
-        "categoria_lean, categoria_lean_origem, papel_pessoa"
+        "categoria_lean, categoria_lean_origem, papel_pessoa, maos_maquina, "
+        "orientacao, trabalho, bbox_stats, n_amostras, versao_instrumento, "
+        "principal, produtividade_predita, produtividade_regra"
     )
     q = (
         sb.table("eventos")
@@ -4158,6 +4174,9 @@ def listar_eventos_tabela(
     ) or []
     cat_por_label = {c["label"]: c.get("categoria_lean") for c in comps_full}
     comp_id_por_label = {c["label"]: c["id"] for c in comps_full}
+    frentes_produtividade = _frentes_produtividade_por_camera(
+        sb, user.empresa, nome
+    )
 
     for ev in itens:
         ev["video_nome"] = nomes.get(ev.get("video_id"), "—")
@@ -4173,6 +4192,19 @@ def listar_eventos_tabela(
         else:
             ev["categoria_lean"] = cat_por_label.get(label_ef)
         ev["comportamento_id"] = comp_id_por_label.get(label_ef)
+        ev["_cam_id"] = ev.get("cam_id")
+        if ev.get("validacao_correto") is False:
+            decisao, motivo = produtividade.AUDIT_ABSTEM, "evento_descartado"
+        else:
+            decisao, motivo = produtividade.classificar_produtividade_auditavel(
+                ev, frentes_produtividade
+            )
+        ev["produtividade_decisao"] = (
+            "produtivo" if decisao == produtividade.AUDIT_PRODUTIVO
+            else "improdutivo" if decisao == produtividade.AUDIT_IMPRODUTIVO
+            else "sem_decisao"
+        )
+        ev["produtividade_motivo_atual"] = motivo
 
     # Fase 29: 2º ângulo (par cam2 do mesmo vídeo, clock-aligned) para a linha
     # expandida mostrar as duas câmeras lado a lado. Mesmo lookup dos pendentes
@@ -4291,6 +4323,7 @@ def evidencias_de_presenca(
     processo_id: str,
     estado: str = Query("posto_vazio"),
     indicador: str | None = Query(None),
+    labels: str | None = Query(None),
     janela_dias: int = Query(7, ge=1, le=30),
     page: int = Query(1, ge=1),
     page_size: int = Query(8, ge=1, le=50),
@@ -4346,15 +4379,10 @@ def evidencias_de_presenca(
     # Mesma configuração de orientação que o dashboard entrega a
     # agregar_produtividade. Ela participa da resolução de conflitos na linha
     # do tempo, portanto não pode ser omitida no read-model.
-    frentes: dict[str, str] = {}
-    orientacao_liberada = os.environ.get("KV_ORIENTACAO_VERIFICADA", "off").strip().lower() in {"1", "true", "on", "yes"}
-    if orientacao_liberada:
-        try:
-            for z in varrer(sb, "zonas_camera", "cam_id, papel, frente_maquina, ativo", empresa=user.empresa, processo=nome):
-                if z.get("ativo") is not False and z.get("papel") == "maquina" and z.get("cam_id") and z.get("frente_maquina"):
-                    frentes[str(z["cam_id"])] = str(z["frente_maquina"])
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[evidencias/presenca] configuração por câmera indisponível: %s", exc)
+    frentes = _frentes_produtividade_por_camera(sb, user.empresa, nome)
+    labels_filtro = {
+        item.strip() for item in (labels or "").split(",") if item.strip()
+    }
 
     # É literalmente a mesma linha do tempo usada por agregar_produtividade.
     # A associação estado → indicador também é compartilhada com as métricas.
@@ -4362,13 +4390,20 @@ def evidencias_de_presenca(
     for ini, fim, est, motivo, rep in produtividade._linha_do_tempo(periodo, frentes):
         if not produtividade.estado_compone_indicador(est, indicador_efetivo):
             continue
+        label_efetivo = (
+            rep.get("label_corrigido")
+            or rep.get("comportamento_label")
+            or "posto_vazio"
+        )
+        if labels_filtro and label_efetivo not in labels_filtro:
+            continue
         item = dict(rep)
         item.update({
             "id": rep.get("id"), "evento_id": rep.get("id"),
             "tempo_inicio_s": ini, "tempo_fim_s": fim, "duracao_s": fim - ini,
             "estado_presenca": est, "motivo_presenca": motivo,
             "estado_indicador": indicador_efetivo, "motivo_indicador": motivo,
-            "label_efetivo": rep.get("label_corrigido") or rep.get("comportamento_label") or "posto_vazio",
+            "label_efetivo": label_efetivo,
         })
         observacoes.append(item)
     # No drill-down comercial, o gestor precisa encontrar primeiro o lote que
@@ -5823,7 +5858,260 @@ def analise_diaria_processo(
     Python puro (sem custo de IA)."""
     sb = make_supabase_client()
     nome = _processo_nome(sb, user, processo_id)
-    return montar_analise_diaria(sb, user.empresa, nome, dias=dias)
+    relatorio = montar_analise_diaria(sb, user.empresa, nome, dias=dias)
+
+    # A tela antiga montava P/I pelo nome do comportamento. O painel principal
+    # já usa a decisão visual por evento; sobrepor abaixo o mesmo read-model é
+    # o que impede "Acompanhar máquina" de ganhar uma cor fixa que contradiz
+    # mãos/orientação/trabalho observados em cada trecho.
+    campos = (
+        "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
+        "descricao_bruta, tempo_inicio_s, tempo_fim_s, validacao_correto, "
+        "validado_humano, origem_validacao, principal, papel_pessoa, "
+        "maos_maquina, orientacao, trabalho, bbox_stats, categoria_lean, "
+        "categoria_lean_origem, n_amostras, versao_instrumento, em_duvida"
+    )
+    evs = varrer(sb, "eventos", campos, empresa=user.empresa, processo=nome)
+    videos = varrer(
+        sb, "videos", "id, nome, cam_id, gravado_em, processado_em",
+        empresa=user.empresa, processo=nome,
+    )
+    tz_fabrica, _ = fuso_do_processo(sb, user.empresa, nome)
+    meta_video: dict[str, tuple[datetime, str | None]] = {}
+    for video in videos:
+        dt = _inicio_video_dt(video)
+        if not video.get("id") or dt is None:
+            continue
+        dt = dt.replace(tzinfo=tz_fabrica) if dt.tzinfo is None else dt.astimezone(tz_fabrica)
+        meta_video[str(video["id"])] = (dt, video.get("cam_id"))
+
+    eventos_produtividade: list[dict] = []
+    for evento in evs:
+        legado = int(evento.get("versao_instrumento") or 0) < 9
+        if legado and not _HISTORICO_PRESENCA:
+            continue
+        meta = meta_video.get(str(evento.get("video_id")))
+        if not meta:
+            continue
+        dt, cam = meta
+        item = dict(evento)
+        if legado:
+            item.update({"maos_maquina": None, "orientacao": None, "trabalho": None})
+        item.update({"_capturado_em": dt, "_dia": dt.date().isoformat(), "_cam_id": cam})
+        eventos_produtividade.append(item)
+
+    frentes = _frentes_produtividade_por_camera(sb, user.empresa, nome)
+    por_dia: dict[str, dict] = {}
+
+    def novo_dia() -> dict:
+        return {
+            "tot": 0.0, "produtivo": 0.0, "improdutivo": 0.0,
+            "sem_decisao": 0.0, "posto_sem_operador": 0.0,
+            "acoes": {}, "horas": {}, "buckets": {},
+        }
+
+    for fatia in produtividade.fatias_produtividade(
+        eventos_produtividade, frentes
+    ):
+        rep = fatia["evento"]
+        base = rep.get("_capturado_em")
+        if not isinstance(base, datetime):
+            continue
+        inicio = base + timedelta(seconds=float(fatia["tempo_inicio_s"]))
+        fim = base + timedelta(seconds=float(fatia["tempo_fim_s"]))
+        cursor = inicio
+        while cursor < fim:
+            meia_noite = cursor.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) + timedelta(days=1)
+            limite = min(fim, meia_noite)
+            segundos = max(0.0, (limite - cursor).total_seconds())
+            if segundos <= 0:
+                break
+            dia_iso = cursor.date().isoformat()
+            d = por_dia.setdefault(dia_iso, novo_dia())
+            decisao = str(fatia["decisao"])
+            cat = (
+                "va" if decisao == "produtivo"
+                else "desp" if decisao == "improdutivo"
+                else "sem"
+            )
+            d["tot"] += segundos
+            d[decisao] += segundos
+            if produtividade.estado_compone_indicador(
+                str(fatia["estado"]), "posto_sem_operador"
+            ):
+                d["posto_sem_operador"] += segundos
+
+            label_efetivo = str(
+                rep.get("label_corrigido")
+                or rep.get("comportamento_label")
+                or "sem_leitura"
+            )
+            if label_efetivo not in {"acao_indefinida", "nao_nomeado"}:
+                chave_acao = (label_efetivo, cat)
+                d["acoes"][chave_acao] = d["acoes"].get(chave_acao, 0.0) + segundos
+
+            segundo_ini = (
+                cursor.hour * 3600 + cursor.minute * 60
+                + cursor.second + cursor.microsecond / 1_000_000
+            )
+            segundo_fim = segundo_ini + segundos
+            pos = segundo_ini
+            while pos < segundo_fim - 1e-9:
+                hora = int(pos // 3600)
+                corte = min(segundo_fim, (hora + 1) * 3600)
+                h = d["horas"].setdefault(
+                    hora, {"tot": 0.0, "va": 0.0, "desp": 0.0, "sem": 0.0}
+                )
+                h["tot"] += corte - pos
+                h[cat] += corte - pos
+                pos = corte
+            pos = segundo_ini
+            while pos < segundo_fim - 1e-9:
+                bucket = int(pos // 900)
+                corte = min(segundo_fim, (bucket + 1) * 900)
+                b = d["buckets"].setdefault(
+                    bucket, {"va": 0.0, "desp": 0.0, "sem": 0.0}
+                )
+                b[cat] += corte - pos
+                pos = corte
+            cursor = limite
+
+    def percentuais(d: dict) -> tuple[float, float, float]:
+        total = float(d.get("tot") or 0.0)
+        if total <= 0:
+            return 0.0, 0.0, 0.0
+        va = round(100.0 * d["produtivo"] / total, 1)
+        desp = round(100.0 * d["improdutivo"] / total, 1)
+        return va, desp, round(100.0 - va - desp, 1)
+
+    for dia in relatorio.get("dias") or []:
+        d = por_dia.get(str(dia.get("dia")))
+        if not d or d["tot"] <= 0:
+            continue
+        va, desp, sem = percentuais(d)
+        dia.update({
+            "tempo_obs_s": round(d["tot"], 1),
+            "va_pct": va,
+            "desp_pct": desp,
+            "sem_decisao_pct": sem,
+            "duvida_pct": sem,
+            "sem_evidencia_pct": 0.0,
+            "nao_observado_pct": 0.0,
+            "nao_observado_gate_pct": 0.0,
+            "posto_vazio_s": round(d["posto_sem_operador"], 1),
+            "posto_vazio_pct": round(100.0 * d["posto_sem_operador"] / d["tot"], 1),
+            "vazio_pct": round(100.0 * d["posto_sem_operador"] / d["tot"], 1),
+        })
+        # Pouca decisão de produtividade não significa dia sem trabalho. Esse
+        # estado só existe quando a presença realmente indica posto vazio.
+        dia["sem_trabalho"] = (
+            "posto_vazio" if dia["posto_vazio_pct"] >= 90.0 else None
+        )
+        acoes = [
+            {"label": label, "cat": cat, "seg": round(seg, 1)}
+            for (label, cat), seg in sorted(
+                d["acoes"].items(), key=lambda item: item[1], reverse=True
+            )[:8]
+        ]
+        dia["top_acoes"] = acoes
+        dia["top_acao"] = acoes[0] if acoes else None
+        dia["por_hora"] = []
+        for hora, h in sorted(d["horas"].items()):
+            if h["tot"] < 1:
+                continue
+            hp = {
+                "hora": hora, "seg": round(h["tot"], 1),
+                "va_pct": round(100.0 * h["va"] / h["tot"], 1),
+                "desp_pct": round(100.0 * h["desp"] / h["tot"], 1),
+            }
+            hp["sem_decisao_pct"] = round(
+                100.0 - hp["va_pct"] - hp["desp_pct"], 1
+            )
+            hp["vazio_pct"] = 0.0
+            dia["por_hora"].append(hp)
+        linha = []
+        for bucket, b in sorted(d["buckets"].items()):
+            total_bucket = sum(b.values())
+            if total_bucket < 60:
+                continue
+            cursor_m = bucket * 15.0
+            for cat in ("va", "desp", "sem"):
+                if b[cat] <= 0:
+                    continue
+                fim_m = cursor_m + 15.0 * b[cat] / total_bucket
+                if linha and linha[-1]["cat"] == cat and abs(linha[-1]["fim_m"] - cursor_m) < 0.02:
+                    linha[-1]["fim_m"] = round(fim_m, 2)
+                else:
+                    linha.append({"ini_m": round(cursor_m, 2), "fim_m": round(fim_m, 2), "cat": cat})
+                cursor_m = fim_m
+        dia["linha_tempo"] = linha
+
+    # Janelas e tendência também são refeitas sobre a partição canônica. Caso
+    # contrário os cards de topo continuariam contradizendo os dias abaixo.
+    dias_ordenados = sorted(por_dia)
+
+    def janela(n: int, deslocamento: int = 0) -> dict:
+        if not dias_ordenados:
+            selecionados = []
+        else:
+            fim_d = datetime.fromisoformat(dias_ordenados[-1]).date() - timedelta(days=deslocamento)
+            inicio_d = fim_d - timedelta(days=n - 1)
+            selecionados = [
+                d for chave, d in por_dia.items()
+                if inicio_d <= datetime.fromisoformat(chave).date() <= fim_d
+            ]
+        trabalhados = [
+            d for d in selecionados
+            if d["tot"] > 0 and 100.0 * d["posto_sem_operador"] / d["tot"] < 90.0
+        ]
+        total = sum(d["tot"] for d in trabalhados)
+        prod_s = sum(d["produtivo"] for d in trabalhados)
+        improd_s = sum(d["improdutivo"] for d in trabalhados)
+        sem_s = sum(d["sem_decisao"] for d in trabalhados)
+        return {
+            "dias": n,
+            "dias_trabalhados": len(trabalhados),
+            "dias_sem_trabalho": n - len(trabalhados),
+            "tempo_obs_s": round(total, 1),
+            "va_pct": round(100.0 * prod_s / total, 1) if total else 0.0,
+            "desp_pct": round(100.0 * improd_s / total, 1) if total else 0.0,
+            "sem_decisao_pct": round(100.0 * sem_s / total, 1) if total else 0.0,
+            "vazio_pct": round(100.0 * sum(d["posto_sem_operador"] for d in trabalhados) / total, 1) if total else 0.0,
+            "posto_vazio_s": round(sum(d["posto_sem_operador"] for d in trabalhados), 1),
+            "visitas": 0,
+            "horas_produtivas_dia": 0.0,
+        }
+
+    j7, j7_ant = janela(7), janela(7, 7)
+    j30, j30_ant = janela(30), janela(30, 30)
+    relatorio["janelas"] = {
+        "semana": {
+            "atual": j7, "anterior": j7_ant,
+            "delta_va_pp": round(j7["va_pct"] - j7_ant["va_pct"], 1) if j7_ant["dias_trabalhados"] else None,
+        },
+        "mes": {
+            "atual": j30, "anterior": j30_ant,
+            "delta_va_pp": round(j30["va_pct"] - j30_ant["va_pct"], 1) if j30_ant["dias_trabalhados"] else None,
+        },
+    }
+    serie = [d for d in relatorio.get("dias") or [] if d.get("tempo_obs_s", 0) > 0 and not d.get("sem_trabalho")]
+    if len(serie) >= 3:
+        valores = [float(d["va_pct"]) for d in serie]
+        n = len(valores)
+        xm = (n - 1) / 2.0
+        ym = sum(valores) / n
+        den = sum((i - xm) ** 2 for i in range(n)) or 1.0
+        slope = sum((i - xm) * (v - ym) for i, v in enumerate(valores)) / den
+        relatorio["tendencia"] = {
+            "slope_pts_dia": round(slope, 2),
+            "direcao": "ascendente" if slope >= 0.3 else "descendente" if slope <= -0.3 else "estável",
+            "dias_considerados": n,
+        }
+    else:
+        relatorio["tendencia"] = None
+    return relatorio
 
 
 @app.get("/prism/padroes-globais")

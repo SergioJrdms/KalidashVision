@@ -223,6 +223,12 @@ export interface MetricasProdutividadePosto {
   sem_dado: boolean;
 }
 
+export type DecisaoProdutividade = "produtivo" | "improdutivo" | "sem_decisao";
+
+export interface DistribuicaoProdutividade extends DistribuicaoComportamento {
+  decisao: DecisaoProdutividade;
+}
+
 export type IndicadorEvidencia =
   | "tempo_capturado"
   | "produtivo"
@@ -281,6 +287,7 @@ export interface DashboardData {
   permanencia?: Permanencia;
   sugestoes_praticas?: SugestaoPratica[];
   produtividade_posto?: ProdutividadePosto;
+  distribuicao_produtividade?: DistribuicaoProdutividade[];
   snapshot: {
     videos_analisados: number;
     tempo_total_observado_min: number;
@@ -424,6 +431,9 @@ export interface EventoTabela {
   /** Indicador solicitado; o backend já resolveu a associação. */
   estado_indicador?: IndicadorEvidencia | null;
   motivo_indicador?: string | null;
+  /** Decisão atual da mesma regra que alimenta o painel principal. */
+  produtividade_decisao?: DecisaoProdutividade;
+  produtividade_motivo_atual?: string | null;
   pessoa_track_id: number;
   comportamento_label: string;
   label_corrigido: string | null;
@@ -671,6 +681,7 @@ export interface DiaHora {
   seg: number;
   va_pct: number;
   desp_pct: number;
+  sem_decisao_pct?: number;
   // Fase 56: posto vazio é CATEGORIA própria — antes inflava o denominador da
   // hora sem entrar em fatia nenhuma e aparecia como "não classificado".
   vazio_pct: number;
@@ -683,6 +694,7 @@ export interface DiaAnalise {
   tempo_obs_s: number;
   va_pct: number;
   desp_pct: number;
+  sem_decisao_pct?: number;
   vazio_pct: number;
   // B5: % do tempo observado em DÚVIDA (concordância abaixo do limiar ou
   // camada ativa). É o veredito do produto — cai = o sistema aprende.
@@ -715,10 +727,10 @@ export interface DiaAnalise {
   visitas: number;
   primeira_h: string | null;
   ultima_h: string | null;
-  top_acao: { label: string; seg: number } | null;
-  top_acoes: { label: string; seg: number }[];
+  top_acao: { label: string; seg: number; cat?: "va" | "desp" | "sem" } | null;
+  top_acoes: { label: string; seg: number; cat?: "va" | "desp" | "sem" }[];
   // Fase 35.2: o "filme" do dia — faixas de 15 min com a categoria dominante
-  linha_tempo: { ini_m: number; fim_m: number; cat: "va" | "desp" | "vazio" }[];
+  linha_tempo: { ini_m: number; fim_m: number; cat: "va" | "desp" | "sem" | "vazio" }[];
   por_hora: DiaHora[];
   sem_trabalho: "sem_captura" | "posto_vazio" | null;
 }
@@ -730,6 +742,7 @@ export interface JanelaAgregada {
   tempo_obs_s: number;
   va_pct: number;
   desp_pct: number;
+  sem_decisao_pct?: number;
   vazio_pct: number;
   posto_vazio_s: number;
   visitas: number;
@@ -885,7 +898,7 @@ export interface TitularDia {
 // Fase 87 — o que compõe UM bloco de 15 min da faixa "A jornada de …".
 // A largura da cor dentro do bloco é PROPORÇÃO, não horário; a hora de
 // verdade de cada trecho está aqui.
-export type CatJornada = "va" | "desp" | "vazio";
+export type CatJornada = "va" | "desp" | "sem";
 export interface ItemBinJornada {
   id: string;
   video_id: string;

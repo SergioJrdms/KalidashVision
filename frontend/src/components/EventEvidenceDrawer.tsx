@@ -112,7 +112,7 @@ export function EventEvidenceDrawer({ processoId, labels, titulo, categoria, ind
     queryKey: ["evidencias", processoId, labels, indicador, janelaIndicador],
     initialPageParam: 1,
     queryFn: ({ pageParam }) => indicador && janelaIndicador
-      ? api.eventos.evidenciasIndicador(processoId, indicador, janelaIndicador, pageParam)
+      ? api.eventos.evidenciasIndicador(processoId, indicador, janelaIndicador, pageParam, 8, labels || [])
       : janelaPresenca
       ? api.eventos.evidenciasPresenca(processoId, janelaPresenca, pageParam)
       : api.eventos.evidencias(processoId, labels || [], pageParam),

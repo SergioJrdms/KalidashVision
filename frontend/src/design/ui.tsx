@@ -209,25 +209,25 @@ export function MaturityMeter({ pct, size = 56, compact = false }: { pct: number
 // ---- Barra Lean ----
 // Fase 63: duas fatias fecham 100% (produtivo × não-produtivo). `vazio` é um
 // pedaço DO não-produtivo, desenhado com cor própria dentro dele.
-export function LeanBar({ va, desp, vazio = 0, height = 8, showLegend = false }: { va: number; desp: number; vazio?: number; height?: number; showLegend?: boolean }) {
+export function LeanBar({ va, desp, vazio = 0, semDecisao, height = 8, showLegend = false }: { va: number; desp: number; vazio?: number; semDecisao?: number; height?: number; showLegend?: boolean }) {
   // `desp` que chega aqui é o NÃO-PRODUTIVO INTEIRO — `vazio` está dentro dele.
   // Empilhar os dois como vieram somaria 100 + vazio e estouraria a barra.
   // Descontar aqui, num lugar só, evita que cada chamador tenha de lembrar.
   const vazioReal = Math.min(Math.max(0, vazio), Math.max(0, desp));
-  const parts: [string, number][] = [
-    ["va", va], ["desp", Math.max(0, desp - vazioReal)], ["vazio", vazioReal],
-  ];
+  const parts: [string, number][] = semDecisao == null
+    ? [["va", va], ["desp", Math.max(0, desp - vazioReal)], ["vazio", vazioReal]]
+    : [["va", va], ["desp", desp], ["sem", Math.max(0, semDecisao)]];
   return (
     <div className="col" style={{ gap: 6 }}>
       <div className="bar-split" style={{ height }}>
-        {parts.map(([k, v]) => (v > 0 ? <span key={k} style={{ width: `${v}%`, background: leanCor(k) }} title={`${leanLabel(k)}: ${v}%`} /> : null))}
+        {parts.map(([k, v]) => (v > 0 ? <span key={k} style={{ width: `${v}%`, background: k === "sem" ? "var(--apoio)" : leanCor(k) }} title={`${k === "sem" ? "Sem decisão" : leanLabel(k)}: ${v}%`} /> : null))}
       </div>
       {showLegend && (
         <div className="row wrap" style={{ gap: 10, fontSize: 11, color: "var(--muted)" }}>
           {parts.map(([k, v]) =>
             v > 0 ? (
               <span key={k} className="row" style={{ gap: 5 }}>
-                <i style={{ width: 9, height: 9, borderRadius: 3, background: leanCor(k) }} /> {leanLabel(k)} <b className="tnum" style={{ color: "var(--text)" }}>{v}%</b>
+                <i style={{ width: 9, height: 9, borderRadius: 3, background: k === "sem" ? "var(--apoio)" : leanCor(k) }} /> {k === "sem" ? "Sem decisão" : leanLabel(k)} <b className="tnum" style={{ color: "var(--text)" }}>{v}%</b>
               </span>
             ) : null
           )}

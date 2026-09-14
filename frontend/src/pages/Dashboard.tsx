@@ -13,7 +13,7 @@ import { leituraDoPosto, nomeHumano } from "../design/rotulos";
 import type { Go } from "../design/Shell";
 import { ArvoreProdutividade } from "./Arvore";
 import { EventEvidenceDrawer } from "../components/EventEvidenceDrawer";
-import type { AcaoSugestao, DistribuicaoComportamento, IndicadorEvidencia, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso, SugestaoPratica } from "../lib/types";
+import type { AcaoSugestao, DistribuicaoComportamento, DistribuicaoProdutividade, IndicadorEvidencia, InsightsQuantitativos, Permanencia, PerguntaGestor, PlacarProcesso, SugestaoPratica } from "../lib/types";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const SUG_VISIVEL_PADRAO = 3;
@@ -192,7 +192,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
 
       <ArvoreNoDashboard
         proc={proc}
-        distribuicao={q.data.snapshot.distribuicao_comportamentos}
+        distribuicao={q.data.distribuicao_produtividade || q.data.snapshot.distribuicao_comportamentos}
       />
       {evidencia && <EventEvidenceDrawer processoId={proc.id} titulo={evidencia.titulo} categoria={evidencia.categoria} indicador={evidencia.indicador} janelaDias={janela} onClose={() => setEvidencia(null)} />}
     </div>
@@ -204,7 +204,7 @@ function ArvoreNoDashboard({
   distribuicao,
 }: {
   proc: ProcHeaderMock;
-  distribuicao: DistribuicaoComportamento[];
+  distribuicao: Array<DistribuicaoComportamento | DistribuicaoProdutividade>;
 }) {
   const [aberta, setAberta] = useState(false);
   return (

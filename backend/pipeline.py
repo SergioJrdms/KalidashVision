@@ -44,6 +44,7 @@ from .productivity import (
     acao_indefinida_com_maos_produtiva,
     classificar_produtividade_auditavel,
     decisao_conversa_evidenciada,
+    fatias_produtividade,
     improdutividade_incerta_deve_abster,
 )
 from .roupa_superior import avaliar_roupa_superior
@@ -19436,12 +19437,6 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str | None,
                 "nota": ("Nenhum vídeo processado neste processo." if dia is None
                          else "Nenhum vídeo com gravação nesta data.")}
 
-    comps = varrer(sb, "comportamentos",
-                   "label, categoria_lean, categoria_lean_origem",
-                   empresa=empresa, processo=processo)
-    cat_por_label = CatalogoLean(comps)
-    _frente = frente_maquina_do_processo(sb, empresa, processo)
-
     ids = sorted(inicio_por_video)
     eventos: list[dict] = []
     # Filtra pelos vídeos DO DIA no servidor: o bin é uma janela de 15 min, não
@@ -19453,26 +19448,67 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str | None,
             "id, video_id, comportamento_label, label_corrigido, descricao_bruta, "
             "tempo_inicio_s, tempo_fim_s, validacao_correto, principal, papel_pessoa, "
             "confianca, em_duvida, validado_humano, origem_validacao, n_amostras, "
-            "categoria_lean, categoria_lean_origem, "
+            "categoria_lean, categoria_lean_origem, maos_maquina, orientacao, "
+            "trabalho, bbox_stats, produtividade_predita, produtividade_regra, "
             "pessoa_track_id, versao_instrumento",
             empresa=empresa, processo=processo,
             ajustes=lambda q, _l=lote: q.in_("video_id", _l),
         )
 
-    por_cat = {"va": 0.0, "desp": 0.0, "vazio": 0.0}
-    acoes: dict[str, dict] = {}
-    itens: list[dict] = []
-    for e in eventos:
-        if e.get("validacao_correto") is False or e.get("principal") is False:
+    frentes: dict[str, str] = {}
+    if _ORIENTACAO_VERIFICADA:
+        try:
+            for zona in varrer(
+                sb, "zonas_camera", "cam_id, papel, frente_maquina, ativo",
+                empresa=empresa, processo=processo,
+            ):
+                if (
+                    zona.get("ativo") is not False
+                    and zona.get("papel") == "maquina"
+                    and zona.get("cam_id")
+                    and zona.get("frente_maquina")
+                ):
+                    frentes[str(zona["cam_id"])] = str(zona["frente_maquina"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[jornada-bin] calibração por câmera indisponível: %s", exc)
+
+    historico_presenca = str(
+        os.environ.get("KV_HISTORICO_PRESENCA", "on")
+    ).strip().lower() not in {"0", "false", "off", "no"}
+    preparados: list[dict] = []
+    for evento in eventos:
+        versao = int(evento.get("versao_instrumento") or 0)
+        if versao < 9 and not historico_presenca:
             continue
-        dt0 = inicio_por_video.get(e.get("video_id"))
+        dt0 = inicio_por_video.get(evento.get("video_id"))
         if dt0 is None:
             continue
-        e["_frente_maquina"] = _frente
-        label, cat, dur = _cat_do_evento(e, cat_por_label)
+        item = dict(evento)
+        if versao < 9:
+            item.update({"maos_maquina": None, "orientacao": None, "trabalho": None})
+        item.update({
+            "_capturado_em": dt0,
+            "_cam_id": (meta_video.get(evento.get("video_id")) or {}).get("cam_id"),
+        })
+        preparados.append(item)
+
+    por_cat = {"va": 0.0, "desp": 0.0, "sem": 0.0}
+    acoes: dict[tuple[str, str], dict] = {}
+    itens: list[dict] = []
+    for fatia in fatias_produtividade(preparados, frentes):
+        e = fatia["evento"]
+        dt0 = e.get("_capturado_em")
+        if not isinstance(dt0, datetime):
+            continue
+        label = str(
+            e.get("label_corrigido")
+            or e.get("comportamento_label")
+            or "sem_leitura"
+        )
+        dur = float(fatia.get("duracao_s") or 0.0)
         if dur <= 0:
             continue
-        inst = dt0 + timedelta(seconds=float(e.get("tempo_inicio_s") or 0))
+        inst = dt0 + timedelta(seconds=float(fatia["tempo_inicio_s"]))
         dia_do_evento = inst.date().isoformat()
         if dia is not None and dia_do_evento != dia:
             continue
@@ -19483,17 +19519,25 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str | None,
         ov_min = min(m_fim, jan_fim) - max(m_ini, jan_ini)
         if ov_min <= 0:
             continue
-        eh_vazio = (e.get("papel_pessoa") == "posto_vazio") or (label == POSTO_VAZIO_LABEL)
-        chave = "vazio" if eh_vazio else ("va" if cat == "valor_agregado" else "desp")
+        decisao = str(fatia.get("decisao") or "sem_decisao")
+        chave = (
+            "va" if decisao == "produtivo"
+            else "desp" if decisao == "improdutivo"
+            else "sem"
+        )
         seg_bin = ov_min * 60.0
         por_cat[chave] += seg_bin
-        a = acoes.setdefault(label, {"rotulo": label, "cat": chave,
-                                     "segundos": 0.0, "n": 0})
+        a = acoes.setdefault((label, chave), {"rotulo": label, "cat": chave,
+                                               "segundos": 0.0, "n": 0})
         a["segundos"] += seg_bin
         a["n"] += 1
         v = meta_video.get(e["video_id"]) or {}
         itens.append({
-            "id": e.get("id"), "video_id": e.get("video_id"),
+            "id": (
+                f'{e.get("id")}:{float(fatia["tempo_inicio_s"]):.3f}:'
+                f'{float(fatia["tempo_fim_s"]):.3f}'
+            ),
+            "video_id": e.get("video_id"),
             # No agregado, a hora sozinha não localiza o evento: 09:12 acontece
             # em todos os dias. O dia vem junto, sempre.
             "dia": dia_do_evento,
@@ -19506,7 +19550,7 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str | None,
             "corrigido": bool(e.get("label_corrigido")),
             "hora": _hhmm_do_minuto(m_ini, com_segundos=True),
             "hora_fim": _hhmm_do_minuto(m_fim, com_segundos=True),
-            "ini": e.get("tempo_inicio_s"), "fim": e.get("tempo_fim_s"),
+            "ini": fatia["tempo_inicio_s"], "fim": fatia["tempo_fim_s"],
             "segundos": round(dur, 1),
             "segundos_no_bin": round(seg_bin, 1),
             # Um evento que começa antes ou termina depois do bloco entra só com
@@ -19516,7 +19560,7 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str | None,
             "papel": e.get("papel_pessoa"),
             "origem": e.get("origem_validacao"),
             "validado": bool(e.get("validado_humano")),
-            "em_duvida": bool(e.get("em_duvida")),
+            "em_duvida": chave == "sem",
             "confianca": e.get("confianca"),
             "n_amostras": e.get("n_amostras"),
             "track": e.get("pessoa_track_id"),
