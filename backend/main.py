@@ -1373,7 +1373,7 @@ def replay_produtividade(
     videos = varrer(
         sb,
         "videos",
-        "id, nome, cam_id, gravado_em",
+        "id, nome, cam_id, gravado_em, caminho, video_removido_em",
         empresa=user.empresa,
         processo=nome,
         ajustes=lambda q: q.gte("gravado_em", f"{inicio}T00:00:00Z").lt(
@@ -1406,6 +1406,13 @@ def replay_produtividade(
         evento["video_nome"] = meta.get("nome")
         evento["gravado_em"] = meta.get("gravado_em")
         evento["cam_id"] = meta.get("cam_id")
+        caminho = str(meta.get("caminho") or "")
+        evento["evidence_available"] = bool(
+            caminho
+            and not meta.get("video_removido_em")
+            and not caminho.startswith(("/", "\\"))
+            and not (len(caminho) > 1 and caminho[1] == ":")
+        )
 
     versao_codigo = (
         os.environ.get("RENDER_GIT_COMMIT")
