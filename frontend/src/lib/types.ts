@@ -1034,6 +1034,7 @@ export interface ReplayExample {
   person_track_id: number;
   start_s: number;
   end_s: number;
+  evidence_available: boolean;
 }
 export interface ProductivityReplay {
   ok: boolean;

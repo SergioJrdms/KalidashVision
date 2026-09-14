@@ -29,6 +29,7 @@ def evento(**mudancas):
         "versao_instrumento": 9,
         "tempo_inicio_s": 0,
         "tempo_fim_s": 60,
+        "evidence_available": True,
     }
     base.update(mudancas)
     return base
@@ -59,6 +60,7 @@ def test_r1_abstem_e_r95_veta_so_improdutividade_insegura():
     assert por_id["r8"]["current"] == P
     assert por_id["r95"]["current"] == A
     assert por_id["i-ok"]["current"] == I
+    assert all(x["evidence_available"] for x in linhas)
 
 
 def test_metricas_sao_recalculadas_da_matriz_e_nao_lidas_prontas():

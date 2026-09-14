@@ -145,6 +145,7 @@ def preparar_avaliacao(
                 "person_track_id": track,
                 "start_s": inicio,
                 "end_s": fim,
+                "evidence_available": _bool(evento.get("evidence_available")),
             }
         )
     linhas.sort(key=lambda x: (x["day"], x["video_id"], x["start_s"], x["event_id"]))
@@ -194,7 +195,11 @@ def _exemplos(linhas: list[dict[str, Any]]) -> list[dict[str, Any]]:
     exemplos: list[dict[str, Any]] = []
     usados: set[str] = set()
     for grupo, seletor in seletores:
-        for linha in (x for x in linhas if seletor(x)):
+        candidatos = [x for x in linhas if seletor(x)]
+        candidatos.sort(
+            key=lambda x: (not x["evidence_available"], x["day"], x["event_id"])
+        )
+        for linha in candidatos:
             if linha["event_id"] in usados:
                 continue
             item = dict(linha)
