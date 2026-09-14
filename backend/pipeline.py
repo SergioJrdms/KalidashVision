@@ -12124,8 +12124,12 @@ def etapa_persistir(
     gravado_em: str | None = None,
     eventos_auditoria: list[dict] | None = None,
     descritores_track: list[dict] | None = None,
-) -> tuple[str, int]:
-    """Persiste vídeo, comportamentos, eventos. Retorna (video_id, n_auto_validados).
+) -> tuple[str, int, list[str | None]]:
+    """Persiste vídeo, comportamentos e eventos.
+
+    Retorna ``(video_id, n_auto_validados, ids_eventos)``; a terceira posição
+    segue a mesma ordem de ``eventos + eventos_auditoria`` para que todos os
+    itens que podem aparecer como evidência sejam pré-aquecidos.
 
     Fase 16: `eventos` são os PRINCIPAIS (1/min) — contam p/ comportamentos,
     total_eventos e validação (gravados com `principal=True`). `eventos_auditoria`
@@ -12565,9 +12569,11 @@ def etapa_persistir(
                     for _c in faltando:
                         _l.pop(_c, None)
         inseridos.extend(resp.data or [])
-    # Fase 36: ids dos PRINCIPAIS (mesma ordem de `eventos` — os primeiros N
-    # de linhas_eventos), p/ pré-extrair os frames enquanto o vídeo é local.
-    ids_principais = [r.get("id") for r in inseridos[: len(eventos)]]
+    # Fase 115: ids de TODOS os eventos visualizáveis, na mesma ordem de
+    # `eventos + eventos_auditoria`. Versões anteriores guardavam só os
+    # principais; por isso os cartões detalhados podiam ficar sem imagem após
+    # a expiração do vídeo, embora houvesse JPEGs do resumo no mesmo prefixo.
+    ids_eventos = [r.get("id") for r in inseridos]
 
     # Fase 83 — descritor por track. NÃO-FATAL de propósito: é insumo de
     # experimento, e um experimento não pode ser motivo para um vídeo da
@@ -12615,7 +12621,7 @@ def etapa_persistir(
         except Exception as e:   # noqa: BLE001
             log.warning("[descritor] não gravado (%s) — o vídeo segue normal.", e)
 
-    return video_id, n_auto_validados, ids_principais
+    return video_id, n_auto_validados, ids_eventos
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -15782,6 +15788,69 @@ def chave_frame_evento(caminho: str, evento_id: str, k: int) -> str:
     return f"{_prefixo_frames(caminho)}/{evento_id}_{FRAMES_VER}_{k}.jpg"
 
 
+def candidatos_frames_compativeis(evento: dict, candidatos: list[dict]) -> list[dict]:
+    """Eventos do mesmo vídeo cujo cache pode ilustrar ``evento`` sem mentir.
+
+    Um evento detalhado da linha do tempo pode não ter sido pré-aquecido em
+    versões antigas, enquanto o evento-resumo que contém exatamente aquele
+    período ainda tem seus três JPEGs. Aceitamos somente intervalos totalmente
+    contidos ou continentes; uma sobreposição parcial não é evidência segura.
+    A função apenas ordena candidatos — quem lê o Storage ainda confirma que o
+    cache existe antes de devolver qualquer imagem.
+    """
+    try:
+        alvo_ini = float(evento.get("tempo_inicio_s"))
+        alvo_fim = float(evento.get("tempo_fim_s"))
+    except (TypeError, ValueError):
+        return []
+    if alvo_fim < alvo_ini:
+        alvo_ini, alvo_fim = alvo_fim, alvo_ini
+    if alvo_fim <= alvo_ini:
+        return []
+
+    alvo_id = str(evento.get("id") or "")
+    alvo_video = str(evento.get("video_id") or "")
+    eps = 1e-6
+    ranqueados: list[tuple[tuple, dict]] = []
+    for candidato in candidatos or []:
+        candidato_id = str(candidato.get("id") or "")
+        if not candidato_id or candidato_id == alvo_id:
+            continue
+        if alvo_video and str(candidato.get("video_id") or "") != alvo_video:
+            continue
+        if candidato.get("validacao_correto") is False:
+            continue
+        try:
+            ini = float(candidato.get("tempo_inicio_s"))
+            fim = float(candidato.get("tempo_fim_s"))
+        except (TypeError, ValueError):
+            continue
+        if fim < ini:
+            ini, fim = fim, ini
+        if fim <= ini:
+            continue
+
+        exato = abs(ini - alvo_ini) <= eps and abs(fim - alvo_fim) <= eps
+        dentro = ini >= alvo_ini - eps and fim <= alvo_fim + eps
+        contem = ini <= alvo_ini + eps and fim >= alvo_fim - eps
+        if not (exato or dentro or contem):
+            continue
+
+        duracao = fim - ini
+        if exato:
+            # Mesmo instante vence, independentemente de principal/auditoria.
+            score = (0, 0.0, candidato.get("principal") is not False)
+        elif dentro:
+            # Evidência inteiramente dentro do alvo: prefira a mais abrangente.
+            score = (1, -duracao, candidato.get("principal") is not False)
+        else:
+            # Contexto que contém o alvo: prefira o menor intervalo possível.
+            score = (2, duracao, candidato.get("principal") is not True)
+        ranqueados.append((score, candidato))
+    ranqueados.sort(key=lambda item: item[0])
+    return [candidato for _score, candidato in ranqueados]
+
+
 def chave_frame_segmento(caminho_seg: str, segmento_id: str,
                          ini_s: float, fim_s: float, k: int) -> str:
     """Chave do k-ésimo frame de uma JANELA de tempo do segmento (2º ângulo).
@@ -15864,7 +15933,9 @@ def pre_extrair_frames(
             stats["falhas"] += 1
             log.warning(f"[pre-frames] upload falhou {key}: {e}")
 
-    # 1) Frames dos eventos PRINCIPAIS (chaves de GET /eventos/{id}/frames).
+    # 1) Frames de todos os eventos visualizáveis (principais + auditoria).
+    # O drill-down dos indicadores usa as fatias de auditoria; aquecer somente
+    # os resumos deixava essas evidências sem imagem após expirar o vídeo.
     if caminho_storage and not caminho_storage.startswith(("/", "\\")):
         prefix1 = posixpath.dirname(caminho_storage) + "/__frames"
         for eid, ev in zip(ids_eventos or [], eventos or []):
@@ -20839,14 +20910,16 @@ def processar_video(
     if grade_movimento:
         acumular_mapa_movimento(sb, empresa, processo, grade_movimento)
 
-    # Fase 36: PRÉ-EXTRAI todos os JPEGs de visualização (frames dos eventos,
-    # strips da cam2 e frames de referência) enquanto os vídeos ainda estão no
-    # DISCO LOCAL — ver um evento depois custa ~50KB de egress, não o vídeo
-    # inteiro (era a maior fonte de egress do Storage). Não-fatal.
+    # Fase 36/115: PRÉ-EXTRAI todos os JPEGs de visualização (principais E
+    # auditoria detalhada, strips da cam2 e frames de referência) enquanto os
+    # vídeos ainda estão no DISCO LOCAL — ver um evento depois custa ~50KB de
+    # egress, não o vídeo inteiro (era a maior fonte de egress do Storage).
+    # Não-fatal.
     frames_stats = {"ok": False}
     try:
+        eventos_frames = list(eventos) + list(eventos_auditoria or [])
         frames_stats = pre_extrair_frames(
-            sb, caminho_storage, video_path, eventos, ids_principais,
+            sb, caminho_storage, video_path, eventos_frames, ids_principais,
             video_id, cam_id,
             video_path_sec=video_path_secundario,
             storage_path_sec=storage_path_secundario,

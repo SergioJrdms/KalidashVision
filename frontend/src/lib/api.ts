@@ -47,6 +47,15 @@ import type {
 
 const API = import.meta.env.VITE_API_URL as string;
 
+export type EventFramesResponse = {
+  frames: string[];
+  tempos_s?: number[];
+  origem_frames?: "evento_exato" | "intervalo_correspondente";
+  intervalo_frames?: { inicio_s: number; fim_s: number };
+  motivo?: string;
+  detalhe?: string;
+};
+
 async function authHeader(): Promise<Record<string, string>> {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
@@ -197,7 +206,7 @@ export const api = {
       req<{ frames: string[] }>(`/segmentos/${id}/frames?ini=${ini}&fim=${fim}`),
   },
   eventos: {
-    frames: (id: string) => req<{ frames: string[] }>(`/eventos/${id}/frames`),
+    frames: (id: string) => req<EventFramesResponse>(`/eventos/${id}/frames`),
     validar: (id: string, acao: AcaoEvento, label_corrigido?: string, produtividade_humana?: ProdutividadeHumana) =>
       req<{ ok: boolean }>(`/eventos/${id}/validar`, {
         method: "POST",

@@ -4437,7 +4437,6 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
 
     bucket = os.environ.get("SUPABASE_BUCKET_VIDEOS", "videos")
     import base64
-    import posixpath
 
     # Cache determinístico de frames já extraídos (JPEGs pequenos), ao lado do
     # vídeo no Storage. Evita rebaixar o vídeo inteiro a cada visualização
@@ -4445,38 +4444,95 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
     # A VERSÃO do formato vem de pipeline.FRAMES_VER — FONTE ÚNICA, dividida com
     # quem GRAVA o cache (pre_extrair_frames). Hardcodar "v2" aqui faria o cache
     # deixar de casar em silêncio no dia em que o formato mudasse.
-    frames_prefix = posixpath.dirname(caminho) + "/__frames"
     frame_keys = [chave_frame_evento(caminho, evento_id, k) for k in (0, 1, 2)]
+
+    def _tempos_dos_frames(fonte: dict) -> list[float]:
+        ini = float(fonte.get("tempo_inicio_s") or 0.0)
+        fim = float(fonte.get("tempo_fim_s") or ini)
+        if fim < ini:
+            ini, fim = fim, ini
+        return [ini, (ini + fim) / 2.0, fim]
+
+    def _resposta_do_cache(
+        keys: list[str], fonte: dict, primeiro: bytes, *, recuperado: bool = False,
+    ) -> dict | None:
+        """Serve cache por URL assinada, com base64 como fallback honesto."""
+        ini = float(fonte.get("tempo_inicio_s") or 0.0)
+        fim = float(fonte.get("tempo_fim_s") or ini)
+        if fim < ini:
+            ini, fim = fim, ini
+        meta = {
+            "tempos_s": _tempos_dos_frames(fonte),
+            "origem_frames": (
+                "intervalo_correspondente" if recuperado else "evento_exato"
+            ),
+            "intervalo_frames": {"inicio_s": ini, "fim_s": fim},
+        }
+        urls = [_url_frame_assinada(sb, bucket, key) for key in keys]
+        if all(urls):
+            return {"frames": urls, **meta}
+        try:
+            cached = [primeiro] + [
+                sb.storage.from_(bucket).download(key) for key in keys[1:]
+            ]
+        except Exception:
+            return None
+        if not all(cached):
+            return None
+        return {
+            "frames": [
+                "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+                for jpeg in cached
+            ],
+            **meta,
+        }
 
     # 1) Tenta servir do cache. Para não fazer 3 round-trips num miss, sonda só
     #    o primeiro; se existir, baixa os 3 (cache foi escrito atômico junto).
     try:
         primeiro = sb.storage.from_(bucket).download(frame_keys[0])
         if primeiro:
-            # Fase 48.2: cache existe → serve por URL assinada (navegador busca
-            # direto do Supabase; sem egress do Render). Só a sonda foi baixada.
-            urls = [_url_frame_assinada(sb, bucket, k) for k in frame_keys]
-            if all(urls):
-                return {"frames": urls}
-            # Assinatura falhou → base64 como antes (nunca quebra).
-            cached = [primeiro] + [
-                sb.storage.from_(bucket).download(k) for k in frame_keys[1:]
-            ]
-            if all(cached):
-                return {
-                    "frames": [
-                        "data:image/jpeg;base64," + base64.b64encode(j).decode("ascii")
-                        for j in cached
-                    ]
-                }
+            resposta = _resposta_do_cache(frame_keys, ev, primeiro)
+            if resposta:
+                return resposta
     except Exception:
         pass  # cache miss → extrai abaixo
 
-    # Fase 54: cache miss COM o binário já expirado. Não adianta (nem pode)
-    # tentar baixar — o objeto não existe mais. Degrada com motivo explícito em
-    # vez de estourar 500. Na prática isto quase nunca acontece: o cache é
-    # aquecido no fim do processamento, antes de o vídeo ser apagado.
+    # Fase 115: nas versões antigas, apenas os eventos-resumo eram aquecidos.
+    # O drill-down, porém, usa eventos detalhados. Se o vídeo já expirou,
+    # reaproveita somente um cache do MESMO vídeo cujo intervalo esteja
+    # inteiramente dentro do alvo ou o contenha por completo. Sobreposição
+    # parcial é rejeitada para não apresentar uma cena diferente como prova.
     if ev_video_removido:
+        try:
+            rows = (
+                sb.table("eventos")
+                .select(
+                    "id, video_id, tempo_inicio_s, tempo_fim_s, principal, "
+                    "validacao_correto"
+                )
+                .eq("video_id", ev["video_id"])
+                .execute()
+                .data
+            ) or []
+            for fonte in pl.candidatos_frames_compativeis(ev, rows):
+                keys_fonte = [
+                    chave_frame_evento(caminho, str(fonte["id"]), k)
+                    for k in (0, 1, 2)
+                ]
+                try:
+                    primeiro = sb.storage.from_(bucket).download(keys_fonte[0])
+                except Exception:
+                    continue
+                if not primeiro:
+                    continue
+                resposta = _resposta_do_cache(
+                    keys_fonte, fonte, primeiro, recuperado=True,
+                )
+                if resposta:
+                    return resposta
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[frames] recuperação por intervalo falhou: %s", exc)
         return {
             "frames": [],
             "motivo": "video_expirado",
@@ -4538,12 +4594,26 @@ def frames_evento(evento_id: str, user: CurrentUser = Depends(get_current_user))
     if subiu_ok:
         urls = [_url_frame_assinada(sb, bucket, k) for k in frame_keys]
         if all(urls):
-            return {"frames": urls}
+            return {
+                "frames": urls,
+                "tempos_s": _tempos_dos_frames(ev),
+                "origem_frames": "evento_exato",
+                "intervalo_frames": {
+                    "inicio_s": float(ev.get("tempo_inicio_s") or 0.0),
+                    "fim_s": float(ev.get("tempo_fim_s") or 0.0),
+                },
+            }
     return {
         "frames": [
             "data:image/jpeg;base64," + base64.b64encode(j).decode("ascii")
             for j in jpegs
-        ]
+        ],
+        "tempos_s": _tempos_dos_frames(ev),
+        "origem_frames": "evento_exato",
+        "intervalo_frames": {
+            "inicio_s": float(ev.get("tempo_inicio_s") or 0.0),
+            "fim_s": float(ev.get("tempo_fim_s") or 0.0),
+        },
     }
 
 

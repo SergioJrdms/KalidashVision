@@ -30,6 +30,10 @@ export function FrameStripReal({ ativo, onAspecto }: { ativo: { id: string; pess
   // Se há pelo menos 1 frame real, completa 3 repetindo o último — nunca
   // mistura frame real com o placeholder ilustrativo na faixa.
   const frames = raw.length ? [0, 1, 2].map((i) => raw[i] ?? raw[raw.length - 1]) : [];
+  // Em vídeos antigos o backend pode recuperar um cache de um intervalo
+  // consolidado correspondente. Nesse caso, os selos mostram os instantes
+  // REAIS das imagens — nunca os tempos do cartão detalhado por aproximação.
+  const tempos = data?.tempos_s || [0, 1, 2].map((i) => ativo.ini + (i * (ativo.fim - ativo.ini)) / 2);
   const boxes = [{ id: `P-${String(ativo.pessoa).padStart(2, "0")}`, x: 30, y: 24, w: 24, h: 52, act: ativo.label.split(" ").slice(0, 2).join(" ") }];
   return (
     <div className="row" style={{ gap: 2, padding: 2, background: "#0d0820" }}>
@@ -41,7 +45,7 @@ export function FrameStripReal({ ativo, onAspecto }: { ativo: { id: string; pess
             <CameraScene height={180} hud={i === 1} boxes={boxes.map((b) => ({ ...b, x: b.x + i * 4 }))} />
           )}
           <span style={{ position: "absolute", bottom: 6, left: 6, fontSize: 9.5, fontFamily: "var(--mono)", color: "rgba(255,255,255,.7)", background: "rgba(0,0,0,.5)", padding: "1px 6px", borderRadius: 5 }}>
-            {(ativo.ini + (i * (ativo.fim - ativo.ini)) / 2).toFixed(1)}s
+            {(tempos[i] ?? tempos[tempos.length - 1] ?? ativo.ini).toFixed(1)}s
           </span>
         </div>
       ))}
