@@ -4371,7 +4371,13 @@ def evidencias_de_presenca(
             "label_efetivo": rep.get("label_corrigido") or rep.get("comportamento_label") or "posto_vazio",
         })
         observacoes.append(item)
-    observacoes.sort(key=lambda e: (-float(e["duracao_s"]), str(e.get("_capturado_em") or "")))
+    # No drill-down comercial, o gestor precisa encontrar primeiro o lote que
+    # acabou de processar. A duracao desempata dentro do mesmo instante; a
+    # associacao estado -> indicador e todos os totais permanecem intocados.
+    observacoes.sort(
+        key=lambda e: (e["_capturado_em"].timestamp(), float(e["duracao_s"])),
+        reverse=True,
+    )
     total = len(observacoes)
     itens = observacoes[(page - 1) * page_size:page * page_size]
 

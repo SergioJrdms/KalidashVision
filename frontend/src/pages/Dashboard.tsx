@@ -55,7 +55,6 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
       </Card>
     );
   }
-
   // ═══════════════════════════════════════════════════════════════════
   // O TOPO RESPONDE "COMO FOI O TURNO?", não "quando foi o último lote".
   //
@@ -139,9 +138,9 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
       </Card>
 
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,minmax(0,1fr))", gap: 14 }}>
-        <KpiComercial titulo="Produtivo" valor={p.produtivo_total_pct} detalhe="do tempo capturado · clique para conferir" cor="#187a43" icone="gauge" onClick={() => setEvidencia({ indicador: "produtivo", titulo: "Produtivo", categoria: "Produtividade" })} />
-        <KpiComercial titulo="Improdutivo" valor={p.improdutivo_total_pct} detalhe="do tempo capturado · clique para conferir" cor="#b74a3a" icone="trending-down" onClick={() => setEvidencia({ indicador: "improdutivo", titulo: "Improdutivo", categoria: "Produtividade" })} />
-        <KpiComercial titulo="Sem decisão" valor={p.sem_decisao_total_pct} detalhe="do tempo capturado · clique para validar" cor="#8a5a00" icone="help-circle" onClick={() => setEvidencia({ indicador: "sem_decisao", titulo: "Sem decisão", categoria: "Produtividade" })} />
+        <KpiComercial titulo="Produtivo" valor={p.produtivo_total_pct} detalhe="do período analisado · clique para conferir" cor="#187a43" icone="gauge" onClick={() => setEvidencia({ indicador: "produtivo", titulo: "Produtivo", categoria: "Produtividade" })} />
+        <KpiComercial titulo="Improdutivo" valor={p.improdutivo_total_pct} detalhe="do período analisado · clique para conferir" cor="#b74a3a" icone="trending-down" onClick={() => setEvidencia({ indicador: "improdutivo", titulo: "Improdutivo", categoria: "Produtividade" })} />
+        <KpiComercial titulo="Sem decisão" valor={p.sem_decisao_total_pct} detalhe="do período analisado · clique para validar" cor="#8a5a00" icone="help-circle" onClick={() => setEvidencia({ indicador: "sem_decisao", titulo: "Sem decisão", categoria: "Produtividade" })} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14, alignItems: "stretch" }}>
@@ -153,7 +152,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
             </div>
           </div>
           <BarraComercial
-            titulo="Classificação das horas capturadas"
+            titulo="Classificação do período analisado"
             partes={[
               { nome: "Produtivo", valor: p.produtivo_total_pct, cor: "#2e9d62", onClick: () => setEvidencia({ indicador: "produtivo", titulo: "Produtivo", categoria: "Produtividade" }) },
               { nome: "Improdutivo", valor: p.improdutivo_total_pct, cor: "#d66755", onClick: () => setEvidencia({ indicador: "improdutivo", titulo: "Improdutivo", categoria: "Produtividade" }) },
@@ -171,7 +170,7 @@ export default function Dashboard({ proc, go }: { proc: ProcHeaderMock; go: Go }
             </div>
           </div>
           <BarraComercial
-            titulo="Presença nas horas capturadas"
+            titulo="Presença no período analisado"
             partes={[
               { nome: "Presença do operador", valor: p.presenca_operador_total_pct, cor: "var(--accent)", onClick: () => setEvidencia({ indicador: "presenca_operador", titulo: "Presença do operador", categoria: "Presença" }) },
               { nome: "Sem operador no posto", valor: p.posto_sem_operador_total_pct, cor: "#8a8598", onClick: () => setEvidencia({ indicador: "posto_sem_operador", titulo: "Sem operador no posto", categoria: "Presença" }) },
