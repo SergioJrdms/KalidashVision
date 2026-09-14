@@ -1001,3 +1001,61 @@ export interface ContagemPerguntas {
   teto_semana: number;
   teto_abertas: number;
 }
+
+export type ReplayDecision = "PRODUTIVO" | "IMPRODUTIVO" | "ABSTEM";
+export interface ReplayMetrics {
+  id: "first" | "r1" | "current";
+  label: string;
+  n: number;
+  days: number;
+  note?: string;
+  precision_improductive_pct: number | null;
+  precision_productive_pct: number | null;
+  coverage_pct: number | null;
+  claims_improductive: number;
+  false_improductive: number;
+  confusion: Record<"PRODUTIVO" | "IMPRODUTIVO", Record<ReplayDecision, number>>;
+}
+export interface ReplayExample {
+  event_id: string;
+  video_id: string;
+  video_name: string;
+  day: string;
+  version: number;
+  label: string;
+  truth: ReplayDecision;
+  baseline: ReplayDecision;
+  r1: ReplayDecision;
+  current: ReplayDecision;
+  reason: string;
+  group: string;
+  sample_count: number | null;
+  in_doubt: boolean;
+  person_track_id: number;
+  start_s: number;
+  end_s: number;
+}
+export interface ProductivityReplay {
+  ok: boolean;
+  status: "concluido";
+  elapsed_ms: number;
+  code_version: string;
+  manifest: {
+    id: string;
+    title: string;
+    created_at: string;
+    sha256: string;
+    source_sha256: Record<string, string>;
+  };
+  dataset: {
+    matches_frozen_manifest: boolean;
+    expected_events: number;
+    actual_events: number;
+    event_set_sha256: string;
+    days: string[];
+    versions: Record<string, number>;
+    ground_truth: string;
+  };
+  results: ReplayMetrics[];
+  examples: ReplayExample[];
+}

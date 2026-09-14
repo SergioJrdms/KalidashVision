@@ -42,6 +42,7 @@ import type {
   BinJornada,
   TitularDia,
   RotulosSemCategoria,
+  ProductivityReplay,
 } from "./types";
 
 const API = import.meta.env.VITE_API_URL as string;
@@ -250,6 +251,12 @@ export const api = {
     veredito: (itemId: string, veredito: string, observacao?: string) =>
       req<{ ok: boolean }>(`/amostragem/${itemId}/veredito`,
         { method: "POST", body: JSON.stringify({ veredito, observacao }) }),
+  },
+  replayProdutividade: {
+    executar: (processoId: string) =>
+      req<ProductivityReplay>(`/processos/${processoId}/replay-produtividade`, {
+        method: "POST",
+      }),
   },
   perguntas: {
     listar: (processoId: string, status: "pendente" | "respondida" | "dispensada" | "todas" = "pendente") =>

@@ -30,6 +30,7 @@ from .auth import CurrentUser, get_current_user
 from .jobs import JOBS
 from .productivity import agregar_produtividade
 from . import productivity as produtividade
+from .precision_replay import carregar_manifesto, executar_replay, scope_fingerprint
 from . import pipeline as pl
 from .pipeline import (
     extrair_3_frames_evento,
@@ -1351,6 +1352,67 @@ class SortearBody(BaseModel):
     dia: str
     n: int = 20
     semente: int | None = None
+
+
+@app.post("/processos/{processo_id}/replay-produtividade")
+def replay_produtividade(
+    processo_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Reexecuta R1/R95 sobre o conjunto humano fixado, sem escrever no banco."""
+    sb = make_supabase_client()
+    nome = _processo_nome(sb, user, processo_id)
+    manifesto = carregar_manifesto()
+    if scope_fingerprint(user.empresa, nome) != manifesto["scope_fingerprint"]:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "O replay versionado não está disponível para este processo.",
+        )
+
+    inicio, fim = min(manifesto["days"]), max(manifesto["days"])
+    videos = varrer(
+        sb,
+        "videos",
+        "id, nome, cam_id, gravado_em",
+        empresa=user.empresa,
+        processo=nome,
+        ajustes=lambda q: q.gte("gravado_em", f"{inicio}T00:00:00Z").lt(
+            "gravado_em", f"{fim}T23:59:59.999Z"
+        ),
+    )
+    video_meta = {str(v["id"]): v for v in videos if v.get("id")}
+    campos = (
+        "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
+        "origem_validacao, validado_humano, validacao_correto, papel_pessoa, "
+        "maos_maquina, em_duvida, n_amostras, versao_instrumento, "
+        "tempo_inicio_s, tempo_fim_s"
+    )
+    eventos: list[dict[str, Any]] = []
+    ids = list(video_meta)
+    for pos in range(0, len(ids), 100):
+        lote = ids[pos : pos + 100]
+        eventos.extend(
+            varrer(
+                sb,
+                "eventos",
+                campos,
+                empresa=user.empresa,
+                processo=nome,
+                ajustes=lambda q, lote=lote: q.in_("video_id", lote),
+            )
+        )
+    for evento in eventos:
+        meta = video_meta.get(str(evento.get("video_id"))) or {}
+        evento["video_nome"] = meta.get("nome")
+        evento["gravado_em"] = meta.get("gravado_em")
+        evento["cam_id"] = meta.get("cam_id")
+
+    versao_codigo = (
+        os.environ.get("RENDER_GIT_COMMIT")
+        or os.environ.get("COMMIT_SHA")
+        or "local"
+    )
+    return executar_replay(eventos, code_version=versao_codigo)
 
 
 @app.post("/processos/{processo_id}/amostragem/sortear")
