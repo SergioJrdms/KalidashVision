@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from .auth import CurrentUser, get_current_user
 from .jobs import JOBS
 from .productivity import agregar_produtividade
-from .human_learning import gravar_validacao
+from .human_learning import gravar_validacao, carregar_licoes
 from . import productivity as produtividade
 from .precision_replay import carregar_manifesto, executar_replay, scope_fingerprint
 from . import pipeline as pl
@@ -5314,6 +5314,8 @@ def _aplicar_categoria_lean(sb, empresa: str, comportamento_id: str, alvo: dict,
                 sb, empresa, proc_irmao, alvo["label"], cat,
                 origem=pl.ORIGEM_HUMANO_ROTULO)
 
+    # CPU training only, using the fresh authoritative judgments. No VLM call.
+    carregar_licoes(sb, empresa, alvo["processo"])
     return {
         "ok": True,
         "comportamento_id": comportamento_id,

@@ -33,6 +33,7 @@ import numpy as np
 from groq import Groq
 from supabase import Client, create_client
 from .human_learning import carregar_licoes
+from .online_learning import sugerir as sugerir_pesos
 from .productivity import (
     CONFIANCA_COR_GESTOR_MIN,
     LABEL_CONVERSANDO_COLEGA,
@@ -12549,6 +12550,15 @@ def etapa_persistir(
             row_auditoria["produtividade_regra"],
         ) = classificar_produtividade_auditavel(row_auditoria)
         linhas_eventos.append(row_auditoria)
+
+    # Shadow predictions never replace names, human fields, frozen P/I or role.
+    # Existing JSONB stores internal comparison evidence, not client accuracy.
+    for row in linhas_eventos:
+        shadow = sugerir_pesos(empresa, processo, row)
+        if shadow:
+            stats = row.get("bbox_stats")
+            if stats is None or isinstance(stats, dict):
+                row["bbox_stats"] = {**(stats or {}), "aprendizado_pesos_shadow": shadow}
 
     CHUNK = 100
     inseridos: list[dict] = []

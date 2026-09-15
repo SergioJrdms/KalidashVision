@@ -1,4 +1,4 @@
-"""Aprendizado contextual por exemplos humanos, sem alterar pesos do modelo.
+"""Exemplos humanos + atualização de pesos de modelos leves em modo shadow.
 
 As tabelas existentes são a fonte de verdade. Reabrir/descartar uma validação
 remove sua contribuição na próxima leitura; inferências nunca ensinam a si mesmas.
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from .online_learning import atualizar, invalidar
 
 log = logging.getLogger("kalidash")
 _CATS = {"valor_agregado": "PRODUTIVO", "desperdicio": "IMPRODUTIVO"}
@@ -73,8 +74,9 @@ def carregar_licoes(sb, empresa: str, processo: str) -> str:
     """Leitura fresca e isolada a cada vídeo, inclusive com generalização desligada."""
     try:
         eventos = (sb.table("eventos").select(
-            "descricao_bruta,comportamento_label,label_corrigido,validado_humano,"
-            "validacao_correto,origem_validacao,descricao_invalida,produtividade_humana")
+            "id,validado_em,descricao_bruta,comportamento_label,label_corrigido,validado_humano,"
+            "validacao_correto,origem_validacao,descricao_invalida,produtividade_humana,"
+            "maquina,imovel,trabalho,orientacao,maos_maquina")
             .eq("empresa", empresa).eq("processo", processo)
             .eq("origem_validacao", "humano").eq("validado_humano", True)
             .order("validado_em", desc=True).limit(200).execute().data or [])
@@ -83,13 +85,23 @@ def carregar_licoes(sb, empresa: str, processo: str) -> str:
             .eq("empresa", empresa).eq("processo", processo)
             .eq("categoria_lean_origem", "humano").order("label")
             .limit(100).execute().data or [])
+        atualizar(empresa, processo, eventos, comportamentos)
         return montar_licoes(eventos, comportamentos)
     except Exception as exc:
+        invalidar(empresa, processo)
         log.warning("[aprendizado-humano] leitura falhou; sem certeza inventada: %s", exc)
         return ""
 
 
 def gravar_validacao(sb, evento: dict, update: dict) -> int:
+    afetados = _gravar_validacao(sb, evento, update)
+    # No paid inference. Withdrawing a judgment also withdraws its weights.
+    invalidar(evento["empresa"], evento["processo"])
+    carregar_licoes(sb, evento["empresa"], evento["processo"])
+    return afetados
+
+
+def _gravar_validacao(sb, evento: dict, update: dict) -> int:
     """Grava e replica só nas observações cruas constitutivas daquele evento.
 
     Não toca em previsões congeladas, papel, caixas ou identidade. Correções
