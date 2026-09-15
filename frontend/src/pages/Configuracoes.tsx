@@ -73,7 +73,7 @@ function AprendizadoBloco({ proc }: { proc: ProcHeaderMock }) {
       toast(
         r.efetivo
           ? "Generalização LIGADA — vale a partir do próximo vídeo."
-          : "Generalização DESLIGADA — nada mais se propaga sozinho.",
+          : "Generalização DESLIGADA — correções não se espalham para casos parecidos ou outros processos.",
         { icon: "check" },
       );
     },
@@ -86,7 +86,7 @@ function AprendizadoBloco({ proc }: { proc: ProcHeaderMock }) {
     <Card style={{ padding: 22 }}>
       <PanelHead
         titulo="Generalização automática"
-        ajuda="Quando ligada, uma correção sua passa a valer sozinha para casos parecidos e rótulos consolidados são marcados como aprendidos. Desligada, o sistema classifica e você valida — nada se propaga sozinho."
+        ajuda="Exemplos humanos e classificações são usados nas próximas análises deste processo, mesmo com esta chave desligada. A chave controla a aplicação automática em casos parecidos e outros processos. O aprendizado usa exemplos atualizados, não um novo treinamento dos pesos da IA."
         leitura="Durante a coleta, desligada protege o dataset: aprender sobre dado ainda sujo estraga justamente o que a campanha produz."
         right={
           d ? (

@@ -270,10 +270,10 @@ def classificar_observacao(
     Precedência de evidência:
 
     1. ausência/papel do posto;
-    2. mão no torno (evidência positiva objetiva);
-    3. orientação calibrada para a câmera;
-    4. decisão binária estruturada do VLM;
-    5. abstenção.
+    2. classificação humana explícita de produtividade, sem alterar o papel;
+    3. mão no torno (evidência positiva objetiva);
+    4. orientação calibrada para a câmera;
+    5. decisão binária estruturada do VLM ou abstenção.
 
     A prosa de ``descricao_bruta`` nunca decide. Ela pode ser herdada ou
     interpolada para manter a auditoria legível; transformar palavras em
@@ -285,11 +285,44 @@ def classificar_observacao(
     """
     papel = _texto_normalizado(e.get("papel_pessoa"))
 
-    # ── Fase 113 — PONTE ROLANTE MARCOU O SEGMENTO ──
-    # Decide só a PRODUTIVIDADE. A presença continua vindo do papel: quem
-    # estava fora (ou em posto vazio) segue fora, agora como fora PRODUTIVO —
-    # o mesmo balde de presença, categoria diferente. É o que separa "o
-    # operador estava trabalhando na ponte" de "o operador estava no posto".
+    # Verdade individual do usuário; confirmar só o rótulo NÃO define P/I.
+    if (e.get("origem_validacao") in {"humano", "humano_fonte"}
+            and e.get("validado_humano") is True
+            and e.get("validacao_correto") is True
+            and papel in {"operador", EST_OPERADOR_FORA}):
+        julgamento = e.get("produtividade_humana")
+        if julgamento == "ABSTEM":
+            return (EST_OPERADOR_FORA if papel == EST_OPERADOR_FORA
+                    else EST_PRODUTIVIDADE_INCONCLUSIVA, "duvida_mantida_pelo_gestor")
+        if julgamento in {"PRODUTIVO", "IMPRODUTIVO"}:
+            if papel == EST_OPERADOR_FORA:
+                estado = (EST_OPERADOR_FORA_PRODUTIVO if julgamento == "PRODUTIVO"
+                          else EST_OPERADOR_FORA_IMPRODUTIVO)
+            else:
+                estado = EST_PRODUTIVO if julgamento == "PRODUTIVO" else EST_IMPRODUTIVO
+            return estado, "produtividade_individual_validada_pelo_gestor"
+
+    # A decisão explícita do gestor vence a automação de produtividade, mas
+    # nunca cria presença nem altera o papel físico observado.
+    origem_humana = _texto_normalizado(e.get("categoria_lean_origem"))
+    categoria_humana = _texto_normalizado(e.get("categoria_lean"))
+    if origem_humana in {"humano", "humano_rotulo"} and papel in {
+        "operador", EST_OPERADOR_FORA,
+    }:
+        if categoria_humana == "valor_agregado":
+            return (
+                EST_OPERADOR_FORA_PRODUTIVO if papel == EST_OPERADOR_FORA
+                else EST_PRODUTIVO,
+                "atividade_classificada_pelo_gestor",
+            )
+        if categoria_humana == "desperdicio":
+            return (
+                EST_OPERADOR_FORA_IMPRODUTIVO if papel == EST_OPERADOR_FORA
+                else EST_IMPRODUTIVO,
+                "atividade_classificada_pelo_gestor",
+            )
+
+    # Segmento confirmado de ponte decide produtividade, não presença.
     if _PONTE_SEGMENTO_DECIDE and _texto_normalizado(
             e.get("categoria_lean_origem")) == _ORIGEM_PONTE_SEGMENTO:
         if papel in (EST_POSTO_VAZIO, EST_OPERADOR_FORA):
@@ -366,19 +399,6 @@ def classificar_observacao(
                 "improdutividade_incerta_abstencao_r95",
             )
         return EST_IMPRODUTIVO, "costas_ou_lado"
-
-    # A árvore não transforma o nome do rótulo em regra automática. Porém,
-    # quando o próprio gestor classificou aquela atividade, a origem
-    # ``humano_rotulo`` deixa explícito quem decidiu. O sinal medido acima
-    # continua tendo precedência; esta decisão humana vence apenas a opinião
-    # estruturada da VLM abaixo e mantém o clique coerente em todas as telas.
-    origem_categoria = _texto_normalizado(e.get("categoria_lean_origem"))
-    categoria_humana = _texto_normalizado(e.get("categoria_lean"))
-    if origem_categoria == "humano_rotulo":
-        if categoria_humana == "valor_agregado":
-            return EST_PRODUTIVO, "atividade_classificada_pelo_gestor"
-        if categoria_humana == "desperdicio":
-            return EST_IMPRODUTIVO, "atividade_classificada_pelo_gestor"
 
     if e.get("trabalho") is True:
         return EST_PRODUTIVO, "julgamento_visual_direto"
@@ -543,7 +563,9 @@ INDICADORES_EVIDENCIA = {
 def estado_compone_indicador(estado: str, indicador: str) -> bool:
     """Verdade única entre uma fatia canônica e os indicadores da vitrine."""
     produtivos = {EST_PRODUTIVO, EST_OPERADOR_FORA_PRODUTIVO}
-    improdutivos = {EST_IMPRODUTIVO, EST_OPERADOR_FORA_IMPRODUTIVO}
+    # Ausência confirmada é perda operacional na vitrine, sem transformar
+    # ausência em presença nem mudar o denominador da avaliação P/I do operador.
+    improdutivos = {EST_IMPRODUTIVO, EST_OPERADOR_FORA_IMPRODUTIVO, EST_POSTO_VAZIO}
     operador_presente = {
         EST_PRODUTIVO,
         EST_IMPRODUTIVO,

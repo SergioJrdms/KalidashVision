@@ -107,8 +107,8 @@ check("vazio não infla a cobertura de identificação",
 check("cobertura insuficiente bloqueia criativo", r["publicavel"] is False, r)
 check("produtividade comercial fecha 100% do capturado",
       r["produtivo_total_pct"] == 16.7
-      and r["improdutivo_total_pct"] == 16.7
-      and r["sem_decisao_total_pct"] == 66.6
+      and r["improdutivo_total_pct"] == 33.3  # inclui ausência confirmada na vitrine
+      and r["sem_decisao_total_pct"] == 50.0
       and sum(r[k] for k in (
           "produtivo_total_pct", "improdutivo_total_pct", "sem_decisao_total_pct"
       )) == 100.0, r)

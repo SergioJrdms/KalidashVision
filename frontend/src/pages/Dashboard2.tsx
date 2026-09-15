@@ -9,7 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, PanelHead, Ring, Icon, Empty, LeanBar } from "../design/ui";
 import { nomeHumano } from "../design/rotulos";
-import { leanCor, leanLabel, type LeanShort } from "../design/helpers";
+import { leanCor, leanLabel, decisaoCor, decisaoLabel, type LeanShort } from "../design/helpers";
 import { pedirAuditoriaDoDia } from "./Auditoria";
 import type { ProcHeaderMock } from "../lib/adapt";
 import type { Go } from "../design/Shell";
@@ -334,7 +334,7 @@ function EvolucaoPorDia({ dias, selecionado, alvo, ehAgregado, onSelecionar, tra
       <div className="row wrap" style={{ gap: 10, fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
         {CATS.map(({ cat }) => (
           <span key={cat} className="row" style={{ gap: 5 }}>
-            <i style={{ width: 9, height: 9, borderRadius: 3, background: leanCor(cat) }} /> {leanLabel(cat)}
+            <i style={{ width: 9, height: 9, borderRadius: 3, background: decisaoCor(cat) }} /> {decisaoLabel(cat)}
           </span>
         ))}
         <span className="row" style={{ gap: 5 }}><span style={{ color: "var(--faint)" }}>✕</span> sem trabalho</span>
@@ -580,9 +580,9 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
   return (
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
-        titulo="Quanto o sistema não sabe"
-        ajuda="Parte do tempo observado em que a leitura ficou em dúvida naquele dia — as amostras do minuto discordaram, uma verificação da cena contradisse o rótulo, ou ninguém decidiu se o comportamento agrega valor. A curva é HISTÓRICA: validar um trecho não o apaga do dia em que aconteceu, só o marca como julgado (a área preenchida). Tempo que o sistema NÃO OLHOU (herdado por economia) NUNCA entra nesta curva — aparece separado, em âmbar."
-        leitura="Esta curva é o veredito: caindo semana a semana, o sistema está aprendendo."
+        titulo="Sem decisão de produtividade"
+        ajuda="Parte do período analisado que ainda não tem evidência ou classificação suficiente para decidir entre produtivo e improdutivo. Usa a mesma decisão das demais telas e é atualizada após as correções."
+        leitura="A meta é manter até 30% sem decisão, sem inventar certezas."
       />
       <div className="row gap2" style={{ alignItems: "baseline", marginBottom: 6 }}>
         <span className="font-display tnum" style={{ fontSize: 26, fontWeight: 700, color: cor }}>
@@ -590,7 +590,7 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
         </span>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>do tempo observado, no último dia</span>
       </div>
-      {totalLevantado > 0 && (
+      {totalResolvido > 0 && (
         <p style={{ fontSize: 11.5, color: "var(--muted)", margin: "0 0 6px" }}>
           <b className="tnum" style={{ color: leanCor("va") }}>{pctJulgado.toFixed(0)}%</b> da
           dúvida do período já foi julgada por você
@@ -657,7 +657,7 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
                   points={pts.map((d, i) => `${x(i)},${y(d.duvida_pct)}`).join(" ")} />
         {pts.map((d, i) => (
           <circle key={d.dia} cx={x(i)} cy={y(d.duvida_pct)} r={3} fill="#fff" stroke={cor} strokeWidth={1.6}>
-            <title>{`${d.dow} ${d.rot} — ${d.duvida_pct.toFixed(0)}% em dúvida · ${(d.duvida_resolvida_pct || 0).toFixed(0)}% já julgado`}</title>
+            <title>{`${d.dow} ${d.rot} — ${d.duvida_pct.toFixed(0)}% sem decisão`}</title>
           </circle>
         ))}
         {pts.map((d, i) => {
@@ -670,21 +670,21 @@ function DuvidaCard({ dias }: { dias: DiaAnalise[] }) {
       </svg>
       <div className="row wrap" style={{ gap: 12, fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
         <span className="row" style={{ gap: 5 }}>
-          <i style={{ width: 14, height: 2.5, borderRadius: 2, background: cor }} /> dúvida levantada
+          <i style={{ width: 14, height: 2.5, borderRadius: 2, background: cor }} /> sem decisão
         </span>
-        <span className="row" style={{ gap: 5 }}>
+        {totalResolvido > 0 && <span className="row" style={{ gap: 5 }}>
           <i style={{ width: 14, height: 8, borderRadius: 2, background: leanCor("va"), opacity: 0.35 }} /> já julgada
-        </span>
+        </span>}
       </div>
       <p style={{ fontSize: 12, color: "var(--text)", margin: "6px 0 0" }}>
         {delta == null ? (
           <span style={{ color: "var(--muted)" }}>Poucos dias para dizer se está caindo.</span>
         ) : delta <= -2 ? (
-          <><b style={{ color: leanCor("va") }}>▼ Caindo {Math.abs(delta).toFixed(0)} pts</b> — o sistema está aprendendo.</>
+          <><b style={{ color: leanCor("va") }}>▼ Caindo {Math.abs(delta).toFixed(0)} pts</b> — menos tempo sem decisão.</>
         ) : delta >= 2 ? (
           <><b style={{ color: leanCor("desp") }}>▲ Subindo {delta.toFixed(0)} pts</b> — vale olhar o que mudou na operação.</>
         ) : (
-          <><b style={{ color: "#c98a00" }}>◆ Estável</b> — se ficar entre 20% e 30%, a leitura ainda não é confiável o bastante.</>
+          <><b style={{ color: "#c98a00" }}>◆ Estável</b> — acompanhe a meta de até 30% sem decisão.</>
         )}
       </p>
     </Card>
@@ -1207,16 +1207,15 @@ function HeatmapQuinzena({ dias, onSelecionar }: { dias: DiaAnalise[]; onSelecio
       </Card>
     );
   }
-  const corCelula = (va: number) => {
-    if (va >= 60) return leanCor("va");
-    if (va >= 35) return "#c98a00";
-    return leanCor("desp");
+  const corCelula = (va: number, desp: number, sem: number) => {
+    if (sem >= va && sem >= desp) return "var(--apoio)";
+    return va >= desp ? leanCor("va") : leanCor("desp");
   };
   return (
     <Card style={{ padding: 20, height: "100%" }}>
       <PanelHead
         titulo="Mapa da quinzena"
-        ajuda="Cada linha é um dia (últimos 14), cada célula é uma hora do relógio. Verde = hora produtiva, âmbar = mediana, vermelho = hora perdida, ✕ = dia sem trabalho. A opacidade acompanha o tempo filmado na hora."
+        ajuda="Cada linha é um dia, cada célula um horário. A cor mostra a decisão predominante: verde produtivo, vermelho improdutivo, âmbar sem decisão. ✕ indica ausência de atividade no posto."
         leitura="Padrões saltam aos olhos: toda tarde caindo? Toda segunda fraca?"
       />
       <div className="col" style={{ gap: 4 }}>
@@ -1240,8 +1239,8 @@ function HeatmapQuinzena({ dias, onSelecionar }: { dias: DiaAnalise[]; onSelecio
                 if (!hd) return <span key={h} style={{ flex: 1, height: 16, borderRadius: 3, background: "var(--soft)", border: "1px solid var(--line-2)" }} />;
                 return (
                   <span key={h}
-                    title={`${d.dow} ${d.rot} ${h}h — ${Math.round(hd.va_pct)}% produtivo`}
-                    style={{ flex: 1, height: 16, borderRadius: 3, background: corCelula(hd.va_pct), opacity: 0.35 + 0.65 * (hd.seg / maxSeg) }} />
+                    title={`${d.dow} ${d.rot} ${h}h — ${Math.round(hd.va_pct)}% produtivo · ${Math.round(hd.desp_pct)}% improdutivo · ${Math.round(hd.sem_decisao_pct ?? 100 - hd.va_pct - hd.desp_pct)}% sem decisão`}
+                    style={{ flex: 1, height: 16, borderRadius: 3, background: corCelula(hd.va_pct, hd.desp_pct, hd.sem_decisao_pct ?? 100 - hd.va_pct - hd.desp_pct), opacity: 0.35 + 0.65 * (hd.seg / maxSeg) }} />
                 );
               })}
             </div>

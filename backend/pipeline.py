@@ -32,6 +32,7 @@ import cv2
 import numpy as np
 from groq import Groq
 from supabase import Client, create_client
+from .human_learning import carregar_licoes
 from .productivity import (
     CONFIANCA_COR_GESTOR_MIN,
     LABEL_CONVERSANDO_COLEGA,
@@ -112,6 +113,7 @@ ORIGENS_MAQUINA = frozenset(
         "posto_vazio",
         "auditoria",
         "ponte_rolante",
+        "humano_fonte",  # aplicação derivada de correção, não nova anotação
     }
 )
 
@@ -743,6 +745,16 @@ def construir_bloco_processo(descricao: str) -> str:
 
 
 def construir_bloco_conhecimento_adquirido(
+    sb: Client, empresa: str, processo: str, limite: int = 30
+) -> str:
+    # Correções explícitas locais ensinam por exemplos desde a primeira
+    # validação. A chave de generalização continua protegendo outros processos
+    # e remapeamentos automáticos; não desliga a memória do próprio processo.
+    return _construir_bloco_respostas_cliente(sb, empresa, processo, limite) + carregar_licoes(
+        sb, empresa, processo)
+
+
+def _construir_bloco_respostas_cliente(
     sb: Client, empresa: str, processo: str, limite: int = 30
 ) -> str:
     """Bloco montado a partir das perguntas que o sistema fez e o cliente
@@ -3145,6 +3157,12 @@ REGRA ÚNICA DE PRODUTIVIDADE DO OPERADOR ESCOLHIDO:
 - false: está de costas ou de lado para o torno, conversando, no celular ou sem atenção ao posto;
 - null: não foi possível identificar o operador ou a evidência visual é insuficiente.
 O CONTEXTO de mãos/orientação vem de sensores e prevalece sobre impressão visual. Não use categoria Lean, vocabulário, estado mecânico da máquina ou conhecimento presumido do processo.
+
+Não confunda imobilidade com improdutividade: acompanhar comandos, peça ou operação
+com atenção visível é trabalho, mesmo sem movimento ou toque. Nesse caso use true
+e motivo "voltado_para_torno" somente se as imagens mostrarem essa atenção.
+Exemplos humanos do CONTEXTO ajudam a reconhecer e nomear ações, mas nunca
+substituem as imagens na identificação do operador ou na afirmação da atividade.
 
 Responda APENAS um JSON com UMA ENTRADA POR IMAGEM, na ordem, onde "i" é o índice da imagem (0 = a primeira). Em "acoes", descreva cada pessoa marcada para a decisão ser auditável.
 
@@ -11740,7 +11758,7 @@ def limiar_duvida(sb: Client, empresa: str, processo: str) -> float:
 # Origens em que `validado_humano=True` NÃO significa "alguém julgou": é o
 # mecanismo que mantém o registro fora da fila. Nunca foram dúvida e não podem
 # entrar na curva histórica como dúvida resolvida.
-_ORIGENS_MECANICAS = frozenset({"posto_vazio", "auditoria", "ponte_rolante"})
+_ORIGENS_MECANICAS = frozenset({"posto_vazio", "auditoria", "ponte_rolante", "humano_fonte"})
 # Fase 90 — observação que COBRE o tempo sem ter olhado quadro novo. Ela é
 # legítima (sem ela o minuto se parte e o denominador despenca) e não é
 # evidência. A distinção entre "não olhei" e "olhei e não sei" mora aqui.
@@ -12442,20 +12460,15 @@ def etapa_persistir(
             "valor_agregado" if _dec_visual and _dec_visual[0] == "produtivo"
             else "desperdicio" if _dec_visual else None
         )
-        if _cat_visual_evento:
+        if _cat_h and origem_cat_ingestao.get(e["comportamento_label"]) == "humano":
+            row["categoria_lean"] = _cat_h
+            row["categoria_lean_origem"] = ORIGEM_HUMANO_ROTULO
+        elif _cat_visual_evento:
             row["categoria_lean"] = _cat_visual_evento
             row["categoria_lean_origem"] = "ia"
         elif _cat_h:
             row["categoria_lean"] = _cat_h
-            # Decisão humana do rótulo continua valendo nas ocorrências
-            # futuras, mas a exceção P3 permanece estreita: só um
-            # `operador_fora` recebe o carimbo que pode mover produtividade.
-            row["categoria_lean_origem"] = (
-                ORIGEM_HUMANO_ROTULO
-                if e.get("papel_pessoa") == PAPEL_OPERADOR_FORA
-                and origem_cat_ingestao.get(e["comportamento_label"]) == "humano"
-                else "herdado"
-            )
+            row["categoria_lean_origem"] = "herdado"
         if auto_validado:
             row["validacao_correto"] = True
             row["validado_em"] = datetime.utcnow().isoformat()
@@ -12521,12 +12534,12 @@ def etapa_persistir(
             **({
                 "categoria_lean": _cat_visual_aud,
                 "categoria_lean_origem": "ia",
-            } if _cat_visual_aud else {
+            } if _cat_visual_aud and origem_cat_ingestao.get(
+                e["comportamento_label"]) != "humano" else {
                 "categoria_lean": cat_ingestao[e["comportamento_label"]],
                 "categoria_lean_origem": (
                     ORIGEM_HUMANO_ROTULO
-                    if e.get("papel_pessoa") == PAPEL_OPERADOR_FORA
-                    and origem_cat_ingestao.get(e["comportamento_label"]) == "humano"
+                    if origem_cat_ingestao.get(e["comportamento_label"]) == "humano"
                     else "herdado"
                 ),
             } if cat_ingestao.get(e["comportamento_label"]) else {}),
@@ -13517,7 +13530,8 @@ def propagar_categoria_para_eventos(
 ) -> int:
     """Desce a categoria do comportamento para os eventos ELEGÍVEIS daquele
     (empresa, processo, label). Retorna quantos eventos foram (ou seriam)
-    afetados. Não-fatal: falha aqui nunca derruba quem chamou.
+    afetados. Falhas automáticas são não-fatais; falhas de correção humana
+    são devolvidas ao chamador para não anunciar uma gravação inexistente.
 
     Casa pelo label EFETIVO — `label_corrigido` quando existe, senão
     `comportamento_label`. Filtrar só por `comportamento_label` deixaria de
@@ -13547,14 +13561,19 @@ def propagar_categoria_para_eventos(
             q = q.eq(coluna_filtro, label)
             if so_sem_correcao:
                 q = q.is_("label_corrigido", "null")
-            # PRECEDÊNCIA: NULL, já-herdado ou já-decidido-por-humano na árvore.
-            # `humano_rotulo` entra para que uma NOVA decisão do gestor
-            # sobrescreva a anterior; o caminho da IA nunca chama com essa
-            # origem, então ele continua sem poder apagar decisão humana.
-            q = q.or_("categoria_lean.is.null,categoria_lean_origem.eq.herdado,"
-                      "categoria_lean_origem.eq." + ORIGEM_HUMANO_ROTULO)
+            if origem == ORIGEM_HUMANO_ROTULO:
+                # O gestor pode corrigir qualquer decisão automática ou de
+                # rótulo anterior. Uma validação INDIVIDUAL permanece protegida.
+                q = q.or_("categoria_lean_origem.is.null,categoria_lean_origem.neq.humano")
+            else:
+                # Automação jamais apaga uma decisão humana do rótulo.
+                q = q.or_("categoria_lean.is.null,categoria_lean_origem.eq.herdado")
+            if not dry_run:
+                q = q.select("id")
             return len(q.execute().data or [])
         except Exception as e:
+            if origem == ORIGEM_HUMANO_ROTULO:
+                raise  # não devolver sucesso quando a correção não foi gravada
             log.warning("[lean] propagação %s=%s falhou (não-fatal): %s",
                         coluna_filtro, label, e)
             return 0
@@ -19449,7 +19468,7 @@ def eventos_do_bin(sb: Client, empresa: str, processo: str, dia: str | None,
             "tempo_inicio_s, tempo_fim_s, validacao_correto, principal, papel_pessoa, "
             "confianca, em_duvida, validado_humano, origem_validacao, n_amostras, "
             "categoria_lean, categoria_lean_origem, maos_maquina, orientacao, "
-            "trabalho, bbox_stats, produtividade_predita, produtividade_regra, "
+            "trabalho, bbox_stats, produtividade_predita, produtividade_regra, produtividade_humana, "
             "pessoa_track_id, versao_instrumento",
             empresa=empresa, processo=processo,
             ajustes=lambda q, _l=lote: q.in_("video_id", _l),

@@ -157,6 +157,10 @@ export function ArvoreProdutividade({
       // A decisão muda o número em todas as telas que o mostram.
       qc.invalidateQueries({ queryKey: ["dashboard", proc.id] });
       qc.invalidateQueries({ queryKey: ["diaadia", proc.id] });
+      qc.invalidateQueries({ queryKey: ["eventos-tabela", proc.id] });
+      qc.invalidateQueries({ queryKey: ["jornada-bin", proc.id] });
+      qc.invalidateQueries({ queryKey: ["evidencias", proc.id] });
+      qc.invalidateQueries({ queryKey: ["processos"] });
       qc.invalidateQueries({ queryKey: ["rotulos-sem-categoria", proc.id] });
     },
     onError: (e: unknown) => toast(`Não deu para classificar: ${String(e)}`),

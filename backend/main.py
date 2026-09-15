@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from .auth import CurrentUser, get_current_user
 from .jobs import JOBS
 from .productivity import agregar_produtividade
+from .human_learning import gravar_validacao
 from . import productivity as produtividade
 from .precision_replay import carregar_manifesto, executar_replay, scope_fingerprint
 from . import pipeline as pl
@@ -3317,7 +3318,7 @@ def dashboard(
         "origem_validacao, confianca, principal, zona_contexto, "
         # Caso de uso comercial: identidade/presença + decisão binária da
         # descrição. Cluster, vocabulário e categoria Lean não entram na conta.
-        "papel_pessoa, maos_maquina, orientacao, trabalho, descricao_bruta, "
+        "papel_pessoa, maos_maquina, orientacao, trabalho, produtividade_humana, descricao_bruta, "
         # P1 conversa: o JSONB já existente carrega a evidência auditável do
         # interlocutor; sem projetá-lo, o KPI perderia a regra após o reload.
         "bbox_stats, "
@@ -4091,7 +4092,7 @@ def listar_eventos_tabela(
         "descricao_invalida, "
         "categoria_lean, categoria_lean_origem, papel_pessoa, maos_maquina, "
         "orientacao, trabalho, bbox_stats, n_amostras, versao_instrumento, "
-        "principal, produtividade_predita, produtividade_regra"
+        "principal, produtividade_predita, produtividade_regra, produtividade_humana"
     )
     q = (
         sb.table("eventos")
@@ -4194,16 +4195,13 @@ def listar_eventos_tabela(
         ev["comportamento_id"] = comp_id_por_label.get(label_ef)
         ev["_cam_id"] = ev.get("cam_id")
         if ev.get("validacao_correto") is False:
-            decisao, motivo = produtividade.AUDIT_ABSTEM, "evento_descartado"
+            decisao, motivo = "sem_decisao", "evento_descartado"
         else:
-            decisao, motivo = produtividade.classificar_produtividade_auditavel(
+            estado, motivo = produtividade.classificar_observacao(
                 ev, frentes_produtividade
             )
-        ev["produtividade_decisao"] = (
-            "produtivo" if decisao == produtividade.AUDIT_PRODUTIVO
-            else "improdutivo" if decisao == produtividade.AUDIT_IMPRODUTIVO
-            else "sem_decisao"
-        )
+            decisao = produtividade.indicador_produtividade_do_estado(estado)
+        ev["produtividade_decisao"] = decisao
         ev["produtividade_motivo_atual"] = motivo
 
     # Fase 29: 2º ângulo (par cam2 do mesmo vídeo, clock-aligned) para a linha
@@ -4344,7 +4342,8 @@ def evidencias_de_presenca(
         "id, video_id, pessoa_track_id, comportamento_label, label_corrigido, "
         "tempo_inicio_s, tempo_fim_s, validacao_correto, principal, papel_pessoa, "
         "maos_maquina, orientacao, trabalho, descricao_bruta, bbox_stats, "
-        "categoria_lean, categoria_lean_origem, n_amostras, versao_instrumento"
+        "categoria_lean, categoria_lean_origem, n_amostras, versao_instrumento, "
+        "produtividade_humana, validado_humano, origem_validacao"
     )
     evs = varrer(sb, "eventos", campos, empresa=user.empresa, processo=nome)
     videos = varrer(sb, "videos", "id, nome, cam_id, gravado_em, processado_em",
@@ -4899,7 +4898,9 @@ def validar_evento(
     user: CurrentUser = Depends(get_current_user),
 ):
     sb = make_supabase_client()
-    r = sb.table("eventos").select("id, empresa, comportamento_label").eq("id", evento_id).execute()
+    r = sb.table("eventos").select(
+        "id,empresa,processo,video_id,principal,pessoa_track_id,papel_pessoa,"
+        "comportamento_label,tempo_inicio_s,tempo_fim_s,categoria_lean_origem").eq("id", evento_id).execute()
     if not r.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Evento não encontrado")
     ev = r.data[0]
@@ -4912,7 +4913,7 @@ def validar_evento(
         body.label_corrigido,
         body.produtividade_humana,
     )
-    sb.table("eventos").update(update).eq("id", evento_id).execute()
+    afetados = gravar_validacao(sb, ev, update)
 
     # Fase 98 — REAVALIAÇÃO: uma chamada de visão para DIAGNOSTICAR o erro.
     # Só em correção HUMANA individual, só com KV_REAVALIAR_CORRECAO ligada,
@@ -4928,7 +4929,8 @@ def validar_evento(
             reav = _reavaliar_evento(sb, user.empresa, evento_id, _lc)
         except Exception as e:  # noqa: BLE001
             log.warning("[reavaliacao] não-fatal: %s", e)
-    return {"ok": True, "reavaliacao": reav}
+    return {"ok": True, "reavaliacao": reav, "eventos_atualizados": afetados,
+            "aprendizado": "exemplo_humano_local"}
 
 
 def _reavaliar_evento(sb, empresa: str, evento_id: str, rotulo_novo: str):
@@ -4979,13 +4981,15 @@ def reavaliacao_custo(user: CurrentUser = Depends(get_current_user)):
 @app.post("/eventos/{evento_id}/reabrir")
 def reabrir_evento(evento_id: str, user: CurrentUser = Depends(get_current_user)):
     sb = make_supabase_client()
-    r = sb.table("eventos").select("id, empresa, comportamento_label").eq("id", evento_id).execute()
+    r = sb.table("eventos").select(
+        "id,empresa,processo,video_id,principal,pessoa_track_id,papel_pessoa,"
+        "comportamento_label,tempo_inicio_s,tempo_fim_s,categoria_lean_origem").eq("id", evento_id).execute()
     if not r.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Evento não encontrado")
     if r.data[0]["empresa"] != user.empresa:
         raise HTTPException(status.HTTP_403_FORBIDDEN)
     update = _montar_update_validacao("reabrir", r.data[0]["comportamento_label"], None)
-    sb.table("eventos").update(update).eq("id", evento_id).execute()
+    gravar_validacao(sb, r.data[0], update)
     return {"ok": True}
 
 
@@ -4998,7 +5002,8 @@ def validar_lote(body: LoteBody, user: CurrentUser = Depends(get_current_user)):
     # Carrega todos os eventos do lote e valida que pertencem à empresa do usuário.
     r = (
         sb.table("eventos")
-        .select("id, empresa, comportamento_label")
+        .select("id,empresa,processo,video_id,principal,pessoa_track_id,papel_pessoa,"
+                "comportamento_label,tempo_inicio_s,tempo_fim_s,categoria_lean_origem")
         .in_("id", body.ids)
         .execute()
     )
@@ -5017,7 +5022,7 @@ def validar_lote(body: LoteBody, user: CurrentUser = Depends(get_current_user)):
             body.label_corrigido,
             body.produtividade_humana,
         )
-        sb.table("eventos").update(update).eq("id", ev["id"]).execute()
+        gravar_validacao(sb, ev, update)
         aplicados += 1
     return {"ok": True, "aplicados": aplicados}
 
@@ -5234,7 +5239,11 @@ def _aplicar_categoria_lean(sb, empresa: str, comportamento_id: str, alvo: dict,
         if cat is not None
         else {"categoria_lean": None, "categoria_lean_origem": None}  # libera pra IA reclassificar
     )
-    sb.table("comportamentos").update(update).eq("id", comportamento_id).execute()
+    gravados = sb.table("comportamentos").update(update).eq(
+        "id", comportamento_id).eq("empresa", empresa).select(
+            "id,categoria_lean,categoria_lean_origem").execute().data or []
+    if not gravados or gravados[0].get("categoria_lean") != cat:
+        raise HTTPException(status_code=409, detail="A classificação não foi gravada. Atualize a página e tente novamente.")
 
     # Propagação cross-processo (mesma empresa, MESMO label):
     # a decisão do gestor para 'andar' vale em toda a fábrica. Atualiza
@@ -5869,7 +5878,7 @@ def analise_diaria_processo(
         "descricao_bruta, tempo_inicio_s, tempo_fim_s, validacao_correto, "
         "validado_humano, origem_validacao, principal, papel_pessoa, "
         "maos_maquina, orientacao, trabalho, bbox_stats, categoria_lean, "
-        "categoria_lean_origem, n_amostras, versao_instrumento, em_duvida"
+        "categoria_lean_origem, n_amostras, versao_instrumento, em_duvida, produtividade_humana"
     )
     evs = varrer(sb, "eventos", campos, empresa=user.empresa, processo=nome)
     videos = varrer(
@@ -5997,6 +6006,7 @@ def analise_diaria_processo(
             "desp_pct": desp,
             "sem_decisao_pct": sem,
             "duvida_pct": sem,
+            "duvida_resolvida_pct": 0.0,
             "sem_evidencia_pct": 0.0,
             "nao_observado_pct": 0.0,
             "nao_observado_gate_pct": 0.0,

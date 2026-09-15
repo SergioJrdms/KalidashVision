@@ -49,10 +49,14 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
   );
   const contagem = useMemo(() => { const c: Record<string, number> = { todos: rows.length }; STATUS_LIST.forEach((s) => (c[s] = rows.filter((e) => e.status === s).length)); return c; }, [rows]);
 
-  function invalidar() { qc.invalidateQueries({ queryKey: ["eventos-tabela", proc.id] }); qc.invalidateQueries({ queryKey: ["dashboard", proc.id] }); qc.invalidateQueries({ queryKey: ["pendentes", proc.id] }); }
+  function invalidar() {
+    for (const key of ["eventos-tabela", "dashboard", "pendentes", "diaadia", "jornada-bin", "evidencias", "rotulos-sem-categoria"]) {
+      qc.invalidateQueries({ queryKey: [key, proc.id] });
+    }
+  }
   const loteMut = useMutation({ mutationFn: ({ ids, acao, label }: { ids: string[]; acao: AcaoEvento; label?: string }) => api.eventos.lote(ids, acao, label), onSuccess: invalidar });
   const acaoMut = useMutation({
-    mutationFn: ({ id, acao, label }: { id: string; acao: AcaoEvento; label?: string }) => (acao === "reabrir" ? api.eventos.reabrir(id) : api.eventos.validar(id, acao, label)),
+    mutationFn: ({ id, acao, label, produtividade }: { id: string; acao: AcaoEvento; label?: string; produtividade?: "PRODUTIVO" | "IMPRODUTIVO" }) => (acao === "reabrir" ? api.eventos.reabrir(id) : api.eventos.validar(id, acao, label, produtividade)),
     onSuccess: invalidar,
   });
   // Reclassifica pelo RÓTULO. Antes ia pelo `comportamento_id`, que vem nulo
@@ -61,7 +65,10 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
   const setCatMut = useMutation({
     mutationFn: ({ label, cat }: { label: string; cat: LeanShort }) =>
       api.comportamentos.setCategoriaPorLabel(proc.id, label, leanLong(cat)),
-    onSuccess: () => { invalidar(); qc.invalidateQueries({ queryKey: ["processos"] }); },
+    onSuccess: (_r, { label, cat }) => {
+      invalidar(); qc.invalidateQueries({ queryKey: ["processos"] });
+      toast(`“${label}” reclassificado como ${leanLabel(cat)}.`, { icon: "check" });
+    },
     onError: (e: Error) => toast(`Não deu para reclassificar: ${e.message}`, { color: "var(--desp)" }),
   });
 
@@ -75,23 +82,27 @@ export default function Eventos({ proc }: { proc: ProcHeaderMock }) {
     if (aviso) setEditId(aviso.id);
     setAviso(null);
   }
-  function salvarCorrecao(e: EvTabMock, novoLabel: string, novaCat: LeanShort) {
+  async function salvarCorrecao(e: EvTabMock, novoLabel: string, novaCat: LeanShort) {
     const label = novoLabel.trim();
     const labelMudou = !!label && label !== e.label;
     const catMudou = novaCat !== e.cat;
-    if (labelMudou) acaoMut.mutate({ id: e.id, acao: "corrigir", label });
+    try {
+    if (labelMudou) await acaoMut.mutateAsync({ id: e.id, acao: "corrigir", label,
+      produtividade: catMudou ? (novaCat === "va" ? "PRODUTIVO" : "IMPRODUTIVO") : undefined });
     // A categoria vale para o rótulo FINAL: se o gestor renomeou e reclassificou
     // na mesma tela, gravar no rótulo antigo classificaria a coisa errada.
-    if (catMudou) setCatMut.mutate({ label: labelMudou ? label : e.label, cat: novaCat });
-    if (labelMudou || catMudou) toast("Correção salva. O Prism aprendeu com você.", { icon: "check" });
+    if (catMudou) await setCatMut.mutateAsync({ label: labelMudou ? label : e.label, cat: novaCat });
+    if (labelMudou && !catMudou) { invalidar(); toast("Nome corrigido. O exemplo será usado nas próximas análises.", { icon: "check" }); }
     setEditId(null);
+    } catch (err) {
+      if (labelMudou) toast(`Não foi possível concluir a correção: ${String(err)}`, { color: "var(--desp)" });
+    }
   }
   // Reclassificação Lean direta pela coluna (fora da correção). Vale para o
   // comportamento (mesmo endpoint do gráfico "Tempo por comportamento").
   function reclassificar(e: EvTabMock, cat: LeanShort) {
     if (cat === e.cat) return;
     setCatMut.mutate({ label: e.label, cat });
-    toast(`“${e.label}” reclassificado como ${leanLabel(cat)}.`, { icon: "check" });
   }
 
   function toggle(id: string) { setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }

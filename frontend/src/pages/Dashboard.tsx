@@ -1378,7 +1378,13 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
   const setCat = useMutation({
     mutationFn: ({ label, cat }: { label: string; cat: LeanShort }) =>
       api.comportamentos.setCategoriaPorLabel(processoId, label, leanLong(cat)),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["dashboard", processoId] }); qc.invalidateQueries({ queryKey: ["processos"] }); setEdit(null); toast("Anotado. O Prism vai classificar parecidos sozinho.", { icon: "check" }); },
+    onSuccess: () => {
+      for (const key of ["dashboard", "diaadia", "eventos-tabela", "jornada-bin", "evidencias", "rotulos-sem-categoria"]) {
+        qc.invalidateQueries({ queryKey: [key, processoId] });
+      }
+      qc.invalidateQueries({ queryKey: ["processos"] }); setEdit(null);
+      toast("Classificação salva para este comportamento neste processo.", { icon: "check" });
+    },
     onError: (e: Error) => toast(`Não deu para reclassificar: ${e.message}`, { color: "var(--desp)" }),
   });
   const total = det.comportamentos.length;
@@ -1388,7 +1394,7 @@ function TempoPorComportamento({ det, processoId }: { det: DetMock; processoId: 
     <Card id="painel-tempo-comportamento" style={{ padding: 20 }}>
       <PanelHead
         titulo="Tempo por comportamento"
-        ajuda="Os comportamentos que mais consomem tempo. Clique no chip de categoria para reclassificar — sua decisão vale para comportamentos de mesmo nome em outros processos."
+        ajuda="Os comportamentos que mais consomem tempo. Clique na categoria para classificar este comportamento no processo. A aplicação em outros processos depende da generalização automática."
         leitura="A cor diz se aquele tempo está agregando valor ou não."
         right={total > COMP_VISIVEL_PADRAO ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{lista.length} de {total}</span> : undefined}
       />

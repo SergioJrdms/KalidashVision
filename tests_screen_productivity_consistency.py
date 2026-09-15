@@ -150,5 +150,55 @@ check("arvore independente usa distribuicao canonica", "q.data.distribuicao_prod
 check("eventos usa decisao do evento", "decisaoShort(e.produtividade_decisao)" in adapt)
 check("dia a dia usa as fatias canonicas", "produtividade.fatias_produtividade" in main)
 
+print("\n[4] Decisao humana vence automacao sem inventar presenca")
+humano = dict(EVENTOS[0], categoria_lean="desperdicio",
+              categoria_lean_origem="humano_rotulo", maos_maquina=True)
+check("correcao humana vence maos e trabalho", prod.classificar_observacao(humano)[0] == prod.EST_IMPRODUTIVO)
+check("operador continua presente", prod.estado_compone_indicador(prod.classificar_observacao(humano)[0], "presenca_operador"))
+fora = dict(humano, papel_pessoa="operador_fora", categoria_lean="valor_agregado")
+check("atividade fora pode ser produtiva", prod.classificar_observacao(fora)[0] == prod.EST_OPERADOR_FORA_PRODUTIVO)
+check("trabalho fora nao inventa presenca", not prod.estado_compone_indicador(prod.classificar_observacao(fora)[0], "presenca_operador"))
+vazio = dict(EVENTOS[2], papel_pessoa="posto_vazio")
+estado = prod.classificar_observacao(vazio)[0]
+check("ausencia confirmada e improdutiva na vitrine", prod.indicador_produtividade_do_estado(estado) == "improdutivo")
+check("ausencia continua ausencia", prod.estado_compone_indicador(estado, "posto_sem_operador") and not prod.estado_compone_indicador(estado, "presenca_operador"))
+check("ausencia contraditoria continua duvida", prod.indicador_produtividade_do_estado(prod.classificar_observacao(dict(vazio, maos_maquina=True))[0]) == "sem_decisao")
+check("nome acompanhar sozinho nao inventa trabalho", prod.indicador_produtividade_do_estado(prod.classificar_observacao(EVENTOS[2])[0]) == "sem_decisao")
+check("origem automatica nao vira decisao humana", prod.classificar_observacao(dict(humano, categoria_lean_origem="ia"))[0] == prod.EST_PRODUTIVO)
+
+print("\n[5] Propagacao protege humano individual e nao engole falha")
+class WriteQ:
+    def __init__(self, sb): self.sb = sb; self.filters = {}; self.payload = {}; self.rule = ""; self.null = None
+    def update(self, payload): self.payload = payload; return self
+    def select(self, *a): return self
+    def eq(self, c, v): self.filters[c] = v; return self
+    def is_(self, c, v): self.null = c; return self
+    def or_(self, rule): self.rule = rule; return self
+    def execute(self):
+        if self.sb.fail: raise RuntimeError("write failed")
+        touched = []
+        for e in self.sb.rows:
+            if any(e.get(k) != v for k, v in self.filters.items()): continue
+            if self.null and e.get(self.null) is not None: continue
+            origin = e.get("categoria_lean_origem")
+            eligible = origin != "humano" if "neq.humano" in self.rule else (e.get("categoria_lean") is None or origin == "herdado")
+            if eligible: e.update(self.payload); touched.append(dict(e))
+        return types.SimpleNamespace(data=touched)
+class WriteSB:
+    def __init__(self, rows, fail=False): self.rows, self.fail = rows, fail
+    def table(self, name): return WriteQ(self)
+rows = [dict(EVENTOS[0], id=str(i), categoria_lean="valor_agregado", categoria_lean_origem=o)
+        for i, o in enumerate(["ia", "aprendido", "herdado", "humano_rotulo", "humano"])]
+sb = WriteSB(rows)
+check("humano corrige IA e decisoes anteriores", pl.propagar_categoria_para_eventos(sb, "U", "T", "acompanhar_maquina", "desperdicio", origem="humano_rotulo") == 4)
+check("humano individual permanece protegido", rows[-1]["categoria_lean"] == "valor_agregado")
+check("automacao nao apaga humano rotulo", pl.propagar_categoria_para_eventos(sb, "U", "T", "acompanhar_maquina", "valor_agregado") == 0)
+try:
+    pl.propagar_categoria_para_eventos(WriteSB([], fail=True), "U", "T", "acompanhar_maquina", "desperdicio", origem="humano_rotulo")
+    raised = False
+except RuntimeError:
+    raised = True
+check("falha de escrita nao retorna sucesso", raised)
+
 print(f"\n{ok} ok - {fail} falha(s)")
 raise SystemExit(1 if fail else 0)
